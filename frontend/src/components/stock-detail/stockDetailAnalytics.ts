@@ -1,3 +1,4 @@
+import type { TaiwanStockQuoteDepthRead } from "@/types/market";
 import { finiteNumber } from "@/components/stock-detail/stockDetailFormatters";
 import {
   professionalIntradayMinutes,
@@ -472,4 +473,19 @@ export function summarizeIntradayPoints(
     low: Math.min(...lows),
     volume: volumes.length > 0 ? volumes.reduce((total, value) => total + value, 0) : null,
   };
+}
+
+/** Render only the backend-owned basis; older/mismatched payloads fail visible. */
+export function taiwanReferencePrice(
+  quote: TaiwanStockQuoteDepthRead | null | undefined,
+  tradeDate?: string | null,
+  surface?: "depth" | "auction",
+): number | null {
+  const reference = quote?.change_reference;
+  if (!reference?.display_usable || !reference.calculation_eligible || !reference.applies_to_trade_date ||
+      reference.status === "missing" || !finiteNumber(reference.price) || reference.price <= 0) return null;
+  if (tradeDate && reference.applies_to_trade_date !== tradeDate) return null;
+  if (surface === "depth" && !reference.depth_usable) return null;
+  if (surface === "auction" && !reference.auction_usable) return null;
+  return reference.price;
 }

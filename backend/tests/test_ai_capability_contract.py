@@ -18,6 +18,68 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_market_chips_projection_preserves_current_aggregate_field_names(self):
+        selection = capability_contract.normalize_selection(
+            selection={"required": ["market.chips"]}, output="decision_with_evidence",
+            realtime_policy="cache_only", payload_level="compact", scope_type="market",
+            question_intent="general",
+        )
+        payload = {
+            "status": "partial",
+            "official_market_aggregate": {"trade_dates": ["2026-09-10"], "rows": [{"index_id": "TAIEX", "foreign_investor_net_value": 123}]},
+            "institutional_per_stock": {"status": "partial"},
+            "margin_per_stock": {"status": "stale"},
+        }
+        projected, unavailable = capability_contract.project_selected_data(
+            response={"result": {"data": {"market_chips": payload}}}, selection=selection,
+        )
+        self.assertNotIn("market.chips", unavailable)
+        self.assertEqual(projected["market.chips"]["official_market_aggregate"], payload["official_market_aggregate"])
+
+    def test_continuous_partial_prefix_cannot_override_dataset_coverage(self):
+        for coverage in ("partial_prefix", "partial_window", "trailing_window", "sparse", "complete"):
+            with self.subTest(coverage=coverage):
+                item = self._quality_item(
+                    capability="intraday.bars", market="TW",
+                    payload={
+                        "status": "latest_completed_session", "is_partial": True,
+                        "coverage_status": coverage, "provider": "nstock",
+                        "volume_unit": "shares", "trade_date": "2026-09-10",
+                        "points": [{"time": f"2026-09-10T09:{m:02d}:00+08:00",
+                                    "price": 100, "volume": 1000} for m in range(20)],
+                    }, returned_count=20, canonical_available_count=20,
+                    canonical_coverage_status="complete",
+                )
+                self.assertEqual(item["coverage_status"], "partial")
+                self.assertFalse(item["decision_usable"])
+
+    def test_required_technical_input_gate_cannot_be_promoted_by_current_freshness(self):
+        quality = data_quality_contract.build_quality_contract(
+            canonical={
+                "ok": True, "request_status": "completed",
+                "target": {"type": "tw_stock", "market": "TW"},
+                "status": {"readiness": {"decision_required": True, "analysis_ready": False}},
+                "evidence": {"freshness_by_capability": {
+                    "technical.indicators": {"status": "current", "is_current": True},
+                }},
+            },
+            selection={"output": "decision_with_evidence"},
+            manifest={"capabilities": [{
+                "capability": "technical.indicators", "domain": "technical",
+                "slot": "technical", "required": True, "status": "available",
+                "returned_count": 1,
+            }]},
+            projected_data={"technical.indicators": {
+                "status": "partial", "decision_usable": False,
+                "input_quality": {"available_bars": 15, "required_bars": 60},
+                "as_of": "2026-09-09",
+            }},
+            realtime_assessments={}, scope_type="stock",
+        )
+        self.assertFalse(quality["capabilities"]["technical.indicators"]["decision_usable"])
+        self.assertFalse(quality["analysis_ready"])
+        self.assertFalse(quality["decision_ready"])
+
     def _quality_item(
         self,
         *,
@@ -3704,6 +3766,39 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertEqual(daily["returned_count"], 500)
         self.assertTrue(daily["truncated"])
 
+
+    def test_quote_quality_keeps_snapshot_stale_and_observation_identity(self) -> None:
+        item = self._quality_item(
+            capability="quote.snapshot",
+            market="TW",
+            payload={
+                "change_reference": {"trade_date": "2026-09-09", "event_time": "2026-09-09T13:30:00+08:00"},
+                "status": "official_close",
+                "freshness": {"is_stale": True},
+                "trade_date": "2026-09-10",
+                "event_time": "2026-09-10T12:09:33+08:00",
+                "price": 917,
+                "source": "fugle_marketdata",
+            },
+        )
+        self.assertEqual(item["status"], "stale")
+        self.assertEqual(item["status_class"], "blocked")
+        self.assertFalse(item["decision_usable"])
+        self.assertEqual(item["trade_date"], "2026-09-10")
+        self.assertEqual(item["event_time"], "2026-09-10T12:09:33+08:00")
+
+    def test_official_close_date_is_not_prior_close_reference_date(self) -> None:
+        item = self._quality_item(
+            capability="quote.official_close",
+            market="TW",
+            payload={
+                "change_reference": {"trade_date": "2026-09-09"},
+                "status": "latest_completed_session",
+                "price": 917,
+                "trade_date": "2026-09-10",
+            },
+        )
+        self.assertEqual(item["trade_date"], "2026-09-10")
 
     def test_market_indices_top_level_usability_cannot_be_upgraded(self) -> None:
         item = self._quality_item(

@@ -351,6 +351,12 @@ def _aggregated_indicator(
     if period["status"] == "current_partial" and indicators:
         current_partial = indicators[-1]
         completed = indicators[-2] if len(indicators) > 1 else None
+    if completed is not None:
+        completed = {
+            **completed,
+            "input_quality": technical.input_quality,
+            "decision_usable": technical.decision_usable,
+        }
     chart = {
         "stock_id": stock_id,
         "timeframe": timeframe,
@@ -726,6 +732,29 @@ def _today_market_session() -> dict[str, Any]:
 
 def _with_evidence_passport(report: dict[str, Any]) -> dict[str, Any]:
     wrapped = dict(report)
+    data = dict(wrapped.get("data") or {})
+    wrapped["data"] = data
+    indicator = next(
+        (data[key] for key in ("daily_indicator", "indicator", "daily_background")
+         if isinstance(data.get(key), dict)),
+        {},
+    )
+    input_quality = indicator.get("input_quality") or {}
+    if input_quality.get("decision_usable") is False:
+        wrapped.update({
+            "status": "partial",
+            "decision_usable": False,
+            "title": "技術證據不足",
+            "summary": "日線歷史、指標暖機或序列連續性不足，僅保留觀測值。",
+            "score": None,
+            "confidence": "low",
+            "badges": [],
+        })
+        data["input_quality"] = input_quality
+        wrapped["missing"] = list(dict.fromkeys([
+            *(wrapped.get("missing") or []),
+            *(input_quality.get("reason_codes") or []),
+        ]))
     engine = active_engine_contract()
     wrapped["algorithm_version"] = engine["algorithm_version"]
     wrapped["indicator_engine"] = engine
@@ -1259,12 +1288,15 @@ def _build_today_report(
         else None
     )
     coverage_analysis_usable = bool(
-        series_coverage is None
-        or series_coverage.get("status")
+        series_coverage is not None
+        and series_coverage.get("status")
         in {"complete_prefix", "complete_session"}
     )
     stats = _intraday_stats(points)
-    if series_coverage is not None:
+    if series_coverage is None:
+        for key in ("open", "high", "low", "volume"):
+            stats[key] = None
+    else:
         if series_coverage.get("opening_covered") is not True:
             stats["open"] = None
         if series_coverage.get("current_window_complete") is not True:
@@ -1371,8 +1403,8 @@ def _build_today_report(
         )
         if include_volume_pace
         and (
-            series_coverage is None
-            or series_coverage.get("current_cumulative_volume_complete") is True
+            series_coverage is not None
+            and series_coverage.get("current_cumulative_volume_complete") is True
         )
         else {
             "kind": "tw_stock_same_time_volume_pace",
@@ -1835,8 +1867,8 @@ def _build_daily_report(
             else None
         )
         intraday_coverage_usable = bool(
-            intraday_series_coverage is None
-            or intraday_series_coverage.get("status")
+            intraday_series_coverage is not None
+            and intraday_series_coverage.get("status")
             in {"complete_prefix", "complete_session"}
         )
         latest_intraday_point = intraday_points[-1] if intraday_points else None

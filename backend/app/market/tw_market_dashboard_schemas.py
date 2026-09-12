@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from app.market_data.contracts import BreadthLimitObservation
+
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -42,7 +44,18 @@ class TaiwanDashboardBreadthRead(BaseModel):
     decline: int
     unchanged: int
     unknown: int
+    limits: BreadthLimitObservation | None = None
+    limit_up_count: int | None = None
+    limit_down_count: int | None = None
+    classification_diagnostics: dict[str, int] = Field(default_factory=dict)
+    auction_breadth: dict[str, Any] | None = None
+    acquisition_diagnostics: dict[str, Any] | None = None
     coverage_ratio: float
+    received_count: int | None = Field(default=None, ge=0)
+    received_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    classified_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    classification_summary: dict[str, int | None] = Field(default_factory=dict)
+    classification_reason_counts: dict[str, int] = Field(default_factory=dict)
     coverage_reason_counts: dict[str, int | None] = Field(default_factory=dict)
     raw_unknown_reason_counts: dict[str, int] = Field(default_factory=dict)
     scope: str | None = None
@@ -54,6 +67,21 @@ class TaiwanDashboardBreadthRead(BaseModel):
 
     @model_validator(mode="after")
     def validate_coverage_reconciliation(self):
+        if min(self.universe, self.coverage, self.advance, self.decline, self.unchanged, self.unknown) < 0:
+            raise ValueError("breadth counts must be nonnegative")
+        if self.classification_summary:
+            from app.market.tw_breadth_projection import project_breadth_coverage
+
+            projected = project_breadth_coverage({
+                "advance_count": self.advance, "decline_count": self.decline,
+                "unchanged_count": self.unchanged, "total_count": self.universe,
+                "not_received_count": self.classification_summary.get("not_received"),
+                "received_unclassified_count": self.classification_summary.get("received_unclassified"),
+                "coverage_reason_counts": self.classification_reason_counts,
+            })
+            for key, value in projected.items():
+                if getattr(self, key) != value:
+                    raise ValueError(f"breadth {key} does not reconcile")
         if self.advance + self.decline + self.unchanged != self.coverage:
             raise ValueError(
                 "advance + decline + unchanged must equal breadth coverage"

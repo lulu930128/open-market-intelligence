@@ -2400,7 +2400,7 @@ def _add_market_chip_margin_refresh_job(scheduler: Any) -> bool:
 
 
 def _add_market_chip_daily_refresh_jobs(scheduler: Any) -> bool:
-    if not settings.enable_scheduler:
+    if not settings.enable_market_chip_daily_scheduler:
         return False
 
     hour, minute = _parse_hour_minute(
@@ -2654,6 +2654,7 @@ def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
         and not settings.enable_tw_stock_detail_scheduler
+        and not settings.enable_market_chip_daily_scheduler
         and not settings.enable_market_chip_margin_scheduler
         and not settings.enable_market_calendar_scheduler
         and not settings.enable_tw_disposition_scheduler

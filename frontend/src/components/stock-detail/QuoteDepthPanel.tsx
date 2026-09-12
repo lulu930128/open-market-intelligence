@@ -7,7 +7,7 @@ import {
   formatPrice,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
-import { resolveQuoteDepthHeadlineValues } from "@/components/stock-detail/stockDetailAnalytics";
+import { resolveQuoteDepthHeadlineValues, taiwanReferencePrice } from "@/components/stock-detail/stockDetailAnalytics";
 import type {
   TaiwanQuoteContractReplayRead,
   TaiwanQuoteContractReplaySnapshotRead,
@@ -650,13 +650,13 @@ function AuctionDetailsPanel({
                   <span className="font-mono text-[11px] text-omi-text-muted">
                     {formatEventClock(row.eventTime)}
                   </span>
-                  <span className={`text-right font-semibold ${depthPriceTone(row.bestBidPrice, quoteDepth?.previous_close).textClass}`}>
+                  <span className={`text-right font-semibold ${depthPriceTone(row.bestBidPrice, displayReferencePrice(quoteDepth, "auction")).textClass}`}>
                     {formatPrice(row.bestBidPrice)}
                   </span>
-                  <span className={`text-right font-semibold ${depthPriceTone(row.bestAskPrice, quoteDepth?.previous_close).textClass}`}>
+                  <span className={`text-right font-semibold ${depthPriceTone(row.bestAskPrice, displayReferencePrice(quoteDepth, "auction")).textClass}`}>
                     {formatPrice(row.bestAskPrice)}
                   </span>
-                  <span className={`text-right font-bold ${depthPriceTone(row.indicativePrice, quoteDepth?.previous_close).textClass}`}>
+                  <span className={`text-right font-bold ${depthPriceTone(row.indicativePrice, displayReferencePrice(quoteDepth, "auction")).textClass}`}>
                     {formatPrice(row.indicativePrice)}
                   </span>
                   <span className="text-right font-semibold text-omi-text-strong">
@@ -686,6 +686,17 @@ function AuctionDetailsPanel({
       </div>
     </section>
   );
+}
+
+// The explicit preview constructs synthetic display data, never persisted quotes.
+function displayReferencePrice(
+  quote: TaiwanStockQuoteDepthRead | null | undefined,
+  surface?: "depth" | "auction",
+): number | null {
+  if (quote?.provider === "preview" && quote.source === "omi_quote_depth_preview") {
+    return quote.previous_close;
+  }
+  return taiwanReferencePrice(quote, null, surface);
 }
 
 function depthPriceTone(
@@ -960,7 +971,7 @@ export default function QuoteDepthPanel({
       legacyPrice: displayQuoteDepth?.last_price,
       legacyChange: displayQuoteDepth?.change,
       legacyChangePct: displayQuoteDepth?.change_pct,
-      previousClose: displayQuoteDepth?.previous_close,
+      previousClose: displayReferencePrice(displayQuoteDepth, isCurrentAuction ? "auction" : undefined),
     });
   const message = showClosingSnapshot
     ? `當日最後保存委託簿 · ${formatEventClock(
@@ -1107,13 +1118,13 @@ export default function QuoteDepthPanel({
                 <DepthSide
                   levels={normalizedBidLevels}
                   maxSize={maxSize}
-                  previousClose={displayQuoteDepth?.previous_close}
+                  previousClose={displayReferencePrice(displayQuoteDepth, "depth")}
                   side="bid"
                 />
                 <DepthSide
                   levels={normalizedAskLevels}
                   maxSize={maxSize}
-                  previousClose={displayQuoteDepth?.previous_close}
+                  previousClose={displayReferencePrice(displayQuoteDepth, "depth")}
                   side="ask"
                 />
               </div>

@@ -355,7 +355,8 @@ def test_legacy_diagnostics_repair_delegates_to_canonical_platform() -> None:
             backfill_tasks,
             "USDailyOhlcvPlatform",
             return_value=platform,
-        ):
+        ), patch("app.us_market.daily_ohlcv_platform.datetime", wraps=datetime) as platform_clock:
+            platform_clock.now.return_value = NOW
             result = backfill_tasks._run_canonical_us_ohlc_repair(
                 db,
                 symbol="TSM",

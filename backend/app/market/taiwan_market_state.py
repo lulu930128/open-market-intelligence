@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 import json
 from statistics import median
+from math import isfinite
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -19,14 +20,15 @@ from app.market.trading_calendar import (
 SUPPORTED_MARKETS = {"TWSE", "TPEX"}
 INDEX_ID_BY_MARKET = {"TWSE": "TAIEX", "TPEX": "TPEX"}
 TAIWAN_SESSION_CLOSE = time(13, 30)
-MARKET_MINUTE_CALCULATION_VERSION = "tw.market.minute_state.derived.v2"
+MARKET_MINUTE_CALCULATION_VERSION = "tw.market.minute_state.derived.v3"
 
 
 def _as_float(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if isfinite(parsed) and not isinstance(value, bool) else None
     except (TypeError, ValueError):
         return None
 
@@ -409,13 +411,11 @@ def persist_taiwan_market_minute_state(
             .order_by(TaiwanMarketMinuteState.minute_at.desc())
             .first()
         )
-        previous_trade_value = (
-            existing.cumulative_trade_value
-            if existing is not None
-            else latest_prior.cumulative_trade_value
-            if latest_prior is not None
-            else None
-        )
+        previous_values = [
+            row.cumulative_trade_value for row in (existing, latest_prior)
+            if row is not None and row.cumulative_trade_value is not None
+        ]
+        previous_trade_value = max(previous_values) if previous_values else None
         out_of_order = (
             existing is None
             and latest_any is not None
@@ -440,6 +440,22 @@ def persist_taiwan_market_minute_state(
             finalized=finalized,
             is_estimate=trade_value_is_estimate,
         )
+        value_domain = (
+            "market_breadth" if trade_value_contract["source"] == "breadth"
+            else "index_snapshot"
+        )
+        value_component = next(
+            (component for component in component_lineage["components"]
+             if component["domain"] == value_domain), {}
+        )
+        for component in component_lineage["components"]:
+            component["owns_trade_value"] = component["domain"] == value_domain
+        value_event_at = _as_taiwan_datetime(value_component.get("event_at"))
+        if cumulative_trade_value is not None and not finalized and (
+            value_event_at is None
+            or value_event_at.replace(second=0, microsecond=0) != minute_at
+        ):
+            trade_value_quality_status = "component_time_mismatch"
         component_statuses = {
             quote_quality_status,
             breadth_quality_status,
@@ -601,9 +617,22 @@ def _complete_minute_groups(
 
 def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
     status = str(row.trade_value_quality_status or "unknown").strip().lower()
-    return bool(row.lineage_complete) and row.cumulative_trade_value is not None and (
-        status in {"ready", "estimated"}
-        or status == "unknown"
+    if not row.lineage_complete or row.cumulative_trade_value is None or status not in {"ready", "estimated"}:
+        return False
+    # Historical v2 rows may already contain a stale component marked ready.
+    # Validate persisted lineage on reads without rewriting historical data.
+    try:
+        components = json.loads(row.component_sources_json or "[]")
+        domain = "market_breadth" if row.breadth_snapshot_as_of is not None else "index_snapshot"
+        component = next((item for item in components if item.get("owns_trade_value") is True), None)
+        if component is None:
+            component = next((item for item in components if item.get("domain") == domain), {})
+        event_at = _as_taiwan_datetime(component.get("event_at"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return bool(
+        event_at is not None
+        and event_at.replace(second=0, microsecond=0) == _row_minute_at(row)
     )
 
 
@@ -792,7 +821,7 @@ def read_taiwan_market_volume_state(
         for minute_at, rows_by_market in current_groups.items()
         if SUPPORTED_MARKETS.issubset(rows_by_market)
     ]
-    selected_minute = max(complete_current or current_groups.keys())
+    selected_minute = max(current_groups)
     selected_rows = current_groups[selected_minute]
     current_value = _combined_trade_value(selected_rows)
     available_markets = [
@@ -827,10 +856,23 @@ def read_taiwan_market_volume_state(
         else None
     )
 
-    previous_minutes = [minute_at for minute_at in complete_current if minute_at < selected_minute]
+    previous_minute = selected_minute - timedelta(minutes=1)
+    previous_rows = current_groups.get(previous_minute, {})
+    comparable = SUPPORTED_MARKETS.issubset(selected_rows) and SUPPORTED_MARKETS.issubset(previous_rows)
+    if comparable:
+        comparable = all(
+            (selected_rows[market].source, selected_rows[market].breadth_scope,
+             selected_rows[market].trade_value_semantics, selected_rows[market].trade_value_is_estimate)
+            == (previous_rows[market].source, previous_rows[market].breadth_scope,
+                previous_rows[market].trade_value_semantics, previous_rows[market].trade_value_is_estimate)
+            and selected_rows[market].cumulative_trade_value is not None
+            and previous_rows[market].cumulative_trade_value is not None
+            and selected_rows[market].cumulative_trade_value >= previous_rows[market].cumulative_trade_value
+            for market in SUPPORTED_MARKETS
+        )
     previous_value = (
-        _combined_trade_value(current_groups[max(previous_minutes)])
-        if previous_minutes
+        _combined_trade_value(previous_rows)
+        if comparable
         else None
     )
     one_minute_change = (
@@ -974,7 +1016,7 @@ def read_taiwan_market_volume_state(
             "reason": (
                 None
                 if previous_value is not None
-                else "No prior complete TWSE+TPEX minute exists for this session."
+                else "The adjacent previous TWSE+TPEX minute is missing, invalid, or not comparable."
             ),
         },
         "one_minute_trade_value_change": {

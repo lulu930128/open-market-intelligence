@@ -752,9 +752,21 @@ def build_us_overnight_impact_report(
     )
     reported_missing = _dedupe(missing)
 
+    if not cross_market_context.get("decision_usable"):
+        # The legacy facade cannot promote unrelated market moves into target
+        # direction when the canonical relation evidence is unusable.
+        canonical_summary = cross_market_context.get("summary") or {}
+        reported_stance = "unknown"
+        reported_score = None
+        reported_weighted_change_pct = None
+        reported_confidence = "low"
+        reported_title = canonical_summary.get("title") or "跨市場個股證據不足"
+        reported_summary = "跨市場個股證據不足，無法判斷此標的方向；市場因子僅供背景參考。"
+        reported_missing = _dedupe([*missing, "cross_market_target_evidence_unusable"])
+
     if suppress_stale_signal and not is_current:
         reported_stance = "unknown"
-        reported_score = 0
+        reported_score = None
         reported_weighted_change_pct = None
         reported_confidence = "low"
         reported_title = "美股隔夜資料需更新"

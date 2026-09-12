@@ -292,7 +292,8 @@ class FxFlowContextTests(unittest.TestCase):
         self.assertIsNotNone(parsed.fx_flow_context)
         assert parsed.fx_flow_context is not None
         self.assertEqual(parsed.fx_flow_context.signal, "confirmed_outflow")
-        self.assertEqual(report["score"], 0)
+        self.assertIsNone(report["score"])
+        self.assertEqual(report["stance"], "unknown")
         self.assertIn(
             "app.market.fx_flow_context",
             {item["name"] for item in report["source_refs"]},

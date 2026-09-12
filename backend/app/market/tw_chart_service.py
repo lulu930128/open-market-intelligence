@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.market.index_resolution import project_taiwan_index_quote_side
 from app.market.indices import get_market_index_summary
-from app.market.public_quote_platform import read_taiwan_public_quote_projection
+from app.market.quote_depth import read_taiwan_quote_evidence_projection
 from app.market.technical_parameters import TechnicalAnalysisParameters
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead, TaiwanBarSessionScope
 from app.market.tw_bar_service import (
@@ -126,10 +126,9 @@ class TaiwanChartService:
                         f"{normalized_index_id or instrument_id}"
                     )
             elif instrument is not None:
-                quote = read_taiwan_public_quote_projection(
-                    self._db,
+                quote = read_taiwan_quote_evidence_projection(
+                    db=self._db,
                     stock_id=bars.instrument.symbol,
-                    refresh=False,
                     requested_at=effective_now,
                 )
                 last_price = quote.get("last_trade_price")
@@ -150,7 +149,7 @@ class TaiwanChartService:
                         "price_semantics": (
                             "current_session_last_trade"
                             if quote.get("session_phase")
-                            in {"regular", "closing_auction"}
+                            in {"regular_live", "closing_auction"}
                             else "latest_completed_session"
                         ),
                         "provider": quote.get("provider"),
@@ -158,7 +157,8 @@ class TaiwanChartService:
                         "status": freshness.get("status") or "unknown",
                         "is_fallback": bool(quote.get("fallback_used")),
                         "limitations": limitations,
-                        "previous_close": quote.get("previous_close"),
+                        "previous_close": (quote.get("change_reference") or {}).get("price"),
+                        "change_reference": quote.get("change_reference"),
                         "freshness_status": freshness.get("status") or "unknown",
                         "decision_usable": bool(
                             quote.get("price_available")
@@ -170,7 +170,8 @@ class TaiwanChartService:
                 )
                 quote_side = {
                     "current_observation": current_observation,
-                    "previous_close": quote.get("previous_close"),
+                    "previous_close": (quote.get("change_reference") or {}).get("price"),
+                    "change_reference": quote.get("change_reference"),
                     "price_diagnostics": {
                         "history_price_source": None,
                         "latest_history_time": None,

@@ -271,10 +271,14 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
                 requested_at=CACHE_REQUESTED_AT,
             )
 
-            for result in (daily, index, breadth, quote):
+            for result in (daily, index, quote):
                 assert result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
             assert daily.acquisition.external_calls == 0
             assert index.acquisition.external_calls == 0
+            assert breadth.resolved.health.status is ResolvedEvidenceStatus.PARTIAL
+            assert breadth.resolved.breadth.scope == "twse_published_stock_aggregate"
+            assert breadth.resolved.breadth.published_limits is not None
+            assert not breadth.resolved.health.research_usable
             assert breadth.acquisition.external_calls == 0
             assert quote.acquisition.external_calls == 0
             assert daily.resolved.bars[0].lineage.raw_receipt_id
@@ -288,7 +292,11 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
                 "official_breadth": "resolved_data_core",
             }
             assert dashboard_item["official_close_price"] == 44762.32
-            assert dashboard_item["breadth"]["total_count"] == 1
+            assert dashboard_item["breadth"]["total_count"] == breadth.resolved.breadth.universe_count
+            assert dashboard_item["breadth"]["scope"] == "twse_published_stock_aggregate"
+            assert dashboard_item["breadth"]["status"] == "partial"
+            assert dashboard_item["breadth"]["decision_usable"] is False
+            assert dashboard_item["breadth"]["limit_up_count"] == breadth.resolved.breadth.published_limits.up_count
         restarted_engine.dispose()
     finally:
         for path in (

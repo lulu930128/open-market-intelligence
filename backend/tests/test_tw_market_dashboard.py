@@ -491,9 +491,9 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
             resolved_breadth.coverage_reason_counts["received_unclassified"],
             4,
         )
-        self.assertIsNone(
-            resolved_breadth.coverage_reason_counts["provider_missing"]
-        )
+        self.assertNotIn("provider_missing", resolved_breadth.coverage_reason_counts)
+        self.assertEqual(resolved_breadth.received_coverage_ratio, 0.94)
+        self.assertEqual(resolved_breadth.classified_coverage_ratio, 0.9)
         self.assertTrue(all(not item.official for item in parsed.indices))
 
     def test_preopen_pending_does_not_reuse_indicative_rows_as_observed(self) -> None:

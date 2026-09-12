@@ -610,6 +610,7 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                     "market": "TWSE",
                     "close": 24_000.0,
                     "trade_date": "2026-07-28",
+                    "completed_official_index": {"close": 24_000.0, "trade_date": "2026-07-28", "lineage": {"source": "official", "event_at": "2026-07-28T13:30:00+08:00"}},
                     "current_data_core": {
                         "index": current("TAIEX", 24_100.0, 24_000.0)
                     },
@@ -690,7 +691,7 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["trade_date"], "2026-08-04")
         self.assertEqual(
             result["items"][0]["official_close"]["as_of"],
-            "2026-08-04T13:30:00+08:00",
+            None,
         )
         self.assertEqual(
             result["items"][0]["official_close_status"],

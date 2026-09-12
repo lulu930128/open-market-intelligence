@@ -19,6 +19,9 @@ import {
 type Props = {
   points: IntradayTrendPoint[];
   previousClose: number | null;
+  referenceType?: string;
+  referenceStatus?: string;
+  referenceReason?: string;
   label: string;
   source: string;
   indicators?: IntradayIndicatorSettings;
@@ -742,6 +745,9 @@ function buildBaselineAreaPath(
 export default function IntradayTrendChart({
   points,
   previousClose,
+  referenceType,
+  referenceStatus,
+  referenceReason,
   label,
   source,
   indicators = defaultIntradayIndicators,
@@ -1175,13 +1181,19 @@ export default function IntradayTrendChart({
             <div
               className={[
                 "mt-1 text-xs",
-                priceDiagnostics.current_trade_available
+                (priceDiagnostics.current_price_confirmed || priceDiagnostics.current_trade_available)
                   ? "text-omi-success-strong"
                   : "text-omi-warning-strong",
               ].join(" ")}
               data-testid="intraday-current-price-status"
             >
-              {priceDiagnostics.current_trade_available
+              {priceDiagnostics.current_price_basis === "official_close" || priceDiagnostics.current_price_basis === "session_close"
+                ? t(priceDiagnostics.current_price_confirmed
+                    ? priceDiagnostics.current_price_basis === "official_close"
+                      ? "stockDetail.intraday.officialCloseConfirmed"
+                      : "stockDetail.intraday.sessionCloseConfirmed"
+                    : "stockDetail.intraday.closeUnconfirmed")
+                : priceDiagnostics.current_trade_available
                 ? t("stockDetail.intraday.currentTradeAvailable", {
                     time: priceDiagnostics.latest_actual_trade_time?.slice(11, 19) ?? "-",
                     lag: Math.round(priceDiagnostics.lag_seconds ?? 0),
@@ -1228,10 +1240,11 @@ export default function IntradayTrendChart({
         >
           <div>
             <span className="text-xs text-omi-text-subtle">
-              {t("stockDetail.intraday.previousClose")}
+              {t(referenceType && referenceType !== "prior_regular_close" ? "stockDetail.intraday.referencePrice" : "stockDetail.intraday.previousClose")}
             </span>
             <div className="mt-1 text-base font-bold text-omi-text">
-              {formatPrice(previousClose)}
+              <span data-testid="intraday-reference-price" data-reference-price={previousClose ?? ""} data-reference-status={referenceStatus ?? "unknown"}>{formatPrice(previousClose)}</span>
+              {referenceStatus && referenceStatus !== "current" ? <span className="ml-2 text-xs text-omi-warning-strong" title={referenceReason}>{referenceStatus}</span> : null}
             </div>
           </div>
           <div>
@@ -1360,6 +1373,8 @@ export default function IntradayTrendChart({
             <line
               x1={paddingLeft}
               x2={chartAreaRight}
+              data-testid="intraday-reference-baseline"
+              data-reference-price={previousClose}
               y1={previousCloseY}
               y2={previousCloseY}
               className="stroke-omi-chart-blue"
@@ -1371,7 +1386,7 @@ export default function IntradayTrendChart({
               textAnchor="start"
               className="fill-omi-chart-blue text-[11px]"
             >
-              {t("stockDetail.intraday.previousCloseMarker", {
+              {t(referenceType && referenceType !== "prior_regular_close" ? "stockDetail.intraday.referencePriceMarker" : "stockDetail.intraday.previousCloseMarker", {
                 value: formatPrice(previousClose),
               })}
             </text>

@@ -726,7 +726,11 @@ def _latest_tw_comparison(
     except ValueError:
         return None
     daily_rows = project_taiwan_daily_rows(db, bundle.official_close)
-    daily = next((row for row in daily_rows if _positive(row.close_price)), None)
+    daily = max(
+        (row for row in daily_rows if _positive(row.close_price)),
+        key=lambda row: row.trade_date,
+        default=None,
+    )
     quote = bundle.quote.resolved.quote
     quote_health = bundle.quote.resolved.health
     quote_eligible = bool(

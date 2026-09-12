@@ -199,7 +199,7 @@ def test_index_chart_uses_resolved_index_quote_side(
     )
     monkeypatch.setattr(
         tw_chart_service,
-        "read_taiwan_public_quote_projection",
+        "read_taiwan_quote_evidence_projection",
         lambda *_args, **_kwargs: pytest.fail(
             "Taiwan index chart must not use the stock quote owner"
         ),

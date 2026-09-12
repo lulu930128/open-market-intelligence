@@ -27,6 +27,7 @@ from app.market.index_resolution import (
     resolve_taiwan_index_truth,
 )
 from app.market.live_snapshot import classify_market_snapshot
+from app.market.market_chips import project_market_chip_freshness
 from app.market.monthly_revenue_continuity import analyze_monthly_revenue_continuity
 from app.market.quote_volume import build_taiwan_quote_volume_contract
 from app.market.trading_calendar import (
@@ -1557,6 +1558,10 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             session_close_evidence.get("official_close_trade_date")
         ),
     }
+    reference = quote.get("change_reference")
+    if isinstance(reference, dict):
+        for component in (order_book, auction, session_close, official_close):
+            component["change_reference"] = reference
     return {
         "order_book": order_book,
         "auction": auction,
@@ -1757,6 +1762,7 @@ def _compact_quote_snapshot(
             quote_depth.get("data_core_result_kinds") or []
         ),
         "data_core_components": dict(data_core_components),
+        "provider_attempts_by_capability": dict(quote_depth.get("provider_attempts_by_capability") or {}),
         "acquisition_scope": dict(acquisition_scope) if acquisition_scope else None,
         "status": freshness.get("status") or quote_depth.get("session_phase") or "quote",
         "session_phase": quote_depth.get("session_phase"),
@@ -1808,6 +1814,11 @@ def _compact_quote_snapshot(
         "last_price": latest_price,
         "headline_price": quote_depth.get("headline_price"),
         "headline_reference_price": quote_depth.get("headline_reference_price"),
+        "change_reference": _json_value(quote_depth.get("change_reference")),
+        **{
+            f"change_reference_{key}": _json_value(value)
+            for key, value in (quote_depth.get("change_reference") or {}).items()
+        },
         "headline_change": quote_depth.get("headline_change"),
         "headline_change_pct": quote_depth.get("headline_change_pct"),
         "headline_event_time": _json_value(quote_depth.get("headline_event_time")),
@@ -2197,6 +2208,7 @@ def _compact_intraday_history(
         "truncated": len(points) > len(compact_points),
         "coverage_status": coverage_status,
         "series_coverage": series_coverage,
+        "materialization_policy": history.get("materialization_policy"),
         "session_scope": history.get("session_scope"),
         "materialization_state": history.get("materialization_state"),
         "is_historical": history.get("is_historical", False),
@@ -4068,8 +4080,13 @@ def _index_freshness_by_domain(
     intraday_bars: dict[str, Any],
     market_chip: dict[str, Any] | None,
     missing: list[str],
+    calendar_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    chip_status = "current" if market_chip else "missing"
+    chip_freshness = project_market_chip_freshness(
+        latest_data_date=(market_chip or {}).get("trade_date"),
+        row_count=int(bool(market_chip)),
+        calendar_status=calendar_status or {},
+    )
     return {
         "quote": _quote_freshness_domain(quote),
         "technical": {
@@ -4078,21 +4095,10 @@ def _index_freshness_by_domain(
             "resources": [_intraday_bar_freshness_resource(intraday_bars)],
         },
         "chips": {
-            "status": chip_status,
-            "is_current": market_chip is not None,
-            "latest": (market_chip or {}).get("trade_date"),
+            **chip_freshness,
+            "status": "missing" if not market_chip else chip_freshness["status"],
             "missing": [] if market_chip else ["market_chip_daily"],
-            "resources": [
-                {
-                    "resource": "market_chip_daily",
-                    "label": "Market chip daily",
-                    "status": chip_status,
-                    "ok": market_chip is not None,
-                    "latest": (market_chip or {}).get("trade_date"),
-                    "expected": None,
-                    "reason": "Latest market chip row is available." if market_chip else "No market chip row is available.",
-                }
-            ],
+            "resources": [chip_freshness],
         },
     }
 
@@ -4165,6 +4171,7 @@ def _build_tw_index_compact_evidence(
         intraday_bars=intraday_bars,
         market_chip=market_chip,
         missing=missing,
+        calendar_status=calendar_status,
     )
     freshness_by_capability = {
         "target.identity": {
@@ -4282,13 +4289,26 @@ def _build_stock_compact_evidence(
         "market": stock.market if stock else "TW",
         "instrument_type": getattr(stock, "instrument_type", None),
     }
+    technical_evidence = (
+        technical_evidence if isinstance(technical_evidence, dict) else {}
+    )
+    indicator_input = technical_evidence.get("indicators") or {}
+    if indicator_input.get("decision_usable") is False:
+        from app.ai.technical_analysis import apply_technical_sufficiency_gate
+
+        technical_analysis = apply_technical_sufficiency_gate(
+            technical_analysis,
+            sufficiency={
+                **(technical_analysis.get("sufficiency") or {}),
+                **(indicator_input.get("input_quality") or {}),
+                "status": "partial",
+                "decision_usable": False,
+            },
+        )
     technical = _compact_technical_evidence(
         analysis=technical_analysis,
         technical_levels=technical_levels,
         technical_reports=technical_reports,
-    )
-    technical_evidence = (
-        technical_evidence if isinstance(technical_evidence, dict) else {}
     )
     technical["contract_version"] = "tw_technical_current_state_v2"
     technical["advanced_shadow"] = technical_evidence.get("structure_v2")

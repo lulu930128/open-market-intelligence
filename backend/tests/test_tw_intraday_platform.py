@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import inspect
 import json
 
@@ -16,6 +17,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market import intraday
+from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.schemas import IntradayTrendRead, MarketIntradayChartRead
 from app.market.providers.tw_intraday_bars import (
     IntradayProviderPayload,
@@ -216,6 +218,48 @@ def test_yahoo_seconds_offset_is_normalized_to_minute_grid_with_raw_lineage() ->
         acquired.observations[0].lineage.raw_contract_version
         == YAHOO_INTRADAY_PARSER_VERSION
     )
+
+
+def test_yahoo_duplicate_minute_preserves_aligned_ohlcv_and_autoflush_off_lineage():
+    now = datetime(2026, 8, 26, 10, 1, 30, tzinfo=TAIPEI)
+    raw = json.loads(_yahoo_payload(now))
+    result = raw["chart"]["result"][0]
+    result["timestamp"].append(result["timestamp"][0] + 57)
+    quote = result["indicators"]["quote"][0]
+    for key, values in quote.items():
+        values.append(0 if key == "volume" else 1169)
+    requirement = build_taiwan_intraday_requirement(
+        instrument=_instrument().model_copy(update={"symbol": "2330"}), interval="1m", range_value="1d",
+        policy=RealtimePolicy.PREFER_LIVE, requested_at=now, acquiring=True,
+    )
+    adapter = YahooIntradayAdapter(
+        lambda *_: IntradayProviderPayload(
+            raw_text=json.dumps(raw), status="available", url="https://example.test/yahoo",
+            status_code=200, content_type="application/json",
+        ), clock=lambda: now,
+    )
+    plan = plan_data_acquisition_v2(requirement, (YAHOO_INTRADAY_DESCRIPTOR,))
+    acquired = adapter.acquire_route(requirement, plan.routes[0])
+    assert len(acquired.observations) == 2
+    assert acquired.observations[0].close_price == 1168
+    assert acquired.observations[0].volume.value == 1000
+    assert "PROVIDER_DUPLICATE_MINUTE_COLLAPSED" in acquired.summary.limitations
+    db, engine = _db()
+    db.autoflush = False
+    try:
+        transaction = TaiwanIntradayBarTransaction(db)
+        repeated = replace(acquired, observations=(
+            acquired.observations[0], acquired.observations[0], acquired.observations[1],
+        ))
+        transaction.persist_bar_acquisition(requirement, repeated)
+        assert db.query(MarketIntradayBar).count() == 2
+        assert db.query(MarketIntradayBarLineage).count() == 2
+        again = transaction.persist_bar_acquisition(requirement, repeated)
+        assert again.observations_written == 0
+        assert db.query(MarketIntradayBarLineage).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def _executor(

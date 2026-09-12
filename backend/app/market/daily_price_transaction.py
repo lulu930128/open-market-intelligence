@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
 from datetime import timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
+from sqlalchemy import inspect
 
 from app.db.models import (
     DataQualityCheck,
@@ -16,6 +19,7 @@ from app.db.models import (
     RawFetchResult,
     SourceRegistry,
     TaiwanIssuedSharesDaily,
+    TaiwanPublishedBreadthSnapshot,
 )
 from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market.tw_issued_shares import parse_tpex_issued_shares_payload
@@ -35,6 +39,29 @@ from app.sources.defaults import (
 
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
+logger = logging.getLogger(__name__)
+
+
+def _persist_published_breadth(db: Session, raw: RawFetchResult, trade_date) -> str | None:
+    from app.parsers.twse_published_breadth import parse_twse_published_breadth
+
+    if not inspect(db.connection()).has_table(TaiwanPublishedBreadthSnapshot.__tablename__):
+        return "PUBLISHED_BREADTH_SCHEMA_PENDING"
+    existing = db.query(TaiwanPublishedBreadthSnapshot).filter_by(raw_result_id=raw.id).first()
+    if existing is not None:
+        return existing.error_code
+    payload = None
+    error = None
+    try:
+        if not raw.raw_text or hashlib.sha256(raw.raw_text.encode("utf-8")).hexdigest() != raw.content_hash:
+            raise ValueError("TWSE_AGGREGATE_RECEIPT_HASH_MISMATCH")
+        payload = parse_twse_published_breadth(raw.raw_text, trade_date=trade_date).model_dump_json()
+    except (ValueError, TypeError) as exc:
+        logger.warning("Published breadth receipt %s rejected: %s", raw.id, exc)
+        error = "OFFICIAL_AGGREGATE_RECEIPT_REJECTED"
+    db.add(TaiwanPublishedBreadthSnapshot(venue="TWSE", trade_date=trade_date,
+        raw_result_id=raw.id, payload_json=payload, error_code=error))
+    return error
 
 
 def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
@@ -347,6 +374,7 @@ class TaiwanOfficialDailyTransaction:
         raw_ids: list[int] = []
         written = 0
         unchanged = 0
+        limitations = list(acquisition.summary.limitations)
         try:
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
@@ -389,6 +417,16 @@ class TaiwanOfficialDailyTransaction:
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
                 source, raw = receipts_by_source[key]
+                if (receipt.source == TWSE_RWD_DAILY_TRADING_SOURCE_NAME
+                    and receipt.provider == "twse_rwd" and receipt.resource_id == "MI_INDEX_ALLBUT0999"
+                    and receipt.status_code == 200 and not receipt.error_message):
+                    dates = {bar.end_at.astimezone(TAIWAN_TZ).date() for bar in acquisition.observations
+                        if bar.lineage.source == receipt.source
+                        and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}}
+                    if len(dates) == 1:
+                        issue = _persist_published_breadth(self._db, raw, next(iter(dates)))
+                        if issue:
+                            limitations.append(issue)
                 self._quality_check(
                     source=source,
                     raw=raw,
@@ -408,7 +446,7 @@ class TaiwanOfficialDailyTransaction:
             observations_written=written,
             observations_unchanged=unchanged,
             raw_result_ids=tuple(raw_ids),
-            limitations=acquisition.summary.limitations,
+            limitations=tuple(dict.fromkeys(limitations)),
         )
 
 

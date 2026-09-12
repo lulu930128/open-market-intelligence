@@ -142,6 +142,7 @@ class Settings(BaseSettings):
     scheduler_market_daily_repair_max_attempts: int = 4
     scheduler_market_daily_repair_provider_cooldown_seconds: int = 1800
     scheduler_market_chip_refresh_time: str = "15:10"
+    enable_market_chip_daily_scheduler: bool = True
     scheduler_market_chip_refresh_retry_delay_minutes: int = 30
     scheduler_market_chip_margin_refresh_time: str = "21:10"
     enable_market_chip_margin_scheduler: bool = True
@@ -331,6 +332,8 @@ class Settings(BaseSettings):
         default=12, ge=1, le=12
     )
     enable_eod_coverage_scheduler: bool = True
+    enable_market_refresh_priority: bool = False
+    market_refresh_priority_ttl_seconds: int = Field(default=3600, ge=60, le=7200)
     scheduler_eod_coverage_markets: str = "TW,US"
     scheduler_eod_coverage_interval_minutes: int = 30
     scheduler_eod_coverage_us_max_symbols_per_run: int = 250

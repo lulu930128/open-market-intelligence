@@ -918,6 +918,22 @@ def _first_semantic_value(
     )
 
 
+def _observation_time_value(payload: Any, *, keys: set[str]) -> Any:
+    # Comparison references have their own dates and must not identify the
+    # selected observation. Prefer the observation's explicit top-level fields.
+    if isinstance(payload, dict):
+        direct = next(
+            (value for key, value in payload.items()
+             if key in keys and _has_semantic_value(value)),
+            None,
+        )
+        if direct is not None:
+            return direct
+        payload = {key: value for key, value in payload.items()
+                   if key not in {"change_reference", "prior_close_lineage"}}
+    return _first_semantic_value(payload, keys=keys)
+
+
 def _canonical_freshness_status(
     *,
     status: str,
@@ -1004,6 +1020,32 @@ def _canonical_coverage_status(
     )
     manifest_explicit = _normalized_status(manifest_item.get("coverage_status"))
     if capability_id in {"daily.ohlcv", "intraday.bars"}:
+        # Dataset incompleteness is distinct from response byte/point trimming.
+        # Never let a continuous returned prefix or an optimistic manifest
+        # override the selected series' explicit incompleteness.
+        if isinstance(payload, dict) and payload.get("is_partial") is True:
+            return "partial"
+        if explicit in {"partial_prefix", "partial_window", "trailing_window", "sparse"}:
+            return "partial"
+        if explicit == "complete_session":
+            explicit = "complete"
+        elif explicit == "complete_prefix":
+            coverage = _dict(_dict(payload).get("series_coverage"))
+            explicit = (
+                "complete"
+                if (
+                    coverage.get("current_window_complete") is True
+                    or (
+                        coverage.get("missing_bucket_count") == 0
+                        and isinstance(coverage.get("expected_bucket_count"), int)
+                        and coverage.get("expected_bucket_count", 0) > 0
+                    )
+                )
+                and _dict(payload).get("is_partial") is False
+                else "partial"
+            )
+        if explicit == "partial":
+            return "partial"
         returned_count = manifest_item.get("returned_count")
         if not isinstance(returned_count, int) or isinstance(returned_count, bool):
             returned_count = 0
@@ -1506,6 +1548,16 @@ def _quality_for_capability(
         status = "live_requirement_not_satisfied"
         status_class = "blocked"
         canonical_candidate = {"source": "realtime_policy"}
+    elif capability_id == "quote.snapshot" and freshness_status == "stale":
+        status = "stale"
+        status_class = "blocked"
+    if (
+        capability_id == "intraday.bars"
+        and coverage_status not in {"complete", "valid_empty"}
+        and status_class == "ready"
+    ):
+        status = "partial"
+        status_class = "limited"
     completeness = (
         "not_applicable"
         if status_class == "neutral"
@@ -1709,15 +1761,15 @@ def _quality_for_capability(
         "contradictions": contradictions,
         "issues": list(dict.fromkeys(issues)),
         "reason_codes": reason_codes,
-        "as_of": _first_semantic_value(
+        "as_of": _observation_time_value(
             payload,
             keys={"as_of", "latest_data_date", "trade_date", "date"},
         ),
-        "trade_date": _first_semantic_value(
+        "trade_date": _observation_time_value(
             payload,
             keys={"trade_date", "latest_data_date", "date"},
         ),
-        "event_time": _first_semantic_value(
+        "event_time": _observation_time_value(
             payload,
             keys={
                 "event_at",
@@ -1732,7 +1784,7 @@ def _quality_for_capability(
             payload,
             keys={"release_at", "released_at", "next_release_at"},
         ),
-        "fetched_at": _first_semantic_value(payload, keys={"fetched_at"}),
+        "fetched_at": _observation_time_value(payload, keys={"fetched_at"}),
         "computed_at": _first_semantic_value(
             payload,
             keys={"computed_at", "calculated_at", "generated_at"},
@@ -2056,6 +2108,15 @@ def build_quality_contract(
         facts_ready
         and scope_type not in DIAGNOSTIC_SCOPES
         and not blocked_required
+        and not any(
+            (
+                str(item.get("capability") or "").startswith("technical.")
+                or item.get("capability") == "intraday.bars"
+            )
+            and item.get("decision_usable") is False
+            and item.get("applicability_status") != "not_applicable"
+            for item in required_rows
+        )
     )
     decision_ready = bool(
         analysis_ready

@@ -553,7 +553,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             any("provider-derived estimates" in warning for warning in payload["warnings"])
         )
 
-    def test_legacy_unknown_trade_value_quality_remains_backward_compatible(
+    def test_legacy_unknown_trade_value_quality_stays_unusable(
         self,
     ) -> None:
         minute_at = datetime(2026, 7, 30, 10, 0, tzinfo=TAIWAN_TZ)
@@ -581,10 +581,9 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
 
         payload = read_taiwan_market_volume_state(self.db)
 
-        self.assertEqual(payload["current_cumulative_trade_value"], 1_300)
-        self.assertEqual(payload["trade_value_coverage_status"], "complete")
-        self.assertEqual(payload["trade_value_authority_status"], "official")
-        self.assertEqual(payload["trade_value_status"], "official_complete")
+        self.assertIsNone(payload["current_cumulative_trade_value"])
+        self.assertFalse(payload["trade_value_complete"])
+        self.assertEqual(set(payload["missing_markets"]), {"TWSE", "TPEX"})
 
     def test_index_snapshots_form_synthetic_non_indicator_minute_series(
         self,
@@ -934,7 +933,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             derived_flag=estimated,
             component_raw_result_ids_json='["raw_fetch_result:test"]',
             component_sources_json=(
-                '[{"domain":"market_breadth","provider":"test",'
+                '[{"domain":"index_snapshot","owns_trade_value":true,"provider":"test",'
                 '"source":"test","raw_result_id":"raw_fetch_result:test",'
                 f'"event_at":"{minute_at.isoformat()}"}}]'
             ),

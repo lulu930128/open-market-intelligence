@@ -778,6 +778,22 @@ class MarketDatasetCoverageCheckpoint(Base):
     )
 
 
+class MarketRefreshPriority(Base):
+    """Expiring foreground demand; market evidence remains in canonical tables."""
+
+    __tablename__ = "market_refresh_priority"
+    __table_args__ = (
+        UniqueConstraint("market", "venue", "symbol", name="uq_market_refresh_priority_identity"),
+        Index("ix_market_refresh_priority_expiry", "market", "expires_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    market: Mapped[str] = mapped_column(String(8), nullable=False)
+    venue: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(40), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MarketDailyPrice(Base):
     __tablename__ = "market_daily_price"
 
@@ -2707,6 +2723,18 @@ class TaiwanMarketIndexDirectoryItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TaiwanPublishedBreadthSnapshot(Base):
+    __tablename__ = "taiwan_published_breadth_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    venue: Mapped[str] = mapped_column(String(32), nullable=False)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    raw_result_id: Mapped[int] = mapped_column(ForeignKey("raw_fetch_result.id"), unique=True, nullable=False)
+    payload_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    __table_args__ = (Index("ix_tw_published_breadth_date", "venue", "trade_date", "raw_result_id"),)
+
+
 class TaiwanCurrentBreadthSnapshot(Base):
     __tablename__ = "taiwan_current_breadth_snapshot"
 
@@ -2753,6 +2781,9 @@ class TaiwanCurrentBreadthSnapshot(Base):
     unchanged_count: Mapped[int] = mapped_column(Integer)
     received_unclassified_count: Mapped[int] = mapped_column(Integer, default=0)
     not_received_count: Mapped[int] = mapped_column(Integer, default=0)
+    price_states_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    limits_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    classification_diagnostics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     observation_state: Mapped[str] = mapped_column(String(24), index=True)

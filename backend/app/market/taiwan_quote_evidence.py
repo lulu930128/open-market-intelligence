@@ -211,7 +211,7 @@ def read_taiwan_quote_evidence_bundle(
     official_close = read_taiwan_official_daily(
         db,
         stock_id=stock_id,
-        limit=1,
+        limit=2,
         requested_at=now,
     )
     return TaiwanQuoteEvidenceBundle(
@@ -275,6 +275,11 @@ def acquire_taiwan_quote_evidence_bundle(
         if "quote.session_close" in requested
         else refreshed.quote
     )
+    if "quote.session_close" in requested:
+        quote = quote.model_copy(update={
+            "acquisition": refreshed.quote.acquisition,
+            "persistence": refreshed.quote.persistence,
+        })
     auction = refreshed.auction or read_taiwan_auction(
         db,
         stock_id=stock_id,
@@ -284,7 +289,7 @@ def acquire_taiwan_quote_evidence_bundle(
     official_close = read_taiwan_official_daily(
         db,
         stock_id=stock_id,
-        limit=1,
+        limit=2,
         requested_at=now,
     )
     realtime_results = {

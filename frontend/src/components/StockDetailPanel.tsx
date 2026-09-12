@@ -84,6 +84,7 @@ import {
   priceLimitBoxClass,
   priceLimitTone,
   resolveTodayHeadlineValues,
+  taiwanReferencePrice,
   summarizeIntradayPoints,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
@@ -178,7 +179,17 @@ function quoteDepthPriceDiagnostics(
   const currentPrice = quoteDepth?.headline_price ?? quoteDepth?.last_price ?? null;
   const actualTradePrice = quoteDepth?.last_trade_price ?? null;
   if (!quoteDepth || !finiteNumber(currentPrice)) return null;
+  const isPostClose = ["post_close_snapshot", "market_closed", "close_resolution"].includes(quoteDepth.session_phase);
   return {
+    current_price_basis: isPostClose
+      ? (quoteDepth.headline_basis === "official_close" ? "official_close" : "session_close")
+      : quoteDepth.headline_basis,
+    current_price_status: quoteDepth.headline_basis === "official_close"
+      ? quoteDepth.official_close_status
+      : quoteDepth.session_close_status,
+    current_price_confirmed: quoteDepth.headline_basis === "official_close"
+      ? quoteDepth.official_close_available === true
+      : quoteDepth.headline_basis === "session_close" && quoteDepth.session_close_available === true,
     history_price_source: null,
     latest_history_time: null,
     latest_history_price: null,
@@ -191,8 +202,8 @@ function quoteDepthPriceDiagnostics(
         ? actualTradePrice
         : null,
     current_price_source:
-      quoteDepth.actual_trade_price_source ??
       quoteDepth.headline_source ??
+      quoteDepth.actual_trade_price_source ??
       quoteDepth.source,
     lag_seconds: quoteDepth.freshness.age_seconds,
     current_trade_available:
@@ -727,10 +738,7 @@ export default function StockDetailPanel({
       professionalIntradayInterval,
       professionalIntradayStockId,
       todayCapabilities,
-      todayCurrentObservation,
       todayHistoryStatus,
-      todayPreviousClose,
-      todayPriceDiagnostics,
       todaySnapshotPhase,
       todaySnapshotReasonCodes,
       todaySource,
@@ -798,13 +806,6 @@ export default function StockDetailPanel({
   const indicatorDataForTimeframe = currentChartReady
     ? indicatorData
     : emptyIndicatorPoints;
-  const dailyReferenceChartData =
-    chartMatchesSelection && chartTimeframe === "daily" ? chartData : emptyChartPoints;
-  const dailyReferenceIndicatorData =
-    chartMatchesSelection && chartTimeframe === "daily"
-      ? indicatorData
-      : emptyIndicatorPoints;
-
   function toggleChartIndicator(key: IndicatorKey) {
     setActiveIndicatorTemplate(null);
     setChartIndicators((current) => ({
@@ -913,13 +914,12 @@ export default function StockDetailPanel({
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const selectedQuoteDepth = quoteDepth?.stock_id === stockId ? quoteDepth : null;
   const resolvedTodayCurrentObservation =
-    todayCurrentObservation ?? quoteDepthCurrentObservation(selectedQuoteDepth);
+    quoteDepthCurrentObservation(selectedQuoteDepth);
   const resolvedTodayPreviousClose =
-    todayPreviousClose ??
-    selectedQuoteDepth?.previous_close ??
+    taiwanReferencePrice(selectedQuoteDepth, effectiveTimeframe === "today" ? todayTradeDate : selectedQuoteDepth?.presentation_trade_date) ??
     (isIndexProduct ? selectedIndexSnapshot?.previous_close ?? null : null);
   const resolvedTodayPriceDiagnostics =
-    todayPriceDiagnostics ?? quoteDepthPriceDiagnostics(selectedQuoteDepth);
+    quoteDepthPriceDiagnostics(selectedQuoteDepth);
   const resolvedTodaySource =
     selectedQuoteDepth?.headline_source ?? selectedQuoteDepth?.source ?? todaySource;
   const resolvedTodayUpdatedAt =
@@ -1037,27 +1037,7 @@ export default function StockDetailPanel({
     (professionalIsIntraday || currentChartReady);
   const professionalTimeframeLabel = t(`timeframes.${professionalTimeframe}`);
   const latestProfessionalChart = professionalChartData[professionalChartData.length - 1] ?? null;
-  const latestDailyReferenceChart =
-    dailyReferenceChartData[dailyReferenceChartData.length - 1] ?? null;
-  const latestDailyReferenceIndicator =
-    dailyReferenceIndicatorData[dailyReferenceIndicatorData.length - 1] ?? null;
-  const latestDailyReferenceIndicatorDate = normalizeIsoDate(
-    latestDailyReferenceIndicator?.time
-  );
-  const latestDailyCurrentIndicator =
-    latestDailyReferenceIndicator !== null &&
-    normalizeIsoDate(latestDailyReferenceChart?.time) !== null &&
-    latestDailyReferenceIndicatorDate === normalizeIsoDate(latestDailyReferenceChart?.time)
-      ? latestDailyReferenceIndicator
-      : null;
-  const dailyPreviousClose =
-    latestDailyCurrentIndicator?.close !== null &&
-    latestDailyCurrentIndicator?.close !== undefined &&
-    latestDailyCurrentIndicator?.change !== null &&
-    latestDailyCurrentIndicator?.change !== undefined
-      ? latestDailyCurrentIndicator.close - latestDailyCurrentIndicator.change
-      : null;
-  const todayReferenceClose = resolvedTodayPreviousClose ?? dailyPreviousClose;
+  const todayReferenceClose = resolvedTodayPreviousClose;
   const chartChangePct =
     latestChart?.close !== null &&
     latestChart?.close !== undefined &&
@@ -1084,13 +1064,13 @@ export default function StockDetailPanel({
         }
       : null;
   const todayHeadlineValues = resolveTodayHeadlineValues({
-    backendPrice: quoteDepth?.headline_price,
-    backendChange: quoteDepth?.headline_change,
-    backendChangePct: quoteDepth?.headline_change_pct,
+    backendPrice: selectedQuoteDepth?.headline_price,
+    backendChange: selectedQuoteDepth?.headline_change,
+    backendChangePct: selectedQuoteDepth?.headline_change_pct,
     currentPrice: latestTodayDisplayPrice,
     currentReferenceClose: todayReferenceClose,
     completedSessionPrice: completedSessionHeadline,
-    completedSessionReferenceClose: quoteDepth?.previous_close,
+    completedSessionReferenceClose: todayReferenceClose,
   });
   const todayHeadlinePrice: number | null = todayHeadlineValues[0];
   const todayHeadlineChange: number | null = todayHeadlineValues[1];
@@ -1748,6 +1728,9 @@ export default function StockDetailPanel({
               <IntradayTrendChart
                 points={todayTrend}
                 previousClose={resolvedTodayPreviousClose}
+                referenceType={isIndexProduct ? "prior_regular_close" : selectedQuoteDepth?.change_reference?.type ?? "unavailable"}
+                referenceStatus={isIndexProduct ? undefined : resolvedTodayPreviousClose === null ? "missing" : selectedQuoteDepth?.change_reference?.status}
+                referenceReason={selectedQuoteDepth?.change_reference?.reason_code}
                 label={timeframeLabel(t, effectiveTimeframe)}
                 source={resolvedTodaySource}
                 indicators={todayIntradayIndicators}

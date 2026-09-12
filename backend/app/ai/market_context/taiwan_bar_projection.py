@@ -7,6 +7,7 @@ from typing import Any
 
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead
 from app.market.tw_chart_service import TaiwanChartBundleRead
+from app.market.tw_intraday_universe import intraday_materialization_policy
 
 
 def _single_session_trade_date(series: TaiwanBarSeriesRead) -> date | None:
@@ -89,6 +90,7 @@ def project_taiwan_bar_series(
         "is_partial": not series.history.requested_coverage_satisfied,
         "coverage_status": series.history.history_status.value,
         "series_coverage": series.history.model_dump(mode="json"),
+        "materialization_policy": intraday_materialization_policy(),
         "canonical_volume_unit": (
             latest.volume.unit.value
             if latest is not None and latest.volume is not None
@@ -109,6 +111,10 @@ def project_taiwan_bar_series(
             - ({expected_trade_date} if expected_trade_date is not None else set())
         )
         current_session_coverage = getattr(series, "current_session_coverage", None)
+        if current_session_coverage is not None:
+            payload["series_coverage"] = current_session_coverage.model_dump(mode="json")
+            payload["coverage_status"] = current_session_coverage.status.value
+            payload["is_partial"] = current_session_coverage.status.value not in {"complete_prefix", "complete_session"}
         snapshot_phase = (
             current_session_coverage.snapshot_phase.value
             if current_session_coverage is not None
@@ -123,6 +129,7 @@ def project_taiwan_bar_series(
             if expected_trade_date is not None
             and not unexpected_trade_dates
             and snapshot_phase == "ready"
+            and current_session_coverage.status.value in {"complete_prefix", "complete_session"}
             else "partial"
         )
         payload.update(

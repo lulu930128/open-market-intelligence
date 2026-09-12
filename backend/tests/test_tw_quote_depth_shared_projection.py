@@ -319,8 +319,12 @@ def test_official_close_component_uses_canonical_daily_owner() -> None:
         assert result["last_trade_price"] == 1180
         assert result["headline_price"] == 1182
         assert result["headline_reference_price"] == 1170
+        assert result["change_reference"]["price"] == 1170
+        assert result["change_reference"]["trade_date"] is None
+        assert result["change_reference"]["status"] == "partial"
         assert result["headline_change"] == 12
         assert result["headline_basis"] == "official_close"
+        assert result["freshness"]["is_stale"] is True
         assert result["headline_trade_date"] == date(2026, 8, 26)
         assert result["depth_available"] is False
         assert result["depth_snapshot_available"] is False
@@ -335,7 +339,14 @@ def test_official_close_component_uses_canonical_daily_owner() -> None:
             current_session_date="2026-08-26",
             is_trading_day=True,
         )
+        from app.ai.capability_contract import CAPABILITIES, _project_fields
+        projected = _project_fields(ai_quote, fields=CAPABILITIES["quote.snapshot"].fields, limit=100)
+        assert projected["change_reference_price"] == 1170
+        assert projected["change_reference_provider"] == "twse_openapi"
+        assert projected["change_reference_status"] == "partial"
+        assert projected["change_reference"] == ai_quote["change_reference"]
         ai_official = ai_quote["components"]["official_close"]
+        assert ai_official["change_reference"] == ai_quote["change_reference"]
         assert ai_official["available"] is True
         assert ai_official["provider"] == "twse_openapi"
         assert ai_official["lineage"]["raw_receipt_id"].startswith(
@@ -371,6 +382,40 @@ def test_previous_session_official_close_is_promoted_before_next_preopen() -> No
     finally:
         db.close()
         engine.dispose()
+
+
+def test_old_regular_depth_does_not_become_closing_auction_book() -> None:
+    payload = {
+        "depth_available": True, "best_bid_price": 908, "best_ask_price": 909,
+        "depth_event_time": datetime(2026, 9, 10, 12, 8, 27, tzinfo=TAIPEI),
+        "last_trade_available": True,
+        "last_trade_time": datetime(2026, 9, 10, 13, 23, 45, tzinfo=TAIPEI),
+    }
+    _finalize_shared_projection_semantics(
+        payload, phase="closing_auction",
+        requested_at=datetime(2026, 9, 10, 13, 28, tzinfo=TAIPEI),
+    )
+    assert payload["auction_book_available"] is False
+    assert payload["auction_book_time"] is None
+    assert payload["last_trade_before_auction"] is True
+
+
+def test_regular_snapshot_age_stays_stale_after_close() -> None:
+    from app.market.quote_depth import _freshness_for_row
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        trade_date=date(2026, 9, 10),
+        quote_time=datetime(2026, 9, 10, 12, 8, tzinfo=TAIPEI),
+        fetched_at=datetime(2026, 9, 10, 12, 8, tzinfo=TAIPEI),
+    )
+    for phase, minute in [("regular_live", 20), ("post_close_snapshot", 40)]:
+        result = _freshness_for_row(
+            row, phase=phase, now=datetime(2026, 9, 10, 13, minute, tzinfo=TAIPEI),
+        )
+        assert result["is_stale"] is True
+        assert result["is_live"] is False
+        assert result["status"] == "stale"
 
 
 def test_session_close_distinguishes_pending_from_released_but_missing_eod() -> None:

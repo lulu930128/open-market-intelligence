@@ -531,6 +531,18 @@ class CurrentBreadthAdapter:
                     received_unclassified=received_unclassified,
                     not_received=not_received,
                 ),
+                price_states={
+                    code: {
+                        **state,
+                        "lineage": state.get("lineage") or _lineage(
+                            binding=self.binding, event_at=_datetime(state.get("price_as_of")),
+                            fetched_at=fetched_at, content_hash=content_hash,
+                        ),
+                    }
+                    for code, state in (raw.get("price_states") or {}).items()
+                },
+                limits=raw.get("limits"),
+                classification_diagnostics=raw.get("classification_diagnostics") or {},
                 auction=auction,
                 acquisition_diagnostics=BreadthAcquisitionDiagnostics(
                     auction_error_code=auction_error_code,

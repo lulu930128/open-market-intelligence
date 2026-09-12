@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import date, datetime, time, timezone
 import json
+import math
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from app.db.models import (
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
 from app.market.quote_volume import build_taiwan_quote_volume_contract
+from app.market.schemas import TaiwanChangeReferenceRead
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
     reconcile_taiwan_session_close,
@@ -609,7 +611,7 @@ def _freshness_for_row(
     is_stale = bool(
         row is None
         or trade_date_mismatch
-        or (is_live_phase and (age_seconds is None or age_seconds > TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS))
+        or (age_seconds is None or age_seconds > TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS)
         or source_error
     )
 
@@ -651,7 +653,7 @@ def _freshness_for_row(
     elif trade_date_mismatch:
         status = "stale"
         message = "五檔快照交易日落後，請等待來源更新。"
-    elif is_live_phase and is_stale:
+    elif is_stale:
         status = "stale"
         message = "五檔快照已超過即時 freshness 門檻。"
     elif is_live_phase:
@@ -965,7 +967,8 @@ def _empty_response(
     )
     if effective_phase == "post_close_snapshot" and not source_error:
         freshness["status"] = "official_close_pending"
-        freshness["is_stale"] = False
+        # A presentation transition does not supply a new observation.
+        freshness["is_stale"] = True
         freshness["message"] = (
             "The closing auction has ended, but an official close snapshot "
             "has not been confirmed yet."
@@ -1098,9 +1101,9 @@ def _row_to_response(
         now=now,
     )
     if semantics["official_close_available"]:
-        freshness["status"] = "official_close"
+        if not freshness.get("is_stale"):
+            freshness["status"] = "official_close"
         freshness["is_live"] = False
-        freshness["is_stale"] = False
         freshness["message"] = (
             "The latest completed regular-session close is confirmed."
         )
@@ -1522,6 +1525,26 @@ def _finalize_shared_projection_semantics(
 
     depth_available = bool(payload.get("depth_available"))
     last_trade_available = bool(payload.get("last_trade_available"))
+    # Presentation phase may advance while the selected observation stays old.
+    # Only an event from this auction window can represent its order book.
+    def event_datetime(value: Any) -> datetime | None:
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        return _taiwan_exchange_datetime(value) if isinstance(value, datetime) else None
+
+    depth_at = event_datetime(payload.get("depth_event_time"))
+    trade_at = event_datetime(payload.get("last_trade_time"))
+    local_now = _local_now(requested_at)
+    event_phase = taiwan_market_session_phase(depth_at) if depth_at else None
+    expected_event_phase = "preopen" if phase == "preopen_auction" else phase
+    payload["last_trade_before_auction"] = bool(
+        phase == "closing_auction" and last_trade_available and trade_at
+        and trade_at.date() == local_now.date()
+        and taiwan_market_session_phase(trade_at) == "regular"
+    )
     indicative_available = bool(
         payload.get("auction_indicative_available")
         or payload.get("indicative_match_available")
@@ -1530,6 +1553,9 @@ def _finalize_shared_projection_semantics(
     auction_book_available = bool(
         auction_phase
         and depth_available
+        and depth_at is not None
+        and depth_at.date() == local_now.date()
+        and event_phase == expected_event_phase
         and (
             payload.get("best_bid_price") is not None
             or payload.get("best_ask_price") is not None
@@ -1686,9 +1712,8 @@ def _finalize_shared_projection_semantics(
             if isinstance(freshness, dict):
                 freshness.update(
                     {
-                        "status": "session_final",
+                        "status": freshness.get("status") if freshness.get("is_stale") else "session_final",
                         "is_live": False,
-                        "is_stale": False,
                         "expected_trade_date": session_close.get("trade_date"),
                         "message": (
                             "The Taiwan session close is confirmed, but the "
@@ -1763,6 +1788,11 @@ def _component_evidence(result: Any, observation: Any) -> dict[str, Any]:
     )
     return {
         "result_kind": result.result_kind,
+        "acquisition": result.acquisition.model_dump(mode="json"),
+        "latest_observation_lineage": (
+            observation.latest_observation_lineage.model_dump(mode="json")
+            if getattr(observation, "latest_observation_lineage", None) is not None else None
+        ),
         "provider": (
             lineage.provider
             if lineage is not None
@@ -1906,12 +1936,14 @@ def _apply_resolved_official_close(
         freshness.update(
             {
                 "status": (
+                    freshness.get("status")
+                    if freshness.get("is_stale")
+                    else
                     "official_close"
                     if status == "confirmed"
                     else "latest_completed_session"
                 ),
                 "is_live": False,
-                "is_stale": False,
                 "message": "Canonical official daily close is available.",
             }
         )
@@ -1943,6 +1975,127 @@ def _apply_headline_compatibility_aliases(response: dict[str, Any]) -> None:
             "change_pct": response.get("headline_change_pct"),
         }
     )
+
+
+def _project_change_reference(
+    response: dict[str, Any], bundle: TaiwanQuoteEvidenceBundle,
+) -> dict[str, Any]:
+    """Project one session-bound basis from already-resolved canonical evidence.
+
+    A derived reference is not proof of a previous close date. Only an exact
+    canonical prior-session bar can establish that relationship. Never borrow
+    yesterday's quote reference for today's headline/depth/auction.
+    """
+    session_date = _expected_trade_date_for_phase(
+        str(response.get("session_phase") or ""), _local_now(bundle.requested_at),
+    )
+    missing = TaiwanChangeReferenceRead(applies_to_trade_date=session_date)
+    if session_date is None:
+        return missing.model_dump()
+    daily = bundle.official_close.resolved
+    bars = daily.bars if daily.health.facts_usable else ()
+    prior_date = previous_taiwan_trading_day(session_date, include_value=False)
+    prior = next(
+        (bar for bar in bars if bar.end_at.astimezone(TAIWAN_TZ).date() == prior_date),
+        None,
+    )
+    official = next(
+        (bar for bar in bars if bar.end_at.astimezone(TAIWAN_TZ).date() == session_date),
+        None,
+    )
+    value = None
+    lineage = None
+    source_field = None
+    kind = "unavailable"
+    research_usable = False
+    if response.get("headline_basis") == "official_close" and official is not None:
+        if official.price_change is not None:
+            value = _as_float(official.close_price - official.price_change)
+            lineage = official.lineage
+            source_field = "canonical.daily.close_price-price_change"
+            kind = "official_change_reference"
+            research_usable = daily.health.research_usable
+    if value is None:
+        # These results have already passed provider selection at the gateway.
+        for result in (bundle.session_close, bundle.quote):
+            quote = result.resolved.quote
+            if (
+                quote is not None
+                and (
+                    result.resolved.health.facts_usable
+                    or (
+                        quote.state.value in {"indicative", "partial"}
+                        and quote.lineage.authority.value == "exchange"
+                        and quote.lineage.raw_receipt_id is not None
+                        and quote.lineage.event_at is not None
+                        and quote.lineage.event_at <= bundle.requested_at
+                    )
+                )
+                and quote.trade_date == session_date and quote.previous_close is not None
+            ):
+                value = _as_float(quote.previous_close)
+                lineage = quote.lineage
+                source_field = "canonical.quote.previous_close"
+                kind = "provider_reference_price"
+                research_usable = result.resolved.health.research_usable
+                break
+    if value is None or not math.isfinite(value) or value <= 0 or lineage is None:
+        if prior is not None:
+            missing = missing.model_copy(update={
+                "reason_code": "TW_CHANGE_REFERENCE_CORPORATE_ACTION_UNVERIFIED",
+                "prior_close_lineage": prior.lineage.model_dump(mode="json"),
+            })
+        return missing.model_dump()
+    reference_date = None
+    reason = "TW_CHANGE_REFERENCE_PRIOR_CLOSE_UNVERIFIED"
+    if prior is not None and math.isclose(value, float(prior.close_price), abs_tol=1e-8, rel_tol=0):
+        kind = "prior_regular_close"
+        reference_date = prior_date
+        reason = "TW_CHANGE_REFERENCE_PRIOR_CLOSE_CONFIRMED"
+    elif prior is not None and kind == "official_change_reference":
+        # An official reported change establishes the effective exchange basis,
+        # but does not establish a corporate-action cause.
+        kind = "exchange_reference_price"
+        reference_date = session_date
+        reason = "TW_CHANGE_REFERENCE_EXCHANGE_BASIS"
+    return TaiwanChangeReferenceRead(
+        price=value, applies_to_trade_date=session_date, trade_date=reference_date,
+        type=kind, provider=lineage.provider, source=lineage.source,
+        authority=lineage.authority.value, source_field=source_field,
+        lineage=lineage.model_dump(mode="json"),
+        prior_close_lineage=prior.lineage.model_dump(mode="json") if prior is not None else {},
+        status="current" if reference_date is not None else "partial",
+        reason_code=reason, calculation_eligible=True, display_usable=True,
+        research_usable=bool(research_usable and reference_date is not None),
+    ).model_dump()
+
+
+def _apply_change_reference(response: dict[str, Any], bundle: TaiwanQuoteEvidenceBundle) -> None:
+    reference = _project_change_reference(response, bundle)
+    for key, result, field in (
+        ("depth_usable", bundle.depth, "depth"),
+        ("auction_usable", bundle.auction, "auction"),
+    ):
+        observation = getattr(result.resolved, field, None)
+        event_at = observation.lineage.event_at if observation is not None else None
+        reference[key] = bool(
+            reference["display_usable"] and result.resolved.health.facts_usable
+            and event_at is not None
+            and event_at.astimezone(TAIWAN_TZ).date() == reference["applies_to_trade_date"]
+        )
+    response["change_reference"] = reference
+    headline_date = response.get("headline_trade_date")
+    if isinstance(headline_date, str):
+        headline_date = date.fromisoformat(headline_date)
+    price = reference["price"] if (
+        reference["calculation_eligible"]
+        and headline_date == reference["applies_to_trade_date"]
+    ) else None
+    response["headline_reference_price"] = price
+    headline_price = _as_float(response.get("headline_price"))
+    change = headline_price - price if headline_price is not None and price is not None else None
+    response["headline_change"] = change
+    response["headline_change_pct"] = _percent_change(change, price)
 
 
 def project_taiwan_quote_evidence_bundle(
@@ -1990,6 +2143,29 @@ def project_taiwan_quote_evidence_bundle(
             refresh_outcome="not_attempted",
         )
     )
+    if row is None and quote_result.resolved.quote is not None:
+        # A canonical stock component need not have a legacy quote-table row.
+        # Project its actual trade directly, without manufacturing a MIS row.
+        from app.market.public_quote_platform import project_taiwan_public_last_trade_quote
+
+        projected_quote = project_taiwan_public_last_trade_quote(quote_result)
+        for field in (
+            "provider", "source", "trade_date", "quote_time", "provider_event_time",
+            "event_time", "received_at", "fetched_at", "last_price", "last_trade_price",
+            "last_trade_available", "last_trade_time", "last_trade_is_current_session",
+            "actual_trade_occurred", "actual_trade_price_cached", "actual_trade_price_source",
+            "actual_trade_price_as_of", "previous_close", "change", "change_pct",
+            "cumulative_volume_lots", "total_volume_lots", "last_trade_volume_lots",
+        ):
+            response[field] = projected_quote[field]
+        response["freshness"] = {**response.get("freshness", {}), **projected_quote["freshness"],
+            "message": "Canonical current-session last actual trade; original event time retained."}
+        response.update(_headline_contract(
+            price=projected_quote["last_trade_price"], reference_price=projected_quote["previous_close"],
+            event_time=projected_quote["last_trade_time"], trade_date=projected_quote["trade_date"],
+            basis="actual_trade", finalization="provisional", authority="exchange_feed",
+            source=projected_quote["source"], decision_usable=quote_result.resolved.health.research_usable,
+        ))
     _apply_resolved_depth(response, depth_result, phase=phase)
     _apply_resolved_auction(response, auction_result)
     _finalize_shared_projection_semantics(
@@ -2003,6 +2179,7 @@ def project_taiwan_quote_evidence_bundle(
         official_close_result,
         requested_at=requested_at,
     )
+    _apply_change_reference(response, bundle)
     _apply_headline_compatibility_aliases(response)
     selected_sources = [
         observation.lineage.source
@@ -2036,6 +2213,15 @@ def project_taiwan_quote_evidence_bundle(
         }
         for provider in attempted_providers
     ]
+    provider_attempts_by_capability = {
+        capability: {
+            "attempted": result.acquisition.attempted,
+            "status": result.acquisition.status.value,
+            "providers_attempted": list(result.acquisition.providers_attempted),
+            "resource_attempts": [attempt.model_dump(mode="json") for attempt in result.acquisition.resource_attempts],
+        }
+        for capability, result in bundle.component_results.items()
+    }
     response.update(
         {
             "source_chain": list(dict.fromkeys(selected_sources)),
@@ -2045,6 +2231,7 @@ def project_taiwan_quote_evidence_bundle(
                 else response.get("provider")
             ),
             "provider_attempts": provider_attempts,
+            "provider_attempts_by_capability": provider_attempts_by_capability,
             "primary_source_status": quote_result.resolved.health.status.value,
             "primary_source_error": None,
             "fallback_used": (

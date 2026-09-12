@@ -612,6 +612,8 @@ def _compact_execution(execution: dict[str, Any]) -> None:
                     "writes_cache",
                     "requested_capabilities",
                     "result_status",
+                    "repair_priority",
+                    "job",
                 )
                 if key in run
             }
@@ -4167,6 +4169,17 @@ def build(
     )
     reader_data = _dict(_dict(projection_response.get("result")).get("data"))
     reader_provider_contract = _dict(reader_data.get("provider_contract"))
+    keyed_reader_attempts = _dict(reader_provider_contract.get("provider_attempts_by_capability"))
+    reader_attempts = {
+        capability: _list(_dict(summary).get("resource_attempts")) or [
+            {"provider": provider, "status": _dict(summary).get("status")}
+            for provider in _list(_dict(summary).get("providers_attempted"))
+            if _dict(summary).get("attempted") is True
+        ]
+        for capability, summary in keyed_reader_attempts.items()
+    } if keyed_reader_attempts else {
+        "quote.snapshot": _list(reader_provider_contract.get("provider_attempts"))
+    }
     execution["refresh_reconciliation"] = (
         capability_contract.build_refresh_reconciliation(
             selection=selection,
@@ -4175,9 +4188,7 @@ def build(
             tool_runs=tool_runs,
             scope_type=scope_type,
             request_policy=_dict(execution.get("policy")),
-            primary_reader_provider_attempts={
-                "quote.snapshot": _list(reader_provider_contract.get("provider_attempts"))
-            },
+            primary_reader_provider_attempts=reader_attempts,
         )
     )
     canonical["execution"] = execution

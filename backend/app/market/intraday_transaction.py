@@ -242,6 +242,10 @@ class TaiwanIntradayBarTransaction:
         lineage.calculation_version = None
         lineage.component_raw_result_ids_json = None
         lineage.updated_at = utc_now()
+        # Sessions used by the application disable autoflush. Make the new
+        # lineage visible to subsequent observations of the same bucket in
+        # this transaction; otherwise its unique bar_id can be inserted twice.
+        self._db.flush()
         return unchanged
 
     def persist_bar_acquisition(

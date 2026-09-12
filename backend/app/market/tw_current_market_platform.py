@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.market.tw_breadth_projection import project_breadth_coverage
+
 from collections import defaultdict
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -723,6 +725,15 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         and reconciliation_status == "balanced"
     )
     return {
+        **project_breadth_coverage({
+            "advance_count": observation.advance_count,
+            "decline_count": observation.decline_count,
+            "unchanged_count": observation.unchanged_count,
+            "universe_count": observation.universe_count,
+            "missing_count": observation.missing_count,
+            "received_unclassified_count": observation.unknown_count,
+            "coverage_reason_counts": observation.coverage_reason_counts,
+        }),
         "version": observation.contract_version,
         "status": observation.state.value,
         "market": observation.venue,
@@ -744,6 +755,10 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "unknown_count": aggregate_unknown_count,
         "missing_count": not_received_count,
         "coverage_reason_counts": dict(observation.coverage_reason_counts),
+        "classification_diagnostics": dict(observation.classification_diagnostics),
+        "limits": observation.limits.model_dump(mode="json") if observation.limits else None,
+        "limit_up_count": observation.limits.up.observed_count if observation.limits and observation.universe_count and observation.limits.up.unknown_count == 0 else None,
+        "limit_down_count": observation.limits.down.observed_count if observation.limits and observation.universe_count and observation.limits.down.unknown_count == 0 else None,
         "auction_breadth": _project_auction_breadth(result),
         "acquisition_diagnostics": (
             observation.acquisition_diagnostics.model_dump(mode="json")
@@ -780,6 +795,24 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "limitations": list(result.limitations),
         "warnings": list(result.limitations),
     }
+
+
+def read_taiwan_breadth_lanes(db: Session, *, venue: str, requested_at: datetime) -> dict:
+    """Cache-only scope comparison, without substituting unlike universes."""
+    from app.market.official_breadth_platform import (
+        read_taiwan_official_breadth, project_taiwan_official_breadth,
+    )
+
+    presentation = taiwan_presentation_session(requested_at)
+    if presentation["state"] not in {"completed", "previous_session"}:
+        return {"status": "not_applicable", "selected_lane": "current_registered",
+                "reason": "CURRENT_SESSION_REQUIREMENT", "official_daily": None}
+    official = project_taiwan_official_breadth(read_taiwan_official_breadth(
+        db, venue=venue, trade_date=presentation["trade_date"], requested_at=requested_at,
+    ))
+    return {"status": "shadow", "selected_lane": "current_registered",
+            "reason": "DISTINCT_UNIVERSE_SCOPES", "official_daily": official,
+            "comparison": "scope_only", "cache_only": True}
 
 
 __all__ = [

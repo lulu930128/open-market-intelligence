@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.market.tw_breadth_projection import project_breadth_coverage
+
 from collections import Counter
 from datetime import date, datetime, time
 from hashlib import sha256
@@ -13,6 +15,7 @@ from app.config import settings
 from app.db.models import (
     StockMaster,
     StockProfile,
+    TaiwanIssuedSharesDaily,
     TaiwanIntradayStockState,
     WatchlistGroup,
 )
@@ -636,6 +639,17 @@ def _build_index_estimates(
         else []
     )
     profile_by_stock = {profile.stock_id: profile for profile in profiles}
+    shares_date = db.query(func.max(TaiwanIssuedSharesDaily.trade_date)).filter(
+        TaiwanIssuedSharesDaily.market == "TPEX",
+        TaiwanIssuedSharesDaily.trade_date <= trade_date,
+    ).scalar()
+    tpex_shares = {
+        row.stock_id: row.issued_shares
+        for row in db.query(TaiwanIssuedSharesDaily).filter(
+            TaiwanIssuedSharesDaily.market == "TPEX",
+            TaiwanIssuedSharesDaily.trade_date == shares_date,
+        ).all()
+    } if shares_date is not None else {}
     estimates: list[dict[str, Any]] = []
     for market in SUPPORTED_MARKETS:
         index_id = INDEX_ID_BY_MARKET[market]
@@ -652,11 +666,16 @@ def _build_index_estimates(
             state = state_by_stock.get((market, stock.stock_id))
             observation = _observation(state, session_phase=session_phase)
             profile = profile_by_stock.get(stock.stock_id)
-            if profile is not None and profile.report_date is not None:
+            if market == "TPEX" and shares_date is not None:
+                shares_dates.append(shares_date)
+            elif profile is not None and profile.report_date is not None:
                 shares_dates.append(profile.report_date)
             components.append(
                 {
-                    "shares": profile.issued_shares if profile is not None else None,
+                    "shares": (
+                        tpex_shares.get(stock.stock_id) if market == "TPEX"
+                        else profile.issued_shares if profile is not None else None
+                    ),
                     "reference_price": (
                         state.previous_close if state is not None else None
                     ),
@@ -745,56 +764,23 @@ def _build_resolved_indices(
         market = str(raw_breadth.get("market") or raw_item.get("market") or "")
         if not market:
             continue
+        coverage_projection = project_breadth_coverage(raw_breadth)
+        partition = coverage_projection["classification_summary"]
         advance = int(raw_breadth.get("advance_count") or 0)
         decline = int(raw_breadth.get("decline_count") or 0)
         unchanged = int(raw_breadth.get("unchanged_count") or 0)
-        coverage = int(
-            raw_breadth.get("classified_count")
-            or raw_breadth.get("coverage_count")
-            or (advance + decline + unchanged)
-        )
-        universe = int(raw_breadth.get("total_count") or coverage)
-        unknown = max(universe - coverage, 0)
-        missing_count = (
-            int(raw_breadth.get("missing_count") or 0)
-            if "missing_count" in raw_breadth
-            else None
-        )
-        explicit_not_received = raw_breadth.get("not_received_count")
-        not_received = (
-            min(
-                max(
-                    int(
-                        explicit_not_received
-                        if explicit_not_received is not None
-                        else missing_count
-                    ),
-                    0,
-                ),
-                unknown,
-            )
-            if explicit_not_received is not None or missing_count is not None
-            else None
-        )
-        explicit_received_unclassified = raw_breadth.get(
-            "received_unclassified_count"
-        )
-        received_unclassified = (
-            min(
-                max(int(explicit_received_unclassified), 0),
-                max(unknown - (not_received or 0), 0),
-            )
-            if explicit_received_unclassified is not None
-            else max(unknown - not_received, 0)
-            if not_received is not None
-            else None
-        )
-        reason_unknown = (
-            max(unknown - not_received - (received_unclassified or 0), 0)
-            if not_received is not None
-            else unknown
-        )
+        coverage = partition["classified"]
+        universe = int(raw_breadth.get("total_count", raw_breadth.get("universe_count", coverage)))
+        unknown = universe - coverage
+        not_received = partition["not_received"]
+        received_unclassified = partition["received_unclassified"]
+        reason_unknown = unknown - (not_received or 0) - (received_unclassified or 0)
         resolved_breadth[market] = {
+            **coverage_projection,
+            "limits": raw_breadth.get("limits"),
+            "limit_up_count": raw_breadth.get("limit_up_count"),
+            "limit_down_count": raw_breadth.get("limit_down_count"),
+            "classification_diagnostics": raw_breadth.get("classification_diagnostics") or {},
             "auction_breadth": raw_breadth.get("auction_breadth"),
             "acquisition_diagnostics": raw_breadth.get("acquisition_diagnostics"),
             "market": market,
@@ -821,10 +807,6 @@ def _build_resolved_indices(
                 "not_received": not_received,
                 "received_unclassified": received_unclassified,
                 "reason_unknown": reason_unknown,
-                "valid_no_trade": (raw_breadth.get("coverage_reason_counts") or {}).get("valid_no_trade"),
-                "not_tradable": (raw_breadth.get("coverage_reason_counts") or {}).get("suspended_or_not_tradable"),
-                "provider_missing": (raw_breadth.get("coverage_reason_counts") or {}).get("provider_missing"),
-                "mapping_error": (raw_breadth.get("coverage_reason_counts") or {}).get("mapping_error"),
             },
             "raw_unknown_reason_counts": {
                 key: value
@@ -931,7 +913,7 @@ def build_tw_market_dashboard(
         state_by_stock,
         session_phase=session_phase,
         trade_date=trade_date,
-    )
+    ) if session_phase == "preopen" else []
     (
         resolved_indices,
         resolved_breadth,

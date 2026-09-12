@@ -91,6 +91,7 @@ import type {
   StockVolumePace,
   USCapabilityExpectation,
   USIntradaySourceStatus,
+  USIntradaySessionCoverage,
   USMarketResearchRead,
   USCompanyProfileRead,
   USCorporateActionRead,
@@ -385,6 +386,7 @@ type USSupplementalData = {
 };
 
 type USIntradayMeta = {
+  sessionCoverage: USIntradaySessionCoverage | null;
   sessionPhase: string | null;
   marketPhase: string | null;
   regularPointCount: number;
@@ -404,6 +406,7 @@ type USIntradayMeta = {
 };
 
 const emptyUsIntradayMeta: USIntradayMeta = {
+  sessionCoverage: null,
   sessionPhase: null,
   marketPhase: null,
   regularPointCount: 0,
@@ -448,6 +451,7 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
       ? null
       : response.current_observation?.value ?? null;
   return {
+    sessionCoverage: sessionCoverage ?? null,
     sessionPhase: response.session_phase ?? null,
     marketPhase: response.market_phase ?? null,
     regularPointCount:
@@ -4112,6 +4116,17 @@ export default function USStockDetailPanel({
                 {intradaySessionWarning ? (
                   <div className="mt-2 text-xs text-omi-warning">
                     {intradaySessionWarning}
+                  </div>
+                ) : null}
+                {visibleTodayIntradayMeta.sessionCoverage?.coverage_status ? (
+                  <div className="mt-2 break-words text-xs text-omi-text-muted" data-testid="us-completed-session-coverage">
+                    {t("usStockDetail.extendedHours.coverageSummary", {
+                      date: visibleTodayIntradayMeta.sessionCoverage.trade_date ?? "—",
+                      status: t(`usStockDetail.extendedHours.coverage.${visibleTodayIntradayMeta.sessionCoverage.regular_coverage_status ?? visibleTodayIntradayMeta.sessionCoverage.coverage_status}`),
+                      observed: visibleTodayIntradayMeta.sessionCoverage.point_count ?? "—",
+                      expected: visibleTodayIntradayMeta.sessionCoverage.expected_point_count ?? "—",
+                      missing: visibleTodayIntradayMeta.sessionCoverage.missing_slot_count ?? "—",
+                    })}
                   </div>
                 ) : null}
                 {intradayCoverageNotice ? (

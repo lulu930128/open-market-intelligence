@@ -234,6 +234,12 @@ class TaiwanCurrentMarketTransaction:
             .filter(TaiwanCurrentBreadthSnapshot.event_at == event_at)
             .first()
         )
+        if existing is not None:
+            stored_fetch = existing.fetched_at
+            if stored_fetch.tzinfo is None:
+                stored_fetch = stored_fetch.replace(tzinfo=timezone.utc)
+            if stored_fetch > receipt.fetched_at:
+                return True
         decision_usable = (
             observation.state.value == "available"
             and observation.unknown_count == 0
@@ -260,6 +266,15 @@ class TaiwanCurrentMarketTransaction:
             "unchanged_count": observation.unchanged_count,
             "received_unclassified_count": observation.unknown_count,
             "not_received_count": observation.missing_count,
+            "price_states_json": json.dumps({
+                code: state.model_copy(update={"lineage": state.lineage.model_copy(
+                    update={"raw_receipt_id": f"raw_fetch_result:{raw.id}"}
+                )}).model_dump(mode="json") if state.lineage.content_hash == observation.lineage.content_hash
+                else state.model_dump(mode="json")
+                for code, state in observation.price_states.items()
+            }),
+            "limits_json": observation.limits.model_dump_json() if observation.limits else None,
+            "classification_diagnostics_json": json.dumps(observation.classification_diagnostics),
             "trade_value": (
                 int(observation.trade_value)
                 if observation.trade_value is not None

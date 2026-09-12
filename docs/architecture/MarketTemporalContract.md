@@ -97,6 +97,12 @@ freshness仍以最新bar event time判斷；off-session才可明示投影latest 
 
 明示 `trade_date` 的 US historical intraday 使用 `historical_intraday.py` 驗證已完成的交易時窗與 bounded horizon；read path 僅從 canonical cache 讀取指定交易日。獲授權的 acquisition 才將該時窗傳入 provider，經 transaction persistence 後 mandatory reread。Regular completeness 依交易日曆（含 early close）的逐分鐘時槽、重複／缺段與 finalization 判定，不以總筆數單獨推定完整。Partial evidence 保持可見，historical projection 與其 points 不宣稱 live／realtime／decision usable。Extended completeness 尚不升級為 complete。
 
+一般 US Today 讀取選到已完成 regular session 時，也傳遞 Market Truth 的
+`regular_session_coverage` 與 `regular_session_completed`。Compatibility API 保存
+expected／observed／missing／gap 與 finalization，綁定 `requested_trade_date` 供既有
+historical fill contract 使用；連續的半天資料不能升格為 complete。圖表聚合不得
+覆寫來源明示的 partial／未 finalized；來源 unknown finalization 同樣不能升格。
+
 US Quote／Intraday selected evidence 的event recency由
 `evaluate_us_selected_evidence_temporal()`單一pure owner判定，Compatibility service與
 US Market Truth共同消費。Market Truth的`current_observation`只表示observation屬於目前

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from functools import partial
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster
+from app.market.public_quote_repository import read_current_stock_price_states as read_breadth_price_states
 from app.market.index_parsers import regular_stock_code
 from app.market.providers.tw_current_market import CurrentBreadthAdapter, CurrentIndexAdapter
 from app.market.providers.twse_mis_current_breadth import read_twse_mis_current_breadth
@@ -64,6 +64,7 @@ class TaiwanRegisteredStockUniverseReader:
         )
 
 
+
 def _binding(provider: str, source: str, capability: str):
     binding = current_source_binding(
         provider=provider,
@@ -84,6 +85,11 @@ def build_current_market_executors(
     TaiwanCurrentBreadthAcquisitionExecutor,
 ]:
     universe_reader = TaiwanRegisteredStockUniverseReader(db)
+    def breadth_reader(venue: str, timeout_seconds: int):
+        prior_states = read_breadth_price_states(db, venue=venue, requested_at=clock())
+        return read_twse_mis_current_breadth(
+            venue, timeout_seconds, universe_reader=universe_reader, prior_states=prior_states,
+        )
     index = TaiwanCurrentIndexAcquisitionExecutor(
         (
             CurrentIndexAdapter(
@@ -114,10 +120,7 @@ def build_current_market_executors(
                     "twse_mis_live_breadth",
                     TW_CURRENT_BREADTH_CAPABILITY_ID,
                 ),
-                partial(
-                    read_twse_mis_current_breadth,
-                    universe_reader=universe_reader,
-                ),
+                breadth_reader,
                 clock=clock,
             ),
         )

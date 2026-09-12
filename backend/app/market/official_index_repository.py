@@ -19,6 +19,7 @@ from app.market.official_index_contract import (
     TWSE_INDEX_SOURCE_NAME,
 )
 from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_PROVIDER, TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
@@ -77,6 +78,8 @@ class TaiwanOfficialIndexRepository:
         source: SourceRegistry | None,
     ) -> OfficialIndexRead:
         venue, provider, source_name = binding
+        if index_id == "TAIEX" and source is not None and source.source_name == TAIEX_OFFICIAL_DAILY_SOURCE:
+            provider, source_name = TAIEX_OFFICIAL_DAILY_PROVIDER, TAIEX_OFFICIAL_DAILY_SOURCE
         if row is None:
             return OfficialIndexRead(limitations=("OFFICIAL_INDEX_DATE_MISSING",))
         if row.source_id is None or row.raw_result_id is None:

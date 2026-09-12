@@ -552,6 +552,7 @@ class YahooIntradayAdapter:
             )
         bars: list[BarObservation] = []
         parse_error = None
+        limitations: list[str] = []
         content_hash = sha256((payload.raw_text or "").encode("utf-8")).hexdigest()
         if payload.status == "available" and payload.raw_text:
             try:
@@ -623,7 +624,22 @@ class YahooIntradayAdapter:
                                 ),
                             )
                         )
-                    bars = raw_bars[-requirement.request.max_bars :]
+                    by_minute: dict[datetime, BarObservation] = {}
+                    for bar in raw_bars:
+                        previous = by_minute.get(bar.start_at)
+                        if previous is not None:
+                            limitations.append("PROVIDER_DUPLICATE_MINUTE_COLLAPSED")
+                            # Yahoo may append an off-grid last-trade sample
+                            # beside the minute OHLCV. Prefer the aligned bar;
+                            # do not sum overlapping volumes or invent OHLC.
+                            previous_aligned = previous.lineage.event_at == previous.start_at
+                            incoming_aligned = bar.lineage.event_at == bar.start_at
+                            if previous_aligned and not incoming_aligned:
+                                continue
+                            if not incoming_aligned and previous.lineage.event_at > bar.lineage.event_at:
+                                continue
+                        by_minute[bar.start_at] = bar
+                    bars = [by_minute[key] for key in sorted(by_minute)][-requirement.request.max_bars :]
             except Exception as exc:
                 parse_error = f"{type(exc).__name__}: {exc}"[:1000]
                 bars = []
@@ -637,6 +653,7 @@ class YahooIntradayAdapter:
             fetched_at=fetched_at,
             bars=tuple(bars),
             parse_error=parse_error,
+            limitations=tuple(dict.fromkeys(limitations)),
         )
 
 

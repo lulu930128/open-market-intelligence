@@ -18,6 +18,7 @@ from app.market.tw_intraday_capabilities import (
 )
 from app.market.tw_intraday_universe import (
     resolve_taiwan_intraday_target_universe,
+    resolve_taiwan_tier_a_target_plan,
 )
 from app.market.tw_intraday_platform import (
     project_taiwan_intraday_bars,
@@ -196,9 +197,7 @@ def reconcile_taiwan_intraday_close_tails(
     *,
     now: datetime | None = None,
     session_factory: Callable[[], Any] = SessionLocal,
-    universe_resolver: Callable[..., dict[str, Any]] = (
-        resolve_taiwan_intraday_target_universe
-    ),
+    universe_resolver: Callable[..., dict[str, Any]] | None = None,
     reader: Callable[..., Any] = read_taiwan_intraday_bars,
     refresher: Callable[..., Any] = refresh_taiwan_intraday_bars,
     projector: Callable[..., Any] = project_taiwan_intraday_bars,
@@ -225,10 +224,17 @@ def reconcile_taiwan_intraday_close_tails(
 
     db = session_factory()
     try:
-        universe = universe_resolver(
-            db,
-            max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
-        )
+        if universe_resolver is None:
+            universe = resolve_taiwan_tier_a_target_plan(
+                db,
+                operation_profile="production_session_close",
+                max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
+            )
+        else:
+            universe = universe_resolver(
+                db,
+                max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
+            )
         symbols = list(
             dict.fromkeys(
                 str(symbol).strip().upper()

@@ -49,6 +49,20 @@ def _points(
 
 
 class TechnicalEvidenceTests(unittest.TestCase):
+    def test_report_preserves_canonical_input_gate(self) -> None:
+        result = technical_report._with_evidence_passport({
+            "kind": "tw_stock_technical_report", "title": "up", "score": 5,
+            "summary": "up", "badges": [{"label": "up"}],
+            "data": {"daily_indicator": {"time": "2026-09-09", "input_quality": {
+                "decision_usable": False, "available_bars": 15, "required_bars": 60,
+                "reason_codes": ["TW_TECHNICAL_INSUFFICIENT_BARS"],
+            }}},
+        })
+        self.assertFalse(result["decision_usable"])
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["badges"], [])
+        self.assertIn("TW_TECHNICAL_INSUFFICIENT_BARS", result["missing"])
+
     def setUp(self) -> None:
         self.parameters = get_technical_analysis_parameters(persisted_settings={})
 
@@ -376,7 +390,7 @@ class TechnicalEvidenceTests(unittest.TestCase):
                 "TaiwanTechnicalService",
                 return_value=SimpleNamespace(
                     calculate=lambda *_args, **_kwargs: SimpleNamespace(
-                        points=weekly_points
+                        points=weekly_points, input_quality={"decision_usable": True}, decision_usable=True
                     )
                 ),
             ),
@@ -671,6 +685,7 @@ class TechnicalEvidenceTests(unittest.TestCase):
             "timeframes": {
                 "daily": {
                     "decision_snapshot": "completed",
+                    "decision_usable": True,
                     "period": {"status": "completed"},
                     "completed": {
                         "close": 482.5,

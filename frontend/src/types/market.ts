@@ -1114,6 +1114,20 @@ export type MarketBreadth = {
   coverage_count?: number | null;
   classified_count?: number | null;
   coverage_ratio?: number | null;
+  received_count?: number | null;
+  received_coverage_ratio?: number | null;
+  classified_coverage_ratio?: number | null;
+  received_unclassified_count?: number | null;
+  not_received_count?: number | null;
+  classification_diagnostics?: Record<string, number>;
+  provider?: string | null;
+  raw_result_id?: string | null;
+  published_limits?: { basis: "exchange_published_aggregate"; scope: string; universe_count: number; up_count: number; down_count: number } | null;
+  limits?: {
+    universe_count: number;
+    up: { observed_count: number; evaluated_count: number; unknown_count: number };
+    down: { observed_count: number; evaluated_count: number; unknown_count: number };
+  } | null;
   universe_definition?: Record<string, unknown> | null;
   unknown_count?: number | null;
   message_count?: number | null;
@@ -1185,6 +1199,10 @@ export type MarketIndexSnapshot = {
   point_count: number;
   points: ChartPoint[];
   breadth: MarketBreadth | null;
+  breadth_lanes?: {
+    status: string;
+    official_daily?: Partial<MarketBreadth> | null;
+  } | null;
   breadth_status: MarketBreadthStatus;
   error_message: string | null;
 };
@@ -1535,6 +1553,9 @@ export type IntradayTrendPoint = {
 };
 
 export type IntradayPriceDiagnostics = {
+  current_price_basis?: string;
+  current_price_status?: string;
+  current_price_confirmed?: boolean;
   history_price_source: string | null;
   latest_history_time: string | null;
   latest_history_price: number | null;
@@ -1646,6 +1667,15 @@ export type USIntradaySourceStatus = {
 };
 
 export type USIntradaySessionCoverage = {
+  coverage_status?: "complete" | "partial" | "missing" | string | null;
+  regular_coverage_status?: string | null;
+  expected_point_count?: number | null;
+  point_count?: number | null;
+  missing_slot_count?: number | null;
+  gap_count?: number | null;
+  unfinalized_count?: number | null;
+  first_bar_time?: string | null;
+  last_bar_time?: string | null;
   trade_date: string | null;
   expected_trade_date?: string | null;
   latest_available_trade_date?: string | null;
@@ -1985,7 +2015,28 @@ export type TaiwanQuoteEvidenceAcquisitionScopeRead = {
   limitations: string[];
 };
 
+export type TaiwanChangeReferenceRead = {
+  price: number | null;
+  applies_to_trade_date: string | null;
+  trade_date: string | null;
+  type: "prior_regular_close" | "exchange_reference_price" | "provider_reference_price" | "official_change_reference" | "unavailable";
+  provider: string | null;
+  source: string | null;
+  authority: string | null;
+  source_field: string | null;
+  lineage: Record<string, unknown>;
+  prior_close_lineage?: Record<string, unknown>;
+  status: "current" | "partial" | "missing";
+  reason_code: string;
+  calculation_eligible: boolean;
+  display_usable: boolean;
+  research_usable: boolean;
+  depth_usable: boolean;
+  auction_usable: boolean;
+};
+
 export type TaiwanStockQuoteDepthRead = {
+  change_reference?: TaiwanChangeReferenceRead;
   stock_id: string;
   stock_name: string | null;
   market: string | null;
@@ -2415,7 +2466,9 @@ export type StockTechnicalReportRead = {
   generated_at: string;
   title: string;
   summary: string;
-  score: number;
+  score: number | null;
+  status?: string | null;
+  decision_usable?: boolean | null;
   value: number | null;
   value_label: string;
   rows: StockTechnicalReportRow[];
@@ -2822,7 +2875,7 @@ export type OvernightImpactRead = {
   stance: string;
   title: string;
   summary: string;
-  score: number;
+  score: number | null;
   weighted_change_pct: number | null;
   confidence: "low" | "medium" | "high" | string;
   tw_mapping: {

@@ -1331,7 +1331,18 @@ class AiSupplementalContextTests(unittest.TestCase):
         )
         self.db.commit()
 
-        result = tw_market_chips.read_tw_market_chips_context(self.db, limit=10)
+        with patch.object(tw_market_chips, "build_taiwan_calendar_status", return_value={
+            "release_windows": {"market_chip_daily": {"expected_trade_date": "2026-07-17"}},
+        }):
+            result = tw_market_chips.read_tw_market_chips_context(self.db, limit=10)
+
+        with patch.object(tw_market_chips, "build_taiwan_calendar_status", return_value={
+            "release_windows": {"market_chip_daily": {"expected_trade_date": "2026-07-20"}},
+        }):
+            stale = tw_market_chips.read_tw_market_chips_context(self.db, limit=10)
+        self.assertEqual(stale["official_market_aggregate"]["status"], "stale")
+        self.assertTrue(all(not row["is_current"] for row in stale["official_market_aggregate"]["freshness"]))
+        self.assertNotEqual(stale["status"], "ready")
 
         self.assertEqual(result["official_market_aggregate"]["status"], "ready")
         coverage = result["institutional_per_stock"]["coverage"]

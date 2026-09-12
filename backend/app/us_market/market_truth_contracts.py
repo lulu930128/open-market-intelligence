@@ -487,6 +487,20 @@ class USIntradaySeriesPoint(CanonicalModel):
         return self
 
 
+class USRegularSessionCoverage(CanonicalModel):
+    expected_point_count: int = Field(ge=0)
+    point_count: int = Field(ge=0)
+    missing_slot_count: int = Field(ge=0)
+    duplicate_count: int = Field(ge=0)
+    non_monotonic_count: int = Field(ge=0)
+    off_grid_count: int = Field(ge=0)
+    gap_count: int = Field(ge=0)
+    first_bar_time: datetime | None = None
+    last_bar_time: datetime | None = None
+    coverage_status: Literal["complete", "partial", "missing"]
+    unfinalized_count: int = Field(default=0, ge=0)
+
+
 class USIntradaySeriesProjection(CanonicalModel):
     contract_version: str = "omi.market.us_intraday_series_projection.v1"
     evaluated_at: datetime
@@ -510,6 +524,8 @@ class USIntradaySeriesProjection(CanonicalModel):
     missing_interval_count: int = Field(ge=0)
     explained_gap_count: int = Field(ge=0)
     continuity: Literal["complete", "partial", "missing", "not_applicable"]
+    regular_session_completed: bool = False
+    regular_session_coverage: USRegularSessionCoverage | None = None
     limitations: tuple[str, ...] = ()
 
     @field_validator("evaluated_at")
@@ -554,6 +570,8 @@ class USIntradaySeriesProjection(CanonicalModel):
             raise ValueError("observed interval count must match regular points")
         if (
             self.observed_interval_count + self.missing_interval_count
+            - (self.regular_session_coverage.duplicate_count if self.regular_session_coverage else 0)
+            - (self.regular_session_coverage.off_grid_count if self.regular_session_coverage else 0)
             != self.scheduled_interval_count
         ):
             raise ValueError("intraday interval accounting must balance")

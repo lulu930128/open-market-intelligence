@@ -1324,6 +1324,13 @@ def _compose_us_intraday_series_projection(
         )
         scheduled = int((session_close - session_open).total_seconds() // 60)
     coverage = regular_intraday_coverage([point.start_at for point in regular], trade_date=trade_date) if trade_date is not None else {}
+    if coverage:
+        coverage["unfinalized_count"] = sum(
+            point.finalization not in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+            for point in regular
+        )
+        if coverage["unfinalized_count"] and coverage["coverage_status"] == "complete":
+            coverage["coverage_status"] = "partial"
     observed = len(regular)
     missing = coverage.get("missing_slot_count", 0)
     continuity = (
@@ -1359,6 +1366,8 @@ def _compose_us_intraday_series_projection(
         missing_interval_count=missing,
         explained_gap_count=0,
         continuity=continuity,
+        regular_session_completed=trade_date is not None and evaluated_at >= session_close,
+        regular_session_coverage=coverage or None,
         limitations=bars.health.limitations,
     )
 

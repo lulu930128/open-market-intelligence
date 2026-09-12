@@ -1409,6 +1409,7 @@ def read_stock_quote_context(
         # Data Core owns the attempt list. The AI consumer projects it without
         # inventing an "auto" provider attempt or reconstructing fallback.
         "provider_attempts": list(platform_provider_attempts),
+        "provider_attempts_by_capability": dict((quote_depth or {}).get("provider_attempts_by_capability") or {}),
     }
     attempted_domains = [
         domain

@@ -85,7 +85,7 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
         )
         cached = twse_mis_current_breadth._classify_message(
             self._message(t="09:01:00", z="-", pz="-", ts="0", v="5"),
-            "TWSE",
+            "TWSE", cached_state={"trade_date": first["trade_date"], "price": first["current_price"], "price_as_of": first["price_as_of"], "has_actual_trade": True},
         )
 
         self.assertIsNotNone(first)
@@ -161,16 +161,15 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
         self.assertIsNone(next_day["current_price"])
         self.assertIsNone(next_day["price_as_of"])
 
-    def test_reset_clears_actual_trade_state(self) -> None:
+    def test_price_recovery_requires_explicit_application_state(self) -> None:
         twse_mis_current_breadth._classify_message(
-            self._message(t="09:00:00", z="101", pz="-", ts="0", v="5"),
-            "TWSE",
+            self._message(t="09:00:00", z="101", pz="-", ts="0", v="5"), "TWSE",
         )
-        self.assertTrue(twse_mis_current_breadth._STOCK_STATE)
-
-        twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
-
-        self.assertFalse(twse_mis_current_breadth._STOCK_STATE)
+        row = twse_mis_current_breadth._classify_message(
+            self._message(t="09:01:00", z="-", pz="-", ts="0", v="5"), "TWSE",
+        )
+        self.assertIsNone(row["current_price"])
+        self.assertFalse(hasattr(twse_mis_current_breadth, "_STOCK_STATE"))
 
     def test_preopen_aggregate_is_pending_with_separate_auction_contract(self) -> None:
         codes = [f"{1000 + index:04d}" for index in range(1, 502)]

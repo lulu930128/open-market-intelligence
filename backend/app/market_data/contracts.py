@@ -306,6 +306,7 @@ class QuoteObservation(CanonicalModel):
     contract_version: str = "omi.market.quote.v1"
     instrument: InstrumentKey
     lineage: SourceLineage
+    latest_observation_lineage: SourceLineage | None = None
     trade_date: date | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     state: ObservationState = ObservationState.AVAILABLE
@@ -484,6 +485,70 @@ class BreadthAcquisitionDiagnostics(CanonicalModel):
     latest_attempt_failed_batch_count: int | None = Field(default=None, ge=0)
 
 
+class BreadthLimitSide(CanonicalModel):
+    """Observed threshold hits; an exact total requires full evaluable coverage."""
+
+    observed_count: int = Field(ge=0)
+    evaluated_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> BreadthLimitSide:
+        if self.observed_count > self.evaluated_count:
+            raise ValueError("limit hits exceed evaluated count")
+        return self
+
+
+class BreadthLimitObservation(CanonicalModel):
+    contract_version: str = "omi.market.breadth.limits.v1"
+    basis: Literal["actual_trade_vs_exchange_threshold"] = "actual_trade_vs_exchange_threshold"
+    universe_count: int = Field(ge=0)
+    up: BreadthLimitSide
+    down: BreadthLimitSide
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> BreadthLimitObservation:
+        for side in (self.up, self.down):
+            if side.evaluated_count + side.unknown_count != self.universe_count:
+                raise ValueError("limit coverage must equal universe")
+        return self
+
+
+class PublishedBreadthLimits(CanonicalModel):
+    """Exchange-reported totals, without asserting per-instrument evaluation."""
+
+    contract_version: str = "omi.market.breadth.published_limits.v1"
+    basis: Literal["exchange_published_aggregate"] = "exchange_published_aggregate"
+    scope: str = Field(min_length=1, max_length=64)
+    universe_count: int = Field(gt=0)
+    up_count: int = Field(ge=0)
+    down_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_totals(self) -> PublishedBreadthLimits:
+        if self.up_count + self.down_count > self.universe_count:
+            raise ValueError("published limit totals exceed universe")
+        return self
+
+
+class BreadthPriceState(CanonicalModel):
+    trade_date: date
+    price: Decimal = Field(gt=0)
+    price_as_of: datetime
+    has_actual_trade: Literal[True] = True
+    lineage: SourceLineage
+    previous_close: Decimal | None = Field(default=None, gt=0)
+    cumulative_volume_lots: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_time(self) -> BreadthPriceState:
+        if self.price_as_of.utcoffset() is None or self.price_as_of != self.lineage.event_at:
+            raise ValueError("breadth price state requires original event lineage")
+        if self.price_as_of.date() != self.trade_date:
+            raise ValueError("price state event must belong to its trade date")
+        return self
+
+
 class MarketBreadthObservation(CanonicalModel):
     contract_version: str = "omi.market.breadth.v1"
     market: Market
@@ -500,6 +565,10 @@ class MarketBreadthObservation(CanonicalModel):
     unknown_count: int = Field(ge=0)
     missing_count: int = Field(ge=0)
     coverage_reason_counts: dict[str, int] = Field(default_factory=dict)
+    classification_diagnostics: dict[str, int] = Field(default_factory=dict)
+    limits: BreadthLimitObservation | None = None
+    published_limits: PublishedBreadthLimits | None = None
+    price_states: dict[str, BreadthPriceState] = Field(default_factory=dict)
     auction: AuctionBreadthObservation | None = None
     acquisition_diagnostics: BreadthAcquisitionDiagnostics | None = None
     trade_value: Decimal | None = Field(default=None, ge=0)
@@ -515,6 +584,24 @@ class MarketBreadthObservation(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_partition(self) -> MarketBreadthObservation:
+        if self.published_limits is not None:
+            if (not self.official or self.provisional or self.limits is not None
+                or self.published_limits.scope != self.scope
+                or self.published_limits.universe_count != self.universe_count
+                or self.lineage.authority != AuthorityClass.EXCHANGE):
+                raise ValueError("published limits require a coherent official aggregate scope")
+        for state in self.price_states.values():
+            if (state.trade_date != self.trade_date or state.price_as_of > self.lineage.event_at
+                or state.lineage.provider != self.lineage.provider
+                or state.lineage.authority != self.lineage.authority):
+                raise ValueError("breadth price state crosses date, event, provider or authority")
+        if self.limits is not None and self.limits.universe_count != self.universe_count:
+            raise ValueError("limit companion must share breadth universe")
+        if self.classification_diagnostics and (
+            any(value < 0 for value in self.classification_diagnostics.values())
+            or sum(self.classification_diagnostics.values()) != self.coverage_reason_counts.get("mapping_error", 0)
+        ):
+            raise ValueError("classification diagnostics must reconcile to mapping_error")
         if self.auction is not None and (
             self.auction.market != self.market or self.auction.venue != self.venue
             or self.auction.trade_date != self.trade_date

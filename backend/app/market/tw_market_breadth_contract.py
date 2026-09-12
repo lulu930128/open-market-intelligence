@@ -102,6 +102,10 @@ def resolve_twse_mis_breadth_price_state(
         and isinstance(cached_state, Mapping)
         and cached_state.get("trade_date") == trade_date
         and cached_state.get("has_actual_trade") is True
+        and _aware_datetime(cached_state.get("price_as_of")) is not None
+        and _aware_datetime(cached_state.get("price_as_of")).utcoffset() is not None
+        and snapshot_as_of is not None
+        and _aware_datetime(cached_state.get("price_as_of")) <= snapshot_as_of
     ):
         cached_price = _positive_number(cached_state.get("price"))
         cached_price_as_of = _aware_datetime(cached_state.get("price_as_of"))
@@ -163,13 +167,27 @@ def resolve_twse_mis_breadth_price_state(
     }
 
 
-def classify_twse_mis_breadth_coverage(
-    rows: list[Mapping[str, Any]],
-    *,
-    universe_count: int,
-) -> dict[str, int]:
-    """Partition provider rows without turning missing quotes into unchanged."""
+def breadth_classification_reason(row: Mapping[str, Any]) -> tuple[str, str | None]:
+    direction = str(row.get("direction") or "").strip().lower()
+    if direction in {"advance", "decline", "unchanged"}:
+        return direction, None
+    volume = _nonnegative_int(row.get("cumulative_volume_lots"))
+    previous_close = _positive_number(row.get("previous_close"))
+    has_actual_trade = row.get("has_actual_trade") is True
+    if (row.get("market_session") in ACTUAL_TRADE_SESSIONS
+        and not has_actual_trade and volume == 0 and previous_close is not None):
+        return "valid_no_trade", None
+    if previous_close is None:
+        return "mapping_error", "reference_price_missing"
+    if not has_actual_trade and (volume or 0) > 0:
+        return "mapping_error", str(row.get("actual_trade_reason_code") or "actual_trade_unavailable")
+    return "unknown", None
 
+
+def classify_twse_mis_breadth_coverage(
+    rows: list[Mapping[str, Any]], *, universe_count: int,
+) -> dict[str, int]:
+    """Mutually exclusive receipt partition; no inferred suspension status."""
     counts = {key: 0 for key in BREADTH_COVERAGE_REASON_KEYS}
     received_codes: set[str] = set()
     for row in rows:
@@ -177,34 +195,23 @@ def classify_twse_mis_breadth_coverage(
         if not code or code in received_codes:
             continue
         received_codes.add(code)
-        direction = str(row.get("direction") or "").strip().lower()
-        if direction in {"advance", "decline", "unchanged"}:
-            counts[direction] += 1
+        reason, _ = breadth_classification_reason(row)
+        counts[reason] += 1
+    if len(received_codes) > universe_count or universe_count < 0:
+        raise ValueError("breadth received symbols exceed universe")
+    counts["provider_missing"] = universe_count - len(received_codes)
+    return counts
+
+
+def breadth_classification_diagnostics(rows: list[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    seen: set[str] = set()
+    for row in rows:
+        code = str(row.get("code") or "").strip()
+        if not code or code in seen:
             continue
-
-        market_session = str(row.get("market_session") or "unknown").strip()
-        volume = _nonnegative_int(row.get("cumulative_volume_lots"))
-        previous_close = _positive_number(row.get("previous_close"))
-        has_actual_trade = row.get("has_actual_trade") is True
-        if (
-            market_session in ACTUAL_TRADE_SESSIONS
-            and not has_actual_trade
-            and volume == 0
-            and previous_close is not None
-        ):
-            counts["valid_no_trade"] += 1
-        elif previous_close is None or (not has_actual_trade and (volume or 0) > 0):
-            counts["mapping_error"] += 1
-        else:
-            counts["unknown"] += 1
-
-    counts["provider_missing"] = max(universe_count - len(received_codes), 0)
-    partition_total = sum(counts.values())
-    if partition_total < universe_count:
-        counts["unknown"] += universe_count - partition_total
-    elif partition_total > universe_count:
-        counts["unknown"] = max(
-            counts["unknown"] - (partition_total - universe_count),
-            0,
-        )
+        seen.add(code)
+        reason, detail = breadth_classification_reason(row)
+        if reason == "mapping_error" and detail:
+            counts[detail] = counts.get(detail, 0) + 1
     return counts

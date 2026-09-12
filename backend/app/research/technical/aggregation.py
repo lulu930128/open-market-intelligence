@@ -121,9 +121,14 @@ def aggregate_intraday_points(
                 "volume": int(volume) if volume is not None else None,
                 "_volume_available_count": 1 if volume is not None else 0,
                 "_volume_unavailable_count": 0 if volume is not None else 1,
+                "_source_partial": point.get("is_partial") is True or point.get("finalized") is False,
             }
             continue
         bucket["price"] = price
+        bucket["_source_partial"] = (
+            bucket["_source_partial"] or point.get("is_partial") is True
+            or point.get("finalized") is False
+        )
         bucket["high"] = max(float(bucket["high"]), high_price)
         bucket["low"] = min(float(bucket["low"]), low_price)
         if volume is not None:
@@ -136,6 +141,8 @@ def aggregate_intraday_points(
     for bucket in sorted(buckets.values(), key=lambda item: item["time"]):
         available_count = int(bucket.pop("_volume_available_count"))
         unavailable_count = int(bucket.pop("_volume_unavailable_count"))
+        if bucket.pop("_source_partial"):
+            bucket.update(is_partial=True, finalized=False)
         if unavailable_count:
             bucket["volume"] = None
             bucket["volume_status"] = (
@@ -163,7 +170,10 @@ def aggregate_intraday_payload(
     )
     live_window = source_status.get("is_live_window") is True
     for index, point in enumerate(aggregated):
-        is_partial = live_window and index == len(aggregated) - 1
+        is_partial = (
+            point.get("is_partial") is True or point.get("finalized") is False
+            or (live_window and index == len(aggregated) - 1)
+        )
         point["is_partial"] = is_partial
         point["finalized"] = not is_partial
     aggregated = enrich_intraday_technical_points(aggregated)
@@ -184,10 +194,11 @@ def aggregate_intraday_payload(
     result.update(summarize_intraday_volume(aggregated))
     result["sampling_mode"] = "server_aggregated" if interval != "1m" else "source"
     result["aggregation_method"] = "session_anchored_ohlcv.v1"
+    result["partial_bar_count"] = sum(point["is_partial"] for point in aggregated)
     result["bar_finalization_status"] = (
-        "contains_current_partial" if live_window and aggregated else "completed"
+        "contains_current_partial" if live_window and aggregated
+        else "contains_partial" if result["partial_bar_count"] else "completed"
     )
-    result["partial_bar_count"] = 1 if live_window and aggregated else 0
     result["technical_algorithm_version"] = INTRADAY_TECHNICAL_ALGORITHM_VERSION
     result["technical_parameter_contract"] = dict(
         INTRADAY_TECHNICAL_PARAMETER_CONTRACT

@@ -365,9 +365,11 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
     assert calls == ["C", "B"]
     assert first["postcondition_met"] is False
     assert first["checkpoint"]["current_count"] == 2
+    assert first["continuation_required"] is True
     assert second["status"] == "completed"
     assert second["postcondition_met"] is True
     assert second["checkpoint"]["current_count"] == 3
+    assert second["continuation_required"] is False
 
 
 def test_partial_coverage_job_fails_terminal_status_but_preserves_partial_result() -> None:

@@ -1,5 +1,7 @@
 "use client";
 
+import { BreadthCoverage, CompactBreadthCoverage, OfficialBreadthComparison, resolveLimitMetric } from "@/components/market-dashboard/BreadthCoverage";
+
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import { summarizeIntradayPoints } from "@/components/stock-detail/stockDetailAnalytics";
 import {
@@ -63,8 +65,11 @@ function taiwanBreadthScopeLabel(
         : "dashboard.marketIndex.twseFullBreadth"
     );
   }
-  if (breadth.scope === "registered_universe") {
+  if ((breadth.scope === "registered_universe" || breadth.scope === "full_market_registered_stock_universe")) {
     return t("dashboard.marketIndex.registeredBreadth");
+  }
+  if (breadth.scope === "twse_published_stock_aggregate") {
+    return t("dashboard.marketIndex.publishedBreadth");
   }
   if (breadth.scope === "full_market") {
     return t(
@@ -361,8 +366,17 @@ export function IndexDetailDataPanel({
         <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.estimatedTradeValueYi")} value={formatTradeValueYi(estimatedTradeValue)} />
         <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.advances")} value={formatNumber(breadth?.advance_count)} tone="text-omi-market-up" />
         <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.declines")} value={formatNumber(breadth?.decline_count)} tone="text-omi-market-down" />
-        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.limitUp")} value={formatNumber(breadth?.limit_up_count)} tone="text-omi-market-up" />
-        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.limitDown")} value={formatNumber(breadth?.limit_down_count)} tone="text-omi-market-down" />
+        {(["up", "down"] as const).map((direction) => {
+          const metric = resolveLimitMetric(breadth, direction);
+          return <IndexMetricCard key={direction}
+            testId={`breadth-limit-${direction}`}
+            label={t(`stockDetail.dataViews.indexDetail.${direction === "up" ? "limitUp" : "limitDown"}`)}
+            value={formatNumber(metric.value)}
+            tone={metric.status === "unknown" ? "text-omi-text-muted" : direction === "up" ? "text-omi-market-up" : "text-omi-market-down"}
+            description={t(`dashboard.marketIndex.limit${metric.status === "exact" ? "Exact" : metric.status === "observed" ? "Observed" : "Unknown"}`, {
+              evaluated: metric.side?.evaluated_count ?? "—", total: breadth?.limits?.universe_count ?? "—",
+            })} />;
+        })}
         <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.unchanged")} value={formatNumber(breadth?.unchanged_count)} />
         <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.total")} value={formatNumber(breadth?.total_count)} />
       </div>
@@ -477,6 +491,9 @@ export function IndexDetailDataPanel({
       />
 
       <div className="space-y-1 px-5 py-3 text-xs text-omi-text-muted">
+        {breadth ? <CompactBreadthCoverage breadth={breadth} /> : null}
+        <details>
+        <summary className="cursor-pointer py-1">{t("dashboard.marketIndex.breadthDetails")}</summary>
         <div className="font-semibold text-omi-text">{breadthScopeLabel}</div>
         <div>
           {index?.breadth_status?.status === "failed"
@@ -491,7 +508,9 @@ export function IndexDetailDataPanel({
               })
             : t("stockDetail.dataViews.indexDetail.breadthPending")}
         </div>
-        {breadthCoverageText ? <div>{breadthCoverageText}</div> : null}
+        {breadth ? <BreadthCoverage breadth={breadth} /> : null}
+        <OfficialBreadthComparison lanes={index?.breadth_lanes} />
+        {breadth?.classified_coverage_ratio === undefined && breadthCoverageText ? <div>{breadthCoverageText}</div> : null}
         {breadth?.snapshot_as_of || breadth?.as_of ? (
           <div>
             {t("dashboard.marketIndex.breadthUpdated", {
@@ -508,6 +527,7 @@ export function IndexDetailDataPanel({
             })}
           </div>
         ) : null}
+        </details>
       </div>
     </section>
   );
@@ -518,11 +538,13 @@ export function IndexMetricCard({
   value,
   tone = "text-omi-text",
   testId,
+  description,
 }: {
   label: string;
   value: string;
   tone?: string;
   testId?: string;
+  description?: string;
 }) {
   return (
     <div
@@ -531,6 +553,7 @@ export function IndexMetricCard({
     >
       <div className="text-xs font-semibold text-omi-text-muted">{label}</div>
       <div className={`mt-1 text-base font-bold ${tone}`}>{value}</div>
+      {description ? <div className="mt-1 text-xs text-omi-text-muted">{description}</div> : null}
     </div>
   );
 }

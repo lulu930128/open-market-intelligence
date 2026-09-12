@@ -5,6 +5,8 @@ OMI 以 `app/stocks/atlas_news.py` 唯讀消費 Open Intel Atlas 的
 `company_news_stock_v1`。StockMaster 的 exact market/symbol 用於定位，
 不以公司名稱搜尋、不讀 Atlas DB、不抓第三方來源、不建新聞主資料庫。
 
+Bridge request 失敗時仍輸出 exact exchange/symbol 的 availability coverage，authority 為 `omi_bridge_availability`；404 保留 stock-or-endpoint-not-found 的歧義，不推論公司不存在或没有新聞。成功 response 的 coverage 仍由 Atlas 擁有。
+
 ## 設定與入口
 
 - `OMI_ATLAS_NEWS_ENABLED=false` 預設關閉，獨立於 Event shadow flag。

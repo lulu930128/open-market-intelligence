@@ -143,7 +143,7 @@ def test_market_minute_state_persists_each_component_and_time_skew() -> None:
             "raw_fetch_result:12",
         ]
         assert row.component_time_skew_seconds == 7
-        assert row.calculation_version == "tw.market.minute_state.derived.v2"
+        assert row.calculation_version == "tw.market.minute_state.derived.v3"
     finally:
         db.close()
         engine.dispose()

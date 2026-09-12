@@ -215,7 +215,9 @@ def _build_tw_market_compact(
         "industry_strength_label": industry_strength_label,
         "index_intraday": index_intraday,
         "cross_market": _compact_auxiliary_context(cross_market),
-        "market_chips": _compact_auxiliary_context(market_chips),
+        # This owner already bounds per-stock rankings. Preserve required
+        # aggregate facts; the auxiliary summary helper discards them entirely.
+        "market_chips": market_chips,
         "volume_state": volume_state,
         "source_health": _compact_source_health(source_health) if source_health else {},
         "market": market_aggregates,
@@ -1355,19 +1357,17 @@ def _market_indices_capability(
         close = (
             completed_official.get("close")
             if completed_official is not None
-            else item.get("close")
-            if item.get("close") is not None
-            else item.get("value")
+            else None
         )
         change = (
             completed_official.get("change")
             if completed_official is not None
-            else item.get("change")
+            else None
         )
         change_pct = (
             completed_official.get("change_pct")
             if completed_official is not None
-            else item.get("change_pct")
+            else None
         )
         if (
             change_pct is None
@@ -1378,15 +1378,9 @@ def _market_indices_capability(
             change_pct = change / (close - change) * 100
         official_as_of = _json_scalar(
             (completed_official or {}).get("lineage", {}).get("event_at")
-            or item.get("as_of")
-            or item.get("quote_time")
-            or item.get("trade_date")
-            or item.get("date")
         )
         trade_date = _date_iso(
             (completed_official or {}).get("trade_date")
-            or item.get("trade_date")
-            or item.get("date")
             or official_as_of
         )
         current_for_requested_session = headline["decision_usable"] is True
@@ -1415,10 +1409,7 @@ def _market_indices_capability(
                     "change_pct": change_pct,
                     "trade_date": trade_date,
                     "as_of": official_as_of,
-                    "source": (completed_official or {}).get("lineage", {}).get("source")
-                    or item.get("source")
-                    or summary.get("source")
-                    or "market_index_summary",
+                    "source": (completed_official or {}).get("lineage", {}).get("source"),
                 },
                 "live_snapshot": (
                     {
@@ -1482,12 +1473,7 @@ def _market_indices_capability(
     selected_as_of_values = [
         str(item.get("as_of")) for item in items if item.get("as_of")
     ]
-    official_dates = {
-        str(_dict.get("trade_date"))
-        for item in items
-        if isinstance((_dict := item.get("official_close")), dict)
-        and _dict.get("trade_date")
-    }
+    selected_dates = {str(item["trade_date"]) for item in items if item.get("trade_date")}
     current_count = sum(
         item.get("current_for_requested_session") is True for item in items
     )
@@ -1497,7 +1483,7 @@ def _market_indices_capability(
             "ready"
             if current_count == 2
             else "partial"
-            if current_count or len(official_dates) > 1
+            if current_count or len(selected_dates) > 1
             else "latest_completed_session"
             if is_complete
             else "missing"
@@ -1513,7 +1499,7 @@ def _market_indices_capability(
     else:
         status = (
             "partial"
-            if len(official_dates) > 1
+            if len(selected_dates) > 1
             else "latest_completed_session"
             if is_complete
             else "partial"
@@ -1528,7 +1514,7 @@ def _market_indices_capability(
         "oldest_as_of": min(selected_as_of_values) if selected_as_of_values else None,
         "newest_as_of": max(selected_as_of_values) if selected_as_of_values else None,
         "mixed_as_of": len(set(selected_as_of_values)) > 1,
-        "mixed_trade_dates": len(official_dates) > 1,
+        "mixed_trade_dates": len(selected_dates) > 1,
         "market_session": session_phase,
         "current_for_requested_session": current_count == 2,
         "is_current": current_count == 2,
@@ -1559,8 +1545,8 @@ def _market_indices_capability(
             ]
         ),
         "warnings": (
-            ["Taiwan market indices contain mixed official trade dates."]
-            if len(official_dates) > 1
+            ["Taiwan market indices contain mixed selected trade dates."]
+            if len(selected_dates) > 1
             else [
                 "Current-session Taiwan index snapshots are unavailable; "
                 "official completed-session closes are retained as reference."

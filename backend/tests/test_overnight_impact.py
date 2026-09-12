@@ -239,8 +239,8 @@ class OvernightImpactTests(unittest.TestCase):
 
         self.assertEqual(report["kind"], "us_overnight_tw_impact")
         self.assertIn("semiconductor", report["tw_mapping"]["profiles"])
-        self.assertLess(report["weighted_change_pct"], 0)
-        self.assertIn(report["stance"], {"risk_off", "strong_risk_off"})
+        self.assertIsNone(report["weighted_change_pct"])
+        self.assertEqual(report["stance"], "unknown")
         self.assertIn("^SOX", {factor["symbol"] for factor in report["factors"]})
         self.assertTrue(
             any(basket["group_name"] == "半導體_GPU_ASIC" for basket in report["baskets"])
@@ -304,11 +304,11 @@ class OvernightImpactTests(unittest.TestCase):
         report = build_us_overnight_impact_report(db=self.db, stock_id="1101")
 
         self.assertEqual(report["tw_mapping"]["profiles"], ["general"])
-        self.assertGreater(report["weighted_change_pct"], 0)
-        self.assertIn(report["stance"], {"risk_on", "strong_risk_on"})
+        self.assertIsNone(report["weighted_change_pct"])
+        self.assertEqual(report["stance"], "unknown")
         self.assertNotIn("^SOX", {factor["symbol"] for factor in report["factors"]})
 
-    def test_current_core_factors_are_not_suppressed_by_missing_optional_baskets(
+    def test_current_market_factors_do_not_replace_missing_target_evidence(
         self,
     ) -> None:
         add_stock(self.db, stock_id="3711", stock_name="日月光投控", industry="24")
@@ -326,10 +326,11 @@ class OvernightImpactTests(unittest.TestCase):
 
         self.assertTrue(report["freshness"]["is_current"])
         self.assertEqual(report["freshness"]["valid_weight"], 1.0)
-        self.assertNotEqual(report["stance"], "unknown")
-        self.assertIsNotNone(report["weighted_change_pct"])
-        self.assertEqual(report["missing"], [])
-        self.assertEqual(report["confidence"], "medium")
+        self.assertEqual(report["stance"], "unknown")
+        self.assertFalse(report["cross_market_context"]["decision_usable"])
+        self.assertIsNone(report["weighted_change_pct"])
+        self.assertIn("cross_market_target_evidence_unusable", report["missing"])
+        self.assertEqual(report["confidence"], "low")
         basket_coverage = report["freshness"]["optional_basket_coverage"]
         self.assertEqual(basket_coverage["requested_count"], 4)
         self.assertEqual(basket_coverage["available_count"], 0)
@@ -363,7 +364,7 @@ class OvernightImpactTests(unittest.TestCase):
 
         self.assertFalse(report["freshness"]["is_current"])
         self.assertEqual(report["stance"], "unknown")
-        self.assertEqual(report["score"], 0)
+        self.assertIsNone(report["score"])
         self.assertIsNone(report["weighted_change_pct"])
         self.assertIn("us_overnight_tw_impact_stale", report["missing"])
         self.assertTrue(any("落後預期 2026-06-08" in item for item in report["warnings"]))
@@ -410,8 +411,9 @@ class OvernightImpactTests(unittest.TestCase):
         self.assertEqual(refresh_mock.call_count, 4)
         self.assertTrue(report["freshness"]["is_current"])
         self.assertEqual(report["freshness"]["refresh"]["is_current_after_refresh"], True)
-        self.assertNotEqual(report["stance"], "unknown")
-        self.assertIsNotNone(report["weighted_change_pct"])
+        self.assertEqual(report["stance"], "unknown")
+        self.assertFalse(report["cross_market_context"]["decision_usable"])
+        self.assertIsNone(report["weighted_change_pct"])
 
     def test_stock_context_exposes_overnight_impact_for_ai(self) -> None:
         add_stock(self.db, stock_id="2330", stock_name="台積電", industry="24")

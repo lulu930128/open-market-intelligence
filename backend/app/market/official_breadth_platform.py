@@ -150,9 +150,43 @@ def read_taiwan_official_breadth(
     return MarketDataGateway().resolve_market_breadth(
         requirement,
         reader=TaiwanOfficialBreadthCandidateReader(
-            TaiwanOfficialBreadthRepository(db)
+            TaiwanOfficialBreadthRepository(db, available_at=effective_requested_at)
         ),
     )
+
+
+def project_taiwan_official_breadth(result: MarketDataResultV1) -> dict:
+    """Daily-derived lane; never masquerade as a current registered universe."""
+    from app.market.tw_breadth_projection import project_breadth_coverage
+
+    observation = result.resolved.breadth
+    if observation is None:
+        return {"status": "missing", "scope": "active_ordinary_stock_universe",
+                "decision_usable": False, "limitations": list(result.limitations)}
+    payload = {
+        "status": observation.state.value, "market": observation.venue,
+        "scope": observation.scope, "trade_date": observation.trade_date,
+        "as_of": observation.lineage.event_at, "source": observation.lineage.source,
+        "provider": observation.lineage.provider, "market_session": "closed",
+        "raw_result_id": observation.lineage.raw_receipt_id,
+        "price_semantics": observation.price_semantics,
+        "advance_count": observation.advance_count, "decline_count": observation.decline_count,
+        "unchanged_count": observation.unchanged_count, "classified_count": observation.classified_count,
+        "coverage_count": observation.classified_count, "total_count": observation.universe_count,
+        "received_unclassified_count": observation.unknown_count, "missing_count": observation.missing_count,
+        "not_received_count": observation.missing_count,
+        "unknown_count": observation.unknown_count + observation.missing_count,
+        "limit_up_count": observation.published_limits.up_count if observation.published_limits else None,
+        "limit_down_count": observation.published_limits.down_count if observation.published_limits else None,
+        "published_limits": observation.published_limits.model_dump(mode="json") if observation.published_limits else None,
+        "trade_value": int(observation.trade_value) if observation.trade_value is not None else None,
+        "is_provisional": observation.provisional, "official": observation.official,
+        "decision_usable": result.resolved.health.research_usable,
+        "lineage": observation.lineage.model_dump(mode="json"),
+        "resolved_health": result.resolved.health.model_dump(mode="json"),
+        "limitations": [*result.limitations, *([] if observation.published_limits else ["EXACT_EXCHANGE_LIMIT_TOTALS_UNAVAILABLE"])],
+    }
+    return {**payload, **project_breadth_coverage(payload)}
 
 
 __all__ = [

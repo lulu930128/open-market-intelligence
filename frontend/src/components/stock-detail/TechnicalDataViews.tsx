@@ -91,7 +91,7 @@ export type TechnicalReport = {
   summary: string;
   value: number | null;
   valueLabel: string;
-  score: number;
+  score: number | null;
   rows: TechnicalReportRow[];
   badges: TechnicalReportBadge[];
   currentState?: TechnicalCurrentState | null;

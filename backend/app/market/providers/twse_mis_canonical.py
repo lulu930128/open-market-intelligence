@@ -230,6 +230,8 @@ def canonical_snapshot_from_twse_mis(
             if trial
             else TradeObservationState.TRADE_OBSERVED
             if actual_price is not None
+            else TradeObservationState.UNKNOWN
+            if actual_trade["actual_trade_occurred"]
             else TradeObservationState.AWAITING_FIRST_TRADE
         ),
         last_trade_price=actual_price,

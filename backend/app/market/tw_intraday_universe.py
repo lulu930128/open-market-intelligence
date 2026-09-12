@@ -338,6 +338,19 @@ def resolve_taiwan_intraday_target_universe(
     )
 
 
+def intraday_materialization_policy() -> dict[str, object]:
+    """Expose configured production bounds, not an unconditional live SLA."""
+    return {
+        "background_enabled": settings.enable_taiwan_intraday_bar_scheduler,
+        "background_interval_seconds": settings.scheduler_taiwan_intraday_bar_interval_seconds,
+        "background_max_symbols": settings.scheduler_taiwan_intraday_bar_max_symbols,
+        "scope": "bounded_priority_universe",
+        "read_policy": "cache_only",
+        "live_guaranteed": False,
+        "live_eligibility_basis": "canonical_current_session_coverage",
+    }
+
+
 __all__ = [
     "INTRADAY_UNIVERSE_VERSION",
     "TIER_A_TARGET_PLAN_VERSION",

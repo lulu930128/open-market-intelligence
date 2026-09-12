@@ -2477,6 +2477,7 @@ def _us_intraday_snapshot_revision(payload: dict) -> str:
         "interval": payload.get("effective_interval") or payload.get("interval"),
         "session_scope": payload.get("session_scope"),
         "trade_date": (payload.get("session_coverage") or {}).get("trade_date"),
+        "session_coverage": payload.get("session_coverage"),
         "points": payload.get("points") or [],
         "current_observation": payload.get("current_observation"),
         "quote_identity": {
@@ -3152,8 +3153,8 @@ def _market_truth_compat_intraday_payload(
                     "open": float(point["open_price"]),
                     "high": float(point["high_price"]),
                     "low": float(point["low_price"]),
-                    "finalized": point.get("finalization") != "provisional",
-                    "is_partial": point.get("finalization") == "provisional",
+                    "finalized": point.get("finalization") in {"final", "corrected"},
+                    "is_partial": point.get("finalization") not in {"final", "corrected"},
                 }
             )
     points.sort(key=lambda point: str(point["time"]))
@@ -3402,6 +3403,29 @@ def _market_truth_compat_intraday_payload(
                     "CANONICAL_US_DAILY_PREVIOUS_CLOSE_MISSING",
                 )
             )
+        )
+    if series.get("regular_session_completed"):
+        coverage = series.get("regular_session_coverage") or {}
+        # Transport the canonical completed-session result; do not infer
+        # completeness from a continuous returned prefix or market phase.
+        payload["session_coverage"].update(coverage)
+        if session_scope != "regular":
+            payload["session_coverage"]["regular_coverage_status"] = coverage.get("coverage_status")
+            payload["session_coverage"]["coverage_status"] = "partial" if selected_points else "missing"
+        payload["requested_trade_date"] = series.get("trade_date")
+        payload["is_historical"] = True
+        payload["is_partial"] = payload["session_coverage"].get("coverage_status") != "complete"
+        payload["is_live"] = False
+        payload["decision_usable"] = False
+        for point in payload.get("points") or []:
+            point["decision_usable"] = False
+        bar_source_status.update(
+            requested_trade_date=series.get("trade_date"),
+            is_historical=True,
+            is_partial=payload["is_partial"],
+            is_live=False,
+            decision_usable=False,
+            session_coverage=payload["session_coverage"],
         )
     payload["snapshot_revision"] = _us_intraday_snapshot_revision(payload)
     payload["snapshot_point_count"] = int(payload.get("point_count") or 0)

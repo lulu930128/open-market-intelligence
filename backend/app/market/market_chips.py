@@ -25,6 +25,7 @@ from app.market.official_index_platform import read_taiwan_official_index
 from app.market_data.contracts import MarketIndexObservation
 from app.market.providers import http_get, http_post
 from app.market.trading_calendar import latest_released_trading_day
+from app.observability.source_health_contract import daily_row_status
 from app.parsers.twse_common import (
     list_row_to_dict,
     normalize_text,
@@ -60,6 +61,51 @@ MarketChipProgressCallback = Callable[[int | None, int | None, str | None], None
 
 class MarketChipFetchError(RuntimeError):
     pass
+
+
+def project_market_chip_freshness(
+    *,
+    latest_data_date: date | str | None,
+    row_count: int,
+    calendar_status: dict[str, Any],
+) -> dict[str, Any]:
+    """Shared release-window assessment for Source Health and outward evidence."""
+    window = (calendar_status.get("release_windows") or {}).get("market_chip_daily") or {}
+
+    def as_date(value: Any) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except (TypeError, ValueError):
+            return None
+
+    latest = as_date(latest_data_date)
+    expected = as_date(window.get("expected_trade_date"))
+    status, ok, quality, reason = daily_row_status(
+        row_count=row_count,
+        latest_data_date=latest,
+        expected_data_date=expected,
+        freshness_required=True,
+        empty_reason="No local rows are available for this resource.",
+        current_reason="Latest local row is aligned with the expected Taiwan release window.",
+        available_reason="Local rows are available; no exact release-date target is enforced.",
+    )
+    return {
+        "resource": "market_chip_daily",
+        "label": "Market chip daily",
+        "status": status,
+        "ok": ok,
+        "is_current": status == "current",
+        "data_quality": quality,
+        "latest": latest.isoformat() if latest else None,
+        "expected": expected.isoformat() if expected else None,
+        "reason": reason,
+        "release_status": window.get("status"),
+        "refresh_recommended": status in {"empty", "stale"},
+    }
 
 
 @dataclass(frozen=True)
@@ -1058,11 +1104,11 @@ def fetch_market_chip_daily(
     if index_stat is not None:
         values.update(
             {
-                "close_value": float(index_stat.close_value),
+                "close_value": float(index_stat.close_value) if index_stat.close_value is not None else None,
                 "price_change": index_stat.price_change,
                 "price_change_pct": _price_change_pct(
-                    float(index_stat.close_value),
-                    float(index_stat.price_change),
+                    float(index_stat.close_value) if index_stat.close_value is not None else None,
+                    float(index_stat.price_change) if index_stat.price_change is not None else None,
                 ),
                 "trade_value": (
                     int(index_stat.trade_value)
@@ -1073,8 +1119,10 @@ def fetch_market_chip_daily(
         )
         sources.append(
             _source_ref(
-                name=index_stat.lineage.source,
-                url="canonical://tw.market_index.daily",
+                name=(index_stat.lineage.source if isinstance(index_stat, MarketIndexObservation)
+                      else index_stat.source),
+                url=("canonical://tw.market_index.daily" if isinstance(index_stat, MarketIndexObservation)
+                     else "canonical://tw.market_index.daily_stat"),
             )
         )
 

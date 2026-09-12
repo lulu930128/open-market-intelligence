@@ -5,6 +5,8 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app.db.models import JobRun
+from app.config import settings
+from app.jobs.market_refresh_priority import active_market_refresh_priorities
 from app.jobs import service as job_service
 from app.jobs.job_types import MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE
 from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
@@ -40,6 +42,9 @@ def run_eod_coverage_reconcile_job(
             max_consecutive_errors=max_consecutive_errors,
             error_backoff_seconds=error_backoff_seconds,
             progress_callback=progress,
+            priority_symbols=(
+                lambda: active_market_refresh_priorities(db, market=market)
+            ) if settings.enable_market_refresh_priority else None,
             taiwan_venue_refresher=(
                 refresh_taiwan_official_daily_venue
                 if market.strip().upper() == "TW"
@@ -51,7 +56,11 @@ def run_eod_coverage_reconcile_job(
                 else None
             ),
         )
-        if result.get("postcondition_met") is not True:
+        if result.get("postcondition_met") is not True and not (
+            result.get("continuation_required") is True
+            and result.get("status") == "partial"
+            and result.get("error_count") == 0
+        ):
             raise job_service.JobExecutionError(
                 (
                     "EOD coverage postcondition not met: "

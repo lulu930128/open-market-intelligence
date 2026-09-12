@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from app.market_data.contracts import BreadthLimitObservation, PublishedBreadthLimits
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -549,6 +550,14 @@ class MarketBreadthRead(BaseModel):
     decline_count: int
     unchanged_count: int
     total_count: int
+    received_count: int | None = None
+    received_coverage_ratio: float | None = None
+    classified_coverage_ratio: float | None = None
+    classification_summary: dict[str, int | None] = Field(default_factory=dict)
+    classification_reason_counts: dict[str, int] = Field(default_factory=dict)
+    classification_diagnostics: dict[str, int] = Field(default_factory=dict)
+    limits: BreadthLimitObservation | None = None
+    published_limits: PublishedBreadthLimits | None = None
     limit_up_count: int | None = None
     limit_down_count: int | None = None
     trade_value: int | None = None
@@ -630,6 +639,7 @@ class MarketIndexSnapshotRead(BaseModel):
     completed_official_index: dict[str, Any] | None = None
     completed_official_breadth: dict[str, Any] | None = None
     data_core: dict[str, Any] | None = None
+    breadth_lanes: dict[str, Any] | None = None
     current_data_core: dict[str, Any] | None = None
     data_core_projection_scope: dict[str, str] | None = None
     decision_usable: bool = False
@@ -1331,7 +1341,55 @@ class TaiwanQuoteEvidenceAcquisitionScopeRead(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class TaiwanChangeReferenceRead(BaseModel):
+    """Comparison basis, independent of the provider's raw previous_close."""
+
+    price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    applies_to_trade_date: date | None = None
+    trade_date: date | None = None
+    type: Literal[
+        "prior_regular_close", "exchange_reference_price",
+        "provider_reference_price", "official_change_reference", "unavailable",
+    ] = "unavailable"
+    provider: str | None = None
+    source: str | None = None
+    authority: str | None = None
+    source_field: str | None = None
+    lineage: dict[str, Any] = Field(default_factory=dict)
+    prior_close_lineage: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["current", "partial", "missing"] = "missing"
+    reason_code: str = "TW_CHANGE_REFERENCE_MISSING"
+    calculation_eligible: bool = False
+    display_usable: bool = False
+    research_usable: bool = False
+
+    depth_usable: bool = False
+    auction_usable: bool = False
+
+    @model_validator(mode="after")
+    def _validate_reference(self) -> "TaiwanChangeReferenceRead":
+        usable = (
+            self.calculation_eligible or self.display_usable or self.research_usable
+            or self.depth_usable or self.auction_usable
+        )
+        if usable and (self.price is None or self.applies_to_trade_date is None):
+            raise ValueError("usable comparison reference requires price and target session")
+        if self.status == "missing" and (self.price is not None or usable):
+            raise ValueError("missing comparison reference cannot carry usable price")
+        if self.status == "current" and self.trade_date is None:
+            raise ValueError("current comparison reference requires an evidenced basis date")
+        if self.research_usable and self.status != "current":
+            raise ValueError("partial comparison reference is not research usable")
+        if self.type == "prior_regular_close" and (
+            self.trade_date is None or self.applies_to_trade_date is None
+            or self.trade_date >= self.applies_to_trade_date
+        ):
+            raise ValueError("prior close must precede the target session")
+        return self
+
+
 class TaiwanStockQuoteDepthRead(BaseModel):
+    change_reference: TaiwanChangeReferenceRead = Field(default_factory=TaiwanChangeReferenceRead)
     stock_id: str
     stock_name: str | None = None
     market: str | None = None
@@ -1343,6 +1401,7 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     provider_attempts: list[TaiwanQuoteProviderAttemptRead] = Field(
         default_factory=list
     )
+    provider_attempts_by_capability: dict[str, Any] = Field(default_factory=dict)
     primary_source_status: str | None = None
     primary_source_error: str | None = None
     fallback_reason: str | None = None
@@ -2044,7 +2103,9 @@ class TechnicalReportRead(BaseModel):
     generated_at: datetime
     title: str
     summary: str
-    score: int
+    score: int | None
+    status: str | None = None
+    decision_usable: bool | None = None
     value: float | None = None
     value_label: str
     rows: list[TechnicalReportRowRead]
@@ -2242,7 +2303,7 @@ class OvernightImpactRead(BaseModel):
     stance: str
     title: str
     summary: str
-    score: int
+    score: int | None
     weighted_change_pct: float | None = None
     confidence: str
     tw_mapping: OvernightImpactMappingRead

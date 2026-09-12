@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import isfinite
+
 import math
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta, timezone
@@ -20,6 +22,7 @@ from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_STOCK_STATE_VERSION,
     TW_MARKET_BREADTH_VERSION,
     classify_twse_mis_breadth_coverage,
+    breadth_classification_diagnostics,
     resolve_twse_mis_breadth_price_state,
 )
 from app.market_data.contracts import OperationalStatus
@@ -36,7 +39,6 @@ UniverseReader = Callable[[str], list[str]]
 _CACHE: dict[str, dict[str, object]] = {}
 _LAST_GOOD: dict[str, dict[str, object]] = {}
 _STOCK_ROWS: dict[str, list[dict[str, object]]] = {}
-_STOCK_STATE: dict[str, dict[str, object]] = {}
 _REFRESH_LOCK = Lock()
 
 
@@ -72,14 +74,22 @@ def _prices_equal(left: float | None, right: float | None) -> bool:
 def _classify_message(
     message: dict[str, object],
     market: str,
+    *, cached_state: dict | None = None,
 ) -> dict[str, object] | None:
     code = regular_stock_code(message.get("c"))
     if code is None:
         return None
     trade_date = parse_trade_date(message.get("d") or message.get("^"))
     snapshot_at = _snapshot_time(message)
+    if cached_state is not None and snapshot_at is not None:
+        prior_at = cached_state.get("price_as_of")
+        if isinstance(prior_at, datetime) and prior_at > snapshot_at:
+            # An out-of-order receipt cannot replace a newer actual trade.
+            # Retain the prior companion, but do not count this as current receipt coverage.
+            return None
     previous_close = as_float(message.get("y"))
-    state_key = f"{market}:{code}"
+    if previous_close is not None and (not isfinite(previous_close) or previous_close <= 0):
+        previous_close = None
     price_state = resolve_twse_mis_breadth_price_state(
         trade_date=trade_date,
         snapshot_as_of=snapshot_at,
@@ -89,11 +99,9 @@ def _classify_message(
         indicative_price=message.get("pz"),
         indicative_volume_lots=message.get("ps"),
         indicative_status=message.get("ts"),
-        cached_state=_STOCK_STATE.get(state_key),
+        cached_state=cached_state,
     )
-    cache_update = price_state.pop("cache_update", None)
-    if isinstance(cache_update, dict):
-        _STOCK_STATE[state_key] = cache_update
+    price_state.pop("cache_update", None)
     latest_price = as_float(price_state.get("current_price"))
     direction: str | None = None
     if latest_price is not None and previous_close is not None:
@@ -114,12 +122,19 @@ def _classify_message(
     )
     limit_up = as_float(message.get("u"))
     limit_down = as_float(message.get("w"))
+    if limit_up is not None and (not isfinite(limit_up) or limit_up <= 0):
+        limit_up = None
+    if limit_down is not None and (not isfinite(limit_down) or limit_down <= 0):
+        limit_down = None
+    if limit_up is not None and limit_down is not None and limit_up < limit_down:
+        limit_up = limit_down = None
     return {
         "code": code,
         "market": market,
         "trade_date": trade_date,
         "as_of": snapshot_at,
         **price_state,
+        "price_lineage": cached_state.get("lineage") if cached_state and price_state["price_source"] == "session_cache" else None,
         "current_price": latest_price,
         "previous_close": previous_close,
         "open_price": as_float(message.get("o")),
@@ -129,13 +144,13 @@ def _classify_message(
         "estimated_trade_value": estimated_trade_value,
         "direction": direction,
         "is_limit_up": (
-            latest_price is not None and limit_up is not None and latest_price >= limit_up
-        ),
+            latest_price >= limit_up
+        ) if latest_price is not None and limit_up is not None and limit_up > 0 else None,
         "is_limit_down": (
             latest_price is not None
             and limit_down is not None
-            and latest_price <= limit_down
-        ),
+            and limit_down > 0 and latest_price <= limit_down
+        ) if latest_price is not None and limit_down is not None and limit_down > 0 else None,
     }
 
 
@@ -260,12 +275,24 @@ def _build_payload(
     codes: list[str],
     messages: list[dict[str, object]],
     failed_batches: int,
+    *, prior_states: dict[str, dict] | None = None,
 ) -> dict[str, object] | None:
     code_set = set(codes)
+    prior_states = prior_states or {}
+    # Pick the latest message per instrument before classification; receipt order
+    # must not double count a symbol or make an older event replace a newer one.
+    unique_messages = {}
+    for message in messages:
+        code = str(message.get("c") or "")
+        if code not in code_set:
+            continue
+        previous = unique_messages.get(code)
+        if previous is None or (str(message.get("d")), str(message.get("t"))) >= (str(previous.get("d")), str(previous.get("t"))):
+            unique_messages[code] = message
     rows = [
         row
-        for message in messages
-        for row in [_classify_message(message, market)]
+        for message in unique_messages.values()
+        for row in [_classify_message(message, market, cached_state=prior_states.get(str(message.get("c"))))]
         if row is not None and row["code"] in code_set
     ]
     if not rows:
@@ -343,6 +370,25 @@ def _build_payload(
         "market": market,
         "version": TW_MARKET_BREADTH_VERSION,
         "state_contract_version": TW_MARKET_BREADTH_STOCK_STATE_VERSION,
+        "price_states": {
+            **{code: state for code, state in prior_states.items() if code in code_set and state.get("trade_date") == max(trade_dates, default=None)},
+            **{
+                str(row["code"]): {
+                    "trade_date": row["trade_date"], "price": row["current_price"],
+                    "price_as_of": row["price_as_of"], "has_actual_trade": True,
+                    "lineage": row.get("price_lineage"),
+                    "previous_close": (
+                        prior_states.get(str(row["code"]), {}).get("previous_close")
+                        if row.get("price_source") == "session_cache" else row.get("previous_close")
+                    ),
+                    "cumulative_volume_lots": (
+                        prior_states.get(str(row["code"]), {}).get("cumulative_volume_lots")
+                        if row.get("price_source") == "session_cache" else row.get("cumulative_volume_lots")
+                    ),
+                }
+                for row in rows if row.get("has_actual_trade") and row.get("price_as_of")
+            },
+        },
         "status": (
             "pending_regular_session"
             if pending
@@ -369,8 +415,19 @@ def _build_payload(
         "unchanged_count": unchanged,
         "total_count": universe,
         "universe_count": universe,
-        "limit_up_count": sum(bool(row.get("is_limit_up")) for row in rows),
-        "limit_down_count": sum(bool(row.get("is_limit_down")) for row in rows),
+        "limits": {
+            "universe_count": universe,
+            **{
+                side: {
+                    "observed_count": sum(row.get(f"is_limit_{side}") is True for row in rows),
+                    "evaluated_count": sum(isinstance(row.get(f"is_limit_{side}"), bool) for row in rows),
+                    "unknown_count": universe - sum(isinstance(row.get(f"is_limit_{side}"), bool) for row in rows),
+                }
+                for side in ("up", "down")
+            },
+        },
+        "limit_up_count": sum(row.get("is_limit_up") is True for row in rows) if universe and len(rows) == universe and all(isinstance(row.get("is_limit_up"), bool) for row in rows) else None,
+        "limit_down_count": sum(row.get("is_limit_down") is True for row in rows) if universe and len(rows) == universe and all(isinstance(row.get("is_limit_down"), bool) for row in rows) else None,
         "trade_value": trade_value,
         "trade_value_is_estimate": trade_value is not None,
         "trade_value_semantics": (
@@ -402,6 +459,7 @@ def _build_payload(
         "unknown_count": aggregate_unknown,
         "received_unclassified_count": received_unclassified,
         "coverage_reason_counts": coverage_reason_counts,
+        "classification_diagnostics": breadth_classification_diagnostics(rows),
         "message_count": len(received_codes),
         "missing_count": not_received,
         "not_received_count": not_received,
@@ -434,6 +492,7 @@ def read_twse_mis_current_breadth(
     timeout_seconds: int,
     *,
     universe_reader: UniverseReader,
+    prior_states: dict[str, dict] | None = None,
 ) -> CurrentMarketProviderPayload:
     market = str(scope or "").strip().upper()
     if market not in {"TWSE", "TPEX"}:
@@ -505,7 +564,7 @@ def read_twse_mis_current_breadth(
                 initial_decision=decision,
             )
             provider_io_started = True
-            payload = _build_payload(market, codes, messages, failed_batches)
+            payload = _build_payload(market, codes, messages, failed_batches, prior_states=prior_states)
             if payload is None:
                 raise ValueError("TWSE MIS breadth returned no canonical candidate")
             _cache(market, payload)
@@ -581,7 +640,6 @@ def reset_twse_mis_current_breadth_provider() -> None:
     _CACHE.clear()
     _LAST_GOOD.clear()
     _STOCK_ROWS.clear()
-    _STOCK_STATE.clear()
     TWSE_MIS_PROVIDER_GUARD.reset()
 
 

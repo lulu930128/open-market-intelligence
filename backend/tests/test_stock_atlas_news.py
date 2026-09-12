@@ -96,6 +96,16 @@ def test_malformed_fails_closed(db, mutation):
         assert atlas_news.read_stock_news(db, "2330")["status"] == "incompatible"
 
 
+def test_missing_atlas_target_has_explicit_bridge_coverage(db):
+    with patch.object(atlas_news, "_fetch", return_value=(404, {})):
+        result = atlas_news.read_stock_news(db, "2330")
+    assert result["coverage"]["status"] == "missing"
+    assert result["coverage"]["symbol"] == "2330"
+    assert result["coverage"]["decision_usable"] is False
+    assert result["coverage"]["authority"] == "omi_bridge_availability"
+    assert result["absence_interpretation"] == "unknown_not_observed"
+
+
 def test_empty_disabled_and_non_loopback(db, monkeypatch):
     payload = envelope()
     payload["data"] = []

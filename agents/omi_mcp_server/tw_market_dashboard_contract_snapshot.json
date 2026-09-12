@@ -2,8 +2,83 @@
   "dashboard_contract_version": "omi.tw_market_dashboard.v1",
   "dashboard_output_schema": {
     "$defs": {
+      "BreadthLimitObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "basis": {
+            "const": "actual_trade_vs_exchange_threshold",
+            "default": "actual_trade_vs_exchange_threshold",
+            "title": "Basis",
+            "type": "string"
+          },
+          "contract_version": {
+            "default": "omi.market.breadth.limits.v1",
+            "title": "Contract Version",
+            "type": "string"
+          },
+          "down": {
+            "$ref": "#/$defs/BreadthLimitSide"
+          },
+          "universe_count": {
+            "minimum": 0,
+            "title": "Universe Count",
+            "type": "integer"
+          },
+          "up": {
+            "$ref": "#/$defs/BreadthLimitSide"
+          }
+        },
+        "required": [
+          "universe_count",
+          "up",
+          "down"
+        ],
+        "title": "BreadthLimitObservation",
+        "type": "object"
+      },
+      "BreadthLimitSide": {
+        "additionalProperties": false,
+        "description": "Observed threshold hits; an exact total requires full evaluable coverage.",
+        "properties": {
+          "evaluated_count": {
+            "minimum": 0,
+            "title": "Evaluated Count",
+            "type": "integer"
+          },
+          "observed_count": {
+            "minimum": 0,
+            "title": "Observed Count",
+            "type": "integer"
+          },
+          "unknown_count": {
+            "minimum": 0,
+            "title": "Unknown Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observed_count",
+          "evaluated_count",
+          "unknown_count"
+        ],
+        "title": "BreadthLimitSide",
+        "type": "object"
+      },
       "TaiwanDashboardBreadthRead": {
         "properties": {
+          "acquisition_diagnostics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Acquisition Diagnostics"
+          },
           "advance": {
             "title": "Advance",
             "type": "integer"
@@ -21,6 +96,19 @@
             "default": null,
             "title": "As Of"
           },
+          "auction_breadth": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Auction Breadth"
+          },
           "canonical_ref": {
             "anyOf": [
               {
@@ -32,6 +120,48 @@
             ],
             "default": null,
             "title": "Canonical Ref"
+          },
+          "classification_diagnostics": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Classification Diagnostics",
+            "type": "object"
+          },
+          "classification_reason_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Classification Reason Counts",
+            "type": "object"
+          },
+          "classification_summary": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Classification Summary",
+            "type": "object"
+          },
+          "classified_coverage_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Classified Coverage Ratio"
           },
           "coverage": {
             "title": "Coverage",
@@ -80,6 +210,41 @@
             "default": null,
             "title": "Failed Batch Count"
           },
+          "limit_down_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Limit Down Count"
+          },
+          "limit_up_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Limit Up Count"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BreadthLimitObservation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "market": {
             "title": "Market",
             "type": "string"
@@ -98,6 +263,33 @@
             },
             "title": "Raw Unknown Reason Counts",
             "type": "object"
+          },
+          "received_count": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Received Count"
+          },
+          "received_coverage_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Received Coverage Ratio"
           },
           "scope": {
             "anyOf": [
@@ -184,6 +376,11 @@
       },
       "TaiwanDashboardFreshnessRead": {
         "properties": {
+          "basis": {
+            "default": "producer_cadence",
+            "title": "Basis",
+            "type": "string"
+          },
           "cache_only": {
             "const": true,
             "default": true,
@@ -227,6 +424,18 @@
             ],
             "default": null,
             "title": "Oldest As Of"
+          },
+          "producer_cadence_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Producer Cadence Seconds"
           },
           "source": {
             "title": "Source",
@@ -618,9 +827,30 @@
             "default": null,
             "title": "Change Pct"
           },
+          "compatibility_fallback": {
+            "default": false,
+            "title": "Compatibility Fallback",
+            "type": "boolean"
+          },
+          "compatibility_fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Compatibility Fallback Reason"
+          },
           "decision_usable": {
             "title": "Decision Usable",
             "type": "boolean"
+          },
+          "delivery_status": {
+            "title": "Delivery Status",
+            "type": "string"
           },
           "event_time": {
             "anyOf": [
@@ -649,6 +879,13 @@
             "title": "Index Id",
             "type": "string"
           },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
           "market": {
             "title": "Market",
             "type": "string"
@@ -669,6 +906,18 @@
             "title": "Official Source",
             "type": "boolean"
           },
+          "previous_close": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Previous Close"
+          },
           "provider": {
             "anyOf": [
               {
@@ -688,6 +937,10 @@
           "provisional_estimate": {
             "title": "Provisional Estimate",
             "type": "boolean"
+          },
+          "quote_semantics": {
+            "title": "Quote Semantics",
+            "type": "string"
           },
           "resolution_id": {
             "title": "Resolution Id",
@@ -777,7 +1030,9 @@
           "official_close_status",
           "official",
           "provisional",
-          "decision_usable"
+          "decision_usable",
+          "quote_semantics",
+          "delivery_status"
         ],
         "title": "TaiwanDashboardResolvedIndexRead",
         "type": "object"
@@ -879,6 +1134,19 @@
             "default": null,
             "title": "Change Pct"
           },
+          "expected_trade_date": {
+            "format": "date",
+            "title": "Expected Trade Date",
+            "type": "string"
+          },
+          "freshness_status": {
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "instrument_type": {
+            "title": "Instrument Type",
+            "type": "string"
+          },
           "market": {
             "anyOf": [
               {
@@ -919,6 +1187,34 @@
             "title": "Price Semantics",
             "type": "string"
           },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -939,6 +1235,19 @@
             "default": null,
             "title": "Stock Name"
           },
+          "trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Trade Date"
+          },
           "warning": {
             "anyOf": [
               {
@@ -954,8 +1263,12 @@
         },
         "required": [
           "stock_id",
+          "instrument_type",
           "status",
-          "price_semantics"
+          "price_semantics",
+          "expected_trade_date",
+          "freshness_status",
+          "reason_code"
         ],
         "title": "TaiwanDashboardWatchlistItemRead",
         "type": "object"
@@ -1180,7 +1493,7 @@
     "title": "TaiwanMarketDashboardRead",
     "type": "object"
   },
-  "digest": "86303d7685858bd3c052734deb58748d690e0a5508dab6733bd021a675bb3fbb",
+  "digest": "4da0c6967c4aaf83a43850285c8f3b6643279f2c27ddc8c8ec2100bc2981b27d",
   "schema_version": "omi.mcp.tw_market_dashboard_snapshot.v1",
   "stock_detail_contract_version": "omi.tw_stock_dashboard_detail.v2",
   "stock_detail_output_schema": {
@@ -1310,6 +1623,26 @@
             "title": "Bars Legacy Count",
             "type": "integer"
           },
+          "bootstrap_recommended": {
+            "title": "Bootstrap Recommended",
+            "type": "boolean"
+          },
+          "coverage_status": {
+            "title": "Coverage Status",
+            "type": "string"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Currency"
+          },
           "data_quality": {
             "default": "ok",
             "title": "Data Quality",
@@ -1321,6 +1654,19 @@
             },
             "title": "Deprecated Fields",
             "type": "array"
+          },
+          "earliest_available_trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Earliest Available Trade Date"
           },
           "expected_data_date": {
             "anyOf": [
@@ -1334,6 +1680,10 @@
             ],
             "default": null,
             "title": "Expected Data Date"
+          },
+          "expected_minimum_bar_count": {
+            "title": "Expected Minimum Bar Count",
+            "type": "integer"
           },
           "freshness_status": {
             "default": "missing",
@@ -1363,6 +1713,19 @@
             "title": "Is Current",
             "type": "boolean"
           },
+          "latest_available_trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Latest Available Trade Date"
+          },
           "latest_data_date": {
             "anyOf": [
               {
@@ -1389,8 +1752,19 @@
             "default": null,
             "title": "Latest Finalized Data Date"
           },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
           "lookback_days": {
             "title": "Lookback Days",
+            "type": "integer"
+          },
+          "missing_session_count": {
+            "title": "Missing Session Count",
             "type": "integer"
           },
           "point_count": {
@@ -1443,6 +1817,18 @@
             "title": "To Date",
             "type": "string"
           },
+          "trade_value_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Trade Value Unit"
+          },
           "volume_semantics": {
             "default": "not_provided",
             "title": "Volume Semantics",
@@ -1480,6 +1866,10 @@
           "requested_bar_count",
           "available_bar_count",
           "returned_point_count",
+          "expected_minimum_bar_count",
+          "missing_session_count",
+          "coverage_status",
+          "bootstrap_recommended",
           "bars_legacy_count",
           "lookback_days",
           "from_date",
@@ -1897,6 +2287,16 @@
       },
       "chart": {
         "$ref": "#/$defs/MarketOhlcChartRead"
+      },
+      "instrument_type": {
+        "default": "unknown",
+        "enum": [
+          "stock",
+          "etf",
+          "unknown"
+        ],
+        "title": "Instrument Type",
+        "type": "string"
       },
       "intraday_chart": {
         "anyOf": [

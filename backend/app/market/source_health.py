@@ -18,6 +18,7 @@ from app.db.models import (
 )
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.indices import get_market_index_summary
+from app.market.market_chips import project_market_chip_freshness
 from app.market.quote_depth import TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
@@ -40,6 +41,9 @@ from app.market.taiwan_rules import (
     expected_financial_metrics_period,
     is_equity_only_dataset_required,
 )
+from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_instrument import TaiwanInstrumentResolutionError
+from app.market.trading_calendar import taiwan_presentation_session
 from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 from app.market.tw_intraday_universe import (
     resolve_taiwan_intraday_target_universe,
@@ -541,7 +545,13 @@ def _stock_intraday_entry(
             required=required,
         )
 
-    query = db.query(MarketIntradayBar).filter(MarketIntradayBar.interval == "1m")
+    # Bind the Taiwan venue axis as well as symbol/interval. Besides excluding
+    # unrelated markets, this lets the existing stock/market/interval/time index
+    # bound latest-bar reads instead of scanning every market's 1m rows.
+    query = db.query(MarketIntradayBar).filter(
+        MarketIntradayBar.interval == "1m",
+        MarketIntradayBar.market.in_(SUPPORTED_MARKETS),
+    )
     if stock_id is not None:
         query = query.filter(MarketIntradayBar.stock_id == stock_id)
     row_count = query.count()
@@ -550,36 +560,44 @@ def _stock_intraday_entry(
         MarketIntradayBar.bar_time.desc(),
         MarketIntradayBar.id.desc(),
     )
-    observed_at = _taiwan_observed_at(latest.bar_time if latest else None)
+    # Resolve exactly the same bounded 1d series used by the history chart.
+    # Latest provider storage remains diagnostic; it does not select coverage.
+    presentation_date = taiwan_presentation_session(current_time)["trade_date"]
+    try:
+        series = TaiwanBarService(db).read_bars(
+            instrument_id=stock_id, interval="1m",
+            from_time=datetime.combine(presentation_date, time.min, tzinfo=TAIWAN_TZ),
+            to_time=current_time, requested_at=current_time,
+        )
+    except TaiwanInstrumentResolutionError as exc:
+        return TaiwanSourceHealthEntry(
+            resource="market_intraday_bar_1m", label="Taiwan stock intraday 1m bars",
+            frequency="realtime", target=_target(stock_id=stock_id),
+            status="error", ok=False, row_count=row_count, required=required,
+            data_quality="missing", reason=str(exc),
+            health_dimensions={"scope": "request_symbol", "reason_code": "INSTRUMENT_IDENTITY_UNAVAILABLE"},
+        )
+    selected_bars = series.bars
+    selected_last = selected_bars[-1] if selected_bars else None
+    selected_provider = selected_last.lineage.provider if selected_last else None
+    selected_source = selected_last.lineage.source if selected_last else None
+    observed_at = selected_last.start_at if selected_last else None
     latest_data_date = observed_at.date() if observed_at else None
     expected_data_date = _expected_observation_date(calendar_status)
     stale_after_seconds = 20 * 60
     status_value, ok, data_quality, reason, age_seconds = _realtime_observation_status(
-        row_count=row_count,
-        latest_data_date=latest_data_date,
-        expected_data_date=expected_data_date,
-        observed_at=observed_at,
+        row_count=len(selected_bars), latest_data_date=latest_data_date,
+        expected_data_date=expected_data_date, observed_at=observed_at,
         current_time=current_time,
         phase=str(calendar_status.get("phase") or "unknown"),
         stale_after_seconds=stale_after_seconds,
     )
-    coverage_query = query
-    if latest is not None:
-        coverage_query = coverage_query.filter(
-            MarketIntradayBar.provider == latest.provider,
-            MarketIntradayBar.source == latest.source,
-        )
-    if latest_data_date is not None:
-        coverage_query = coverage_query.filter(
-            func.date(MarketIntradayBar.bar_time) == latest_data_date.isoformat()
-        )
-    coverage_count, first_bar_time, last_bar_time = coverage_query.with_entities(
-        func.count(MarketIntradayBar.id),
-        func.min(MarketIntradayBar.bar_time),
-        func.max(MarketIntradayBar.bar_time),
-    ).one()
-    first_bar_at = _taiwan_observed_at(first_bar_time)
-    last_bar_at = _taiwan_observed_at(last_bar_time)
+    if not selected_bars and calendar_status.get("phase") in {"preopen_pending", "preopen"}:
+        status_value, ok, data_quality = "pending", False, "pending"
+        reason = "Awaiting qualified bars for the requested presentation session."
+    coverage_count = len(selected_bars)
+    first_bar_at = selected_bars[0].start_at if selected_bars else None
+    last_bar_at = observed_at
     session_start_covered = bool(
         first_bar_at is not None and first_bar_at.time() <= time(9, 1)
     )
@@ -650,8 +668,8 @@ def _stock_intraday_entry(
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         data_quality=data_quality,
         reason=reason,
-        provider=getattr(latest, "provider", None) if latest else "yahoo_finance_chart",
-        source=getattr(latest, "source", None) if latest else None,
+        provider=selected_provider,
+        source=selected_source,
         latest_observed_at=observed_at,
         age_seconds=age_seconds,
         stale_after_seconds=stale_after_seconds,
@@ -665,10 +683,16 @@ def _stock_intraday_entry(
             "requested_symbol_count": 1,
             "current_count": 1 if ok else 0,
             "missing_symbols": [stock_id] if row_count <= 0 else [],
+            "series_identity": series.identity.model_dump(mode="json"),
+            "provider_diagnostics": {
+                "latest_provider": getattr(latest, "provider", None),
+                "latest_source": getattr(latest, "source", None),
+                "latest_stored_at": str(latest.bar_time) if latest else None,
+            },
             "series_coverage": {
                 "status": coverage_status,
-                "provider": getattr(latest, "provider", None) if latest else None,
-                "source": getattr(latest, "source", None) if latest else None,
+                "provider": selected_provider,
+                "source": selected_source,
                 "trade_date": latest_data_date.isoformat() if latest_data_date else None,
                 "observed_bar_count": int(coverage_count or 0),
                 "expected_point_count_approx": expected_point_count,
@@ -708,21 +732,6 @@ def _stock_intraday_universe_entry(
     row_count = 0
 
     for symbol in symbols:
-        query = (
-            db.query(MarketIntradayBar)
-            .filter(MarketIntradayBar.interval == "1m")
-            .filter(MarketIntradayBar.stock_id == symbol)
-        )
-        symbol_row_count = query.count()
-        row_count += symbol_row_count
-        symbol_latest = _latest_or_none(
-            query,
-            MarketIntradayBar.bar_time.desc(),
-            MarketIntradayBar.id.desc(),
-        )
-        observed_at = _taiwan_observed_at(
-            symbol_latest.bar_time if symbol_latest else None
-        )
         symbol_health = _stock_intraday_entry(
             db,
             stock_id=symbol,
@@ -730,6 +739,9 @@ def _stock_intraday_universe_entry(
             current_time=current_time,
             required=required,
         )
+        symbol_row_count = symbol_health.row_count
+        row_count += symbol_row_count
+        observed_at = symbol_health.latest_observed_at
         status_value = symbol_health.status
         ok = symbol_health.ok
         reason = symbol_health.reason
@@ -755,7 +767,7 @@ def _stock_intraday_universe_entry(
             latest_observed_at is None or observed_at > latest_observed_at
         ):
             latest_observed_at = observed_at
-            latest = symbol_latest
+            latest = symbol_health
 
     requested_count = len(symbols)
     healthy = [item for item in target_statuses if item["ok"]]
@@ -796,11 +808,21 @@ def _stock_intraday_universe_entry(
         ok = False
         data_quality = "pending"
         reason = "Every selected Tier-A target is awaiting current-session evidence."
+    elif any(item["status"] == "partial" for item in target_statuses):
+        status_value = "partial"
+        ok = False
+        data_quality = "partial"
+        reason = "Selected Tier-A targets have observations but incomplete session coverage."
     elif stale_symbols:
         status_value = "stale"
         ok = False
         data_quality = "stale"
         reason = "No selected Tier-A target has usable current intraday evidence."
+    elif row_count:
+        status_value = "partial"
+        ok = False
+        data_quality = "partial"
+        reason = "Selected Tier-A targets have observations but incomplete session coverage."
     else:
         status_value = "empty"
         ok = False
@@ -831,7 +853,7 @@ def _stock_intraday_universe_entry(
         latest_data_key=(
             latest_observed_at.isoformat() if latest_observed_at else None
         ),
-        latest_updated_at=getattr(latest, "updated_at", None) if latest else None,
+        latest_updated_at=latest.latest_updated_at if latest else None,
         expected_data_date=expected_data_date,
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         data_quality=data_quality,
@@ -1390,19 +1412,18 @@ def _market_chip_entry(
         MarketChipDaily.id.desc(),
     )
     latest_data_date = latest.trade_date if latest else None
-    status_value, ok, data_quality, reason = _status_for(
+    chip_freshness = project_market_chip_freshness(
         row_count=row_count,
         latest_data_date=latest_data_date,
-        expected_data_date=expected_data_date,
-        freshness_required=True,
+        calendar_status=calendar_status,
     )
     return TaiwanSourceHealthEntry(
         resource=MARKET_CHIP_RESOURCE,
         label="Market chip daily",
         frequency="daily",
         target=_target(index_id=index_id),
-        status=status_value,
-        ok=ok,
+        status=chip_freshness["status"],
+        ok=chip_freshness["ok"],
         row_count=row_count,
         latest_data_date=latest_data_date,
         latest_updated_at=getattr(latest, "updated_at", None) if latest else None,
@@ -1410,8 +1431,8 @@ def _market_chip_entry(
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         release_status=window.get("status"),
         release_is_released=window.get("is_released"),
-        data_quality=data_quality,
-        reason=reason,
+        data_quality=chip_freshness["data_quality"],
+        reason=chip_freshness["reason"],
     )
 
 
@@ -1521,6 +1542,23 @@ def build_taiwan_source_health(
         market="tw",
         entries=[entry.to_dict() for entry in entries],
     )
+    if normalized_stock_id and any(
+        entry.get("resource") == "market_intraday_bar_1m" for entry in entry_dicts
+    ):
+        plan = resolve_taiwan_intraday_target_universe(db)
+        selected = normalized_stock_id in (plan.get("symbols") or [])
+        excluded = next((item for item in plan.get("skipped_targets") or []
+                         if item.get("stock_id") == normalized_stock_id), {})
+        for entry in entry_dicts:
+            if entry.get("resource") == "market_intraday_bar_1m":
+                dimensions = entry.setdefault("health_dimensions", {})
+                dimensions["acquisition_selection"] = {
+                    "status": "selected" if selected else "not_selected",
+                    "reason": None if selected else excluded.get("reason", "not_in_bounded_plan"),
+                    "operation_profile": plan.get("operation_profile"),
+                    "max_symbols": plan.get("max_symbols"),
+                    "continuous_live_guaranteed": False,
+                }
     generated_at = _generated_at()
     if sync_snapshots:
         sync_source_health_snapshots(

@@ -15,8 +15,9 @@ import {
 import {
   resolveQuoteDepthHeadlineValues,
   resolveTodayHeadlineValues,
+  taiwanReferencePrice,
 } from "@/components/stock-detail/stockDetailAnalytics";
-import type { ChartPoint, StockTechnicalReportRead } from "@/types/market";
+import type { TaiwanStockQuoteDepthRead, ChartPoint, StockTechnicalReportRead } from "@/types/market";
 
 function chartPoints(): ChartPoint[] {
   return Array.from({ length: 40 }, (_, index) => {
@@ -267,4 +268,21 @@ test("Taiwan technical mapping keeps finalized decision and provisional observat
   expect(mapped.currentObservation?.currentState?.position.price).toBe(605);
   expect(mapped.currentObservation?.decisionUsable).toBe(false);
   expect(mapped.currentObservation?.officialDailyConfirmed).toBe(false);
+});
+
+
+test("Taiwan reference rejects missing and mismatched session data without local reconstruction", () => {
+  const quote = {
+    previous_close: null,
+    change_reference: {
+      price: 621, applies_to_trade_date: "2026-09-08", trade_date: "2026-09-07",
+      type: "prior_regular_close", status: "current", calculation_eligible: true,
+      display_usable: true, depth_usable: true, auction_usable: false,
+    },
+  } as TaiwanStockQuoteDepthRead;
+  expect(taiwanReferencePrice(quote, "2026-09-08")).toBe(621);
+  expect(taiwanReferencePrice(quote, "2026-09-08", "depth")).toBe(621);
+  expect(taiwanReferencePrice(quote, "2026-09-08", "auction")).toBeNull();
+  expect(taiwanReferencePrice(quote, "2026-09-09")).toBeNull();
+  expect(taiwanReferencePrice({ ...quote, change_reference: undefined, previous_close: 588 })).toBeNull();
 });

@@ -12,7 +12,8 @@ from app.db.models import (
     MarketChipDaily,
     StockMaster,
 )
-from app.market.market_chips import market_chip_daily_to_dict
+from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.market_chips import market_chip_daily_to_dict, project_market_chip_freshness
 
 
 def _latest_date(db: Session, model: Any) -> Any:
@@ -201,12 +202,22 @@ def _official_market_aggregate(db: Session) -> dict[str, Any]:
     ]
     trade_dates = sorted({str(item["trade_date"]) for item in serialized if item.get("trade_date")})
     markets = [str(item.get("market") or item.get("index_id")) for item in serialized]
+    calendar_status = build_taiwan_calendar_status()
+    freshness = [
+        {"index_id": row.index_id, **project_market_chip_freshness(
+            latest_data_date=row.trade_date, row_count=1, calendar_status=calendar_status,
+        )}
+        for row in rows
+    ]
+    current = all(item["is_current"] for item in freshness)
     return {
-        "status": "ready" if len(rows) == 2 and len(trade_dates) == 1 else "partial",
+        "status": "stale" if any(item["status"] == "stale" for item in freshness)
+        else "ready" if len(rows) == 2 and len(trade_dates) == 1 and current else "partial",
         "scope": "twse_tpex_official_aggregate",
         "markets": markets,
         "same_trade_date": len(trade_dates) == 1,
         "trade_dates": trade_dates,
+        "freshness": freshness,
         "rows": serialized,
     }
 

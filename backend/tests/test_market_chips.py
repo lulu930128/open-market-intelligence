@@ -290,6 +290,35 @@ class MarketChipParserTests(unittest.TestCase):
 
 
 class MarketChipRefreshTests(unittest.TestCase):
+    def test_daily_stat_without_observation_lineage_can_supply_chip_facts(self):
+        from app.market.market_chips import fetch_market_chip_daily
+        stat = MarketIndexDailyStat(
+            index_id="TAIEX", market="TWSE", trade_date=date(2026, 9, 10),
+            close_value=46940.49, price_change=None, trade_value=1000000,
+            source="twse_daily_stats",
+        )
+        with (
+            patch("app.market.market_chips.ensure_market_index_daily_stat_coverage"),
+            patch("app.market.market_chips._latest_market_index_stat", return_value=stat),
+            patch("app.market.market_chips._fetch_taiwan_market_chip_sources", return_value=({"foreign_investor_net_value": 100}, [], [])),
+        ):
+            result = fetch_market_chip_daily(None, index_id="TAIEX", trade_date=date(2026, 9, 10))
+        self.assertEqual(result["close_value"], 46940.49)
+        self.assertIsNone(result["price_change_pct"])
+        self.assertIn("twse_daily_stats", str(result["source_details"]))
+
+    def test_chip_daily_schedule_is_independent_of_legacy_core_scheduler(self):
+        from unittest.mock import Mock
+        from app.jobs import scheduler
+        runner = Mock()
+        with patch.object(scheduler.settings, "enable_scheduler", False), patch.object(
+            scheduler.settings, "enable_market_chip_daily_scheduler", True
+        ):
+            self.assertTrue(scheduler._add_market_chip_daily_refresh_jobs(runner))
+        self.assertEqual(runner.add_job.call_count, 3)
+        with patch.object(scheduler.settings, "enable_market_chip_daily_scheduler", False):
+            self.assertFalse(scheduler._add_market_chip_daily_refresh_jobs(Mock()))
+
     def test_normalize_market_chip_index_ids_deduplicates_and_validates(self) -> None:
         self.assertEqual(
             normalize_market_chip_index_ids(["taiex", "TPEX", "TAIEX"]),

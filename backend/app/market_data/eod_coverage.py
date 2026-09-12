@@ -857,12 +857,16 @@ def _repair_tw_eod(
     error_backoff_seconds: int,
     max_calls: int,
     venue_refresher: TaiwanVenueRefresher | None,
+    priority_symbols: Callable[[], tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     source_by_venue = (
         ("TWSE", TWSE_DAILY_TRADING_SOURCE_NAME),
         ("TPEX", TPEX_DAILY_QUOTES_SOURCE_NAME),
     )
     unresolved_venues = _tw_unresolved_venues(computation)
+    priority_set = set(priority_symbols()) if priority_symbols else set()
+    priority_venues = {member.venue for member in computation.members if member.symbol in priority_set}
+    source_by_venue = tuple(sorted(source_by_venue, key=lambda item: item[0] not in priority_venues))
     targets = [
         item for item in source_by_venue if item[0] in unresolved_venues
     ][:max_calls]
@@ -1083,6 +1087,7 @@ def _repair_us_eod(
     error_backoff_seconds: int,
     progress_callback: ProgressCallback | None,
     us_port: USFullMarketEodPort,
+    priority_symbols: Callable[[], tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     candidates = _rotate_after_cursor(computation.unresolved_symbols, row.cursor_symbol)
     targets = candidates[:max_symbols]
@@ -1107,9 +1112,16 @@ def _repair_us_eod(
         },
     )
 
-    for index, symbol in enumerate(targets, start=1):
+    remaining_symbols = list(candidates)
+    dispatch_offset = int(row.attempted_count or 0)
+    for index in range(1, len(targets) + 1):
         if monotonic() - started >= max_runtime_seconds:
             break
+        # Reserve every fifth dispatch for the rotated background queue.
+        # attempted_count persists across shards, including max_symbols=1.
+        priority = priority_symbols() if priority_symbols and (dispatch_offset + index) % 5 else ()
+        symbol = next((value for value in priority if value in remaining_symbols), remaining_symbols[0])
+        remaining_symbols.remove(symbol)
         if progress_callback:
             progress_callback(index - 1, max(len(targets), 1), f"Refreshing US EOD {symbol}.")
         attempted += 1
@@ -1224,6 +1236,11 @@ def _repair_us_eod(
         "errors": errors[:10],
         "checkpoint": serialize_eod_checkpoint(refreshed_row),
         "message": "US full-market EOD coverage processed a bounded resumable symbol shard.",
+        "continuation_required": (
+            refreshed.status != "healthy" and not errors
+            and attempted > 0 and attempted < len(candidates)
+            and refreshed.current_count > computation.current_count
+        ),
     }
 
 
@@ -1242,6 +1259,7 @@ def reconcile_eod_coverage(
     progress_callback: ProgressCallback | None = None,
     taiwan_venue_refresher: TaiwanVenueRefresher | None = None,
     us_port: USFullMarketEodPort | None = None,
+    priority_symbols: Callable[[], tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_coverage_market(market)
     bounds = eod_reconcile_bounds(normalized)
@@ -1362,6 +1380,7 @@ def reconcile_eod_coverage(
             error_backoff_seconds=error_backoff_seconds,
             max_calls=min(bounds.max_calls, bounds.max_symbols),
             venue_refresher=taiwan_venue_refresher,
+            priority_symbols=priority_symbols,
         )
     if us_port is None:
         raise ValueError("US EOD repair requires an injected market-owned port")
@@ -1377,6 +1396,7 @@ def reconcile_eod_coverage(
         error_backoff_seconds=max(int(error_backoff_seconds), 60),
         progress_callback=progress_callback,
         us_port=us_port,
+        priority_symbols=priority_symbols,
     )
 
 

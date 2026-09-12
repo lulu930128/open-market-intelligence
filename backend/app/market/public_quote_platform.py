@@ -223,6 +223,7 @@ class TaiwanPublicQuoteCandidateReader:
                 if self._session_close
                 else None
             ),
+            requested_at=requirement.requested_at,
         )
         if self._session_close and not any(
             stored.observation is not None for stored in stored_reads
@@ -714,6 +715,10 @@ def project_taiwan_public_last_trade_quote(
         "trade_date": quote.trade_date if quote is not None else None,
         "quote_time": event_at,
         "provider_event_time": event_at,
+        "latest_observation_lineage": (
+            (quote.latest_observation_lineage or quote.lineage).model_dump(mode="json")
+            if quote is not None else None
+        ),
         "event_time": event_at,
         "received_at": quote.lineage.received_at if quote is not None else None,
         "fetched_at": quote.lineage.fetched_at if quote is not None else None,

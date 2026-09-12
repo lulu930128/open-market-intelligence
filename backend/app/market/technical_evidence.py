@@ -1619,6 +1619,7 @@ def build_technical_structure_v2(
         completed
         and indicators.get("status") in {"ready", "partial"}
         and corporate_action.get("coverage_status") == "complete"
+        and daily.get("decision_usable") is True
     )
     return {
         "kind": "tw_technical_current_state_v2",
@@ -1890,7 +1891,10 @@ def build_tw_stock_price_map_evidence(
     daily_snapshot["decision_usable"] = bool(
         daily_corporate_actions.get("coverage_status") == "complete"
         and daily_snapshot.get("completed")
+        and daily_technical.decision_usable
     )
+    daily_snapshot["input_quality"] = daily_technical.input_quality
+    daily_snapshot["warmup"] = daily_technical.warmup
 
     swing_daily = daily[-SWING_LOOKBACK:]
     swing_corporate_actions = _corporate_contract_for_points(
@@ -1978,13 +1982,15 @@ def build_tw_stock_price_map_evidence(
         "parameter_contract": _indicator_parameter_contract(parameters),
         "status": (
             "ready"
-            if daily_corporate_actions["coverage_status"] == "complete"
+            if daily_snapshot["decision_usable"]
             else "partial"
         ),
         "stock_id": stock_id,
         "as_of": _json_date(end_date),
         "price_basis": PRICE_BASIS,
         "timeframes": {"daily": daily_snapshot},
+        "decision_usable": daily_snapshot["decision_usable"],
+        "input_quality": daily_technical.input_quality,
         "corporate_action": daily_corporate_actions,
         "corporate_action_coverage_by_timeframe": {
             "daily": _corporate_summary(daily_corporate_actions)
@@ -2082,8 +2088,8 @@ def build_tw_stock_technical_evidence(
                 current_calculated[-1] if current_calculated else None
             )
     canonical_daily, daily_technical = _technical_points(daily_series, parameters)
-    canonical_weekly, _ = _technical_points(weekly_series, parameters)
-    canonical_monthly, _ = _technical_points(monthly_series, parameters)
+    canonical_weekly, weekly_technical = _technical_points(weekly_series, parameters)
+    canonical_monthly, monthly_technical = _technical_points(monthly_series, parameters)
     timeframes = {
         "daily": _snapshot_for_timeframe(
             daily,
@@ -2142,10 +2148,18 @@ def build_tw_stock_technical_evidence(
     }
     for timeframe_name, snapshot in timeframes.items():
         timeframe_contract = timeframe_corporate_actions[timeframe_name]
+        technical_series = {
+            "daily": daily_technical,
+            "weekly": weekly_technical,
+            "monthly": monthly_technical,
+        }[timeframe_name]
+        snapshot["input_quality"] = technical_series.input_quality
+        snapshot["warmup"] = technical_series.warmup
         snapshot["corporate_action"] = _corporate_summary(timeframe_contract)
         snapshot["decision_usable"] = bool(
             timeframe_contract.get("coverage_status") == "complete"
             and snapshot.get("completed")
+            and technical_series.decision_usable
         )
 
     swing_daily = daily[-SWING_LOOKBACK:]
@@ -2272,7 +2286,9 @@ def build_tw_stock_technical_evidence(
         "technical_revision": daily_technical.technical_revision,
         "calculation_role": "backend_authoritative",
         "parameter_contract": _indicator_parameter_contract(parameters),
-        "status": "partial" if daily_corporate_actions["coverage_status"] != "complete" else "ready",
+        "status": "ready" if timeframes["daily"]["decision_usable"] else "partial",
+        "decision_usable": timeframes["daily"]["decision_usable"],
+        "input_quality": daily_technical.input_quality,
         "stock_id": stock_id,
         "as_of": _json_date(end_date),
         "price_basis": PRICE_BASIS,

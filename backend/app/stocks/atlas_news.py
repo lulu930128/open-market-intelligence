@@ -83,7 +83,16 @@ def read_stock_news(db: Session, stock_id: str, *, limit: int = 20, cursor: str 
                         generated_at=datetime.now(timezone.utc).isoformat()).model_dump()
 
     def failure(status: str, reason: str) -> dict[str, Any]:
-        return {**base, "status": status, "reason_code": reason, "missing": [reason]}
+        return {
+            **base, "status": status, "reason_code": reason, "missing": [reason],
+            "coverage": {
+                "status": "missing" if reason == "atlas_stock_or_endpoint_not_found" else "unknown",
+                "scope": "stock", "exchange": market, "symbol": stock.stock_id,
+                "guarantee": "unknown", "reason_code": reason,
+                "authority": "omi_bridge_availability",
+                "decision_usable": False,
+            },
+        }
 
     if market not in {"TWSE", "TPEX"}:
         return failure("not_supported", "atlas_market_not_supported")

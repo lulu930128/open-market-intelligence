@@ -212,6 +212,11 @@ class USIntradayTrendPointRead(BaseModel):
 
 
 class USIntradaySourceStatusRead(BaseModel):
+    requested_trade_date: str | None = None
+    is_historical: bool = False
+    is_partial: bool | None = None
+    is_live: bool = False
+    session_coverage: dict | None = None
     provider: str = "unresolved"
     source: str | None = None
     status: str = "unavailable"
@@ -342,6 +347,18 @@ class USIntradayCurrentObservationRead(BaseModel):
 
 
 class USIntradaySessionCoverageRead(BaseModel):
+    coverage_status: str | None = None
+    regular_coverage_status: str | None = None
+    expected_point_count: int | None = None
+    point_count: int | None = None
+    missing_slot_count: int | None = None
+    gap_count: int | None = None
+    duplicate_count: int | None = None
+    non_monotonic_count: int | None = None
+    off_grid_count: int | None = None
+    unfinalized_count: int | None = None
+    first_bar_time: str | None = None
+    last_bar_time: str | None = None
     trade_date: str | None = None
     expected_trade_date: str | None = None
     latest_available_trade_date: str | None = None
@@ -356,6 +373,11 @@ class USIntradaySessionCoverageRead(BaseModel):
 
 
 class USIntradayTrendRead(BaseModel):
+    requested_trade_date: str | None = None
+    is_historical: bool = False
+    is_partial: bool | None = None
+    is_live: bool = False
+    decision_usable: bool = False
     stock_id: str
     symbol: str | None = None
     source: str

@@ -745,8 +745,6 @@ def _market_quote_breadth_from_rows(
     advance_count = 0
     decline_count = 0
     unchanged_count = 0
-    limit_up_count = 0
-    limit_down_count = 0
     total_count = 0
     trade_value = sum(
         value
@@ -775,10 +773,6 @@ def _market_quote_breadth_from_rows(
         else:
             unchanged_count += 1
 
-        limit_up, limit_down = _quote_limit_counts(close=close, change=change)
-        limit_up_count += limit_up
-        limit_down_count += limit_down
-
     if total_count == 0:
         return None
 
@@ -795,8 +789,8 @@ def _market_quote_breadth_from_rows(
         "decline_count": decline_count,
         "unchanged_count": unchanged_count,
         "total_count": total_count,
-        "limit_up_count": limit_up_count,
-        "limit_down_count": limit_down_count,
+        "limit_up_count": None,
+        "limit_down_count": None,
         "trade_value": trade_value,
         "source": source,
     }
@@ -974,42 +968,12 @@ def _resolve_market_breadth(
     *,
     target_trade_date: date | None = None,
 ) -> dict | None:
-    quote_breadth: dict | None = None
-
-    try:
-        quote_breadth = _fetch_market_quote_breadth(market)
-    except Exception as exc:
-        observe_provider_fallback(exc, operation="indices.market_quote_breadth")
-
-    if (
-        target_trade_date is not None
-        and _breadth_trade_date(quote_breadth) == target_trade_date
-        and _is_plausible_market_breadth(quote_breadth)
-    ):
-        return quote_breadth
-
-    local_breadth = _latest_market_breadth(db=db, market=market)
-
-    if target_trade_date is not None:
-        if (
-            _breadth_trade_date(local_breadth) == target_trade_date
-            and _is_plausible_market_breadth(local_breadth)
-        ):
-            return local_breadth
-        return None
-
-    quote_date = _breadth_trade_date(quote_breadth)
-    local_date = _breadth_trade_date(local_breadth)
-
-    if quote_date is not None and (
-        local_date is None or quote_date >= local_date
-    ) and _is_plausible_market_breadth(quote_breadth):
-        return quote_breadth
-
-    if _is_plausible_market_breadth(local_breadth):
-        return local_breadth
-
-    return None
+    from app.market.official_breadth_platform import (
+        read_taiwan_official_breadth, project_taiwan_official_breadth,
+    )
+    result = read_taiwan_official_breadth(db, venue=market, trade_date=target_trade_date)
+    payload = project_taiwan_official_breadth(result)
+    return payload if payload["status"] != "missing" else None
 
 
 def _market_breadth_target_date(now: datetime | None = None) -> date:
@@ -4778,6 +4742,7 @@ def _shared_current_market_summary(
         project_taiwan_current_index,
         read_taiwan_current_breadth,
         read_taiwan_current_index,
+        read_taiwan_breadth_lanes,
     )
 
     now = requested_at or datetime.now(TAIPEI_TZ)
@@ -4802,6 +4767,7 @@ def _shared_current_market_summary(
         )
         current = project_taiwan_current_index(index_result)
         breadth = project_taiwan_current_breadth(breadth_result)
+        breadth_lanes = read_taiwan_breadth_lanes(db, venue=venue, requested_at=now)
         if breadth.get("status") == "missing":
             breadth_payload = None
         else:
@@ -4927,6 +4893,7 @@ def _shared_current_market_summary(
                 "current_observation": current,
                 "decision_usable": current.get("decision_usable") is True,
                 "resolution": current.get("resolved_health"),
+                "breadth_lanes": breadth_lanes,
                 "current_data_core": {
                     "index": current,
                     "breadth": breadth,

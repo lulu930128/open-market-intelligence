@@ -71,8 +71,11 @@ def calculate_active_daily_indicators(
         {
             **point,
             "time": point["time"].astimezone(TAIWAN_TZ).date(),
+            **({"input_quality": technical.input_quality,
+                "decision_usable": technical.decision_usable}
+               if index == len(technical.points) - 1 else {}),
         }
-        for point in technical.points
+        for index, point in enumerate(technical.points)
     ]
 
 

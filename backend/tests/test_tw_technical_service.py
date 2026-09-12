@@ -401,3 +401,27 @@ def test_intraday_vwap_resets_on_new_taiwan_session() -> None:
 
     assert calculated[0]["vwap"] == 10.0
     assert calculated[1]["vwap"] == 20.0
+
+
+def test_short_history_is_observable_but_not_decision_usable() -> None:
+    series = _series()
+    short = series.model_copy(update={"bars": series.bars[:15], "bar_states": series.bar_states[:15]})
+    result = TaiwanTechnicalService().calculate(short)
+    assert result.points
+    assert not result.decision_usable
+    assert result.input_quality["available_bars"] == 15
+    assert "TW_TECHNICAL_INSUFFICIENT_BARS" in result.input_quality["reason_codes"]
+
+
+def test_history_gap_blocks_even_when_indicator_warmup_is_complete() -> None:
+    series = _series()
+    # June 10 is a trading day inside this otherwise sufficient calculation window.
+    gapped = series.model_copy(update={
+        "bars": series.bars[:9] + series.bars[10:],
+        "bar_states": series.bar_states[:9] + series.bar_states[10:],
+    })
+    result = TaiwanTechnicalService().calculate(gapped)
+    assert result.warmup["ma"]["status"] == "ready"
+    assert result.input_quality["missing_trading_day_count"] == 1
+    assert not result.decision_usable
+    assert "TW_TECHNICAL_HISTORY_GAP" in result.input_quality["reason_codes"]

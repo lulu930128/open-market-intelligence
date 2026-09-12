@@ -30,6 +30,7 @@ from app.market.official_index_platform import (
     read_taiwan_official_index_series,
 )
 from app.market.official_index_repository import TaiwanOfficialIndexRepository
+from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market.official_index_transaction import TaiwanOfficialIndexTransaction
 from app.market.providers.tw_official_index import (
     TPEX_INDEX_RESOURCE_ID,
@@ -337,11 +338,12 @@ def test_index_read_clamps_future_date_and_rejects_pre_release_receipt(
     assert "REQUESTED_INDEX_DATE_EXCEEDS_LATEST_RELEASED_DATE" in result.limitations
 
 
+@pytest.mark.parametrize("source_name", [TWSE_INDEX_SOURCE_NAME, TAIEX_OFFICIAL_DAILY_SOURCE])
 def test_index_series_preloads_once_but_each_point_still_uses_resolver(
-    db: Session,
+    db: Session, source_name: str,
 ) -> None:
     source = SourceRegistry(
-        source_name=TWSE_INDEX_SOURCE_NAME,
+        source_name=source_name,
         source_type="official",
         category="market_index",
         reliability_level="official",

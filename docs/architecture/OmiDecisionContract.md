@@ -10,6 +10,14 @@ US historical intraday 的 `fill_state` 由 capability contract 依 canonical co
 
 ## 架構原則
 
+已授權的 TW／US 個股 external refresh 執行可在
+`enable_market_refresh_priority` 啟用後，向 jobs transaction owner 登記有限時效的
+foreground demand。EOD scheduler 在既有 provider／release／quota 邊界內優先調度；
+不改變 capability 或 provider 選擇。`execution.tool_runs[].repair_priority` 與既有
+job identity 在 compact projection 中保留。cache-only／禁止 external fetch 的請求
+不登記需求。此功能需要對應 migration，預設關閉；目前消費者是 Daily EOD，並不
+表示所有資料集已完成優先隊列整合。
+
 OMI backend 是 target resolution、capability registry、資料 freshness、
 bounded refresh、tool orchestration、AI reasoning、decision readiness 與
 outward projection 的唯一 owner。Frontend、MCP、Kuro 模型與其他 consumer
@@ -476,6 +484,16 @@ Temporal evidence 必須遵守 [`MarketTemporalContract.md`](MarketTemporalContr
 | OMI Dock consumer | `frontend/src/components/OmiAskDock.tsx` |
 
 ## 驗證要求
+
+Intraday payload 的 `is_partial=true` 與 canonical partial coverage 是硬性降級訊號；回傳片段 continuity 與 transport trimming 不得將它升格 complete。Required intraday 不可決策時，analysis readiness 不得重新升格。Market chips capability 的 aggregate 與 per-stock 欄位沿現有 owner 名稱輸出，不可因 registry 欄位過時而只留下 status。
+
+單股 intraday Source Health 的 resolved coverage 使用與 1d chart 相同的 TaiwanBarService read 與 series identity；latest provider storage 僅作診斷。Acquisition selection 另列 selected/not_selected 與 bounded plan reason，不與資料新鮮度合成單一狀態。
+
+Quote/depth observation 的 auction 歸屬依 event time 判定，presentation clock 不可重分類舊 regular depth。Session/official close 是独立 evidence；其成立不得清除舊 snapshot 的 stale 標記。
+
+台股 Technical 的 canonical series 同時輸出 `input_quality` 與 `decision_usable`：適用指標的 required bar count、計算範圍內交易日連續性與 bar eligibility 共同限制下游。資料筆數足夠不代表日期連續；下游可以保留已知 facts，但不得把明確不足的 technical evidence 升格為 analysis-ready 或正式評分。缺少可用個股跨市場證據時，市場因子僅供背景，方向為 unknown、score 為 null。
+
+Market chips projection 與 Source Health 共用 calendar release window 的 expected trade date 判定 freshness，不能因為有資料便標為 current。Quote bundle 的 provider attempts 分 capability 保留；depth acquisition 不得改寫 cached quote 的 provider provenance。
 
 台股 `quote.snapshot` 的頂層 price／OHLC／event time 保留 snapshot evidence；其中 `current_price` 是獨立 resolved current-price 物件，帶有來源、時間、freshness 與 fallback reason。它可以取用 canonical 1m fallback，但不可讓 snapshot quality 因此升級。既有內部 display／decision consumers 使用 `current_price`，HTTP/SSE/MCP 均由同一 capability projection 傳遞；不新增 price alias 或 consumer-side fallback。
 

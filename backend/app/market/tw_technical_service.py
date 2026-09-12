@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 import json
@@ -30,6 +30,7 @@ from app.market.technical_parameters import (
     get_technical_analysis_parameters,
 )
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead
+from app.market.trading_calendar import is_taiwan_trading_day
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
@@ -93,6 +94,8 @@ class TaiwanTechnicalSeriesRead(CanonicalModel):
     parameter_contract: dict[str, Any]
     status: TaiwanTechnicalStatus
     warmup: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    input_quality: dict[str, Any] = Field(default_factory=dict)
+    decision_usable: bool = False
     points: tuple[dict[str, Any], ...] = ()
     current_partial: TaiwanTechnicalCurrentPartial | None = None
     structures: dict[str, Any] = Field(default_factory=dict)
@@ -280,6 +283,49 @@ def _warmup(
     return output
 
 
+def _input_quality(
+    bars: TaiwanBarSeriesRead,
+    *,
+    decision_bar_count: int,
+    warmup: dict[str, dict[str, Any]],
+    eligible: bool,
+) -> dict[str, Any]:
+    """Gate the calculation input, independently of response/history limits."""
+    required = max(
+        (item["required_bars"] for item in warmup.values()
+         if item["status"] != "unavailable"),
+        default=1,
+    )
+    reasons: list[str] = []
+    if decision_bar_count < required:
+        reasons.append("TW_TECHNICAL_INSUFFICIENT_BARS")
+    if not eligible:
+        reasons.append("TW_TECHNICAL_BAR_STATE_NOT_ELIGIBLE")
+    missing_days = 0
+    if bars.requested_interval == "1d":
+        dates = [bar.start_at.date() for bar in bars.bars[:decision_bar_count]]
+        for previous, current in zip(dates, dates[1:]):
+            if current <= previous:
+                reasons.append("TW_TECHNICAL_BAR_ORDER_INVALID")
+                continue
+            cursor = previous + timedelta(days=1)
+            while cursor < current:
+                missing_days += int(is_taiwan_trading_day(cursor))
+                cursor += timedelta(days=1)
+        if missing_days:
+            reasons.append("TW_TECHNICAL_HISTORY_GAP")
+    elif not bars.history.requested_coverage_satisfied:
+        reasons.append("TW_TECHNICAL_HISTORY_INCOMPLETE")
+    return {
+        "status": "partial" if reasons else "ready",
+        "decision_usable": not reasons,
+        "required_bars": required,
+        "available_bars": decision_bar_count,
+        "missing_trading_day_count": missing_days,
+        "reason_codes": list(dict.fromkeys(reasons)),
+    }
+
+
 def build_taiwan_technical_capability_contract() -> dict[str, Any]:
     parameters = get_technical_analysis_parameters()
     available = (
@@ -460,6 +506,14 @@ class TaiwanTechnicalService:
                 ),
             )
         calculation_bar_count = len(bars.bars)
+        input_quality = _input_quality(
+            bars,
+            decision_bar_count=decision_bar_count,
+            warmup=warmup,
+            eligible=bool(points) and partial_index != -1,
+        )
+        if status is TaiwanTechnicalStatus.AVAILABLE and not input_quality["decision_usable"]:
+            status = TaiwanTechnicalStatus.PARTIAL
         latest = points[-1] if points else {}
         structures = {
             key: latest.get(key)
@@ -496,6 +550,8 @@ class TaiwanTechnicalService:
             parameter_contract=parameter_contract,
             status=status,
             warmup=warmup,
+            input_quality=input_quality,
+            decision_usable=input_quality["decision_usable"],
             points=response_points,
             current_partial=current_partial,
             structures=structures,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -26,13 +26,39 @@ from app.db.models import (
     TaiwanQuoteContractSnapshot,
     TaiwanStockQuoteSnapshot,
 )
-from app.market.source_health import build_taiwan_source_health
+from app.market.source_health import (
+    build_taiwan_source_health, TaiwanSourceHealthEntry, _stock_intraday_universe_entry,
+)
 from app.observability import provider_health
 from app.observability.provider_health import record_provider_event
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
 class TaiwanSourceHealthTests(unittest.TestCase):
+    def test_universe_reuses_single_symbol_health_without_requery_or_empty_promotion(self):
+        now = datetime(2026, 9, 10, 10, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+        single = TaiwanSourceHealthEntry(
+            resource="market_intraday_bar_1m", label="1m", frequency="realtime",
+            target="3042", status="partial", ok=False, row_count=15,
+            provider="nstock", source="nstock_minute_stock_data",
+            latest_observed_at=now, latest_updated_at=now,
+            health_dimensions={"series_coverage": {"status": "partial_prefix"}},
+        )
+        db = Mock()
+        with patch("app.market.source_health.resolve_taiwan_intraday_target_universe", return_value={"symbols": ["3042"]}), patch(
+            "app.market.source_health._stock_intraday_entry", return_value=single,
+        ) as reader:
+            result = _stock_intraday_universe_entry(
+                db, calendar_status={"phase": "regular", "date": "2026-09-10"},
+                current_time=now, required=True,
+            )
+        reader.assert_called_once()
+        db.query.assert_not_called()
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.row_count, 15)
+        self.assertEqual(result.latest_updated_at, now)
+        self.assertEqual(result.provider, "nstock")
+
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)
@@ -431,8 +457,9 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             entries["taiwan_stock_quote_snapshot"]["latest_observed_at"],
             "2026-07-22T09:09:50+08:00",
         )
-        self.assertEqual(entries["market_intraday_bar_1m"]["status"], "current")
-        self.assertEqual(entries["market_intraday_bar_1m"]["age_seconds"], 60)
+        # A raw close-only row is not a canonical OHLC bar.
+        self.assertEqual(entries["market_intraday_bar_1m"]["status"], "empty")
+        self.assertIsNone(entries["market_intraday_bar_1m"]["age_seconds"])
         quote_dimensions = entries["taiwan_stock_quote_snapshot"][
             "health_dimensions"
         ]
@@ -631,9 +658,8 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         self.assertEqual(intraday["status"], "partial")
         self.assertFalse(intraday["ok"])
         self.assertEqual(dimensions["requested_symbol_count"], 2)
-        self.assertEqual(dimensions["current_count"], 1)
-        self.assertEqual(dimensions["missing_symbols"], ["3711"])
-        self.assertEqual(dimensions["coverage_ratio"], 0.5)
+        self.assertEqual(dimensions["current_count"], 0)
+        self.assertEqual(dimensions["coverage_ratio"], 0.0)
 
     def test_realtime_source_health_uses_presentation_session_before_open(self) -> None:
         self.db.add(

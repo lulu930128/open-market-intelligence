@@ -13,7 +13,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.market.official_breadth_platform import read_taiwan_official_breadth
+from app.market.official_breadth_platform import (
+    project_taiwan_official_breadth,
+    read_taiwan_official_breadth,
+)
 from app.market.official_index_platform import read_taiwan_official_index
 from app.market.trading_calendar import TAIWAN_TZ, previous_taiwan_trading_day
 from app.market_data.contracts import ResolvedEvidenceStatus
@@ -125,7 +128,8 @@ def _project_breadth_component(
     resolved_breadth = breadth_result.resolved.breadth
     if (
         breadth_result.resolved.health.status
-        in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK}
+        in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK, ResolvedEvidenceStatus.PARTIAL}
+        and breadth_result.resolved.health.facts_usable
         and resolved_breadth is not None
     ):
         classified_count = resolved_breadth.classified_count
@@ -166,7 +170,7 @@ def _project_breadth_component(
             "official": resolved_breadth.official,
             "state": resolved_breadth.state.value,
             "status": "ready" if complete_and_available else "partial",
-            "decision_usable": complete_and_available,
+            "decision_usable": complete_and_available and breadth_result.resolved.health.research_usable,
             "universe_definition": {
                 "authority": resolved_breadth.universe_source,
                 "missing_quote_policy": "unknown_and_missing_remain_explicit",
@@ -175,6 +179,8 @@ def _project_breadth_component(
             "warnings": list(breadth_result.limitations),
             "lineage": resolved_breadth.lineage.model_dump(mode="json"),
         }
+        if resolved_breadth.published_limits is not None:
+            breadth_component["observation"].update(project_taiwan_official_breadth(breadth_result))
     else:
         breadth_component["observation"] = None
     return breadth_component

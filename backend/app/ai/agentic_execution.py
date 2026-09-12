@@ -12,6 +12,8 @@ from app.crypto_market import service as crypto_market_service
 from app.crypto_market.contract import normalize_provider as normalize_crypto_provider
 from app.crypto_market.contract import normalize_symbol as normalize_crypto_symbol
 from app.db.session import SessionLocal
+from app.config import settings
+from app.jobs.market_refresh_priority import request_market_refresh_priority
 from app.jobs import service as job_service
 from app.jp_market import service as jp_market_service
 from app.jp_market.sources import normalize_jp_symbol
@@ -1106,6 +1108,14 @@ def execute_tool_plan(
             break
 
         tracking_job_id: int | None = None
+        repair_priority = None
+        if definition.external_fetch and settings.enable_market_refresh_priority:
+            priority_market = "TW" if tool_name.startswith("tw.") else "US" if tool_name.startswith("us.") else None
+            priority_symbol = args.get("stock_id") if priority_market == "TW" else args.get("symbol")
+            if priority_market and priority_symbol:
+                repair_priority = request_market_refresh_priority(
+                    db, market=priority_market, symbol=str(priority_symbol),
+                )
         if definition.external_fetch:
             background_request = _background_job_request(tool_name, args)
             background_target = str(
@@ -1143,6 +1153,7 @@ def execute_tool_plan(
                         "evidence_status": "pending",
                         "result_status": None,
                         "request_status": "background_in_progress",
+                        "repair_priority": repair_priority,
                         "reason": step.get("reason"),
                         "arguments": args,
                         "external_fetch": True,
@@ -1233,6 +1244,7 @@ def execute_tool_plan(
             "writes_market_cache": definition.writes_cache,
             "writes_user_data": False,
             "result_summary": _compact_result(result),
+            "repair_priority": repair_priority,
             "error": operation_error,
             "started_at": started_at.isoformat(),
             "ended_at": ended_at.isoformat(),

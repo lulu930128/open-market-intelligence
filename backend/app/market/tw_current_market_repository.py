@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import logging
 
 from pydantic import ValidationError
-from sqlalchemy import and_, inspect, or_
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy import and_, func, inspect, or_
+from sqlalchemy.orm import Session, load_only, defer
 
 from app.db.models import (
     RawFetchResult,
@@ -17,7 +18,7 @@ from app.db.models import (
     TaiwanCurrentBreadthSnapshot,
     TaiwanCurrentIndexSnapshot,
 )
-from app.market.trading_calendar import is_taiwan_trading_day
+from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
 from app.market.tw_current_market_capabilities import (
     TW_CURRENT_BREADTH_CAPABILITY_ID,
     TW_CURRENT_BREADTH_DATASET_ID,
@@ -31,6 +32,7 @@ from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_he
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
     AuctionBreadthObservation,
+    BreadthPriceState,
     BreadthAcquisitionDiagnostics,
     AuthorityClass,
     BarFinalization,
@@ -57,6 +59,7 @@ from app.market_data.resolution import ResolutionCandidate
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
+logger = logging.getLogger(__name__)
 CURRENT_INDEX_MAX_ABS_CHANGE_RATIO = TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
 
 _RAW_FETCH_LINEAGE_COLUMNS = (
@@ -474,6 +477,12 @@ class TaiwanCurrentMarketRepository:
                 ),
                 limitations=("TW_CURRENT_BREADTH_SCHEMA_UNAVAILABLE",),
             )
+        stored_columns = {column["name"] for column in schema.get_columns(table)}
+        extension_columns = ("limits_json", "classification_diagnostics_json", "price_states_json")
+        # Additive migration window: existing breadth remains readable, while
+        # absent companions remain unknown. Remove after supported DBs adopt 0082.
+        deferred_extensions = [defer(getattr(TaiwanCurrentBreadthSnapshot, name))
+                               for name in extension_columns if name not in stored_columns]
         recent_cutoff = requirement.request.from_date - timedelta(days=7)
         row_query = (
             self._db.query(
@@ -481,7 +490,7 @@ class TaiwanCurrentMarketRepository:
                 RawFetchResult,
                 SourceRegistry,
             )
-            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS), *deferred_extensions)
             .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentBreadthSnapshot.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == TaiwanCurrentBreadthSnapshot.source_id)
             .filter(TaiwanCurrentBreadthSnapshot.venue == target.scope_key)
@@ -573,6 +582,9 @@ class TaiwanCurrentMarketRepository:
                     unchanged_count=row.unchanged_count,
                     unknown_count=row.received_unclassified_count,
                     missing_count=row.not_received_count,
+                    price_states=json.loads(row.price_states_json) if "price_states_json" in stored_columns and row.price_states_json else {},
+                    limits=json.loads(row.limits_json) if "limits_json" in stored_columns and row.limits_json else None,
+                    classification_diagnostics=json.loads(row.classification_diagnostics_json) if "classification_diagnostics_json" in stored_columns and row.classification_diagnostics_json else {},
                     coverage_reason_counts=_breadth_coverage_reason_counts(
                         row.limitations_json,
                         universe_count=row.universe_count,
@@ -850,3 +862,66 @@ __all__ = [
     "TaiwanIndexSeriesBatch",
     "TaiwanIndexSeriesRow",
 ]
+
+
+def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime,
+                            symbols: tuple[str, ...] | None = None) -> dict[str, dict]:
+    """Restore only receipt-backed same-session prices; never repair on a read."""
+    table = TaiwanCurrentBreadthSnapshot.__tablename__
+    schema = inspect(db.connection())
+    if not schema.has_table(table) or "price_states_json" not in {c["name"] for c in schema.get_columns(table)}:
+        return {}
+    single_symbol = symbols[0] if symbols is not None and len(symbols) == 1 else None
+    column = TaiwanCurrentBreadthSnapshot.price_states_json
+    projection = func.json_extract(column, '$.' + json.dumps(single_symbol)) if single_symbol else column
+    row = (db.query(projection)
+           .filter(func.json_valid(column) == 1)
+           .filter(TaiwanCurrentBreadthSnapshot.venue == venue)
+           .filter(TaiwanCurrentBreadthSnapshot.provider == "twse_mis")
+           .filter(TaiwanCurrentBreadthSnapshot.source == "twse_mis_live_breadth")
+           .filter(TaiwanCurrentBreadthSnapshot.trade_date == requested_at.astimezone(TAIWAN_TZ).date())
+           .filter(TaiwanCurrentBreadthSnapshot.event_at <= requested_at)
+           .order_by(TaiwanCurrentBreadthSnapshot.event_at.desc(), TaiwanCurrentBreadthSnapshot.id.desc())
+           .first())
+    if row is None or not row[0]:
+        return {}
+    try:
+        raw_states = {single_symbol: json.loads(row[0])} if single_symbol else json.loads(row[0])
+        if not isinstance(raw_states, dict):
+            raise ValueError("price states must be an object")
+    except (ValueError, TypeError):
+        logger.warning("Ignoring malformed %s current stock price companion", venue)
+        return {}
+    parsed = {}
+    for code, raw_state in raw_states.items():
+        if symbols is not None and code not in symbols:
+            continue
+        try:
+            parsed[code] = BreadthPriceState.model_validate(raw_state)
+        except (ValueError, TypeError):
+            logger.warning("Ignoring invalid %s current stock price state for %s", venue, code)
+    receipt_ids = {
+        int(state.lineage.raw_receipt_id.split(":", 1)[1])
+        for state in parsed.values()
+        if state.lineage.raw_receipt_id and state.lineage.raw_receipt_id.startswith("raw_fetch_result:")
+        and state.lineage.raw_receipt_id.split(":", 1)[1].isdigit()
+    }
+    receipts = {}
+    ids = sorted(receipt_ids)
+    for offset in range(0, len(ids), 400):
+        for raw_id, content_hash, source_name in (db.query(RawFetchResult.id, RawFetchResult.content_hash, SourceRegistry.source_name)
+                .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
+                .filter(SourceRegistry.source_name.in_(("twse_mis_live_breadth", "twse_mis_quote_depth")))
+                .filter(RawFetchResult.fetched_at <= requested_at.astimezone(timezone.utc))
+                .filter(RawFetchResult.id.in_(ids[offset:offset + 400])).all()):
+            receipts[f"raw_fetch_result:{raw_id}"] = (content_hash, source_name)
+    states = {}
+    for code, state in parsed.items():
+        if (state.lineage.raw_receipt_id and state.lineage.provider == "twse_mis"
+            and state.lineage.source in {"twse_mis_live_breadth", "twse_mis_quote_depth"}
+            and state.lineage.content_hash is not None
+            and receipts.get(state.lineage.raw_receipt_id) == (state.lineage.content_hash, state.lineage.source)
+            and state.trade_date == requested_at.astimezone(TAIWAN_TZ).date()
+            and state.price_as_of <= requested_at):
+            states[code] = state.model_dump(mode="python")
+    return states

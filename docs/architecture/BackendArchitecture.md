@@ -1,4 +1,22 @@
-﻿# OMI Backend Architecture
+# OMI Backend Architecture
+
+## 盤後分批與個股優先需求
+
+Daily EOD 沿用既有 full-market coverage／checkpoint 與 market-owned acquisition。
+美股 bounded shard 若 canonical current count 已增加、沒有 provider error 且仍有
+未處理候選，可回傳 `continuation_required=true`：該批正常結束，但
+`postcondition_met=false` 與 partial coverage 必須保留。無進展、錯誤或來源未提供
+當期資料不得藉此報成成功。
+
+`jobs/market_refresh_priority.py` 擁有明示 foreground demand 的持久化 transaction；
+Shared EOD 只接受注入的 bounded priority-reader callback，不反向依賴 jobs。
+需求依正式 instrument master identity 去重並到期失效，不保存或重算市場 evidence。
+美股於每個 symbol boundary 重新讀取 priority，跨 shard 的 attempted counter 每五次
+保留一次給原背景候選；台股提升所屬 venue bulk，避免逐股重複 acquisition。
+Priority 不繞過 release／provider backoff／bounds，也不強殺執行中的 provider request。
+
+此入口目前僅對接 Daily EOD；完整跨 dataset queue、全市場分鐘線、全域共享配額與
+多程序 worker lease 的收斂仍屬 active exec plan，不因本需求表存在而宣稱已完成。
 
 本文件描述 Open Market Intelligence backend 的長期穩定責任邊界。
 
@@ -637,3 +655,32 @@ Migration 完成條件同時包含 new path works、production consumer 已切�
 - 刪 legacy compatibility。
 
 先建立可驗證 seam，再逐步 cutover。
+
+### Taiwan stock comparison reference
+
+台股比較基準由 `quote_depth.project_taiwan_quote_evidence_bundle` 擁有，使用 additive typed `change_reference`。既有 quote evidence bundle 在同次 cache-only daily read 讀取最多兩筆 canonical daily bars，不新增 provider acquisition、cache 或寫入。Provider `previous_close` 保留原值。官方 close/change 或同 session 的 resolved quote 可建立基準數值；只有核對前一交易日的 canonical close 相符，才能確認 prior-close 日期與類型。缺少該證據時保留 partial 與未知日期；官方有效基準不同於前收時標記 exchange reference，不推論 corporate-action 原因。`lineage` 與 `prior_close_lineage` 分別保留數值來源與日期核對證據。
+
+REST quote-depth、legacy Chart quote-side、Today、Depth/Auction、AI/MCP 共用此 projection。`applies_to_trade_date` 表示適用 session，與基準歷史 `trade_date` 分開；Depth/Auction 用途另核對 selected component 的 event date。Legacy Chart 的 `previous_close` 僅作 resolved reference 的 presentation alias，並附完整 `change_reference`，不回寫 provider evidence。Bar/Technical 契約維持原責任，Frontend 不以 daily close/change 重建缺值。ADR comparison 從同份有界 daily evidence 依 trade_date 選最新有效 row，不依賴兩日序列的排列位置。Reference research eligibility 與 price availability 分離；盤後價格確認使用 session/official close evidence，不以 actual-trade availability 替代。
+
+
+### 台股 breadth 對帳、門檻與價格前態
+
+`tw_breadth_projection.project_breadth_coverage` 擁有 additive 接收／可分類比例與獨立 partition 投影。Canonical unknown 不含 missing；Dashboard legacy unknown 包含 missing。Dashboard 的舊 coverage_reason_counts 只保留摘要相容投影，細項由 classification_reason_counts 承載；移除舊摘要的 gate 是 Dashboard/MCP consumer 採用新欄位並完成版本遷移，禁止再把細項加回舊摘要加總。
+
+`MarketBreadthObservation.limits` 是 actual-trade 對交易所門檻的觀測計數及各側可判定範圍。只有非空 universe 全部可判定，outward limit_up_count/limit_down_count 才有精確值；缺門檻不轉成 false/0。方向、limit、資料接收與 decision usability 分開。分類子原因只細分 mapping_error，不由無成交推論停牌。
+
+逐股價格前態存於既有 current breadth snapshot 的 typed companion JSON，與原 observation/receipt 由同一 transaction owner 保存。Public quote repository 的 shared current-stock reader 合併同日、同 venue 的 MIS quote actual observations 與 breadth companion，逐筆核對原 receipt/hash/source；acquisition 與 cache-only quote consumer 共用此讀取結果。Provider 接受明確前態，不持有程序全域價格 cache、不讀寫 DB。缺少本次成交價不清除最後真實成交；carry-forward 保留原價格時間與 receipt，不以本次接收時間更新原價格 freshness。最新 observation lineage 與價格 lineage 分開投影。沒有可信歷史前態時保持缺值直到取得新 actual evidence。
+
+Minute-state derived v3 依成交額所屬 component 的 event minute 檢查 bucket coherence；舊 breadth 金額不得隨 index refresh 變成新分鐘觀測。分鐘差額要求相鄰 bucket、兩市場資料齊全、來源／scope／semantics 可比較且各自累計不倒退。Read path 對既有 rows 同樣檢查 lineage/coherence，不重寫歷史 DB。
+
+盤中 current index 與 completed official close 分開；official close 缺失保持 null。TAIEX canonical daily source 可由既有 official index repository 讀取，仍驗證 receipt、發布時間與日期。盤前估算使用獨立 indicative lane，TPEX 股數由 dated issued-shares owner 提供。技術報告須有明確 complete-prefix/session coverage 才使用開盤區間與量速；未知 coverage 不等同完整。AI 保留 current-session coverage、materialization policy 與按 capability 區分的 acquisition diagnostics，cache-only 不觸發補洞。前日收盤缺少足夠公司行動確認時，不替代當日比較基準。
+
+Migration 20260908_0082 為 additive nullable companion 欄位。Current repository 的舊 schema read seam 僅為部署遷移窗口：缺 companion columns 時 defer 欄位並返回未知，不能在 read path 自動升級；所有支援 DB 採用此 revision 後移除 seam。Persistence 需要完成 migration。
+
+官方日線 breadth 沿用 official_breadth_platform/repository，`read_taiwan_breadth_lanes` 在 completed-session 需求下提供 shadow 比較；active_ordinary_stock_universe 不替換 current registered universe。Legacy completed breadth entry 改走此 cache-only owner，逐股 ±9.5% heuristic 不再輸出 exact limit count。TWSE MI_INDEX 股票合計沿用既有 RWD official-daily descriptor/acquisition，日線 transaction 同時保存 typed published breadth companion 至獨立 snapshot，與 raw receipt 原子提交。讀取只載入小型 canonical payload 與 receipt metadata，不載入 raw_text、不解析大型原文、不寫入；需同日、發布時間合格、可信官方來源及 requested_at 可見。其 scope 為交易所股票欄所有已公布分類，不與 registered/active-stock 範圍混用。官方 lane 可提供此 aggregate，current_registered 主卡 selection 維持原範圍；aggregate 不可用時保留 daily-derived evidence 與限制。
+
+`PublishedBreadthLimits` 表示交易所公布的合計，與逐股 `BreadthLimitObservation` 分開：不以 aggregate 填造 evaluated_count。精確漲跌停與整體 breadth 的 partial 狀態可並存，完整總數不等於所有研究證據可用，也不由 session close 單獨推導 finality。前端只做 exact/observed/unconfirmed 呈現；有可判定樣本的 observed zero 顯示 0，零可判定樣本維持尚未確認。Coverage、scope、來源與官方比較可展開，影響主卡解讀的狀態維持可見。
+
+0083 正式採用前的 schema compatibility 僅允許略過尚無 published snapshot 的讀寫，回傳 persistence limitation；正式 DB 全數採用後移除此 seam。既有 receipt 不由 GET 自動回填，需受控重新處理或後續 acquisition。TPEX published aggregate 仍未接入，缺精確來源時保持 unknown。
+
+整合驗證補充：TWSE published breadth 的純解析與 typed payload 位於 `app/parsers/twse_published_breadth.py`，read repository 不反向依賴 provider adapter。Completed Dashboard 保留 resolver 允許的 partial facts，並沿用 official breadth projection 的 aggregate scope／精確合計與 usability。新增 price-state reader 的 schema inspection 使用 session-owned connection，避免 Engine inspector 干擾尚未提交的 SQLite transaction。

@@ -20,8 +20,6 @@ import {
 import { timeframeLabel, type TranslationFunction } from "@/i18n";
 import type {
   ChartPoint,
-  IntradayCurrentObservation,
-  IntradayPriceDiagnostics,
   IntradayTrendCapabilities,
   IntradayTrendPoint,
   OhlcIntradayOverlay,
@@ -99,9 +97,6 @@ type TodaySnapshotMetadata = {
 
 type TodayChartState = {
   capabilities: IntradayTrendCapabilities;
-  currentObservation: IntradayCurrentObservation | null;
-  previousClose: number | null;
-  priceDiagnostics: IntradayPriceDiagnostics | null;
   source: string;
   stockId: string;
   tradeDate: string | null;
@@ -879,13 +874,6 @@ export function useTaiwanStockChartData({
               ...missingIntradayCapabilities,
               supports_volume: bars.some((point) => point.volume !== null),
             },
-            currentObservation: previousMatches
-              ? previous?.currentObservation ?? null
-              : null,
-            previousClose: previousMatches ? previous?.previousClose ?? null : null,
-            priceDiagnostics: previousMatches
-              ? previous?.priceDiagnostics ?? null
-              : null,
             source: "TaiwanBarService",
             stockId: effectStockId,
             tradeDate: presentationTradeDate,
@@ -1103,12 +1091,9 @@ export function useTaiwanStockChartData({
       professionalIntradayIndicators,
       professionalIntradayInterval,
       professionalIntradayStockId,
-      todayPreviousClose: currentTodayState?.previousClose ?? null,
       todayCapabilities:
         currentTodayState?.capabilities ?? missingIntradayCapabilities,
-      todayCurrentObservation: currentTodayState?.currentObservation ?? null,
       todayHistoryStatus: currentTodayState?.historyStatus ?? "missing",
-      todayPriceDiagnostics: currentTodayState?.priceDiagnostics ?? null,
       todaySnapshotPhase: currentTodayState?.snapshotPhase ?? "warming",
       todaySnapshotReasonCodes: currentTodayState?.snapshotReasonCodes ?? [],
       todaySource: currentTodayState?.source ?? "unavailable",

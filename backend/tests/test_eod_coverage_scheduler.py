@@ -251,3 +251,17 @@ def test_eod_enqueue_clamps_effective_work_to_registry_bounds() -> None:
     assert kwargs["request"]["max_runtime_seconds"] == 120
     assert kwargs["progress_total"] == 2
     assert kwargs["task_args"][3:5] == (2, 120)
+
+
+def test_progressing_partial_shard_is_not_a_failed_job():
+    result = {"status": "partial", "postcondition_met": False,
+              "continuation_required": True, "error_count": 0}
+    completed = []
+    def execute(_job_id, worker):
+        completed.append(worker(object(), Mock()))
+    with patch.object(eod_coverage, "reconcile_eod_coverage", return_value=result), patch.object(
+        eod_coverage.job_service, "run_tracked_job", side_effect=execute
+    ):
+        eod_coverage.run_eod_coverage_reconcile_job(1, "US", True, None, 1, 30, 0, 5, 1800)
+    assert completed == [result]
+    assert completed[0]["postcondition_met"] is False

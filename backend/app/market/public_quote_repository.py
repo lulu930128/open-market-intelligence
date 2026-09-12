@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy import func, inspect
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -14,6 +15,8 @@ from app.db.models import (
     TaiwanStockQuoteSnapshot,
 )
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import taiwan_market_session
+from app.market.tw_current_market_repository import read_breadth_price_states
 from app.market.tw_realtime_capabilities import (
     TW_QUOTE_SNAPSHOT_CAPABILITY_ID,
     TW_REALTIME_SOURCE_BINDINGS,
@@ -21,6 +24,8 @@ from app.market.tw_realtime_capabilities import (
 )
 from app.market_data.contracts import (
     InstrumentKey,
+    BreadthPriceState,
+    InstrumentType,
     Market,
     MarketSession,
     ObservationState,
@@ -262,6 +267,7 @@ class TaiwanPublicQuoteRepository:
         max_candidates: int = 8,
         trade_date: date | None = None,
         allowed_sessions: tuple[MarketSession, ...] | None = None,
+        requested_at: datetime | None = None,
     ) -> tuple[PersistedPublicQuoteRead, ...]:
         if instrument.market is not Market.TW:
             raise ValueError("Taiwan public quote repository requires market=TW")
@@ -294,6 +300,7 @@ class TaiwanPublicQuoteRepository:
             key=lambda binding: binding.descriptor.priority,
         )
         rows_by_id: dict[int, TaiwanStockQuoteSnapshot] = {}
+        latest_rows: dict[tuple[str, str], TaiwanStockQuoteSnapshot] = {}
         for binding in quote_bindings:
             row = (
                 base_query.filter(
@@ -309,6 +316,19 @@ class TaiwanPublicQuoteRepository:
                 .first()
             )
             if row is not None:
+                latest_rows[(row.provider, row.source)] = row
+                # A no-trade message is an observation, not a deletion of the
+                # last actual trade. Query by role before applying the bound.
+                if row.last_price is None and row.trade_state != TradeObservationState.INDICATIVE_OBSERVED.value:
+                    actual = base_query.filter(
+                        TaiwanStockQuoteSnapshot.provider == row.provider,
+                        TaiwanStockQuoteSnapshot.source == row.source,
+                        TaiwanStockQuoteSnapshot.trade_date == row.trade_date,
+                        TaiwanStockQuoteSnapshot.trade_state == TradeObservationState.TRADE_OBSERVED.value,
+                        TaiwanStockQuoteSnapshot.last_price.isnot(None),
+                    ).order_by(TaiwanStockQuoteSnapshot.quote_time.desc(), TaiwanStockQuoteSnapshot.id.desc()).first()
+                    if actual is not None:
+                        row = actual
                 rows_by_id[row.id] = row
                 if len(rows_by_id) >= max_candidates:
                     break
@@ -322,6 +342,8 @@ class TaiwanPublicQuoteRepository:
                 .all()
             )
             for row in fallback_rows:
+                if (row.provider, row.source) in latest_rows:
+                    continue
                 rows_by_id.setdefault(row.id, row)
                 if len(rows_by_id) >= max_candidates:
                     break
@@ -330,7 +352,7 @@ class TaiwanPublicQuoteRepository:
             key=lambda row: (row.quote_time, row.id),
             reverse=True,
         )[:max_candidates]
-        if not rows:
+        if not rows and requested_at is None:
             return (
                 PersistedPublicQuoteRead(
                     limitations=("PUBLIC_QUOTE_CANDIDATE_MISSING",),
@@ -343,10 +365,63 @@ class TaiwanPublicQuoteRepository:
             if identity in seen_sources:
                 continue
             seen_sources.add(identity)
-            reads.append(self._decode_row(instrument, row))
+            read = self._decode_row(instrument, row)
+            latest_row = latest_rows.get(identity)
+            if read.observation is not None and latest_row is not None and latest_row.id != row.id:
+                latest_read = self._decode_row(instrument, latest_row)
+                if latest_read.observation is not None:
+                    read = replace(read, observation=read.observation.model_copy(update={
+                        "latest_observation_lineage": latest_read.observation.lineage,
+                    }))
+            reads.append(read)
             if len(reads) >= max_candidates:
                 break
-        return tuple(reads)
+        if requested_at is not None and not allowed_sessions:
+            state = read_current_stock_price_states(
+                self._db, venue=instrument.venue, requested_at=requested_at,
+                symbols=(instrument.symbol,),
+            ).get(instrument.symbol)
+            if state is not None:
+                state = BreadthPriceState.model_validate(state)
+                existing = next((item for item in reads if item.provider == state.lineage.provider), None)
+                if existing is None or existing.observation is None or (
+                    existing.observation.last_trade_price is None
+                    or existing.observation.lineage.event_at < state.price_as_of
+                ):
+                    quote = QuoteObservation(
+                        instrument=instrument, lineage=state.lineage.model_copy(update={
+                            "cache_hit": True,
+                            "observation_id": state.lineage.observation_id
+                            or f"{state.lineage.raw_receipt_id}:stock:{instrument.symbol}",
+                        }),
+                        latest_observation_lineage=(
+                            existing.observation.latest_observation_lineage or existing.observation.lineage
+                            if existing is not None and existing.observation is not None
+                            and existing.observation.trade_date == state.trade_date
+                            and (existing.observation.latest_observation_lineage or existing.observation.lineage).event_at >= state.price_as_of
+                            else None
+                        ),
+                        trade_date=state.trade_date, currency="TWD",
+                        state=ObservationState.AVAILABLE,
+                        trade_state=TradeObservationState.TRADE_OBSERVED,
+                        last_trade_price=state.price,
+                        previous_close=state.previous_close,
+                        cumulative_quantity=_quantity_from_lots(state.cumulative_volume_lots),
+                    )
+                    reads = [item for item in reads if item.provider != state.lineage.provider]
+                    reads.append(PersistedPublicQuoteRead(
+                        observation=quote, provider=quote.lineage.provider,
+                        source=quote.lineage.source,
+                        provider_priority=quote_source_binding(
+                            provider=quote.lineage.provider, source="twse_mis_quote_depth",
+                        ).descriptor.priority,
+                        raw_result_id=int(quote.lineage.raw_receipt_id.split(":")[1]),
+                        market_session=taiwan_market_session(state.price_as_of),
+                        limitations=("CURRENT_SESSION_LAST_ACTUAL_TRADE",),
+                    ))
+        return tuple(reads[:max_candidates]) or (PersistedPublicQuoteRead(
+            limitations=("PUBLIC_QUOTE_CANDIDATE_MISSING",),
+        ),)
 
     def load_latest_quote(
         self,
@@ -355,6 +430,60 @@ class TaiwanPublicQuoteRepository:
         """Compatibility single-row read; new callers should read all candidates."""
 
         return self.load_quote_candidates(instrument, max_candidates=1)[0]
+
+
+def read_current_stock_price_states(
+    db: Session, *, venue: str, requested_at: datetime,
+    symbols: tuple[str, ...] | None = None,
+) -> dict[str, dict]:
+    """One receipt-backed same-session state reader for quote and breadth.
+
+    The two acquisition paths retain their original source identities. Only
+    actual trade evidence participates; neither a read nor a provider failure
+    creates a new observation or changes a trade's event/receipt time.
+    """
+    states = read_breadth_price_states(db, venue=venue, requested_at=requested_at, symbols=symbols)
+    if symbols is not None:
+        states = {code: value for code, value in states.items() if code in symbols}
+    if not inspect(db.connection()).has_table(TaiwanStockQuoteSnapshot.__tablename__):
+        return states
+    query = db.query(TaiwanStockQuoteSnapshot.stock_id, func.max(TaiwanStockQuoteSnapshot.quote_time).label("event_at")).filter(
+        TaiwanStockQuoteSnapshot.market == venue,
+        TaiwanStockQuoteSnapshot.provider == "twse_mis",
+        TaiwanStockQuoteSnapshot.source == "twse_mis_quote_depth",
+        TaiwanStockQuoteSnapshot.trade_date == requested_at.astimezone(TAIWAN_TZ).date(),
+        TaiwanStockQuoteSnapshot.quote_time <= requested_at.astimezone(TAIWAN_TZ),
+        TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at),
+        TaiwanStockQuoteSnapshot.trade_state == TradeObservationState.TRADE_OBSERVED.value,
+        TaiwanStockQuoteSnapshot.last_price > 0,
+    )
+    if symbols is not None:
+        query = query.filter(TaiwanStockQuoteSnapshot.stock_id.in_(symbols))
+    latest = query.group_by(TaiwanStockQuoteSnapshot.stock_id).subquery()
+    rows = db.query(TaiwanStockQuoteSnapshot).join(latest,
+        (TaiwanStockQuoteSnapshot.stock_id == latest.c.stock_id)
+        & (TaiwanStockQuoteSnapshot.quote_time == latest.c.event_at),
+    ).filter(TaiwanStockQuoteSnapshot.market == venue,
+             TaiwanStockQuoteSnapshot.trade_date == requested_at.astimezone(TAIWAN_TZ).date(),
+             TaiwanStockQuoteSnapshot.provider == "twse_mis",
+             TaiwanStockQuoteSnapshot.source == "twse_mis_quote_depth").all()
+    repository = TaiwanPublicQuoteRepository(db)
+    for row in rows:
+        instrument = InstrumentKey(market=Market.TW, venue=venue,
+            symbol=row.stock_id, instrument_type=InstrumentType.STOCK)
+        quote = repository._decode_row(instrument, row).observation
+        if quote is None or quote.last_trade_price is None:
+            continue
+        prior = states.get(row.stock_id)
+        if prior is not None and prior["price_as_of"] >= quote.lineage.event_at:
+            continue
+        states[row.stock_id] = BreadthPriceState(
+            trade_date=quote.trade_date, price=quote.last_trade_price,
+            price_as_of=quote.lineage.event_at, lineage=quote.lineage,
+            previous_close=quote.previous_close,
+            cumulative_volume_lots=row.total_volume_lots,
+        ).model_dump(mode="python")
+    return states
 
 
 __all__ = [

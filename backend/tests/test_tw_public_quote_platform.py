@@ -503,6 +503,37 @@ def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
     )
 
 
+def test_missing_z_retains_original_trade_across_many_receipts(db: Session) -> None:
+    from app.market.public_quote_repository import read_current_stock_price_states
+    from app.market.providers.twse_mis_current_breadth import _build_payload
+    from datetime import timedelta
+    record = _records()["2330"]
+    start = datetime(2026, 8, 25, 10, 0, tzinfo=TAIWAN_TZ)
+    raw = _raw_with_message_updates(record, t="10:00:00", tlong=str(int(start.timestamp() * 1000)), ts="0", z="2400", tv="1", v="10")
+    first = acquire_taiwan_public_last_trade_quote(db, stock_id="2330", policy=RealtimePolicy.PREFER_LIVE,
+        requested_at=start, acquisition=_executor(raw, start))
+    original = first.resolved.quote
+    assert original is not None
+    for offset in (1, 2, 3):
+        now = start + timedelta(minutes=offset)
+        raw = _raw_with_message_updates(record, t=now.strftime("%H:%M:%S"), tlong=str(int(now.timestamp()*1000)), ts="0", z="-", tv="0", v="10")
+        acquire_taiwan_public_last_trade_quote(db, stock_id="2330", policy=RealtimePolicy.PREFER_LIVE,
+            requested_at=now, acquisition=_executor(raw, now))
+    db.expire_all()
+    result = read_taiwan_public_last_trade_quote(db, stock_id="2330", requested_at=now)
+    assert result.resolved.quote.last_trade_price == original.last_trade_price
+    assert result.resolved.quote.lineage.event_at == original.lineage.event_at
+    assert result.resolved.quote.lineage.raw_receipt_id == original.lineage.raw_receipt_id
+    assert result.resolved.quote.latest_observation_lineage.event_at == now
+    assert result.resolved.quote.latest_observation_lineage.raw_receipt_id != original.lineage.raw_receipt_id
+    assert project_taiwan_public_last_trade_quote(result)["freshness"]["is_stale"]
+    states = read_current_stock_price_states(db, venue="TWSE", requested_at=now)
+    payload = _build_payload("TWSE", ["2330"], [{"c":"2330", "d":"20260825", "t":"10:03:00", "z":"-", "y":"2390", "ts":"0", "tv":"0", "v":"10"}], 0, prior_states=states)
+    assert payload["price_states"]["2330"]["price"] == original.last_trade_price
+    assert payload["price_states"]["2330"]["lineage"]["raw_receipt_id"] == original.lineage.raw_receipt_id
+    assert read_current_stock_price_states(db, venue="TWSE", requested_at=now + timedelta(days=1)) == {}
+
+
 def test_session_close_candidate_bound_is_applied_after_role_filter(db: Session) -> None:
     record = _records()["2330"]
     acquire_taiwan_session_close(

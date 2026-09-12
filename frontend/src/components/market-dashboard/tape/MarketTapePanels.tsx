@@ -1,5 +1,7 @@
 "use client";
 
+import { BreadthInfo } from "@/components/market-dashboard/BreadthCoverage";
+
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import {
   formatDashboardTime,
@@ -84,7 +86,7 @@ function taiwanBreadthLabel(t: TranslationFunction, index: MarketIndexSnapshot) 
         : "dashboard.marketIndex.twseFullBreadth"
     );
   }
-  if (breadth.scope === "registered_universe") {
+  if ((breadth.scope === "registered_universe" || breadth.scope === "full_market_registered_stock_universe")) {
     return t("dashboard.marketIndex.registeredBreadth");
   }
   if (breadth.scope === "full_market") {
@@ -148,7 +150,6 @@ export function TaiwanMarketTape({
               breadthStatus !== "pending"
                 ? (breadth.advance_count / breadthCounts.classified) * 100
                 : null;
-            const breadthAsOf = breadth?.snapshot_as_of ?? breadth?.as_of;
             const auction = breadth?.auction_breadth;
 
             return (
@@ -222,7 +223,7 @@ export function TaiwanMarketTape({
                 </div>
                 {breadth ? (
                   <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-omi-text-muted">
-                    <span
+                    {breadth.classified_coverage_ratio === undefined ? <span
                       data-testid={`market-tape-${index.index_id.toLowerCase()}-breadth-coverage`}
                     >
                       {t("dashboard.marketIndex.breadthCoverage", {
@@ -230,14 +231,8 @@ export function TaiwanMarketTape({
                         total: breadth.total_count,
                         unknown: breadthCounts.unknown,
                       })}
-                    </span>
-                    {breadthAsOf ? (
-                      <span>
-                        {t("dashboard.marketIndex.breadthUpdated", {
-                          asOf: formatDashboardTime(new Date(breadthAsOf)),
-                        })}
-                      </span>
-                    ) : null}
+                    </span> : null}
+                    <BreadthInfo breadth={breadth} />
                     {auction?.status === "provisional" ? (
                       <span>
                         {t("dashboard.marketIndex.auctionProvisional", {

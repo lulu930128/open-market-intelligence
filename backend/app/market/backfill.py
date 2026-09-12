@@ -175,9 +175,17 @@ def _existing_market_row_stats(
         .filter(MarketDailyPrice.stock_id == stock_id)
         .filter(MarketDailyPrice.trade_date >= start_date)
         .filter(MarketDailyPrice.trade_date <= end_date)
+        .filter(MarketDailyPrice.open_price > 0)
+        .filter(MarketDailyPrice.high_price > 0)
+        .filter(MarketDailyPrice.low_price > 0)
+        .filter(MarketDailyPrice.close_price > 0)
+        .filter(MarketDailyPrice.high_price >= MarketDailyPrice.open_price)
+        .filter(MarketDailyPrice.high_price >= MarketDailyPrice.close_price)
+        .filter(MarketDailyPrice.low_price <= MarketDailyPrice.open_price)
+        .filter(MarketDailyPrice.low_price <= MarketDailyPrice.close_price)
         .all()
     )
-    dates = [row.trade_date for row in rows]
+    dates = {row.trade_date for row in rows if is_taiwan_trading_day(row.trade_date)}
 
     return len(dates), max(dates) if dates else None
 
@@ -206,13 +214,8 @@ def _minimum_existing_rows_for_skip(
     if expected_trading_day_count <= 0:
         return 0
 
-    if not is_closed_historical_month:
-        return expected_trading_day_count
-
-    if expected_trading_day_count <= 10:
-        return expected_trading_day_count
-
-    return max(1, expected_trading_day_count - 5)
+    # A completed calendar month does not prove complete price history.
+    return expected_trading_day_count
 
 
 def _should_skip_existing_month(

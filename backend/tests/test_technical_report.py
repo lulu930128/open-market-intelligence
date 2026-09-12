@@ -555,7 +555,9 @@ class TechnicalReportTests(unittest.TestCase):
             )
 
         self.assertEqual(report["phase"], "post_close")
-        self.assertEqual(report["title"], "正式日線已發布")
+        self.assertFalse(report["decision_usable"])
+        self.assertIsNone(report["score"])
+        self.assertIn("TW_TECHNICAL_HISTORY_GAP", report["missing"])
         self.assertEqual(report["rows"][0]["key"], "official_close_price")
         self.assertEqual(report["rows"][0]["label"], "正式收盤")
         self.assertEqual(report["rows"][0]["value"], 605.0)
@@ -594,6 +596,76 @@ class TechnicalReportTests(unittest.TestCase):
             "session_volume_complete": False,
             "gap_count": 255,
         }
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 13, 24, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report._canonical_intraday_payload",
+                return_value={
+                    "source": "nstock_minute_stock_data",
+                    "previous_close": 179.0,
+                    "points": points,
+                    "series_coverage": coverage,
+                },
+            ),
+            patch(
+                "app.market.technical_report._current_partial_daily_indicator",
+                side_effect=AssertionError(
+                    "partial coverage must not build provisional OHLCV indicators"
+                ),
+            ),
+            patch(
+                "app.market.technical_report.build_tw_stock_volume_pace",
+                side_effect=AssertionError(
+                    "partial coverage must not compute cumulative volume pace"
+                ),
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        intraday = report["data"]["intraday"]
+        self.assertEqual(report["phase"], "intraday")
+        self.assertEqual(report["title"], "盤中資料涵蓋不完整")
+        self.assertEqual(report["score"], 0)
+        self.assertFalse(intraday["score_eligible"])
+        self.assertIsNone(intraday["stats"]["open"])
+        self.assertIsNone(intraday["stats"]["high"])
+        self.assertIsNone(intraday["stats"]["low"])
+        self.assertIsNone(intraday["stats"]["volume"])
+        self.assertIsNone(intraday["opening_gap_pct"])
+        self.assertIsNone(intraday["price_vs_open_pct"])
+        self.assertEqual(intraday["volume_pace"]["status"], "partial")
+
+    def test_unknown_intraday_coverage_does_not_invent_open_range_or_volume_pace(self) -> None:
+        points = [
+            {
+                "time": f"2026-03-23T11:{25 + index:02d}:00+08:00",
+                "price": 180.0 + index,
+                "open": 180.0 + index,
+                "high": 181.0 + index,
+                "low": 179.0 + index,
+                "volume": 1_000,
+            }
+            for index in range(9)
+        ]
+        points.append(
+            {
+                "time": "2026-03-23T13:24:00+08:00",
+                "price": 190.0,
+                "open": 189.0,
+                "high": 191.0,
+                "low": 188.0,
+                "volume": 1_000,
+            }
+        )
+        coverage = None
         with (
             patch(
                 "app.market.technical_report._now",
@@ -681,7 +753,7 @@ class TechnicalReportTests(unittest.TestCase):
             )
         )
 
-    def test_weekly_and_monthly_reports_return_scored_rows(self) -> None:
+    def test_short_weekly_and_monthly_history_returns_unscored_observations(self) -> None:
         weekly = build_stock_technical_report(
             db=self.db,
             stock_id="2330",
@@ -697,8 +769,10 @@ class TechnicalReportTests(unittest.TestCase):
 
         self.assertEqual(weekly["timeframe"], "weekly")
         self.assertEqual(monthly["timeframe"], "monthly")
-        self.assertIsInstance(weekly["score"], int)
-        self.assertIsInstance(monthly["score"], int)
+        self.assertIsNone(weekly["score"])
+        self.assertFalse(weekly["decision_usable"])
+        self.assertIsNone(monthly["score"])
+        self.assertFalse(monthly["decision_usable"])
         self.assertTrue(weekly["rows"])
         self.assertTrue(monthly["rows"])
 
@@ -755,7 +829,8 @@ class TechnicalReportTests(unittest.TestCase):
 
         analysis = context["data"]["analysis"]
         self.assertEqual(analysis["selected_horizon"], "swing")
-        self.assertEqual(analysis["selected_timeframe"], "weekly")
+        self.assertEqual(analysis["selected_timeframe"], "daily")
+        self.assertIsNone(context["data"]["technical_reports"]["weekly"]["score"])
         self.assertIn("daily", context["data"]["technical_reports"])
         self.assertIn("weekly", context["data"]["technical_reports"])
         self.assertIn("monthly", context["data"]["technical_reports"])
@@ -989,6 +1064,7 @@ class TechnicalReportTests(unittest.TestCase):
                     trade_date=date(2026, 3, 20),
                     snapshot_phase=SimpleNamespace(value="ready"),
                     status=SimpleNamespace(value="complete_session"),
+                    model_dump=lambda **_kwargs: {"status": "complete_session", "missing_bucket_count": 0},
                 ),
                 warnings=(),
                 limitations=(),
@@ -1716,6 +1792,7 @@ class TechnicalReportTests(unittest.TestCase):
                     "previous_close": 180.0,
                     "point_count": len(points),
                     "points": points,
+                    "series_coverage": {"status": "complete_prefix", "opening_covered": True, "current_window_complete": True, "current_cumulative_volume_complete": True},
                 },
             ),
             patch(
