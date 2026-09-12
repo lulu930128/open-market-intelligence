@@ -134,6 +134,8 @@ INTERNAL_DATASET_REFRESH_OPERATIONS = frozenset(
         "us.reconcile_priority_daily_ohlcv",
         "us.ensure_daily_history_coverage",
         "us.refresh_daily_ohlcv",
+        "jp.refresh_daily_ohlcv",
+        "kr.refresh_daily_ohlcv",
     }
 )
 
@@ -193,6 +195,38 @@ def evaluate_dataset_health(
 
 DATASET_REGISTRY = DatasetRegistry(
     (
+        DatasetSpec(
+            dataset_id="kr.daily.ohlcv", schema_version="omi.market.bar.v1", market=Market.KR,
+            scope_kind="kr_stock", owner="app.kr_market.daily_ohlcv_platform.KRDailyOhlcvPlatform",
+            read_operation="read", projection_id="daily.ohlcv.kr_stock.KR", capability_ids=("daily.ohlcv",),
+            frequency=DatasetFrequency.DAILY, expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,
+            eligible_instrument_types=(InstrumentType.STOCK, InstrumentType.ETF),
+            storage_reference="source_registry+raw_fetch_result+kr_bar_evidence", refreshable=True,
+            refresh_operation="kr.refresh_daily_ohlcv", repairable=True,
+            refresh_bounds=RefreshBounds(max_calls=2, timeout_seconds=30, max_symbols=1, max_range_days=3650),
+            postcondition="Persist KR receipts and coherent daily candidates then reread through Shared Gateway; rollout and venue verification remain explicit gates.",
+        ),
+        DatasetSpec(
+            dataset_id="jp.daily.ohlcv",
+            schema_version="omi.market.bar.v1",
+            market=Market.JP,
+            scope_kind="jp_stock",
+            owner="app.jp_market.daily_platform.JPDailyPlatform",
+            read_operation="read",
+            projection_id="daily.ohlcv.jp_stock.JP",
+            capability_ids=("daily.ohlcv",),
+            frequency=DatasetFrequency.DAILY,
+            expected_state_policy=ExpectedStatePolicy.REQUESTED_OR_LATEST_COMPLETED,
+            eligibility_policy=EligibilityPolicy.LISTED_INSTRUMENT_AND_TRADING_DAY,
+            eligible_instrument_types=(InstrumentType.STOCK, InstrumentType.ETF, InstrumentType.INDEX),
+            storage_reference="source_registry+raw_fetch_result+jp_bar_evidence",
+            refreshable=True,
+            refresh_operation="jp.refresh_daily_ohlcv",
+            refresh_bounds=RefreshBounds(max_calls=2, timeout_seconds=30, max_symbols=1, max_range_days=3650),
+            repairable=True,
+            postcondition="Persist receipts and immutable JP daily candidates, then reread through shared quality and resolution; rollout controls production adoption.",
+        ),
         DatasetSpec(
             dataset_id="tw.quote.snapshot",
             schema_version="omi.market.quote.v1",

@@ -533,13 +533,13 @@ def _execute_tool(
     if tool_name.startswith("jp.") and not str(args.get("symbol") or "").strip():
         raise ValueError("symbol is required for Japan market tools.")
     if (
-        tool_name in {"kr.read_stock_intraday_trend", "kr.refresh_daily_price"}
+        tool_name in {"kr.read_stock_intraday_trend", "kr.refresh_stock_intraday_trend", "kr.refresh_daily_price"}
         and not str(args.get("symbol") or "").strip()
     ):
         raise ValueError("symbol is required for Korea stock tools.")
     if (
         tool_name
-        in {"kr.read_index_intraday_trend", "kr.refresh_index_daily_price"}
+        in {"kr.read_index_intraday_trend", "kr.refresh_index_intraday_trend", "kr.refresh_index_daily_price"}
         and not str(args.get("index_id") or "").strip()
     ):
         raise ValueError("index_id is required for Korea index tools.")
@@ -742,8 +742,15 @@ def _execute_tool(
     if tool_name == "jp.read_intraday_trend":
         return jp_market_service.get_jp_intraday_trend(
             symbol=normalize_jp_symbol(str(args.get("symbol") or "")),
+            db=db, refresh=False, external_fetch_allowed=False,
+        )
+
+    if tool_name == "jp.refresh_intraday_trend":
+        return jp_market_service.get_jp_intraday_trend(
+            symbol=normalize_jp_symbol(str(args.get("symbol") or "")),
             db=db,
             refresh=True,
+            external_fetch_allowed=True,
         )
 
     if tool_name == "jp.refresh_daily_price":
@@ -758,14 +765,25 @@ def _execute_tool(
         return kr_market_service.get_kr_stock_intraday_trend(
             db=db,
             symbol=normalize_kr_symbol(str(args.get("symbol") or "")),
-            refresh=True,
+            external_fetch_allowed=False,
+        )
+
+    if tool_name == "kr.refresh_stock_intraday_trend":
+        return kr_market_service.refresh_kr_stock_intraday_trend(
+            db=db, symbol=normalize_kr_symbol(str(args.get("symbol") or "")),
+        )
+
+    if tool_name == "kr.refresh_index_intraday_trend":
+        return kr_market_service.refresh_kr_index_intraday_trend(
+            db=db, index_id=normalize_kr_index_id(str(args.get("index_id") or "")),
+            max_pages=1,
         )
 
     if tool_name == "kr.read_index_intraday_trend":
         return kr_market_service.get_kr_index_intraday_trend(
             db=db,
             index_id=normalize_kr_index_id(str(args.get("index_id") or "")),
-            refresh=True,
+            external_fetch_allowed=False,
         )
 
     if tool_name == "kr.refresh_daily_price":

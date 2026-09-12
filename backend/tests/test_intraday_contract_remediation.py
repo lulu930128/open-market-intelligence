@@ -2158,9 +2158,11 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(quote["market_status"], "closed_holiday")
         self.assertEqual(
             quote["quote_semantics"],
-            "latest_completed_session_trade",
+            "intraday_bar_close_reference",
         )
-        self.assertTrue(quote["last_trade_available"])
+        self.assertFalse(quote["last_trade_available"])
+        self.assertTrue(quote["price_available"])
+        self.assertFalse(quote["decision_usable"])
         self.assertFalse(quote["depth_available"])
         self.assertFalse(quote["indicative_match_available"])
         self.assertEqual(quote["session_phase"], "market_closed")
@@ -2194,9 +2196,11 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(quote["market_status"], "open")
         self.assertEqual(
             quote["quote_semantics"],
-            "delayed_current_session_trade",
+            "intraday_bar_close_reference",
         )
-        self.assertTrue(quote["last_trade_available"])
+        self.assertFalse(quote["last_trade_available"])
+        self.assertFalse(quote["decision_usable"])
+        self.assertIsNone(quote["last_trade_price"])
         self.assertFalse(quote["depth_available"])
         self.assertFalse(quote["indicative_match_available"])
 

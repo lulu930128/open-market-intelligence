@@ -4829,6 +4829,31 @@ class JPDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class JPBarEvidence(Base):
+    """Immutable JP canonical bar revisions; raw payloads live in RawFetchResult."""
+
+    __tablename__ = "jp_bar_evidence"
+    __table_args__ = (
+        UniqueConstraint("observation_id", name="uq_jp_bar_evidence_observation"),
+        Index("ix_jp_bar_evidence_read", "symbol", "venue", "interval", "trade_date", "available_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observation_id: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(64))
+    venue: Mapped[str] = mapped_column(String(32))
+    instrument_type: Mapped[str] = mapped_column(String(24))
+    provider: Mapped[str] = mapped_column(String(64))
+    interval: Mapped[str] = mapped_column(String(16))
+    trade_date: Mapped[date] = mapped_column(Date)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    price_basis: Mapped[str] = mapped_column(String(24))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_result_id: Mapped[int] = mapped_column(ForeignKey("raw_fetch_result.id"))
+    observation_json: Mapped[str] = mapped_column(Text)
+
+
 class JPCompanyFundamental(Base):
     __tablename__ = "jp_company_fundamental"
 
@@ -5056,6 +5081,28 @@ class JPWatchlistItem(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class KRBarEvidence(Base):
+    """Immutable receipt-backed KR bars; legacy price tables remain untouched."""
+
+    __tablename__ = "kr_bar_evidence"
+    __table_args__ = (
+        UniqueConstraint("observation_id", name="uq_kr_bar_evidence_observation"),
+        Index("ix_kr_bar_evidence_read", "symbol", "venue", "interval", "trade_date", "available_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observation_id: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(64))
+    venue: Mapped[str] = mapped_column(String(32))
+    provider: Mapped[str] = mapped_column(String(64))
+    interval: Mapped[str] = mapped_column(String(16))
+    trade_date: Mapped[date] = mapped_column(Date)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    raw_result_id: Mapped[int] = mapped_column(ForeignKey("raw_fetch_result.id"))
+    observation_json: Mapped[str] = mapped_column(Text)
+    observation_hash: Mapped[str] = mapped_column(String(64))
 
 
 class KRStockMaster(Base):

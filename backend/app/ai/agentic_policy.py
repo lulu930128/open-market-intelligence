@@ -154,8 +154,15 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
     ),
     "jp.read_intraday_trend": ToolDefinition(
         name="jp.read_intraday_trend",
+        description="Read persisted Japan intraday trend for one symbol.",
+        external_fetch=False,
+        writes_cache=False,
+    ),
+    "jp.refresh_intraday_trend": ToolDefinition(
+        name="jp.refresh_intraday_trend",
         description="Fetch a bounded same-session Japan intraday trend for one symbol.",
         external_fetch=True,
+        writes_cache=True,
     ),
     "jp.refresh_daily_price": ToolDefinition(
         name="jp.refresh_daily_price",
@@ -165,18 +172,30 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
     ),
     "kr.read_stock_intraday_trend": ToolDefinition(
         name="kr.read_stock_intraday_trend",
-        description="Fetch a bounded same-session Korea stock intraday trend.",
-        external_fetch=True,
-        writes_cache=True,
+        description="Read persisted Korea stock intraday trend.",
+        external_fetch=False,
+        writes_cache=False,
     ),
     "kr.read_index_intraday_trend": ToolDefinition(
         name="kr.read_index_intraday_trend",
-        description="Fetch a bounded same-session Korea index intraday trend.",
-        external_fetch=True,
+        description="Read persisted Korea index intraday trend.",
+        external_fetch=False,
     ),
     "kr.refresh_daily_price": ToolDefinition(
         name="kr.refresh_daily_price",
         description="Refresh bounded Korea stock daily OHLCV cache.",
+        external_fetch=True,
+        writes_cache=True,
+    ),
+    "kr.refresh_stock_intraday_trend": ToolDefinition(
+        name="kr.refresh_stock_intraday_trend",
+        description="Refresh bounded Korea stock intraday bars into the local cache.",
+        external_fetch=True,
+        writes_cache=True,
+    ),
+    "kr.refresh_index_intraday_trend": ToolDefinition(
+        name="kr.refresh_index_intraday_trend",
+        description="Refresh bounded Korea index intraday observations.",
         external_fetch=True,
         writes_cache=True,
     ),

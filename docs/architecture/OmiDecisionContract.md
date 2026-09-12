@@ -504,6 +504,10 @@ Market source-health-only read 不附帶建立市場 breadth 或 daily universe�
 
 Reader 內的 canonical provider attempts 另傳入 refresh reconciliation；它可以回報 provider fetch attempted 而 tool run attempted 為 false，不虛構額外 tool invocation。MCP schema fallback 由 backend public-contract generator 產生；source snapshot 通過不代表外部 client 已 reload。
 
+KR canonical daily 的 gated consumer 使用同一 Shared Gateway resolved series；`daily.ohlcv` 保留 price basis、listing board／venue、coverage／missing dates 與每點 receipt lineage。日期 current 與 venue scope verified 是不同條件；未知 provider venue coverage 不取得 decision usability。History command 必須驗證所需 coverage，不能只因最新一天存在而略過補歷史；補取仍不足時只能保留獨立的 partial facts。
+
+KR intraday bar close 是 market-owned price reference，不能宣稱是獨立 last trade、live quote 或可供盤中決策。Daily close reference 不合成 minute bar 或補造 minute volume。Source Health 的保存快照 freshness 與 `resolved_datasets` 的當前 canonical health 分開；KR dataset 帶有 active reader 與 rollout status，disabled／missing 不得因舊 provider snapshot 正常而升格。所有上述欄位由 v4 共用 projection 保留到 HTTP／MCP。
+
 - Contract：v4 normal、partial、clarification、rejected、timeout、fallback，
   並驗證 public v2/v3 rejection。
 - Selection：unknown/incompatible capability、field allowlist、limits、byte budget。

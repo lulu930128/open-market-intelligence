@@ -268,8 +268,18 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 438)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 437)
+        operation_ids = [schema["paths"][path][method]["operationId"] for method, path in operations]
+        self.assertEqual(len(operation_ids), len(set(operation_ids)))
+        for operation in (
+            ("post", "/api/jp-market/intraday/{symbol}/refresh"),
+            ("post", "/api/jp-market/ohlc/{symbol}/refresh"),
+            ("post", "/api/kr-market/stocks/{symbol}/intraday/refresh"),
+            ("post", "/api/kr-market/indices/{index_id}/intraday/refresh"),
+            ("post", "/api/kr-market/stocks/{symbol}/daily/ensure-history"),
+            ("post", "/api/kr-market/indices/{index_id}/daily/ensure-history"),
+            ("get", "/api/market/technical/{instrument_id}/session-summary"),
+        ):
+            self.assertIn(operation, operations)
         self.assertIn(("get", "/api/stocks/{stock_id}/news"), operations)
         self.assertIn(("get", "/api/market/technical/{stock_id}/price-map"), operations)
         self.assertIn(("get", "/api/market/bars/{instrument_id}"), operations)

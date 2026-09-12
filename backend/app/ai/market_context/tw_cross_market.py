@@ -5,6 +5,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.jp_market.daily_projection import read_daily_context_asset
 from app.ai.agentic_common import _json_value
 from app.db.models import (
     CryptoTickerSnapshot,
@@ -236,6 +238,8 @@ def read_tw_cross_market_context(
         for symbol, label in US_TARGETS
     ]
     jp_assets = [
+        read_daily_context_asset(db, symbol=symbol, label=label, now=now)
+        if settings.jp_canonical_daily_mode == "on" else
         _daily_asset(
             db,
             model=JPDailyPrice,

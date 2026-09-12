@@ -115,6 +115,15 @@ COMPOSITE_OPERATIONS_WRITING_CACHE = frozenset(
 # These tools remain useful backend conveniences or compatibility aliases, but
 # they must not become a second public owner for the same capability.
 INTERNAL_ONLY_OPERATIONS: dict[str, str] = {
+    "jp.read_intraday_trend": "Cache-only JP context reader; acquisition is owned by jp.refresh_intraday_trend.",
+    "kr.read_stock_intraday_trend": (
+        "Cache-only KR reader; kr.refresh_stock_intraday_trend owns intraday fill. "
+        "KR service owns compatibility until consumer migration and runtime parity are accepted."
+    ),
+    "kr.read_index_intraday_trend": (
+        "Cache-only KR reader; kr.refresh_index_intraday_trend owns intraday fill. "
+        "KR service owns compatibility until consumer migration and runtime parity are accepted."
+    ),
     "tw.refresh_stock_evidence": (
         "Composite Taiwan stock convenience tool; public fill planning prefers "
         "the signed granular actions for each selected capability."

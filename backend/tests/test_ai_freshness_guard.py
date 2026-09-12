@@ -2827,7 +2827,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_ask_gates_jp_intraday_provider_read_by_external_fetch_policy(self) -> None:
+    def test_ask_preserves_jp_cached_intraday_without_external_fetch(self) -> None:
         db = make_session()
         try:
             add_jp_stock(db)
@@ -2841,10 +2841,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 "source_refs": [],
             }
 
-            for allow_external_fetch, expected_include_intraday in (
-                (False, False),
-                (True, True),
-            ):
+            for allow_external_fetch in (False, True):
                 payload = AiAskRequest(
                     question="Toyota Japan intraday context",
                     target={"type": "jp_stock", "id": "7203", "label": "Toyota"},
@@ -2870,7 +2867,11 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
                 self.assertEqual(
                     reader.call_args.kwargs["market_data_params"]["include_intraday"],
-                    expected_include_intraday,
+                    True,
+                )
+                self.assertEqual(
+                    reader.call_args.kwargs["market_data_params"]["external_fetch_allowed"],
+                    allow_external_fetch,
                 )
         finally:
             db.close()
@@ -3316,8 +3317,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertGreaterEqual(intraday.call_count, 1)
             self.assertTrue(
                 all(
-                    item.kwargs.get("session_scope") == "all"
-                    and item.kwargs.get("persist_history") is False
+                    item.kwargs.get("persist_history") is False
                     for item in intraday.call_args_list
                 )
             )

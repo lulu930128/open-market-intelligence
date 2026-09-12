@@ -1124,8 +1124,9 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertTrue(result["summary"]["intraday"]["is_current"])
         self.assertEqual(
             result["data"]["compact"]["intraday_readiness"]["status"],
-            "ready",
+            "limited",
         )
+        self.assertFalse(result["data"]["compact"]["intraday_readiness"]["usable_for_intraday"])
         self.assertTrue(
             result["data"]["compact"]["intraday_readiness"][
                 "independent_of_daily"

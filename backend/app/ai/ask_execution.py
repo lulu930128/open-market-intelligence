@@ -168,14 +168,31 @@ def _external_intraday_market_data_params(
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     params = _market_data_params(payload, policy=policy)
+    query_plan = policy.get("query_plan", {}) if isinstance(policy, dict) else {}
+    query_plan = query_plan if isinstance(query_plan, dict) else {}
+    selected = set(query_plan.get("selected_capabilities") or ()) | set(
+        query_plan.get("optional_selected_capabilities") or ()
+    )
+    if selected:
+        params["requested_capabilities"] = sorted(selected)
+    selection = query_plan.get("selection")
+    limits = selection.get("limits", {}) if isinstance(selection, dict) else {}
+    if isinstance(limits, dict):
+        for capability, parameter in (("daily.ohlcv", "bars"), ("intraday.bars", "intraday_limit")):
+            limit = limits.get(capability)
+            if capability in selected and isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+                params.setdefault(parameter, limit)
     has_explicit_intraday = "include_intraday" in params
-    requested_intraday = bool(params.get("include_intraday")) if has_explicit_intraday else payload.analysis_horizon == "intraday"
+    requested_intraday = bool(params.get("include_intraday")) if has_explicit_intraday else (
+        payload.analysis_horizon == "intraday" or bool(selected & {"intraday.bars", "quote.snapshot"})
+    )
     if not requested_intraday or (has_explicit_intraday and not params.get("include_intraday")):
         return params
 
     params["include_intraday"] = bool(
         params.get("external_fetch_allowed")
         or params.get("realtime_policy") == "cache_only"
+        or params.get("fallback_to_cached")
     )
     return params
 

@@ -765,7 +765,7 @@ def run_regional_market_tool_session(
         if wants_intraday:
             steps.append(
                 {
-                    "tool": "jp.read_intraday_trend",
+                    "tool": "jp.refresh_intraday_trend",
                     "args": {"symbol": normalized_id},
                     "reason": "A bounded current-session Japan quote was selected.",
                 }
@@ -800,16 +800,16 @@ def run_regional_market_tool_session(
             steps.append(
                 {
                     "tool": (
-                        "kr.read_index_intraday_trend"
+                        "kr.refresh_index_intraday_trend"
                         if is_index
-                        else "kr.read_stock_intraday_trend"
+                        else "kr.refresh_stock_intraday_trend"
                     ),
                     "args": (
                         {"index_id": normalized_id}
                         if is_index
                         else {"symbol": normalized_id}
                     ),
-                    "reason": "A bounded current-session Korea quote was selected.",
+                    "reason": "Bounded Korea intraday evidence refresh was selected.",
                 }
             )
     else:
@@ -1221,11 +1221,17 @@ def read_unified_source_health_context(
     *,
     market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return source_health_context.read_unified_source_health_context(
+    result = source_health_context.read_unified_source_health_context(
         db=db,
         market_data_params=market_data_params,
         now=_now,
     )
+    filters = result["data"]["filters"]
+    if filters.get("market") == "kr" and filters.get("target"):
+        from app.kr_market.source_health import read_kr_resolved_dataset_health
+        datasets = read_kr_resolved_dataset_health(db, target=filters["target"], now=result["generated_at"])
+        result["data"]["resolved_datasets"] = datasets
+    return result
 
 
 def read_capability_status(

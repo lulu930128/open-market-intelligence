@@ -441,7 +441,9 @@ class Settings(BaseSettings):
     us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
     us_market_http_timeout_seconds: int = 30
     jp_market_http_timeout_seconds: int = 30
+    jp_canonical_daily_mode: Literal["off", "shadow", "on"] = "off"
     kr_market_http_timeout_seconds: int = 30
+    kr_canonical_daily_enabled: bool = False
     resource_market_http_timeout_seconds: int = 15
     jquants_api_base_url: str = "https://api.jquants.com/v2"
     jquants_api_key: str | None = None

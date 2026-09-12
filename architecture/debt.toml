@@ -26,16 +26,6 @@ closure_gate = "Backend policy owns selection and the production request no long
 new_occurrences_allowed = false
 
 [[debt]]
-id = "frontend-jp-ranking-refresh-provider"
-rule = "frontend_provider_selection"
-path = "frontend/src/components/market-dashboard/ranking/useJpRankingState.ts"
-occurrence = 'requestBackfillJob:request:/api/jp-market/watchlists/groups/${currentGroupId}/refresh-daily:provider:"auto"'
-reason = "Legacy JP ranking refresh still sends provider=auto from a production consumer."
-owner = "JP market API and frontend owners"
-closure_gate = "Backend policy owns selection and the production request no longer sends provider."
-new_occurrences_allowed = false
-
-[[debt]]
 id = "frontend-kr-ranking-refresh-provider"
 rule = "frontend_provider_selection"
 path = "frontend/src/components/market-dashboard/ranking/useKrRankingState.ts"
@@ -43,76 +33,6 @@ occurrence = 'requestBackfillJob:request:/api/kr-market/watchlists/groups/${curr
 reason = "Legacy KR ranking refresh still sends provider=auto from a production consumer."
 owner = "KR market API and frontend owners"
 closure_gate = "Backend policy owns selection and the production request no longer sends provider."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-jp-intraday-refresh"
-rule = "get_side_effect"
-path = "backend/app/routers/jp_market.py"
-occurrence = "get_jp_intraday_trend_api:keyword:get_jp_intraday_trend:refresh"
-reason = "Legacy JP GET forwards a dynamic refresh flag to the service."
-owner = "JP market API owner"
-closure_gate = "GET is cache-only and explicit refresh uses a bounded command route."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-jp-ohlc-ensure-history"
-rule = "get_side_effect"
-path = "backend/app/routers/jp_market.py"
-occurrence = "get_jp_ohlc_chart_data:keyword:list_jp_ohlc_chart_data:ensure_history"
-reason = "Legacy JP OHLC GET forwards ensure_history."
-owner = "JP market API owner"
-closure_gate = "GET rejects or removes ensure_history and history acquisition uses an explicit command."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-kr-index-intraday-refresh"
-rule = "get_side_effect"
-path = "backend/app/routers/kr_market.py"
-occurrence = "get_kr_index_intraday_chart:keyword:get_kr_index_intraday_trend:refresh"
-reason = "Legacy KR index intraday GET forwards a dynamic refresh flag."
-owner = "KR market API owner"
-closure_gate = "GET is cache-only and explicit refresh uses a bounded command route."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-kr-index-intraday-reload-all"
-rule = "get_side_effect"
-path = "backend/app/routers/kr_market.py"
-occurrence = "get_kr_index_intraday_chart:keyword:get_kr_index_intraday_trend:reload_all"
-reason = "Legacy KR index intraday GET forwards reload_all."
-owner = "KR market API owner"
-closure_gate = "GET cannot request reload_all; bounded reload moves to an explicit command."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-kr-index-ohlc-ensure-history"
-rule = "get_side_effect"
-path = "backend/app/routers/kr_market.py"
-occurrence = "get_kr_index_ohlc_chart:keyword:list_kr_index_ohlc_chart_data:ensure_history"
-reason = "Legacy KR index OHLC GET forwards ensure_history."
-owner = "KR market API owner"
-closure_gate = "GET rejects or removes ensure_history and history acquisition uses an explicit command."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-kr-stock-ohlc-ensure-history"
-rule = "get_side_effect"
-path = "backend/app/routers/kr_market.py"
-occurrence = "get_kr_ohlc_chart_data:keyword:list_kr_ohlc_chart_data:ensure_history"
-reason = "Legacy KR stock OHLC GET forwards ensure_history."
-owner = "KR market API owner"
-closure_gate = "GET rejects or removes ensure_history and history acquisition uses an explicit command."
-new_occurrences_allowed = false
-
-[[debt]]
-id = "get-kr-stock-intraday-refresh"
-rule = "get_side_effect"
-path = "backend/app/routers/kr_market.py"
-occurrence = "get_kr_stock_intraday_chart:keyword:get_kr_stock_intraday_trend:refresh"
-reason = "Legacy KR stock intraday GET forwards a dynamic refresh flag."
-owner = "KR market API owner"
-closure_gate = "GET is cache-only and explicit refresh uses a bounded command route."
 new_occurrences_allowed = false
 
 [[debt]]
