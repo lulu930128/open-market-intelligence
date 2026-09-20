@@ -386,6 +386,7 @@ type USSupplementalData = {
 };
 
 type USIntradayMeta = {
+  sessionSummary: IntradayTrendResponse["session_summary"];
   sessionCoverage: USIntradaySessionCoverage | null;
   sessionPhase: string | null;
   marketPhase: string | null;
@@ -406,6 +407,7 @@ type USIntradayMeta = {
 };
 
 const emptyUsIntradayMeta: USIntradayMeta = {
+  sessionSummary: null,
   sessionCoverage: null,
   sessionPhase: null,
   marketPhase: null,
@@ -452,6 +454,12 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
       : response.current_observation?.value ?? null;
   return {
     sessionCoverage: sessionCoverage ?? null,
+    sessionSummary: response.session_summary?.contract_version === "us.chart.session_summary.v1"
+      && response.session_summary.base_interval === "1m" && response.session_summary.metrics != null
+      && response.session_summary.instrument_id === (response.symbol ?? response.stock_id)
+      && response.session_summary.trade_date === sessionCoverage?.trade_date
+      && response.session_summary.session_scope === response.session_scope
+      ? response.session_summary : null,
     sessionPhase: response.session_phase ?? null,
     marketPhase: response.market_phase ?? null,
     regularPointCount:
@@ -758,6 +766,7 @@ const usIntradaySession: IntradaySessionConfig = {
   getXRatio: getUsIntradayXRatio,
   isRegularSessionPoint: isUsRegularSessionPoint,
   volumeFormatter: formatVolume,
+  timestampFormatter: (value) => `${formatDateTime(value)} ET`,
 };
 
 const usExtendedIntradaySession: IntradaySessionConfig = {
@@ -776,6 +785,7 @@ const usExtendedIntradaySession: IntradaySessionConfig = {
   getXRatio: getUsExtendedIntradayXRatio,
   isRegularSessionPoint: isUsExtendedSessionPoint,
   volumeFormatter: formatVolume,
+  timestampFormatter: (value) => `${formatDateTime(value)} ET`,
 };
 
 function usIntradaySessionConfigForScope(scope: USIntradaySessionScope) {
@@ -1099,6 +1109,7 @@ export default function USStockDetailPanel({
   const [institutionalHoldings, setInstitutionalHoldings] =
     useState<USSec13FInstitutionalHoldingsRead | null>(null);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
+  const [intradayDetailsTarget, setIntradayDetailsTarget] = useState<HTMLDivElement | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
   const [todayIntradayMeta, setTodayIntradayMeta] = useState<USIntradayMeta>(emptyUsIntradayMeta);
@@ -3994,7 +4005,8 @@ export default function USStockDetailPanel({
                   </button>
                 ))}
               </div>
-              <div className="mt-2 flex items-start justify-end gap-2">
+              <div className="relative mt-2 flex items-start justify-end gap-2">
+                {timeframe === "today" ? <div ref={setIntradayDetailsTarget} /> : null}
                 {timeframe === "today" ? (
                   <div className="relative">
                     <button
@@ -4089,7 +4101,7 @@ export default function USStockDetailPanel({
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <div className="text-xs font-semibold uppercase text-omi-text-muted">
-                      {t("usStockDetail.extendedHours.title")}
+                      {timeframeLabel(t, "today")} · {sessionScopeLabel(t, intradaySessionScope)}
                     </div>
                     <div className="mt-1 text-xs text-omi-text-muted">
                       {intradaySessionMetaLine}
@@ -4154,8 +4166,14 @@ export default function USStockDetailPanel({
                   data-reference-trade-date={todayPreviousCloseReferenceDate ?? ""}
                 >
                   <IntradayTrendChart
+                    detailsTarget={intradayDetailsTarget}
                     points={visibleTodayTrend}
-                    previousClose={todayHistoricalReferencePrice}
+                    previousClose={visibleTodayIntradayMeta.sessionSummary
+                      ? visibleTodayIntradayMeta.sessionSummary.metrics.reference?.value ?? null
+                      : todayHistoricalReferencePrice}
+                    sessionSummary={visibleTodayIntradayMeta.sessionSummary}
+                    sessionSummaryStatus={visibleTodayIntradayMeta.sessionSummary ? "ready" : undefined}
+                    historyStatus={visibleTodayIntradayMeta.sessionCoverage?.coverage_status}
                     label={
                       selectedIndexConfig
                         ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
@@ -4164,6 +4182,7 @@ export default function USStockDetailPanel({
                     source={visibleTodaySource}
                     indicators={intradayIndicators}
                     session={activeIntradaySession}
+                    volumeLabel={t(selectedIndexConfig ? "usStockDetail.metrics.volume" : "usStockDetail.metrics.volumeShares")}
                     revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
                     refreshIntervalMs={US_INTRADAY_REFRESH_MS}
                     refreshMode="cache_poll"

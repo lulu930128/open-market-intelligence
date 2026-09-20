@@ -39,7 +39,7 @@ test.describe("Taiwan Stock Detail Radar V2 live acceptance", () => {
       await expect(priceMap).toHaveAttribute("data-stock-id", sample.stockId);
       await expect(priceMap).toHaveAttribute(
         "data-version",
-        "tw.stock.price_map.v3",
+        "tw.stock.price_map.v4",
         { timeout: 30_000 }
       );
       await expect(priceMap).toHaveAttribute(

@@ -1,6 +1,6 @@
 "use client";
 
-import { BreadthCoverage, CompactBreadthCoverage, OfficialBreadthComparison, resolveLimitMetric } from "@/components/market-dashboard/BreadthCoverage";
+import { HistoricalAuctionBreadth, BreadthCoverage, CompactBreadthCoverage, OfficialBreadthComparison, resolveLimitMetric } from "@/components/market-dashboard/BreadthCoverage";
 
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import { summarizeIntradayPoints } from "@/components/stock-detail/stockDetailAnalytics";
@@ -508,7 +508,7 @@ export function IndexDetailDataPanel({
               })
             : t("stockDetail.dataViews.indexDetail.breadthPending")}
         </div>
-        {breadth ? <BreadthCoverage breadth={breadth} /> : null}
+        {breadth ? <BreadthCoverage breadth={breadth} /> : <HistoricalAuctionBreadth auctions={index?.latest_completed_auctions} />}
         <OfficialBreadthComparison lanes={index?.breadth_lanes} />
         {breadth?.classified_coverage_ratio === undefined && breadthCoverageText ? <div>{breadthCoverageText}</div> : null}
         {breadth?.snapshot_as_of || breadth?.as_of ? (

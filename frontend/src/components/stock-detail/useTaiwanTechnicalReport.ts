@@ -5,6 +5,7 @@ import type {
   Timeframe,
 } from "@/components/stock-detail/StockDetailDataViews";
 import { fetchJson } from "@/lib/api";
+import { useTechnicalSettingsRevision } from "@/lib/technicalSettingsRevision";
 import type { StockTechnicalReportRead } from "@/types/market";
 import { useEffect, useRef, useState } from "react";
 
@@ -23,8 +24,10 @@ export function useTaiwanTechnicalReport({
   stockId: string | null;
 }) {
   const [report, setReport] = useState<StockTechnicalReportRead | null>(null);
+  const [reportSettingsRevision, setReportSettingsRevision] = useState(-1);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const activeStockIdRef = useRef(stockId);
+  const settingsRevision = useTechnicalSettingsRevision();
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -42,6 +45,7 @@ export function useTaiwanTechnicalReport({
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     let initialTimer: number | undefined;
     let refreshTimer: number | undefined;
     let requestInFlight = false;
@@ -62,11 +66,15 @@ export function useTaiwanTechnicalReport({
             timeframe: requestedTimeframe,
             include_intraday: includeIntraday,
             include_volume_pace: includeVolumePace,
-          }
+          },
+          // Historical canonical calculations can outlast the generic 20s read
+          // budget under load. Keep a bounded deadline and cancel on view changes.
+          { signal: controller.signal, timeoutMs: 60_000 }
         );
 
         if (cancelled || activeStockIdRef.current !== requestedStockId) return;
         setReport(nextReport);
+        setReportSettingsRevision(settingsRevision);
         setLoadState("success");
       } catch {
         // Keep the last matching cache projection on a transient request failure.
@@ -94,13 +102,14 @@ export function useTaiwanTechnicalReport({
 
     return () => {
       cancelled = true;
+      controller.abort();
       if (initialTimer !== undefined) window.clearTimeout(initialTimer);
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
     };
-  }, [effectiveTimeframe, enabled, isIndexProduct, stockId]);
+  }, [effectiveTimeframe, enabled, isIndexProduct, stockId, settingsRevision]);
 
   const currentReport =
-    report?.stock_id === stockId && report.timeframe === effectiveTimeframe
+    reportSettingsRevision === settingsRevision && report?.stock_id === stockId && report.timeframe === effectiveTimeframe
       ? report
       : null;
   const scopedLoadState: LoadState =

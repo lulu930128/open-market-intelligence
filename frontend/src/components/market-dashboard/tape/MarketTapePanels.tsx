@@ -1,6 +1,6 @@
 "use client";
 
-import { BreadthInfo } from "@/components/market-dashboard/BreadthCoverage";
+import { BreadthInfo, HistoricalAuctionBreadth } from "@/components/market-dashboard/BreadthCoverage";
 
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import {
@@ -244,6 +244,7 @@ export function TaiwanMarketTape({
                     ) : null}
                   </div>
                 ) : null}
+                {!breadth ? <HistoricalAuctionBreadth auctions={index.latest_completed_auctions} /> : null}
               </div>
             );
           })

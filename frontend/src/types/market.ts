@@ -890,6 +890,13 @@ export type TaiwanBarOutwardState = {
   technical_eligible: boolean;
 };
 
+export type TaiwanBarReadDiagnostics = {
+  snapshot_cache_status: "hit" | "miss" | "bypassed" | "not_used";
+  canonical_store_status: "hit" | "miss";
+  final_series_revision: string;
+  storage_revision: string | null;
+};
+
 export type TaiwanBarSeriesRead = {
   contract_version: string;
   instrument: TaiwanInstrumentKey;
@@ -934,6 +941,7 @@ export type TaiwanBarSeriesRead = {
     repair_recommended: boolean;
     repair_operation_id: string | null;
   } | null;
+  read_diagnostics?: TaiwanBarReadDiagnostics | null;
   identity: {
     series_fingerprint: string;
     lineage_digest: string;
@@ -961,6 +969,33 @@ export type TaiwanChartPresentationEvent = {
   provider: string;
   source: string;
   volume: TaiwanCanonicalQuantity | null;
+  evidence_id?: string | null;
+  evidence?: {
+    official_close_price: number | null;
+    official_close_trade_date: string | null;
+    official_close_event_time: string | null;
+    official_close_provider: string | null;
+    official_close_source: string | null;
+    session_close_price: number | null;
+    session_close_trade_date: string | null;
+    session_close_event_time: string | null;
+    session_close_provider: string | null;
+    session_close_source: string | null;
+    closing_match_volume_shares: number | null;
+    closing_match_volume_lots: number | null;
+    closing_match_volume_semantics: string | null;
+    closing_match_volume_source_field: string | null;
+    session_cumulative_volume_shares: number | null;
+    session_cumulative_volume_lots: number | null;
+    session_cumulative_volume_trade_date: string | null;
+    session_cumulative_volume_event_time: string | null;
+    session_cumulative_volume_source_field: string | null;
+    volume_provider: string | null;
+    volume_source: string | null;
+    volume_event_time: string | null;
+    volume_status: string | null;
+    volume_scope: string | null;
+  } | null;
   display_eligible: boolean;
   technical_eligible: false;
 };
@@ -1038,10 +1073,15 @@ export type TaiwanTechnicalCapabilityContract = {
   calculation_owner: "TaiwanTechnicalService" | string;
   parameter_contract: {
     authority: "backend" | string;
+    parameter_revision?: string;
     defaults: Record<string, unknown>;
     ranges: Record<string, unknown>;
   };
-  indicators: Record<string, { status: "available" | "pending" | string }>;
+  indicators: Record<string, {
+    status: "available" | "pending" | string;
+    applicable_intervals?: string[];
+    non_applicable_intervals?: string[];
+  }>;
   frontend_fallback_allowed: false;
 };
 
@@ -1134,9 +1174,26 @@ export type MarketBreadth = {
   missing_count?: number | null;
   warnings?: string[];
   source: string | null;
-  trade_value_is_estimate?: boolean;
+  trade_value_is_estimate?: boolean | null;
   trade_value_semantics?: string | null;
   trade_value_confidence?: string | null;
+  latest_completed_auctions?: Array<{
+    status: "historical";
+    venue: string;
+    trade_date: string;
+    market_session: string;
+    as_of: string;
+    received_at: string;
+    advance_count: number;
+    decline_count: number;
+    unchanged_count: number;
+    coverage_count: number;
+    unknown_count: number;
+    universe_count: number;
+    is_provisional: true;
+    decision_usable: false;
+    freshness: { status: "historical"; is_current: false; is_live: false };
+  }>;
   auction_breadth?: {
     market: string;
     status: string;
@@ -1199,6 +1256,7 @@ export type MarketIndexSnapshot = {
   point_count: number;
   points: ChartPoint[];
   breadth: MarketBreadth | null;
+  latest_completed_auctions?: MarketBreadth["latest_completed_auctions"];
   breadth_lanes?: {
     status: string;
     official_daily?: Partial<MarketBreadth> | null;
@@ -1294,7 +1352,14 @@ export type TaiwanFuturesMarketStatus = {
   next_session_end_at: string | null;
 };
 
-export type TaiwanFuturesQuote = {
+export type TaiwanFuturesVolume = {
+  instrument_type?: "futures";
+  volume_unit?: "contracts" | null;
+  volume_semantics?: "interval_contracts" | "session_cumulative_contracts" | "trading_day_contracts" | null;
+  volume_contract_version?: string | null;
+};
+
+export type TaiwanFuturesQuote = TaiwanFuturesVolume & {
   id: number;
   provider: string;
   market: string;
@@ -1340,7 +1405,7 @@ export type TaiwanFuturesQuote = {
   updated_at: string;
 };
 
-export type TaiwanFuturesDailyBar = {
+export type TaiwanFuturesDailyBar = TaiwanFuturesVolume & {
   id: number;
   provider: string;
   market: string;
@@ -1385,7 +1450,7 @@ export type TaiwanFuturesDailyRefresh = {
   rows: TaiwanFuturesDailyBar[];
 };
 
-export type TaiwanFuturesIntradayBar = {
+export type TaiwanFuturesIntradayBar = TaiwanFuturesVolume & {
   id: number;
   provider: string;
   market: string;
@@ -1863,6 +1928,7 @@ export type TaiwanIntradaySeriesCoverage = {
 };
 
 export type IntradayTrendResponse = {
+  session_summary?: import("./chartSessionSummary").ChartSessionSummary | null;
   stock_id: string;
   symbol: string | null;
   source: string;
@@ -2035,6 +2101,24 @@ export type TaiwanChangeReferenceRead = {
   auction_usable: boolean;
 };
 
+export type TaiwanAuctionHistoryRead = {
+  stock_id: string;
+  trade_date: string;
+  auction_type: string;
+  requested_as_of: string;
+  event_time: string | null;
+  capture_status: "captured" | "missing";
+  historical: true;
+  provisional: true;
+  price_semantics: "indicative";
+  decision_usable: false;
+  indicator_usable: false;
+  execution_grade_usable: false;
+  cache_only: true;
+  observations: Array<Record<string, unknown>>;
+  limitations: string[];
+};
+
 export type TaiwanStockQuoteDepthRead = {
   change_reference?: TaiwanChangeReferenceRead;
   stock_id: string;
@@ -2143,6 +2227,7 @@ export type TaiwanStockQuoteDepthRead = {
   auction_indicative_status?: string;
   auction_indicative_source?: string | null;
   auction_phase?: string | null;
+  auction_history?: TaiwanAuctionHistoryRead | null;
   auction_event_time?: string | null;
   indicative_match_available?: boolean;
   indicative_match_price?: number | null;
@@ -2176,6 +2261,8 @@ export type TaiwanStockQuoteDepthRead = {
 };
 
 export type TaiwanRealtimeQuoteLeaseRead = {
+  materialization_job_id?: number | null;
+  materialization_error_code?: string | null;
   lease_id: string | null;
   stock_id: string;
   provider: string;
@@ -2954,6 +3041,7 @@ export type StockIndicatorPoint = {
   support_resistance?: Record<string, number | null>;
   vwap?: number | null;
   twap?: number | null;
+  obv?: number | null;
 };
 
 export type StockPriceMapStatus = TaiwanNextSessionPlanStatus;
@@ -2976,6 +3064,9 @@ export type StockPriceMapLevelRead = {
 };
 
 export type StockPriceMapZoneRead = {
+  geometry_status?: "ready" | "unavailable";
+  scanner_eligible?: boolean;
+  scanner_reason_codes?: string[];
   zone_id: string;
   evidence_lower_bound: number;
   evidence_upper_bound: number;
@@ -3019,7 +3110,11 @@ export type StockPriceMapNearestZoneRead = Pick<
 
 export type StockPriceMapRead = {
   kind: "tw_stock_price_map" | string;
-  version: "tw.stock.price_map.v3" | string;
+  version: "tw.stock.price_map.v4" | string;
+  requested_timeframe: "today" | "daily" | "weekly" | "monthly";
+  structure_timeframe: "daily" | "weekly" | "monthly";
+  observation_semantics: string;
+  method_applicability: Record<string, string>;
   market: string;
   stock_id: string;
   stock_name: string | null;
@@ -3061,7 +3156,7 @@ export type StockPriceMapRead = {
   technical: {
     headline: string;
     summary: string;
-    score: number;
+    score: number | null;
     value: number | null;
     value_label: string;
     confidence: string;

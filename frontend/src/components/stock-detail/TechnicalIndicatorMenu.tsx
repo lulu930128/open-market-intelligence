@@ -297,7 +297,7 @@ export default function TechnicalIndicatorMenu({
                       </span>
                     </span>
                     <span className="shrink-0 bg-omi-surface-muted px-1.5 py-0.5 text-[10px] font-bold text-omi-text-muted">
-                      {t("indicators.pending")}
+                      {t(option.status === "planned" ? "indicators.pending" : `indicators.${option.status}`)}
                     </span>
                   </div>
                 )

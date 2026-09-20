@@ -2146,6 +2146,93 @@ function usIntradayResponse(symbol: string) {
   };
 }
 
+test("US Today session metrics preserve shares, estimates, scope and interval", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1100 });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await mockOmiApi(page, {
+    usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+    usRankingRows: seededUsRankingRows(),
+    apiResponder: ({ path, url }) => {
+      if (!path.endsWith("/us-market/intraday/AAPL")) return null;
+      const scope = url.searchParams.get("session_scope") ?? "regular";
+      const interval = url.searchParams.get("interval") ?? "1m";
+      const values: Record<string, number | null> = {
+        open: 433.33, high: 435.37, low: 428.9, reference: 428.03, average: 432.61,
+        volume: 7205987, turnover: 3115432187.25, previous_volume: 6800123,
+        last_volume: null, bid: null, ask: null, range_pct: 1.51,
+        relative_volume: scope === "regular" ? 0.97 : null, vwap_distance_pct: -0.28,
+      };
+      const points = [0, 1, 2].map((i) => ({
+        time: `2026-09-11T${scope === "extended" ? "17" : "15"}:${interval === "15m" ? 15 + i * 15 : interval === "5m" ? 45 + i * 5 : 57 + i}:00-04:00`,
+        price: 433.24, open: 433.33, high: 433.48, low: 432.97, volume: 174493,
+        finalized: true, session: scope === "extended" ? "after_hours" : "regular",
+      }));
+      return { body: {
+        ...usIntradayResponse("AAPL"), interval, effective_interval: interval,
+        source_interval: "1m", market_phase: "market_closed", session_phase: "market_closed",
+        session_scope: scope, points, point_count: points.length,
+        regular_point_count: 390, extended_point_count: 3, has_extended_hours: true,
+        session_coverage: { trade_date: "2026-09-11", requested_scope: scope,
+          regular_point_count: 390, extended_point_count: 3, coverage_status: "complete" },
+        session_summary: {
+          contract_version: "us.chart.session_summary.v1", instrument_id: "AAPL", trade_date: "2026-09-11",
+          session_scope: scope, base_interval: "1m", series_revision: "fixture-summary", reference_type: "prior_regular_close",
+          metrics: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {
+            value, unit: key.includes("volume") || ["bid", "ask"].includes(key) ? "shares" : "USD",
+            status: value === null ? "unavailable" : key === "relative_volume" ? "partial" : "available",
+            estimated: ["average", "turnover", "vwap_distance_pct"].includes(key), method: "fixture",
+            trade_date: "2026-09-11", as_of: "2026-09-11T16:00:00-04:00", source: "fixture",
+            scope, freshness: "stale", coverage: "complete", sample_days: null, limitations: [],
+          }])), limitations: [],
+        },
+      } };
+    },
+  });
+  await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+  const panel = page.getByTestId("us-stock-kline-panel");
+  const today = panel.getByRole("button", { name: "今日", exact: true });
+  await expect(async () => {
+    await today.click();
+    await expect(today).toHaveClass(/omi-timeframe-tab-active/, { timeout: 750 });
+  }).toPass({ timeout: 5_000 });
+  await expect(page.getByTestId("session-metric-volume")).toContainText("總量（股）");
+  await expect(page.getByTestId("session-metric-volume")).toContainText("7,205,987");
+  await expect(page.getByTestId("session-metric-turnover")).toContainText("≈ 3,115,432,187.25");
+  await expect(page.getByTestId("session-metric-average")).toContainText("≈ 432.61");
+  await expect(page.getByTestId("session-metric-last_volume")).toContainText("—");
+  await expect(page.getByTestId("session-metric-depth")).toContainText("— / —");
+  await expect(page.getByTestId("intraday-session-strip")).toContainText("0.97×");
+  await expect(page.getByTestId("intraday-session-strip")).toContainText("部分");
+  await expect(page.getByTestId("intraday-bar-readout")).toContainText("ET");
+  await expect(page.getByTestId("intraday-bar-readout")).toContainText("174,493");
+  for (const interval of ["5m", "15m"]) {
+    await panel.getByRole("button", { name: interval, exact: true }).click();
+    await expect(page.getByTestId("session-metric-average")).toContainText("≈ 432.61");
+    await expect(page.getByTestId("session-metric-volume")).toContainText("7,205,987");
+  }
+  await panel.getByRole("button", { name: "K 線", exact: true }).click();
+  await expect(page.getByTestId("intraday-trend-chart")).toHaveAttribute("data-chart-mode", "candles");
+  await expect(page.getByTestId("intraday-bar-readout")).toContainText("433.33");
+  await page.getByTestId("intraday-trend-chart").screenshot({ path: ".tmp/us-session-summary-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByTestId("intraday-session-summary").scrollIntoViewIfNeeded();
+  expect(await page.getByTestId("intraday-session-summary").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await page.getByTestId("intraday-session-summary").screenshot({ path: ".tmp/us-session-summary-mobile-metrics.png" });
+  await panel.getByText("數據口徑與來源", { exact: true }).click();
+  await expect(panel).toContainText("成交量以股計");
+  const details = page.getByTestId("intraday-data-details").locator("div").first();
+  const bounds = await details.boundingBox();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: ".tmp/us-session-summary-mobile.png", fullPage: true });
+  await panel.getByText("數據口徑與來源", { exact: true }).click();
+  await panel.getByRole("button", { name: "盤前/盤後", exact: true }).click();
+  await expect(page.getByTestId("session-metric-open")).toContainText("區間首筆開盤");
+  await expect(page.getByTestId("intraday-session-strip")).not.toContainText("0.97×");
+  expect(errors).toEqual([]);
+});
+
 function usMarketIndicesResponse() {
   const definitions = [
     ["^GSPC", "S&P 500", 948, 940],
@@ -7544,7 +7631,18 @@ test.describe("OMI dashboard smoke", () => {
   test("Taiwan professional chart removes and restores an active technical indicator", async ({
     page,
   }) => {
-    await mockOmiApi(page);
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => path.endsWith("/market/technical/contracts/tw")
+        ? { body: {
+          contract_version: "tw.technical.capabilities.v1",
+          algorithm_version: "tw.technical.indicators.v4",
+          calculation_owner: "TaiwanTechnicalService",
+          parameter_contract: { authority: "backend", defaults: {}, ranges: {} },
+          indicators: { ma: { status: "available" } },
+          frontend_fallback_allowed: false,
+        } }
+        : null,
+    });
     await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
 
     await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
@@ -7556,7 +7654,7 @@ test.describe("OMI dashboard smoke", () => {
     const chart = page.getByTestId("lightweight-kline-chart");
     const activeIndicators = async () =>
       (await chart.getAttribute("data-active-indicators"))?.split(",") ?? [];
-    expect(await activeIndicators()).toContain("ma");
+    await expect.poll(activeIndicators).toContain("ma");
 
     await page.getByTestId("chart-indicator-menu-toggle").click();
     const movingAverageToggle = page.locator('[data-indicator-option="ma"]');

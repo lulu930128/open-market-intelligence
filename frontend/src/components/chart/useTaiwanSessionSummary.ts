@@ -2,33 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/api";
+import type { ChartSessionSummary } from "@/types/chartSessionSummary";
+export type { SessionMetric } from "@/types/chartSessionSummary";
 
-export type SessionMetric = {
-  value: number | null;
-  unit: string;
-  status: "available" | "partial" | "unavailable";
-  estimated: boolean;
-  method: string;
-  trade_date: string;
-  as_of: string | null;
-  source: string;
-  scope: string;
-  freshness: string | null;
-  coverage: string | null;
-  sample_days: number | null;
-  limitations: string[];
-};
-export type TaiwanSessionSummary = {
+export type TaiwanSessionSummary = ChartSessionSummary & {
   contract_version: "tw.chart.session_summary.v1";
-  instrument_id: string;
   trade_date: string;
-  base_interval: "1m";
-  series_revision: string;
   presentation_session_state: string | null;
   official_close_status: string | null;
-  reference_type: string | null;
-  metrics: Record<string, SessionMetric>;
-  limitations: string[];
 };
 
 export function sessionSummaryMatches(data: TaiwanSessionSummary, stockId: string, tradeDate: string) {

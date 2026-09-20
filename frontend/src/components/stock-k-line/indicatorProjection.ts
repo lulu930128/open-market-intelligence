@@ -2,6 +2,8 @@ import type { IndicatorParameters } from "@/components/stock-k-line/indicatorCat
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 import {
   backendIndicatorParametersMatch,
+  backendIndicatorTimeKey,
+  backendScalarIndicatorValue,
   backendIndicatorValue,
   backendIndicatorWindowExists,
   isBackendAuthoritativeIndicator,
@@ -763,11 +765,12 @@ function projectBackendStockKLineData(
   indicatorData: StockIndicatorPoint[],
   params: IndicatorParameters
 ): MergedPoint[] {
+  const intraday = chartData.some((point) => point.time.length > 10);
   const indicatorByTime = new Map(
-    indicatorData.map((point) => [point.time.slice(0, 10), point])
+    indicatorData.map((point) => [backendIndicatorTimeKey(point.time, intraday), point])
   );
   return chartData.map((point) => {
-    const indicator = indicatorByTime.get(point.time.slice(0, 10));
+    const indicator = indicatorByTime.get(backendIndicatorTimeKey(point.time, intraday));
     const backend = isBackendAuthoritativeIndicator(indicator);
     const value = (
       values: Record<string, number | null> | undefined,
@@ -802,7 +805,7 @@ function projectBackendStockKLineData(
       ),
       ema12: value(indicator?.ema, `ema${params.emaFast}`, emaMatches),
       ema26: value(indicator?.ema, `ema${params.emaSlow}`, emaMatches),
-      vwap: null,
+      vwap: intraday ? backendScalarIndicatorValue(indicator, "vwap") : null,
       psar: null,
       donchianUpper: value(
         indicator?.donchian,
@@ -890,7 +893,7 @@ function projectBackendStockKLineData(
         `adx${params.adxPeriod}`,
         backendIndicatorParametersMatch(indicator, { adx_period: params.adxPeriod })
       ),
-      obv: null,
+      obv: backendScalarIndicatorValue(indicator, "obv"),
       obvMa10: null,
       mfi14: value(
         indicator?.mfi,

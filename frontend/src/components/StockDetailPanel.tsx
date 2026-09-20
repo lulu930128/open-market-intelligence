@@ -15,12 +15,14 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  indicatorCategoryGroups,
   professionalIndicatorCategoryGroups,
   type IndicatorParameters,
   type IndicatorKey,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import type { ChartDrawingTool } from "@/components/LightweightKLineChart";
+import { filterTaiwanIndicatorPreset, projectTaiwanIndicatorMenu } from "@/components/stock-k-line/taiwanIndicatorMenu";
 import {
   formatChartDate,
   type ChartDateGranularity,
@@ -751,6 +753,7 @@ export default function StockDetailPanel({
       todayUpdatedAt,
       technicalContract,
       technicalParameterContract,
+      technicalLoadState,
     },
   } = useTaiwanStockChartData({
     chartFocusMode,
@@ -772,6 +775,15 @@ export default function StockDetailPanel({
       ? backendOwnedIndicatorParameters(indicatorParameters, defaults)
       : indicatorParameters;
   }, [indicatorParameters, technicalContract, technicalParameterContract]);
+  const menuTimeframe = chartFocusMode ? professionalTimeframe : effectiveTimeframe;
+  const menuInterval = ({ daily: "1d", weekly: "1w", monthly: "1mo", today: `${todayBarInterval}m` } as Record<string, string>)[menuTimeframe] ?? menuTimeframe;
+  const canonicalMenuGroups = useMemo(() => projectTaiwanIndicatorMenu(
+    chartFocusMode ? professionalIndicatorCategoryGroups : indicatorCategoryGroups,
+    technicalContract, menuInterval, canonicalIndicatorParameters
+  ), [chartFocusMode, technicalContract, menuInterval, canonicalIndicatorParameters]);
+  const canonicalChartIndicators = useMemo(() => filterTaiwanIndicatorPreset(
+    chartIndicators, canonicalMenuGroups
+  ), [chartIndicators, canonicalMenuGroups]);
   const {
     loadState: technicalReportLoadState,
     report: backendTechnicalReport,
@@ -845,11 +857,7 @@ export default function StockDetailPanel({
     if (!template) return;
 
     setActiveIndicatorTemplate(template.key);
-    setChartIndicators(template.indicators);
-    setIndicatorParameters({
-      ...defaultIndicatorParameters,
-      ...(template.parameters ?? {}),
-    });
+    setChartIndicators(filterTaiwanIndicatorPreset(template.indicators, canonicalMenuGroups));
   }
 
   function updateIndicatorParameter(
@@ -884,7 +892,7 @@ export default function StockDetailPanel({
         .sort((left, right) => left.time.localeCompare(right.time))
         .slice(-180);
     }
-    return [];
+    return indicatorDataForTimeframe;
   }, [backendTechnicalReport, effectiveTimeframe, indicatorDataForTimeframe]);
 
   const latestIndicator =
@@ -1152,13 +1160,15 @@ export default function StockDetailPanel({
 
     return mapBackendTechnicalReport(backendTechnicalReport, t);
   }, [backendTechnicalReport, effectiveTimeframe, stockId, t]);
-  const unavailableDailyTechnicalReport = useMemo<TechnicalReport>(
+  const unavailableTechnicalReport = useMemo<TechnicalReport>(
     () => ({
       title: t("stockDetail.dataViews.technical.unavailableTitle"),
-      summary: t("stockDetail.dataViews.technical.unavailableSummary"),
+      summary: t("stockDetail.dataViews.technical.unavailableTimeframeSummary", {
+        timeframe: t(`timeframes.${effectiveTimeframe}`),
+      }),
       value: null,
       valueLabel: t("stockDetail.dataViews.technical.finalizedValueLabel"),
-      score: 0,
+      score: null,
       rows: [],
       badges: [],
       currentState: null,
@@ -1168,9 +1178,9 @@ export default function StockDetailPanel({
       currentStateDecisionUsable: false,
       warningCount: 1,
     }),
-    [t]
+    [t, effectiveTimeframe]
   );
-  const technicalReport = backendTechnicalReportView ?? unavailableDailyTechnicalReport;
+  const technicalReport = backendTechnicalReportView ?? unavailableTechnicalReport;
   const relativeToPrimaryIndexCandidate =
     technicalReport.rows.find((row) => row.key === "relative_market")?.pulseValue ?? null;
   const relativeToPrimaryIndex =
@@ -1178,18 +1188,16 @@ export default function StockDetailPanel({
     ? relativeToPrimaryIndexCandidate
     : null;
   const technicalDecisionState =
-    effectiveTimeframe === "daily"
-      ? technicalReport.decisionState ??
-        (technicalReport.currentStateDecisionUsable
-          ? technicalReport.currentState ?? null
-          : null)
-      : null;
+    technicalReport.decisionState ??
+    (technicalReport.currentStateDecisionUsable
+      ? technicalReport.currentState ?? null
+      : null);
   const technicalProvisionalState =
     effectiveTimeframe === "daily" &&
     technicalReport.currentObservation?.decisionUsable === false
       ? technicalReport.currentObservation.currentState
       : null;
-  const technicalCurrentState = technicalDecisionState;
+  const technicalCurrentState = technicalDecisionState ?? technicalReport.currentState ?? null;
   const technicalStatus = technicalDecisionState?.headline.label ?? technicalReport.title;
   const displayOvernightImpact = !stockId || isIndexProduct ? null : overnightImpact;
   const displayOvernightImpactLoadState: LoadState =
@@ -1344,6 +1352,9 @@ export default function StockDetailPanel({
       data-chart-stock-id={chartStockId ?? ""}
       data-chart-timeframe={chartTimeframe}
       data-chart-load-state={loadState}
+      data-technical-load-state={technicalLoadState}
+      data-technical-point-count={indicatorDataForTimeframe.length}
+      data-chart-indicator-point-count={indicatorForTimeframe.length}
       data-current-price={latestClose ?? ""}
       data-today-stock-id={todayStockId ?? ""}
       className={[
@@ -1555,7 +1566,8 @@ export default function StockDetailPanel({
                       </button>
                       {indicatorMenuOpen ? (
                         <TechnicalIndicatorMenu
-                          indicators={chartIndicators}
+                          indicators={canonicalChartIndicators}
+                          groups={canonicalMenuGroups}
                           activeTemplate={
                             activeIndicatorTemplate
                           }
@@ -1653,13 +1665,13 @@ export default function StockDetailPanel({
               onCloseIndicatorMenu={() => setIndicatorMenuOpen(false)}
               indicatorMenu={
                 <TechnicalIndicatorMenu
-                  indicators={chartIndicators}
+                  indicators={canonicalChartIndicators}
                   activeTemplate={activeIndicatorTemplate}
                   onApplyTemplate={applyIndicatorTemplate}
                   onToggleIndicator={toggleChartIndicator}
                   supplementalMarkerOptions={corporateEventMenuOptions}
                   onToggleSupplementalMarker={toggleCorporateEventMarker}
-                  groups={professionalIndicatorCategoryGroups}
+                  groups={canonicalMenuGroups}
                   includeParameters={false}
                   parameters={canonicalIndicatorParameters}
                   onUpdateParameter={updateIndicatorParameter}
@@ -1690,8 +1702,8 @@ export default function StockDetailPanel({
               }
               label={professionalTimeframeLabel}
               timeMode={professionalIsIntraday ? "intraday" : "date"}
-              showMovingAverages={chartIndicators.ma}
-              indicators={chartIndicators}
+              showMovingAverages={canonicalChartIndicators.ma}
+              indicators={canonicalChartIndicators}
               indicatorParameters={canonicalIndicatorParameters}
               benchmarkData={
                 professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
@@ -1766,7 +1778,7 @@ export default function StockDetailPanel({
               chartData={chartData}
               indicatorData={indicatorForTimeframe}
               label={timeframeLabel(t, effectiveTimeframe)}
-              indicators={chartIndicators}
+              indicators={canonicalChartIndicators}
               indicatorParameters={canonicalIndicatorParameters}
               benchmarkData={benchmarkDataForChart}
               benchmarkLabel={benchmarkLabel}
@@ -1800,11 +1812,15 @@ export default function StockDetailPanel({
             />
           ) : (
             <EmptyDataState
-              message={t("stockDetail.loadingFrame", {
-                label: timeframeLabel(t, effectiveTimeframe),
-              })}
-              tone="loading"
-              busy
+              message={loadState === "error"
+                ? t("stockDetail.dataViews.technical.unavailableChartSummary", {
+                    timeframe: timeframeLabel(t, effectiveTimeframe),
+                  })
+                : t("stockDetail.loadingFrame", {
+                    label: timeframeLabel(t, effectiveTimeframe),
+                  })}
+              tone={loadState === "error" ? "warning" : "loading"}
+              busy={loadState !== "error"}
               className="m-4"
             />
           )}

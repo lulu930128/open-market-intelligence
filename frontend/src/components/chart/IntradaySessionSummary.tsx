@@ -2,9 +2,17 @@
 
 import { useT } from "@/i18n";
 import type { IntradaySessionStats } from "./intradayPresentation";
-import type { SessionMetric, TaiwanSessionSummary } from "./useTaiwanSessionSummary";
+import type { SessionMetric, ChartSessionSummary } from "@/types/chartSessionSummary";
 
-type Props = { summary: TaiwanSessionSummary | null; stats?: IntradaySessionStats | null; reference?: number | null; status?: string };
+type Props = { summary: ChartSessionSummary | null; stats?: IntradaySessionStats | null; reference?: number | null; status?: string };
+
+function labelKey(key: string, summary: ChartSessionSummary | null) {
+  const us = summary?.contract_version === "us.chart.session_summary.v1";
+  if (us && ["volume", "last_volume", "previous_volume", "depth", "turnover"].includes(key)) return `usStockDetail.session.${key}`;
+  if (us && key === "open" && summary.session_scope !== "regular") return "usStockDetail.session.firstOpen";
+  if (key === "reference" && summary?.reference_type && summary.reference_type !== "prior_regular_close") return "stockDetail.session.comparison";
+  return `stockDetail.session.${key}`;
+}
 
 function numeric(value: number | null | undefined, digits = 2) {
   return typeof value === "number" && Number.isFinite(value)
@@ -27,7 +35,9 @@ export function IntradaySessionMetrics({ summary, stats, reference, status }: Pr
     const item = metrics?.[key];
     const amount = item ? item.value : fallback[key];
     if (key === "depth") return `${numeric(metrics?.bid?.value, 1)} / ${numeric(metrics?.ask?.value, 1)}`;
-    if (key === "turnover" && typeof amount === "number") return `${item?.estimated ? "≈ " : ""}${numeric(amount / 100_000_000)} ${t("stockDetail.session.hundredMillion")}`;
+    if (key === "turnover" && typeof amount === "number") return item?.unit === "USD"
+      ? `${item.estimated ? "≈ " : ""}${numeric(amount)}`
+      : `${item?.estimated ? "≈ " : ""}${numeric(amount / 100_000_000)} ${t("stockDetail.session.hundredMillion")}`;
     return `${item?.estimated && amount != null ? "≈ " : ""}${numeric(amount, key.includes("volume") ? 1 : 2)}`;
   }
   return <div className="@container min-w-0" data-testid="intraday-session-summary">
@@ -39,16 +49,16 @@ export function IntradaySessionMetrics({ summary, stats, reference, status }: Pr
         const base = metrics?.reference?.value ?? reference;
         const color = price && amount != null && base != null && amount !== base
           ? amount > base ? "text-omi-market-up" : "text-omi-market-down" : "text-omi-text";
-        const labelKey = key === "reference" && summary?.reference_type && summary.reference_type !== "prior_regular_close" ? "comparison" : key;
         return <div key={key} className="min-w-0 border-t border-omi-border-subtle py-0" data-testid={`session-metric-${key}`} title={evidence(item ?? (key === "depth" ? metrics?.bid : undefined))}>
-          <dt className="text-xs text-omi-text-muted">{t(`stockDetail.session.${labelKey}`)}</dt>
+          <dt className="text-xs text-omi-text-muted">{t(labelKey(key, summary))}</dt>
           <dd className={`mt-0.5 flex flex-wrap items-baseline gap-x-1 text-sm font-semibold tabular-nums ${color}`}>
-            <span data-testid={key === "reference" ? "intraday-reference-price" : undefined} data-reference-price={key === "reference" ? amount ?? "" : undefined}>{value(key)}</span>
+            <span className="break-words [overflow-wrap:anywhere]" data-testid={key === "reference" ? "intraday-reference-price" : undefined} data-reference-price={key === "reference" ? amount ?? "" : undefined}>{value(key)}</span>
             {item?.status === "partial" ? <span className="text-[10px] font-normal text-omi-warning-strong">{t("stockDetail.session.partial")}</span> : null}
           </dd>
         </div>;
       })}
     </dl>
+    {summary?.contract_version === "us.chart.session_summary.v1" ? <p className="mt-1 text-xs text-omi-text-muted">{t("usStockDetail.session.availabilityHelp")}</p> : null}
     {status !== "ready" ? <p role="status" className="mt-1 text-xs text-omi-text-muted">{t(status === "error" ? "stockDetail.session.unavailable" : "stockDetail.session.loading")}</p> : null}
 
   </div>;
@@ -58,9 +68,9 @@ export function IntradaySessionEvidence({ summary }: Pick<Props, "summary">) {
   const t = useT();
   const metrics = summary?.metrics;
   return <div>
-      <p className="mt-1 leading-relaxed">{t("stockDetail.session.methodHelp")}</p>
+      <p className="mt-1 leading-relaxed">{t(summary?.contract_version === "us.chart.session_summary.v1" ? "usStockDetail.session.methodHelp" : "stockDetail.session.methodHelp")}</p>
       {metrics ? <dl className="mt-2 space-y-2 break-words">{Object.entries(metrics).map(([key, item]) => <div key={key}>
-        <dt className="font-medium">{t(`stockDetail.session.${key === "bid" || key === "ask" ? "depth" : key}`)} · {item.status}</dt>
+        <dt className="font-medium">{t(labelKey(key === "bid" || key === "ask" ? "depth" : key, summary))} · {item.status}</dt>
         <dd>{evidence(item)}</dd>
       </div>)}</dl> : null}
   </div>;

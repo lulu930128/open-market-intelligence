@@ -2,6 +2,12 @@ import { zhTW } from "./zh-TW";
 
 export const jaJP = {
   ...zhTW,
+  indicators: {
+    ...zhTW.indicators, pending: "対応予定", unsupported: "未対応",
+    not_applicable: "この期間は対象外", unavailable: "チャートデータ未提供",
+    quickTemplates: "表示テンプレート", parameters: "パラメーター",
+    templates: { basic: "基本", short: "短期", trend: "トレンド", swing: "スイング", flow: "出来高・価格" },
+  },
   common: {
     ...zhTW.common,
     reserved: "予約",
@@ -151,6 +157,9 @@ export const jaJP = {
       breadthCoverage: "カバレッジ {coverage}/{total} · 未確認 {unknown}",
       breadthUpdated: "市場幅スナップショット {asOf}",
       auctionProvisional: "板寄せ参考 上昇 {advance} / 下落 {decline} / 変わらず {unchanged} · 約定値ではありません",
+      auctionLastOpening: "直近の寄り付き板寄せ",
+      auctionLastClosing: "直近の引け板寄せ",
+      auctionHistorical: "{phase}（履歴・リアルタイムではありません）{asOf}: 上昇 {advance} / 下落 {decline} / 変わらず {unchanged} / 不明 {unknown} · 約定値ではありません",
       advancePct: "{value}% 上昇",
       coverage: "データカバレッジ",
       coverageValue: "{current} / {active}",
@@ -1605,6 +1614,8 @@ export const jaJP = {
         decisionUnavailable: "確定判断には使用不可",
         unavailableTitle: "確定テクニカルデータ不足",
         unavailableSummary: "検証可能な確定日足レポートがバックエンドから提供されていないため、ブラウザー計算で代替しません。",
+        unavailableTimeframeSummary: "検証可能な{timeframe}テクニカルレポートを取得できません。しばらくしてから再試行してください。",
+        unavailableChartSummary: "{timeframe}チャートを取得できません。時間軸を切り替えて再試行してください。詳細は更新状況をご確認ください。",
         valueLabels: {
           vsPreviousClose: "前日終値比",
           last13Weeks: "直近13週",
@@ -1615,6 +1626,9 @@ export const jaJP = {
           intraday: "ザラ場価格 {priceTime} · 日足指標 {dailyTime}",
           daily: "日足指標 {dailyTime} 時点",
           provisional: "暫定指標 {currentTime}（判断利用不可）· 確定日足 {dailyTime}",
+          todaySession: "本日の約定観測 · 日足指標は背景情報",
+          weekly: "確定週足指標 {periodTime} 時点",
+          monthly: "確定月足指標 {periodTime} 時点",
           warningCount: "データ制約 {count} 件",
         },
         chips: {
@@ -2145,6 +2159,16 @@ export const jaJP = {
   },
   usStockDetail: {
     ...zhTW.usStockDetail,
+    session: {
+      volume: "出来高（株）",
+      last_volume: "直近約定（株）",
+      previous_volume: "前日出来高（株）",
+      depth: "買い／売り上位5本（株）",
+      turnover: "売買代金（USD）",
+      firstOpen: "区間の最初の始値",
+      availabilityHelp: "直近約定数量と板上位5本は未提供です。— は欠損または対象外を示します。",
+      methodHelp: "出来高は株、売買代金は USD です。平均は1分足終値 × 出来高で推計し、取引時間帯ごとにリセットします。乖離率は最新足の終値との比較です。5分／15分足への切替で集計基準は変わりません。合計は選択した時間帯の足のみで、独立した引けイベントを含みません。≈ は推計値です。前日出来高は直前取引日の resolved Daily 合計で、集計範囲が異なる場合があります。相対出来高は通常取引時間のみ、比較可能な過去5日間の同時刻中央値を使用します。標本不足は一部または欠損として表示します。指数の出来高は対象外です。",
+    },
     currentQuote: {
       unavailable: "現在の取引時間帯の価格はまだ取得できていません",
       expectedMissing: "プレマーケット／時間外取引の価格はまだ取得できていません",

@@ -2,6 +2,8 @@ import type { IndicatorParameters, IndicatorSettings } from "@/components/StockK
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 import {
   backendIndicatorParametersMatch,
+  backendIndicatorTimeKey as canonicalIndicatorTimeKey,
+  backendScalarIndicatorValue,
   backendIndicatorValue,
   backendIndicatorWindowExists,
 } from "@/components/stock-k-line/indicatorAuthority";
@@ -180,7 +182,7 @@ export function pushSupertrendLine(
 }
 
 function backendIndicatorTimeKey(value: string, timeMode: ChartTimeMode) {
-  return timeMode === "intraday" ? value : value.slice(0, 10);
+  return canonicalIndicatorTimeKey(value, timeMode === "intraday");
 }
 
 function buildBackendSeriesData(
@@ -211,6 +213,10 @@ function buildBackendSeriesData(
     const time = chartTime(point.time, timeMode);
     const color = point.close >= point.open ? upColor : downColor;
     const indicator = indicatorByTime.get(backendIndicatorTimeKey(point.time, timeMode));
+    if (timeMode === "intraday") {
+      pushLine(lines.vwap, time, backendScalarIndicatorValue(indicator, "vwap"));
+    }
+    pushLine(lines.obv, time, backendScalarIndicatorValue(indicator, "obv"));
     candles.push({
       time,
       open: point.open,

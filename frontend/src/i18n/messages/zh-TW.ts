@@ -144,6 +144,9 @@ export const zhTW = {
       breadthCoverage: "覆蓋 {coverage}/{total} · 未確認 {unknown}",
       breadthUpdated: "廣度快照 {asOf}",
       auctionProvisional: "試撮參考 上 {advance}／下 {decline}／平 {unchanged} · 非正式成交",
+      auctionLastOpening: "最近一次開盤試撮",
+      auctionLastClosing: "最近一次收盤試撮",
+      auctionHistorical: "{phase}（歷史、非即時）{asOf}：上 {advance}／下 {decline}／平 {unchanged}／未知 {unknown} · 非正式成交",
       advancePct: "{value}% 上漲",
       coverage: "資料覆蓋",
       coverageValue: "{current} / {active}",
@@ -1279,6 +1282,8 @@ export const zhTW = {
     },
   },
   indicators: {
+    unsupported: "尚未支援", not_applicable: "此週期不適用",
+    unavailable: "圖表尚未提供",
     quickTemplates: "快速組合",
     pending: "待補",
     parameters: "參數",
@@ -2227,6 +2232,8 @@ export const zhTW = {
         decisionUnavailable: "不可作正式決策",
         unavailableTitle: "正式技術資料不足",
         unavailableSummary: "後端尚未提供可驗證的正式日線技術報告，不以瀏覽器補算結果替代。",
+        unavailableTimeframeSummary: "尚未取得可驗證的{timeframe}技術報告，請稍後重試。",
+        unavailableChartSummary: "{timeframe}圖表讀取失敗，請重新選取週期重試；詳細原因見更新狀態。",
         valueLabels: {
           vsPreviousClose: "vs 昨收",
           last13Weeks: "近13週",
@@ -2237,6 +2244,9 @@ export const zhTW = {
           intraday: "盤中價 {priceTime} · 日線指標 {dailyTime}",
           daily: "日線指標截至 {dailyTime}",
           provisional: "今日暫估指標 {currentTime}（不可作 finalized decision）· 正式日線 {dailyTime}",
+          todaySession: "今日成交觀測 · 日線指標另作背景",
+          weekly: "完成週線指標截至 {periodTime}",
+          monthly: "完成月線指標截至 {periodTime}",
           warningCount: "{count} 項資料限制",
         },
         units: {
@@ -3116,6 +3126,16 @@ export const zhTW = {
     },
   },
   usStockDetail: {
+    session: {
+      volume: "總量（股）",
+      last_volume: "單筆成交（股）",
+      previous_volume: "昨量（股）",
+      depth: "五檔委買／委賣（股）",
+      turnover: "分時成交值（USD）",
+      firstOpen: "區間首筆開盤",
+      availabilityHelp: "單筆成交與五檔資料尚未提供；— 表示缺值或不適用。",
+      methodHelp: "成交量以股計，成交值以 USD 計。均價以 1 分鐘收盤價 × 成交量估算，各交易時段重新累計；距均價以最新區間收盤比較。切換 5m／15m 不改變摘要口徑。總量與成交值只涵蓋所選時段的分鐘線，不含獨立收盤事件；≈ 表示估算。昨量取前一交易日 resolved Daily 全日量，口徑可能不同。相對量限正常盤，採近 5 個可比交易日的同時段中位數；樣本不足保留部分或缺值。單筆成交及五檔尚無來源，指數量能不適用。",
+    },
     currentQuote: {
       unavailable: "目前時段報價尚未取得",
       expectedMissing: "盤前／盤後報價尚未取得",
@@ -3248,6 +3268,7 @@ export const zhTW = {
       highLow: "最高 / 最低",
       updatedPoints: "更新 / 筆數",
       volume: "成交量",
+      volumeShares: "成交量(股)",
       pointCount: "資料筆數",
       exchange: "交易所",
       type: "類型",

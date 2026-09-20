@@ -7,6 +7,29 @@ export type IndicatorProjectionScope =
   | "mixed"
   | "presentation_only";
 
+// Renderer wiring only; algorithm support comes from the Backend contract.
+export const backendIndicatorCapabilities: Record<string, string> = {
+  volume: "volume_ma", ma: "ma", ema: "ema", bollinger: "bollinger",
+  donchian: "donchian", rsi: "rsi", macd: "macd", kd: "kd",
+  atr: "atr", adx: "adx", mfi: "mfi", roc: "roc",
+  supportResistance: "support_resistance", vwap: "vwap", obv: "obv",
+};
+
+export function backendIndicatorTimeKey(value: string, intraday: boolean) {
+  if (!intraday) return value.slice(0, 10);
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) ? String(instant) : value;
+}
+
+export function backendScalarIndicatorValue(
+  point: StockIndicatorPoint | undefined,
+  key: "vwap" | "obv"
+) {
+  const value = point?.[key];
+  return isBackendAuthoritativeIndicator(point) &&
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export function isBackendAuthoritativeIndicator(
   point: StockIndicatorPoint | undefined
 ) {
@@ -59,21 +82,7 @@ export function indicatorProjectionScope(
   const activeIndicators = Object.entries(options?.indicators ?? {})
     .filter(([, enabled]) => enabled)
     .map(([key]) => key);
-  const backendProjectedIndicators = new Set([
-    "volume",
-    "ma",
-    "ema",
-    "bollinger",
-    "donchian",
-    "rsi",
-    "macd",
-    "kd",
-    "atr",
-    "adx",
-    "mfi",
-    "roc",
-    "supportResistance",
-  ]);
+  const backendProjectedIndicators = new Set(Object.keys(backendIndicatorCapabilities));
   const usesPresentationOnlyIndicator = activeIndicators.some(
     (key) => !backendProjectedIndicators.has(key)
   );
@@ -143,15 +152,16 @@ export function indicatorProjectionScope(
       );
     });
   };
+  const intraday = chartData.some((point) => point.time.length > 10);
   const authoritativeDates = new Set(
     points
       .filter(pointMatchesActiveContract)
-      .map((point) => point.time.slice(0, 10))
+      .map((point) => backendIndicatorTimeKey(point.time, intraday))
   );
   const chartDates = new Set(
     chartData
       .filter((point) => typeof point.close === "number" && Number.isFinite(point.close))
-      .map((point) => point.time.slice(0, 10))
+      .map((point) => backendIndicatorTimeKey(point.time, intraday))
   );
   const authoritativeCount = [...chartDates].filter((time) =>
     authoritativeDates.has(time)

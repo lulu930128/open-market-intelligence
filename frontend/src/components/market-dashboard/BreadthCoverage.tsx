@@ -20,6 +20,26 @@ export function resolveLimitMetric(breadth: MarketBreadth | null | undefined, di
   return { value: null, status: "unknown" as const, side };
 }
 
+export function HistoricalAuctionBreadth({ auctions }: { auctions: MarketBreadth["latest_completed_auctions"] }) {
+  const t = useT();
+  return <div className="w-full min-w-0 space-y-1 break-words text-xs text-omi-text-muted">
+      {auctions?.map((auction) => (
+        <div key={`${auction.market_session}:${auction.as_of}`} data-testid="tw-breadth-historical-auction">
+          {t("dashboard.marketIndex.auctionHistorical", {
+            phase: t(auction.market_session === "closing_auction"
+              ? "dashboard.marketIndex.auctionLastClosing"
+              : "dashboard.marketIndex.auctionLastOpening"),
+            asOf: auction.as_of,
+            advance: auction.advance_count,
+            decline: auction.decline_count,
+            unchanged: auction.unchanged_count,
+            unknown: auction.unknown_count,
+          })}
+        </div>
+      ))}
+  </div>;
+}
+
 export function BreadthCoverage({ breadth }: { breadth: MarketBreadth }) {
   const t = useT();
   const percent = (value: number | null | undefined) =>
@@ -49,6 +69,7 @@ export function BreadthCoverage({ breadth }: { breadth: MarketBreadth }) {
       {limits ? <div>{t("dashboard.marketIndex.breadthLimitUnknowns", {
         up: limits.up.unknown_count, down: limits.down.unknown_count,
       })}</div> : null}
+      <HistoricalAuctionBreadth auctions={breadth.latest_completed_auctions} />
       {Object.entries(breadth.classification_diagnostics ?? {}).map(([reason, count]) =>
         <div key={reason}>{reason}: {count}</div>)}
       <div className="break-all">{t("dashboard.marketIndex.breadthProvenance", {

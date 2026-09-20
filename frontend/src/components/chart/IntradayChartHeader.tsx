@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { useT } from "@/i18n";
 import type { IntradayCurrentObservation, IntradayPriceDiagnostics } from "@/types/market";
 import { IntradaySessionMetrics, IntradaySessionEvidence } from "./IntradaySessionSummary";
-import type { TaiwanSessionSummary } from "./useTaiwanSessionSummary";
+import type { ChartSessionSummary } from "@/types/chartSessionSummary";
 import { compactIntradayTimestamp, type IntradaySessionStats } from "./intradayPresentation";
 
 type Props = {
@@ -31,7 +31,7 @@ type Props = {
   showVolume: boolean;
   volumeLabel: string;
   stats?: IntradaySessionStats | null;
-  summary?: TaiwanSessionSummary | null;
+  summary?: ChartSessionSummary | null;
   summaryStatus?: string;
   formatPrice: (value: number | null | undefined) => string;
   formatVolume: (value: number | null | undefined) => string;

@@ -144,9 +144,10 @@ export default function TaiwanStockDetailRadarSurface({
   } | null>(null);
   const candidateClose = candidateRequest?.stockId === stockId ? candidateRequest.value : null;
   const { loadState: priceMapLoadState, map } = useTaiwanStockPriceMap({
-    candidateClose,
+    candidateClose: timeframe === "weekly" || timeframe === "monthly" ? null : candidateClose,
     enabled,
     stockId,
+    timeframe,
   });
   const evidenceSummary = useMemo(() => {
     const mapItems = map?.technical.evidence_summary ?? [];
@@ -165,7 +166,9 @@ export default function TaiwanStockDetailRadarSurface({
     return "技術證據尚未完成";
   }, [map, technicalState]);
   const positionCount =
-    technicalState && technicalState.position.availableCount > 0
+    timeframe === "today" && technicalReport.value !== null
+      ? `${technicalReport.value.toFixed(2)}%`
+      : technicalState && technicalState.position.availableCount > 0
       ? `${
           technicalState.position.belowCount > 0
             ? technicalState.position.belowCount

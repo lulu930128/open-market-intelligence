@@ -11,6 +11,7 @@ import {
   type Timeframe,
 } from "@/components/stock-detail/StockDetailDataViews";
 import { fetchJson } from "@/lib/api";
+import { useTechnicalSettingsRevision } from "@/lib/technicalSettingsRevision";
 import type { DataStatusLevel } from "@/lib/dataStatusEvents";
 import { getMarketCalendarStatusSnapshot } from "@/lib/marketCalendarStatus";
 import {
@@ -519,10 +520,13 @@ export function useTaiwanStockChartData({
   const [loadStateScope, setLoadStateScope] = useState<ScopedLoadState | null>(null);
   const [technicalLoadStateScope, setTechnicalLoadStateScope] =
     useState<ScopedLoadState | null>(null);
+  const settingsRevision = useTechnicalSettingsRevision();
   const [technicalContract, setTechnicalContract] =
     useState<TaiwanTechnicalCapabilityContract | null>(null);
+  const [contractSettingsRevision, setContractSettingsRevision] = useState(-1);
   const [technicalParameterScope, setTechnicalParameterScope] = useState<{
     requestKey: string;
+    settingsRevision: number;
     contract: Record<string, unknown>;
   } | null>(null);
   const activeStockIdRef = useRef(stockId);
@@ -552,7 +556,10 @@ export function useTaiwanStockChartData({
       "/api/market/technical/contracts/tw"
     )
       .then((contract) => {
-        if (!cancelled) setTechnicalContract(contract);
+        if (!cancelled) {
+          setTechnicalContract(contract);
+          setContractSettingsRevision(settingsRevision);
+        }
       })
       .catch(() => {
         if (!cancelled) setTechnicalContract(null);
@@ -560,7 +567,7 @@ export function useTaiwanStockChartData({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settingsRevision]);
 
   useEffect(() => {
     if (stockId) return;
@@ -611,6 +618,11 @@ export function useTaiwanStockChartData({
     }
     let cancelled = false;
     let refreshTimer: number | undefined;
+    const controller = new AbortController();
+    const requestOptions = {
+      signal: controller.signal,
+      ...(["1w", "1mo"].includes(interval) ? { timeoutMs: 60_000 } : {}),
+    };
     let requestInFlight = false;
     let technicalRequestInFlight = false;
     let technicalRevisionInFlight: string | null = null;
@@ -676,7 +688,8 @@ export function useTaiwanStockChartData({
             ...(snapshotPinned
               ? { expected_snapshot_revision: expectedRevision }
               : { expected_series_revision: expectedRevision }),
-          }
+          },
+          requestOptions
         );
         if (cancelled || activeStockIdRef.current !== effectStockId) return;
         validateTechnical(
@@ -691,6 +704,7 @@ export function useTaiwanStockChartData({
         lastSuccessfulTechnicalRevision = expectedRevision;
         setTechnicalParameterScope({
           requestKey: effectRequestKey,
+          settingsRevision,
           contract: technical.parameter_contract ?? {},
         });
         const finalizedIndicators = technical.points ?? [];
@@ -791,7 +805,8 @@ export function useTaiwanStockChartData({
             ...(requestedExactRevision
               ? { expected_snapshot_revision: requestedExactRevision }
               : {}),
-          }
+          },
+          requestOptions
         );
         if (cancelled || activeStockIdRef.current !== effectStockId) return;
         validateBars(series, effectStockId, interval);
@@ -995,6 +1010,7 @@ export function useTaiwanStockChartData({
     void loadChart(!cachedTodayState, true);
     return () => {
       cancelled = true;
+      controller.abort();
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
     };
   }, [
@@ -1004,6 +1020,7 @@ export function useTaiwanStockChartData({
     professionalTimeframe,
     publishDataStatus,
     reloadNonce,
+    settingsRevision,
     stockId,
     todayInterval,
   ]);
@@ -1074,6 +1091,7 @@ export function useTaiwanStockChartData({
   const technicalParameterContract =
     currentRequestKey !== null &&
     technicalParameterScope?.requestKey === currentRequestKey
+    && technicalParameterScope.settingsRevision === settingsRevision
       ? technicalParameterScope.contract
       : null;
 
@@ -1087,10 +1105,10 @@ export function useTaiwanStockChartData({
       chartVolumeUnit: currentDailyState?.volumeUnit ?? null,
       chartStockId: currentDailyState?.stockId ?? null,
       chartTimeframe: currentDailyState?.timeframe ?? null,
-      indicatorData: currentDailyState?.indicatorData ?? emptyIndicatorPoints,
+      indicatorData: technicalParameterContract ? currentDailyState?.indicatorData ?? emptyIndicatorPoints : emptyIndicatorPoints,
       loadState,
       professionalIntradayData,
-      professionalIntradayIndicators,
+      professionalIntradayIndicators: technicalParameterContract ? professionalIntradayIndicators : emptyIndicatorPoints,
       professionalIntradayInterval,
       professionalIntradayStockId,
       todayCapabilities:
@@ -1101,9 +1119,9 @@ export function useTaiwanStockChartData({
       todaySource: currentTodayState?.source ?? "unavailable",
       todayStockId: currentTodayState?.stockId ?? null,
       todayTradeDate: currentTodayState?.tradeDate ?? null,
-      todayTrend: currentTodayState?.trend ?? emptyIntradayTrendPoints,
+      todayTrend: currentTodayState ? technicalParameterContract ? currentTodayState.trend : intradayPoints(currentTodayState.trend, []) : emptyIntradayTrendPoints,
       todayUpdatedAt: currentTodayState?.updatedAt ?? null,
-      technicalContract,
+      technicalContract: contractSettingsRevision === settingsRevision ? technicalContract : null,
       technicalParameterContract,
       technicalLoadState,
     },

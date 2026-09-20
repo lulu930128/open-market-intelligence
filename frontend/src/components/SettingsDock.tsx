@@ -1,4 +1,5 @@
 "use client";
+import { notifyTechnicalSettingsChanged } from "@/lib/technicalSettingsRevision";
 
 import {
   LOCALE_OPTIONS,
@@ -1805,6 +1806,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
 
       setSettings(response);
       setDraft(buildParameterDraft(response));
+      notifyTechnicalSettingsChanged();
       setLoadState("success");
       setSaveState("success");
       setSaveMessage(t("settings.saveSuccess"));

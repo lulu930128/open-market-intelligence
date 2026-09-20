@@ -265,6 +265,9 @@ export default function StockPriceMap({
       data-reference-price={map?.reference.price ?? ""}
       data-stock-id={map?.stock_id ?? stockId}
       data-version={map?.version ?? "pending"}
+      data-requested-timeframe={map?.requested_timeframe ?? "pending"}
+      data-structure-timeframe={map?.structure_timeframe ?? "pending"}
+      data-observation-semantics={map?.observation_semantics ?? "pending"}
       data-testid="tw-stock-price-map"
     >
       <div className="flex items-start justify-between gap-4 px-5 py-3">
@@ -277,7 +280,7 @@ export default function StockPriceMap({
           data-testid="tw-stock-price-map-toggle"
         >
           <span className="block text-[11px] font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-            Price map · 完成日線
+            Price map · {!map ? "結構資料待載入" : map.requested_timeframe === "today" ? "日線結構 / 今日成交觀測" : map.structure_timeframe === "weekly" ? "完成週線" : map.structure_timeframe === "monthly" ? "完成月線" : "完成日線"}
           </span>
           <span className="mt-0.5 block text-sm font-semibold text-omi-text-strong">
             {nearestText(map)}
@@ -325,13 +328,14 @@ export default function StockPriceMap({
                 <div>
                   <div className="text-[11px] font-semibold text-omi-text-muted">研究顯示範圍</div>
                   <div className="mt-0.5 text-xs text-omi-text-subtle">
-                    完成日線區間由 Backend 定義；不是交易所法定漲跌停報價
+                    完成週期區間由 Backend 定義；參考價採完成日線收盤
                   </div>
                 </div>
                 <button
                   type="button"
                   className="border border-omi-border px-2.5 py-1.5 text-xs font-semibold text-omi-text-muted transition hover:border-omi-control hover:text-omi-text-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-omi-accent"
                   aria-expanded={scenarioOpen}
+                  disabled={map.structure_timeframe !== "daily"}
                   onClick={() => setScenarioOpen((current) => !current)}
                   data-testid="tw-stock-price-map-scenario-toggle"
                 >
@@ -339,7 +343,7 @@ export default function StockPriceMap({
                 </button>
               </div>
 
-              {scenarioOpen ? (
+              {scenarioOpen && map.structure_timeframe === "daily" ? (
                 <div className="mb-4 border-y border-omi-border-subtle bg-omi-surface-muted px-3 py-3" data-testid="tw-stock-price-map-scenario-tool">
                   <div className="text-xs font-semibold text-omi-text-strong">下一交易日收盤情境</div>
                   <div className="mt-0.5 text-[11px] leading-4 text-omi-text-muted">
@@ -409,7 +413,7 @@ export default function StockPriceMap({
                 </div>
               ) : null}
 
-              <figure className="relative h-[26rem] overflow-hidden border-y border-omi-border-subtle bg-omi-surface-subtle" aria-label={`${map.stock_id} 完成日線分層價位地圖`} data-testid="tw-stock-price-axis">
+              <figure className="relative h-[26rem] overflow-hidden border-y border-omi-border-subtle bg-omi-surface-subtle" aria-label={`${map.stock_id} ${map.structure_timeframe === "weekly" ? "完成週線" : map.structure_timeframe === "monthly" ? "完成月線" : "完成日線"}分層價位地圖`} data-testid="tw-stock-price-axis">
                 <figcaption className="sr-only">
                   現價 {formatPrice(map.reference.price)}。{nearestText(map)}。共有 {map.zones.length} 個研究價位區與 {map.decision_changes.length} 個條件觸發點。
                 </figcaption>

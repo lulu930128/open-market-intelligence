@@ -91,7 +91,8 @@ test("Taiwan technical report cadence is independent of chart timestamps", () =>
   expect(contents).toContain('const includeIntraday = requestedTimeframe === "today" || requestedTimeframe === "daily"');
   expect(contents).toContain('const shouldPoll = requestedTimeframe === "today" || requestedTimeframe === "daily"');
   expect(contents).toContain('["today", "daily", "weekly", "monthly"]');
-  expect(contents).toContain("[effectiveTimeframe, enabled, isIndexProduct, stockId]");
+  expect(contents).toContain("[effectiveTimeframe, enabled, isIndexProduct, stockId, settingsRevision]");
+  expect(contents).toContain("reportSettingsRevision === settingsRevision");
 });
 
 test("Taiwan Ranking and Radar own separate request lifecycles", () => {
@@ -199,7 +200,7 @@ test("Taiwan Stock Detail Radar v2 is the only production technical surface", ()
   expect(priceMap).toContain("zonesWithinAxis(map)");
   expect(priceMap).toContain("zonesOutsideAxis(map)");
   expect(priceMap).not.toContain("space-y-1 before:absolute");
-  expect(marketTypes).toContain('version: "tw.stock.price_map.v3" | string');
+  expect(marketTypes).toContain('version: "tw.stock.price_map.v4" | string');
   expect(marketTypes).toContain('range_kind: "display_range" | "unavailable"');
   expect(marketTypes).toContain("basis_revision: string");
   expect(marketTypes).toContain("evidence_lower_bound: number");

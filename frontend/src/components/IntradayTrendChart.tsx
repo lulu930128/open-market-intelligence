@@ -10,7 +10,7 @@ import type {
 import { useT, type TranslationFunction } from "@/i18n";
 import { compactIntradayTimestamp, intradayBarIsForming, intradayCandle, selectIntradayTimeTicks, type IntradaySessionStats } from "@/components/chart/intradayPresentation";
 import { IntradaySessionStrip } from "@/components/chart/IntradaySessionSummary";
-import type { TaiwanSessionSummary } from "@/components/chart/useTaiwanSessionSummary";
+import type { ChartSessionSummary } from "@/types/chartSessionSummary";
 import IntradayChartHeader from "@/components/chart/IntradayChartHeader";
 import { useIntradayChartMode } from "@/components/chart/useIntradayChartMode";
 import {
@@ -40,7 +40,7 @@ type Props = {
   priceLimitEnabled?: boolean;
   totalVolume?: number | null;
   sessionStats?: IntradaySessionStats | null;
-  sessionSummary?: TaiwanSessionSummary | null;
+  sessionSummary?: ChartSessionSummary | null;
   sessionSummaryStatus?: string;
   volumeLabel?: string;
   priceDiagnostics?: IntradayPriceDiagnostics | null;
@@ -65,6 +65,7 @@ export type IntradaySessionConfig = {
   getXRatio: (value: string | Date) => number;
   isRegularSessionPoint: (value: string | Date) => boolean;
   volumeFormatter?: (value: number | null | undefined) => string;
+  timestampFormatter?: (value: string) => string;
 };
 
 type IntradayChartPoint = IntradayTrendPoint & {
@@ -890,6 +891,7 @@ export default function IntradayTrendChart({
       currentObservation?.price_semantics === "latest_completed_session"
         ? t("stockDetail.intraday.latestCompletedPrice")
         : t("stockDetail.intraday.currentPrice");
+    const snapshotWarming = snapshotPhase === "warming";
     return (
       <div
         className="border border-omi-border-subtle bg-omi-surface p-4"
@@ -901,16 +903,16 @@ export default function IntradayTrendChart({
         <StateSurface
           eyebrow={quoteAvailable ? `${quoteLabel} ${formatPrice(currentObservation.value)}` : undefined}
           title={
-            quoteAvailable
+            quoteAvailable && snapshotWarming
               ? t("stockDetail.intraday.historyWarming")
               : t("stockDetail.intraday.insufficient")
           }
           description={
-            quoteAvailable
+            quoteAvailable && snapshotWarming
               ? t("stockDetail.intraday.historyWarmingDescription")
               : undefined
           }
-          tone={quoteAvailable ? "info" : "empty"}
+          tone={quoteAvailable && snapshotWarming ? "info" : "empty"}
           className="h-[388px]"
         />
         {footerActions ? <div className="relative flex justify-end pt-2">{footerActions}</div> : null}
@@ -1177,6 +1179,7 @@ export default function IntradayTrendChart({
   const barWidth = clamp((usableWidth / sessionMinutes) * interval * 0.7, 1, 10);
   const timeTicks = selectIntradayTimeTicks(session.timeTicks, session.startMinutes, session.endMinutes, usableWidth);
   const formatVolumeValue = session.volumeFormatter ?? formatLots;
+  const formatPointTimestamp = session.timestampFormatter ?? compactIntradayTimestamp;
 
   return (
     <div
@@ -1220,7 +1223,7 @@ export default function IntradayTrendChart({
         stats={sessionStats} formatPrice={formatPrice} formatVolume={formatVolumeValue}
       />
       <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-1 border-b border-omi-border-subtle px-4 py-2 text-xs tabular-nums" data-testid="intraday-bar-readout">
-        <span className="text-omi-text-muted">{t(safeHoverIndex === null ? "stockDetail.intraday.latestBar" : "stockDetail.intraday.selectedBar")} <time>{compactIntradayTimestamp(readoutPoint.time)}</time></span>
+        <span className="text-omi-text-muted">{t(safeHoverIndex === null ? "stockDetail.intraday.latestBar" : "stockDetail.intraday.selectedBar")} <time>{formatPointTimestamp(readoutPoint.time)}</time></span>
         {([
           ["open", readoutCandle?.open], ["high", readoutCandle?.high],
           ["low", readoutCandle?.low], ["close", readoutCandle?.close ?? readoutPoint.price],
@@ -1760,7 +1763,7 @@ export default function IntradayTrendChart({
           aria-valuemin={0}
           aria-valuemax={data.length - 1}
           aria-valuenow={readoutIndex}
-          aria-valuetext={`${compactIntradayTimestamp(readoutPoint.time)} ${formatPrice(readoutPoint.price)}`}
+          aria-valuetext={`${formatPointTimestamp(readoutPoint.time)} ${formatPrice(readoutPoint.price)}`}
           tabIndex={0}
           onPointerMove={handlePointerMove}
           onPointerLeave={() => {

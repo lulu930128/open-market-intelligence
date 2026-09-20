@@ -566,7 +566,20 @@ export function mapBackendTechnicalReport(
         ),
       }
     : null;
-  const basisLabel = !currentStateDecisionUsable
+  const basisLabel = report.timeframe === "today"
+    ? translatedValue(
+        t,
+        "stockDetail.dataViews.technical.basis.todaySession",
+        "今日成交觀測 · 日線指標另作背景"
+      )
+    : report.timeframe === "weekly" || report.timeframe === "monthly"
+    ? translatedValue(
+        t,
+        `stockDetail.dataViews.technical.basis.${report.timeframe}`,
+        `${report.timeframe === "weekly" ? "完成週線" : "完成月線"}指標截至 ${decisionStateTime?.slice(0, 10) ?? "-"}`,
+        { periodTime: decisionStateTime?.slice(0, 10) ?? "-" }
+      )
+    : !currentStateDecisionUsable && currentStateStatus === "current_partial"
     ? translatedValue(
         t,
         "stockDetail.dataViews.technical.basis.provisional",

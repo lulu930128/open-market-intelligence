@@ -64,6 +64,7 @@ export type IndicatorPlotType = "overlay" | "pane" | "signal" | "context";
 
 export type AvailableIndicatorOption = {
   status: "available";
+  canonicalDescription?: string;
   key: IndicatorKey;
   label: string;
   description: string;
@@ -72,7 +73,8 @@ export type AvailableIndicatorOption = {
 };
 
 export type PlannedIndicatorOption = {
-  status: "planned";
+  status: "planned" | "pending" | "unsupported" | "not_applicable" | "unavailable";
+  canonicalDescription?: string;
   key: string;
   label: string;
   description: string;
@@ -292,7 +294,7 @@ export function indicatorOptionDescription(
   t: TranslationFunction,
   option: ChartIndicatorOption
 ) {
-  return translatedOrFallback(t, `indicators.options.${option.key}`, option.description);
+  return option.canonicalDescription ?? translatedOrFallback(t, `indicators.options.${option.key}`, option.description);
 }
 
 export const defaultIndicators: IndicatorSettings = {

@@ -146,6 +146,9 @@ export const enUS = {
       breadthCoverage: "Coverage {coverage}/{total} · unconfirmed {unknown}",
       breadthUpdated: "Breadth snapshot {asOf}",
       auctionProvisional: "Auction indicative up {advance} / down {decline} / flat {unchanged} · not formal trades",
+      auctionLastOpening: "Last opening auction",
+      auctionLastClosing: "Last closing auction",
+      auctionHistorical: "{phase} (historical, not live) {asOf}: up {advance} / down {decline} / flat {unchanged} / unknown {unknown} · not formal trades",
       advancePct: "{value}% advancing",
       coverage: "Data coverage",
       coverageValue: "{current} / {active}",
@@ -1271,6 +1274,8 @@ export const enUS = {
     },
   },
   indicators: {
+    unsupported: "Unsupported", not_applicable: "Not applicable to this interval",
+    unavailable: "Chart projection unavailable",
     quickTemplates: "Templates",
     pending: "Pending",
     parameters: "Parameters",
@@ -2223,6 +2228,8 @@ export const enUS = {
         decisionUnavailable: "Not usable as a finalized decision",
         unavailableTitle: "Finalized technical data unavailable",
         unavailableSummary: "The backend has not provided a verifiable finalized daily technical report; browser calculations are not substituted.",
+        unavailableTimeframeSummary: "A verifiable {timeframe} technical report is not available. Please try again later.",
+        unavailableChartSummary: "The {timeframe} chart could not be loaded. Select the timeframe again to retry; see Update status for details.",
         valueLabels: {
           vsPreviousClose: "vs prev close",
           last13Weeks: "last 13W",
@@ -2233,6 +2240,9 @@ export const enUS = {
           intraday: "Intraday price {priceTime} · daily indicators {dailyTime}",
           daily: "Daily indicators through {dailyTime}",
           provisional: "Provisional indicators {currentTime} (not decision-usable) · finalized daily {dailyTime}",
+          todaySession: "Today's trade observations · daily indicators as background",
+          weekly: "Completed weekly indicators as of {periodTime}",
+          monthly: "Completed monthly indicators as of {periodTime}",
           warningCount: "{count} data limitations",
         },
         units: {
@@ -2850,6 +2860,16 @@ export const enUS = {
     },
   },
   usStockDetail: {
+    session: {
+      volume: "Volume (shares)",
+      last_volume: "Last trade (shares)",
+      previous_volume: "Prior volume (shares)",
+      depth: "Top 5 bid / ask (shares)",
+      turnover: "Traded value (USD)",
+      firstOpen: "First observed open",
+      availabilityHelp: "Last trade size and top-five depth are not provided; — means missing or not applicable.",
+      methodHelp: "Volume is in shares and traded value in USD. The average uses 1-minute close × volume and resets for each trading segment; distance compares the latest bar close. Changing to 5m/15m does not change summary values. Totals cover the selected segment bars, excluding separate closing events; ≈ denotes estimates. Prior volume uses the exact previous trading day's resolved Daily total and may differ in scope. Relative volume uses the median of five comparable prior sessions at the same regular-session minute; insufficient samples remain partial or missing. Last trade size and top-five depth are not provided. Index volume is not applicable.",
+    },
     currentQuote: {
       unavailable: "Current-session quote is not available yet",
       expectedMissing: "Pre-market or after-hours quote is not available yet",
@@ -2991,6 +3011,7 @@ export const enUS = {
       highLow: "High / low",
       updatedPoints: "Updated / points",
       volume: "Volume",
+      volumeShares: "Volume (shares)",
       pointCount: "Point count",
       exchange: "Exchange",
       type: "Type",
