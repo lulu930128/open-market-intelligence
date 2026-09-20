@@ -2478,6 +2478,7 @@ def _us_intraday_snapshot_revision(payload: dict) -> str:
         "session_scope": payload.get("session_scope"),
         "trade_date": (payload.get("session_coverage") or {}).get("trade_date"),
         "session_coverage": payload.get("session_coverage"),
+        "session_summary": payload.get("session_summary"),
         "points": payload.get("points") or [],
         "current_observation": payload.get("current_observation"),
         "quote_identity": {
@@ -3427,6 +3428,8 @@ def _market_truth_compat_intraday_payload(
             decision_usable=False,
             session_coverage=payload["session_coverage"],
         )
+    payload["session_summary"] = bundle.session_summary.model_dump(mode="json") if bundle.session_summary else None
+    payload["volume_pace"] = bundle.volume_pace
     payload["snapshot_revision"] = _us_intraday_snapshot_revision(payload)
     payload["snapshot_point_count"] = int(payload.get("point_count") or 0)
     payload["base_revision"] = None
@@ -3488,6 +3491,7 @@ def get_us_intraday_trend(
             symbol=normalized_symbol,
             evaluated_at=requested_at,
             requested_scope=session_scope,
+            include_session_summary=True,
         )
         cached_payload = _market_truth_compat_intraday_payload(
             bundle=bundle,

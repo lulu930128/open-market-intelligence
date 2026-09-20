@@ -1343,6 +1343,8 @@ def refresh_us_intraday_bars_api(
     symbol: str,
     require_live: bool = False,
     max_provider_calls: int = Query(default=2, ge=1, le=2),
+    trade_date: date | None = None,
+    session_scope: str = Query(default="regular", pattern="^regular$"),
     db: Session = Depends(get_db),
 ):
     """Explicit bounded provider acquisition; persists then rereads canonical bars."""
@@ -1353,6 +1355,7 @@ def refresh_us_intraday_bars_api(
             symbol=symbol,
             require_live=require_live,
             max_provider_calls=max_provider_calls,
+            **({"trade_date": trade_date, "session_scope": session_scope} if trade_date is not None else {}),
         )
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

@@ -183,10 +183,35 @@ def test_intraday_date_selection_allows_latest_historical_off_session() -> None:
         market_phase="market_closed",
     )
 
-    assert selection.expected_trade_date is None
+    assert selection.expected_trade_date == date(2026, 9, 2)
     assert selection.selected_trade_date == date(2026, 9, 2)
     assert selection.current_session_expected is False
-    assert selection.selection_reason == "LATEST_AVAILABLE_OFF_SESSION"
+    assert selection.selection_reason == "LATEST_COMPLETED_SESSION_AVAILABLE"
+
+
+def test_off_session_expected_date_does_not_depend_on_cache_presence() -> None:
+    for available in ([], [date(2026, 9, 10)]):
+        selection = select_us_intraday_trade_date(
+            available,
+            now=datetime(2026, 9, 13, 2, 0, tzinfo=NEW_YORK),
+            market_phase="market_closed",
+        )
+        assert selection.expected_trade_date == date(2026, 9, 11)
+        assert selection.selected_trade_date == date(2026, 9, 11)
+        assert selection.current_session_expected is False
+        assert selection.current_session_satisfied is False
+        assert selection.selection_reason == "EXPECTED_COMPLETED_SESSION_MISSING"
+
+
+def test_missing_regular_session_keeps_completed_date_during_after_hours() -> None:
+    for now in (
+        datetime(2026, 9, 11, 16, 0, tzinfo=NEW_YORK),
+        datetime(2026, 11, 27, 13, 0, tzinfo=NEW_YORK),
+    ):
+        selection = select_us_intraday_trade_date([], now=now, market_phase="after_hours")
+        assert selection.selected_trade_date == now.date()
+        assert selection.current_session_satisfied is False
+        assert selection.selection_reason == "EXPECTED_COMPLETED_SESSION_MISSING"
 
 
 def test_awaiting_first_trade_is_valid_empty() -> None:

@@ -62,6 +62,9 @@ from app.us_market.market_truth_contracts import (
     semantic_fingerprint,
 )
 from app.us_market.session_policy import us_session_for_timestamp
+from app.us_market.session_summary import (
+    USSessionSummaryRead, project_us_session_summary, read_us_session_volume_pace,
+)
 from app.us_market.temporal_expectedness import (
     USCapabilitySessionScope,
     USMarketPhase,
@@ -95,6 +98,8 @@ class _USMarketTruthComponents:
 class USMarketTruthBundle:
     snapshot: USMarketTruthSnapshot
     series: USIntradaySeriesProjection
+    session_summary: USSessionSummaryRead | None = None
+    volume_pace: dict | None = None
 
 
 _INTERVAL_CLOSE_BLOCKING_LIMITATIONS = frozenset(
@@ -1413,6 +1418,7 @@ def read_us_market_truth_bundle(
     symbol: str,
     evaluated_at: datetime,
     requested_scope: str = "regular",
+    include_session_summary: bool = False,
 ) -> USMarketTruthBundle:
     """Read Snapshot and Series from one component generation."""
 
@@ -1433,7 +1439,15 @@ def read_us_market_truth_bundle(
         requested_scope=requested_scope,
         latest_available_trade_date=components.latest_intraday_trade_date,
     )
-    return USMarketTruthBundle(snapshot=snapshot, series=series)
+    pace = None
+    summary = None
+    if include_session_summary:
+        daily = components.daily_read.result.resolved
+        pace = read_us_session_volume_pace(
+            db, series=series, intraday=components.bars_read.result.resolved, daily=daily,
+        )
+        summary = project_us_session_summary(snapshot=snapshot, series=series, daily=daily, pace=pace)
+    return USMarketTruthBundle(snapshot=snapshot, series=series, session_summary=summary, volume_pace=pace)
 
 
 def read_us_historical_intraday_trend(

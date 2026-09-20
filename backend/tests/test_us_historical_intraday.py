@@ -100,3 +100,37 @@ def test_yahoo_adapter_passes_exact_historical_period_without_recent_range():
     assert "range" not in params
     assert params["period1"] == int(start.timestamp())
     assert params["period2"] == int(end.timestamp())
+
+
+def test_explicit_refresh_route_preserves_completed_date_and_bounds(monkeypatch):
+    from fastapi import FastAPI
+    from app.routers import us_market
+    from app.db.session import get_db
+
+    app = FastAPI()
+    app.include_router(us_market.router, prefix="/api/us-market")
+    app.dependency_overrides[get_db] = lambda: object()
+    calls = []
+
+    def refresh(_db, **kwargs):
+        calls.append(kwargs)
+        return {"requested_trade_date": kwargs["trade_date"].isoformat()}
+
+    monkeypatch.setattr(us_market, "refresh_us_intraday_bars", refresh)
+    result = us_market.refresh_us_intraday_bars_api(
+        "AAPL", require_live=False, max_provider_calls=1,
+        trade_date=date(2026, 9, 4), session_scope="regular", db=object(),
+    )
+    assert result["requested_trade_date"] == "2026-09-04"
+    assert calls[0]["trade_date"] == date(2026, 9, 4)
+    assert calls[0]["session_scope"] == "regular"
+    assert calls[0]["max_provider_calls"] == 1
+    parameters = {
+        item["name"]: item["schema"] for item in app.openapi()["paths"][
+            "/api/us-market/intraday/{symbol}/refresh"
+        ]["post"]["parameters"]
+    }
+    assert {"type": "string", "format": "date"} in parameters["trade_date"]["anyOf"]
+    assert parameters["max_provider_calls"]["maximum"] == 2
+    assert parameters["max_provider_calls"]["minimum"] == 1
+    assert parameters["session_scope"]["pattern"] == "^regular$"

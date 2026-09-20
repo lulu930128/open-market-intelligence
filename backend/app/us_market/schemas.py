@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
+from app.us_market.session_summary import USSessionSummaryRead
 
 
 class USStockMasterRead(BaseModel):
@@ -373,6 +374,7 @@ class USIntradaySessionCoverageRead(BaseModel):
 
 
 class USIntradayTrendRead(BaseModel):
+    session_summary: USSessionSummaryRead | None = None
     requested_trade_date: str | None = None
     is_historical: bool = False
     is_partial: bool | None = None

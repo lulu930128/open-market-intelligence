@@ -32,6 +32,7 @@ from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE,
     expected_us_intraday_trade_date,
     is_us_trading_day,
+    latest_completed_us_intraday_trade_date,
 )
 
 
@@ -98,30 +99,33 @@ def select_us_intraday_trade_date(
         market_phase=market_phase,
         now=now,
     )
+    completed = latest_completed_us_intraday_trade_date(now=now)
     if expected is not None:
         satisfied = expected in available
         return USIntradayDateSelection(
             expected_trade_date=expected,
             latest_available_trade_date=latest,
-            selected_trade_date=expected if satisfied else None,
+            selected_trade_date=expected if satisfied or completed == expected else None,
             current_session_expected=True,
             current_session_satisfied=satisfied,
             selection_reason=(
                 "CURRENT_SESSION_AVAILABLE"
                 if satisfied
+                else "EXPECTED_COMPLETED_SESSION_MISSING"
+                if completed == expected
                 else "EXPECTED_CURRENT_SESSION_MISSING"
             ),
         )
     return USIntradayDateSelection(
-        expected_trade_date=None,
+        expected_trade_date=completed,
         latest_available_trade_date=latest,
-        selected_trade_date=latest,
+        selected_trade_date=completed,
         current_session_expected=False,
         current_session_satisfied=False,
         selection_reason=(
-            "LATEST_AVAILABLE_OFF_SESSION"
-            if latest is not None
-            else "NO_INTRADAY_SESSION_AVAILABLE"
+            "LATEST_COMPLETED_SESSION_AVAILABLE"
+            if completed in available
+            else "EXPECTED_COMPLETED_SESSION_MISSING"
         ),
     )
 

@@ -226,6 +226,20 @@ def expected_us_daily_price_date(
     return previous_us_trading_day(target_date, include_value=True)
 
 
+def latest_completed_us_intraday_trade_date(*, now: datetime | None = None) -> date:
+    """Return the latest completed regular session, independent of cache rows.
+
+    Minute evidence follows the actual session close, not the later Daily
+    publication buffer. An empty cache does not remove the expected session.
+    """
+    local_now = _as_new_york_datetime(now)
+    today = local_now.date()
+    return previous_us_trading_day(
+        today,
+        include_value=is_us_trading_day(today) and local_now.time() >= us_session_close_time(today),
+    )
+
+
 def expected_us_intraday_trade_date(
     *,
     market_phase: str,
@@ -257,6 +271,7 @@ __all__ = [
     "US_SPECIAL_CLOSURE_DATES_V1",
     "expected_us_daily_price_date",
     "expected_us_intraday_trade_date",
+    "latest_completed_us_intraday_trade_date",
     "is_us_early_close_day",
     "is_us_daily_price_finalized",
     "is_us_trading_day",

@@ -549,7 +549,13 @@ class USIntradaySeriesProjection(CanonicalModel):
             if self.current_session_satisfied:
                 if self.trade_date != self.expected_trade_date:
                     raise ValueError("satisfied current-session series must select expected date")
-            elif self.trade_date is not None or all_points:
+            elif all_points or (
+                self.trade_date is not None
+                and not (
+                    self.regular_session_completed
+                    and self.trade_date == self.expected_trade_date
+                )
+            ):
                 raise ValueError("missing current-session series cannot expose historical points")
         if self.trade_date is not None and any(
             point.start_at.astimezone(US_MARKET_TIMEZONE).date() != self.trade_date
