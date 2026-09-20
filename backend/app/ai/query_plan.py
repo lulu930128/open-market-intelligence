@@ -208,6 +208,11 @@ DOMAIN_HINTS["chips"] = (
 )
 
 CAPABILITY_HINTS = {
+    "market.indices": ("大盤", "市場指數"),
+    "market.breadth": ("漲跌家數", "上漲家數", "下跌家數", "市場廣度"),
+    "market.volume_state": ("量能", "市場成交金額"),
+    "quote.snapshot": ("最後成交",),
+    "technical.structure": ("技術結構",),
     "quote.order_book": (
         "五檔", "買五", "賣五", "委買", "委賣", "order book", "depth",
     ),
@@ -418,6 +423,8 @@ TW_INTRADAY_SCREENING_METRIC_HINTS = {
         "order book imbalance",
     ),
     "change_pct": (
+        "漲幅",
+        "跌幅",
         "盤中漲幅",
         "盤中跌幅",
         "今日漲幅",
@@ -527,16 +534,32 @@ def _list_param(params: dict[str, Any], key: str) -> tuple[str, ...]:
     )
 
 
+def _selection_question(question: str, *, positive_only: bool = False) -> str:
+    """Substitution constraints do not request or exclude either evidence kind."""
+    clauses = re.split(r"[，,。；;!?！？\r\n]|但是|但要|但保留", question.casefold())
+    selected = []
+    for clause in clauses:
+        clause = re.sub(
+            r"(?:不要|不可|不能|不應)(?:把|用|以).{0,80}?(?:冒充|替代|代替|當成|當作|當).*$",
+            "", clause,
+        )
+        if positive_only and any(term in clause for term in NEGATION_TERMS):
+            if not any(term in clause for term in NEGATION_PRESERVING_TERMS):
+                continue
+        selected.append(clause)
+    return "，".join(selected)
+
+
 def _hint_negation(question: str, hint: str) -> str | None:
     """Return an exclusion marker only when every mention is actually negated."""
 
     matched_negations: list[str] = []
-    for clause in re.split(r"[，,。；;!?]", question):
+    for clause in re.split(r"[，,。；;!?！？\r\n]", question):
         if hint not in clause:
             continue
         if any(
             re.search(
-                rf"{re.escape(term.casefold())}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
+                rf"{re.escape(term.casefold())}[^，,。；;!?！？\r\n]{{0,40}}{re.escape(hint)}",
                 clause,
             )
             for term in NEGATION_PRESERVING_TERMS
@@ -547,7 +570,7 @@ def _hint_negation(question: str, hint: str) -> str | None:
                 term
                 for term in NEGATION_TERMS
                 if re.search(
-                    rf"{re.escape(term.casefold())}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
+                    rf"{re.escape(term.casefold())}[^，,。；;!?！？\r\n]{{0,40}}{re.escape(hint)}",
                     clause,
                 )
             ),
@@ -573,7 +596,7 @@ def _query_domains(
     params = payload.market_data_params if isinstance(payload.market_data_params, dict) else {}
     explicit_requested = _list_param(params, "refresh_domains") or _list_param(params, "requested_domains")
     explicit_excluded = _list_param(params, "excluded_domains")
-    question = payload.question.casefold()
+    question = _selection_question(payload.question)
     positive_terms: list[str] = []
     negative_terms: list[str] = []
     requested: list[str] = list(explicit_requested)
@@ -621,10 +644,12 @@ def _query_capabilities(
     scope_type: str,
     target_market: str | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    question = payload.question.casefold()
+    question = _selection_question(payload.question)
     requested: list[str] = []
     excluded: list[str] = []
     for capability_id, hints in CAPABILITY_HINTS.items():
+        if capability_id.startswith("market.") and scope_type != "market":
+            continue
         for hint in hints:
             normalized_hint = hint.casefold()
             if normalized_hint not in question:
@@ -709,7 +734,7 @@ def _infer_tw_screening_selection(
     ):
         return None
 
-    question = payload.question.casefold()
+    question = _selection_question(payload.question, positive_only=True)
     ranking_requested = bool(
         any(
             hint in question
@@ -803,6 +828,36 @@ def _infer_tw_screening_selection(
     }
 
 
+def _infer_tw_price_map_screening_selection(payload: AiAskRequest, *, scope_type: str, target_market: str | None) -> dict[str, Any] | None:
+    if scope_type != "market" or str(target_market or "TW").upper() not in {"TW", "TWSE", "TPEX", "TAIWAN"}:
+        return None
+    question = _selection_question(payload.question, positive_only=True)
+    if not any(term in question for term in ("支撐", "壓力", "price map", "price-map", "價位帶", "zone")):
+        return None
+    if not any(term in question for term in ("哪些", "篩", "掃描", "排行", "scanner", "screen", "stocks", "名單")):
+        return None
+    relation = next((value for hints, value in (
+        (("突破回測", "breakout retest"), "breakout_retest"),
+        (("跌破回測", "breakdown retest"), "breakdown_retest"),
+        (("支撐反應", "支撐反彈", "support reaction"), "support_reaction"),
+        (("壓力反應", "壓力回落", "resistance reaction"), "resistance_reaction"),
+        (("觸及", "touch"), "touching"),
+        (("站上", "高於", "above"), "above_zone"),
+        (("低於", "below"), "below_zone"),
+    ) if any(hint in question for hint in hints)), "near_zone")
+    timeframe = "monthly" if any(term in question for term in ("月線", "monthly")) else "weekly" if any(term in question for term in ("週線", "weekly")) else "daily"
+    parameters = {"relation": relation, "timeframe": timeframe,
+                  "zone_side": "downside" if "支撐" in question and "壓力" not in question else "upside" if "壓力" in question and "支撐" not in question else "any",
+                  "lane": "indicative" if any(term in question for term in ("試撮", "試搓", "盤前", "indicative", "preopen")) else "actual"}
+    limit_match = re.search(r"(?:前|top)[ ]*([0-9]{1,3})", question)
+    if limit_match:
+        parameters["limit"] = int(limit_match.group(1))
+    explicit = (payload.selection or {}).get("parameters", {}).get("screening.price_map", {})
+    if isinstance(explicit, dict):
+        parameters.update(explicit)
+    return {"include": ["screening.price_map"], "parameters": {"screening.price_map": parameters}}
+
+
 def _infer_tw_intraday_screening_selection(
     payload: AiAskRequest,
     *,
@@ -816,7 +871,7 @@ def _infer_tw_intraday_screening_selection(
     ):
         return None
 
-    question = payload.question.casefold()
+    question = _selection_question(payload.question, positive_only=True)
     hot_groups_requested = any(
         hint.casefold() in question for hint in TW_HOT_GROUP_HINTS
     )
@@ -955,7 +1010,9 @@ def build_query_plan(
         scope_type=scope_type,
     )
     raw_selection = payload.selection if isinstance(payload.selection, dict) else {}
-    has_explicit_capability_selection = any(
+    # Automatic supplements (for example Atlas optional evidence) must retain
+    # NLP planning, matching normalize_selection's explicit-selection lock.
+    has_explicit_capability_selection = raw_selection.get("auto_planning") is not True and any(
         key in raw_selection
         for key in ("required", "include", "optional", "exclude")
     )
@@ -963,7 +1020,10 @@ def build_query_plan(
         None
         if has_explicit_capability_selection
         else (
-            _infer_tw_intraday_screening_selection(
+            _infer_tw_price_map_screening_selection(
+                payload, scope_type=scope_type, target_market=target_market,
+            )
+            or _infer_tw_intraday_screening_selection(
                 payload,
                 scope_type=scope_type,
                 target_market=target_market,
@@ -980,8 +1040,19 @@ def build_query_plan(
         excluded_selection_capabilities: tuple[str, ...] = ()
         capability_selection_mode = "explicit"
     elif inferred_screening_selection is not None:
-        requested_capabilities = ()
-        excluded_selection_capabilities = ()
+        requested_capabilities, excluded_selection_capabilities = _query_capabilities(
+            payload, scope_type=scope_type, target_market=target_market,
+        )
+        # Ranking metric hints (for example foreign institutional flow) are
+        # already consumed by the typed scanner, not separate aggregate requests.
+        market_facts = {"market.indices", "market.breadth", "market.volume_state"}
+        inferred_screening_selection["include"] = list(dict.fromkeys([
+            *inferred_screening_selection["include"],
+            *(cap for cap in requested_capabilities if cap in market_facts),
+        ]))
+        inferred_screening_selection["exclude"] = list(dict.fromkeys([
+            *(raw_selection.get("exclude") or []), *excluded_selection_capabilities,
+        ]))
         capability_selection_mode = "inferred"
         requested_domains = tuple(
             dict.fromkeys(
@@ -1048,13 +1119,20 @@ def build_query_plan(
         selection_input = {
             **raw_selection,
             "include": list(requested_capabilities),
-            "exclude": list(excluded_selection_capabilities),
+            "exclude": list(dict.fromkeys([
+                *(raw_selection.get("exclude") or []), *excluded_selection_capabilities,
+            ])),
         }
     elif inferred_screening_selection is not None:
         selection_input = {
             **raw_selection,
             **inferred_screening_selection,
         }
+    if capability_selection_mode == "restrictive" or inferred_screening_selection is not None:
+        # NLP has now produced a bounded selection. Consume the automatic
+        # planning hint so normalization does not expand broad legacy domains
+        # back into unrelated capabilities; optional supplements stay intact.
+        selection_input.pop("auto_planning", None)
     selection = capability_contract.normalize_selection(
         selection=selection_input,
         output=payload.output,
@@ -1375,6 +1453,9 @@ def build_query_plan(
         }
     )
     if technical_only_selection:
+        price_map_only = "technical.price_map" in selected_capability_set and selected_capability_set <= {
+            "target.identity", "technical.price_map", "data.freshness",
+        }
         return QueryPlan(
             intent=question_intent,
             intents=intents,
@@ -1386,7 +1467,7 @@ def build_query_plan(
             required_capabilities=("stock_master", "market_daily_price"),
             optional_capabilities=(),
             excluded_capabilities=(),
-            required_readers=(
+            required_readers=("get_stock", "build_tw_stock_price_map") if price_map_only else (
                 "get_stock",
                 "list_stock_ohlc_chart_data",
                 "build_stock_technical_report",
@@ -1407,6 +1488,8 @@ def build_query_plan(
             matched_negative_terms=negative_terms,
             capability_selection_mode=capability_selection_mode,
             selected_action_reason=(
+                "Explicit Price Map selection delegates bars, indicators and corporate actions to the canonical map reader."
+                if price_map_only else
                 "Explicit Taiwan technical selection executes only identity, "
                 "released daily bars, technical derivation, and freshness dependencies."
             ),

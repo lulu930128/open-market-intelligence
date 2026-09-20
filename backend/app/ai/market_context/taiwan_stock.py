@@ -28,6 +28,7 @@ from app.ai.market_context.taiwan_projection import (
     _with_evidence_passport,
 )
 from app.ai.market_context.taiwan_bar_projection import project_taiwan_bar_series
+from app.market.tw_bar_service import TaiwanBarService
 from app.ai.market_payload_contract import (
     intraday_point_limit as _intraday_point_limit,
     payload_level as _payload_level,
@@ -211,6 +212,7 @@ def _requested_price_map(
                 stock_id=stock_id,
                 candidate_close=candidate_close,
                 now=dependencies.now(),
+                timeframe=str(price_map_parameters.get("timeframe") or "daily"),
             ),
             None,
         )
@@ -443,6 +445,10 @@ def _compact_intraday_bars(
                 bar_series,
                 session_scope=scope.value,
                 expected_trade_date=expected_trade_date,
+                presentation_events=(TaiwanBarService(db).read_current_session_presentation_events(
+                    series=bar_series,
+                    requested_at=_contract_datetime((calendar_status or {}).get("checked_at")),
+                ) if current_session_scope else ()),
             )
             compact_history = _compact_intraday_history(history, point_limit=point_limit)
             series[interval] = compact_history
@@ -480,6 +486,11 @@ def _compact_intraday_bars(
             else None
         ),
         "series": series,
+        "presentation_events": list({event["evidence_id"]: event
+            for item in series.values() for event in item.get("presentation_events", [])}.values()),
+        "display_event_count": len({event["evidence_id"]
+            for item in series.values() for event in item.get("presentation_events", [])}),
+        "read_diagnostics": {interval: item.get("read_diagnostics") for interval, item in series.items()},
         "warnings": warnings,
     }
 
@@ -1997,6 +2008,30 @@ def read_stock_technical_context(
         db=db,
         stock_id=normalized_stock_id,
     )
+    requested = set((market_data_params or {}).get("requested_capabilities") or ())
+    if "technical.price_map" in requested and requested <= {
+        "technical.price_map", "target.identity", "data.freshness",
+    }:
+        # The canonical map reader owns its bars, indicators and corporate
+        # action dependencies. Do not also compute every unrequested technical
+        # report, advanced indicator and sector benchmark for this selection.
+        price_map, error = _requested_price_map(
+            db=db, stock_id=normalized_stock_id,
+            market_data_params=market_data_params, dependencies=dependencies,
+        )
+        compact: dict[str, Any] = {"stock": _stock_dict(stock)}
+        _attach_price_map_to_compact(compact, price_map)
+        result = price_map or {}
+        return _with_evidence_passport({
+            "kind": "stock_technical_context",
+            "generated_at": dependencies.now(),
+            "as_of": (result.get("reference") or {}).get("trade_date"),
+            "scope": {"type": "stock", "id": normalized_stock_id, "market": "TW"},
+            "data": {"stock": _stock_dict(stock), "price_map": price_map, "compact": compact},
+            "missing": ["technical.price_map"] if error else list(result.get("missing") or []),
+            "warnings": [error] if error else list(result.get("warnings") or []),
+            "source_refs": list(result.get("source_refs") or []),
+        })
     requested_trade_date = parse_market_trade_date(
         (market_data_params or {}).get("trade_date")
     )

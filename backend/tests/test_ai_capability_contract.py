@@ -18,6 +18,84 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_intraday_metric_availability_survives_outward_quality_projection(self):
+        capability = "screening.intraday"
+        for metric, status, reason in (
+            ("order_book_imbalance", "unsupported", "FULL_MARKET_DEPTH_PRODUCER_UNSUPPORTED"),
+            ("vwap_deviation_pct", "unavailable", "CANONICAL_SESSION_VWAP_UNAVAILABLE"),
+        ):
+            for freshness in ("current", "delayed", "stale"):
+                with self.subTest(metric=metric, freshness=freshness):
+                    payload = {
+                        "metric": metric, "status": status, "reason_code": reason,
+                        "freshness_status": freshness, "rows": [],
+                        "facts_usable": False, "decision_usable": False,
+                        "facts_usable_for_ranking": False,
+                        "coverage": {"universe_count": 1, "coverage_count": 1,
+                                     "coverage_ratio": 1.0, "status": status},
+                        "missing": [] if status == "unsupported" else ["canonical_session_vwap"],
+                    }
+                    selection = capability_contract.normalize_selection(
+                        selection={"required": [capability]}, output="evidence_only",
+                        realtime_policy="cache_only", payload_level="full",
+                        scope_type="market", question_intent="general",
+                    )
+                    projected, _ = capability_contract.project_selected_data(
+                        response={"result": {"data": {"screening": {"intraday": payload}}}},
+                        selection=selection,
+                    )
+                    manifest = {"capabilities": [{
+                        "capability": capability, "domain": "screening",
+                        "slot": "screening_intraday", "required": True,
+                        "status": status, "returned_count": 1,
+                    }]}
+                    canonical = {
+                        "ok": True, "request_status": "completed",
+                        "target": {"type": "market", "market": "TW"},
+                        "status": {"readiness": {"decision_required": False}},
+                        "evidence": {"manifest": manifest, "data": projected,
+                                     "freshness_by_capability": {capability: {"status": status}}},
+                    }
+                    quality = data_quality_contract.build_quality_contract(
+                        canonical=canonical, selection=selection, manifest=manifest,
+                        projected_data=projected, realtime_assessments={}, scope_type="market",
+                    )
+                    result = data_quality_contract.apply_quality_contract(canonical, quality=quality)
+                    item = quality["capabilities"][capability]
+                    self.assertEqual(item["status"], status)
+                    self.assertEqual(item["freshness_status"], freshness)
+                    self.assertEqual(item["availability_status"], "unavailable")
+                    self.assertEqual(item["status_class"], "blocked")
+                    self.assertFalse(item["facts_usable"])
+                    self.assertFalse(item["decision_usable"])
+                    self.assertIn(reason, item["reason_codes"])
+                    evidence = result["evidence"]
+                    self.assertEqual(evidence["manifest"]["capabilities"][0]["status"], status)
+                    self.assertFalse(evidence["capability_status"][capability]["facts_usable"])
+                    self.assertEqual(evidence["data"][capability]["missing"], payload["missing"])
+                    if status == "unsupported":
+                        self.assertFalse(item["refresh_possible_now"])
+                        self.assertFalse(item["refresh_recommended"])
+
+    def test_missing_expected_intraday_session_is_not_only_partial(self):
+        payload = capability_contract._canonical_intraday_value({
+            "series": {"1m": {
+                "coverage_status": "missing", "is_partial": True,
+                "expected_trade_date": "2026-09-11", "point_count": 0,
+                "returned_point_count": 0, "points": [],
+                "series_coverage": {
+                    "status": "missing", "expected_bucket_count": 265,
+                    "observed_bucket_count": 0, "missing_bucket_count": 265,
+                },
+            }},
+        })
+        item = self._quality_item(
+            capability="intraday.bars", market="TW", payload=payload,
+            returned_count=0, canonical_available_count=0,
+        )
+        self.assertEqual(item["canonical_dataset_coverage"], "missing")
+        self.assertFalse(item["decision_usable"])
+
     def test_market_chips_projection_preserves_current_aggregate_field_names(self):
         selection = capability_contract.normalize_selection(
             selection={"required": ["market.chips"]}, output="decision_with_evidence",
@@ -1949,7 +2027,7 @@ class AiCapabilityContractTests(unittest.TestCase):
             "refresh_policy_denied",
         )
 
-    def test_tw_quote_and_intraday_use_reader_fetch_not_fill_operations(
+    def test_tw_quote_reader_fetch_and_intraday_canonical_fill(
         self,
     ) -> None:
         for capability_id in (
@@ -1957,7 +2035,6 @@ class AiCapabilityContractTests(unittest.TestCase):
             "quote.order_book",
             "quote.auction",
             "quote.official_close",
-            "intraday.bars",
         ):
             spec = capability_contract.CAPABILITIES[capability_id]
             self.assertEqual(
@@ -1974,6 +2051,9 @@ class AiCapabilityContractTests(unittest.TestCase):
             "tw.refresh_intraday",
             capability_contract.EXECUTABLE_FILL_OPERATIONS,
         )
+        bars = capability_contract.CAPABILITIES["intraday.bars"]
+        self.assertEqual(bars.refresh_strategy_for_scope("stock"), "granular_tool")
+        self.assertEqual(bars.fill_operation_for_scope("stock"), "tw.refresh_intraday_bars")
         self.assertLessEqual(
             capability_contract.EXECUTABLE_FILL_OPERATIONS,
             set(agentic_execution.ALLOWED_TOOLS),
@@ -2620,7 +2700,9 @@ class AiCapabilityContractTests(unittest.TestCase):
 
         self.assertIn("volume", plan.requested_domains)
         self.assertIn("market.volume_state", plan.selected_capabilities)
-        self.assertIn("market.breadth", plan.selected_capabilities)
+        # The caller asks only for volume; a broad classifier intent must not
+        # make unrelated breadth a required response payload.
+        self.assertNotIn("market.breadth", plan.selected_capabilities)
 
     def test_market_chip_nlp_routes_to_market_scope_capabilities(self) -> None:
         payload = AiAskRequest(

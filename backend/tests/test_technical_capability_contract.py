@@ -242,7 +242,9 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
                     "compact": {
                         "price_map": {
                             "kind": "tw_stock_price_map",
-                            "version": "tw.stock.price_map.v3",
+                            "version": "tw.stock.price_map.v4",
+                            "requested_timeframe": "weekly",
+                            "structure_timeframe": "weekly",
                             "market": "TW",
                             "stock_id": "2408",
                             "status": "partial",
@@ -300,7 +302,8 @@ class TechnicalCapabilityContractTests(unittest.TestCase):
             "technical.price_map",
             projected["technical.price_map"],
         )
-        self.assertEqual(brief["version"], "tw.stock.price_map.v3")
+        self.assertEqual(brief["version"], "tw.stock.price_map.v4")
+        self.assertEqual(brief["structure_timeframe"], "weekly")
         self.assertEqual(brief["zone_count"], 12)
         self.assertEqual(len(brief["zones"]), 8)
         self.assertEqual(

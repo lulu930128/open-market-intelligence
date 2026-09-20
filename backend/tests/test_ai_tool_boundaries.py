@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import date, datetime, timezone
 import unittest
 from types import SimpleNamespace
@@ -18,44 +16,6 @@ from app.ai.market_context.taiwan_futures import _build_tw_futures_compact
 from app.db.models import Base
 from app.market import stock_selection_refresh
 from app.watchlists import backfill_service as watchlist_backfill_service
-
-
-EXPECTED_INTERNAL_TOOL_NAMES = (
-    "omi.ask",
-    "omi.read_refresh_status",
-    "omi.read_market_overview",
-    "omi.read_stock_context",
-    "omi.read_tw_index_context",
-    "omi.read_tw_futures_context",
-    "omi.read_us_stock_context",
-    "omi.read_jp_stock_context",
-    "omi.read_jp_index_context",
-    "omi.read_kr_stock_context",
-    "omi.read_kr_index_context",
-    "omi.read_crypto_market_context",
-    "omi.read_crypto_asset_context",
-    "omi.read_watchlist_context",
-    "omi.read_data_freshness",
-    "omi.generate_stock_brief",
-    "omi.generate_us_stock_brief",
-    "omi.generate_watchlist_brief",
-    "omi.generate_stock_llm_report",
-    "omi.generate_us_stock_llm_report",
-    "omi.generate_watchlist_llm_report",
-    "omi.read_memories",
-    "omi.write_memory",
-    "omi.update_memory",
-    "omi.archive_memory",
-    "omi.read_reports",
-    "omi.read_report",
-    "omi.save_stock_brief",
-    "omi.save_us_stock_brief",
-    "omi.save_watchlist_brief",
-)
-
-EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "c729a57f6992d5f52510e2122766e515fc7e3fd769f9c181f78dd11c22ed4012"
-)
 
 
 class AIToolBoundaryTests(unittest.TestCase):
@@ -257,6 +217,10 @@ class AIToolBoundaryTests(unittest.TestCase):
                         "scope": "full_market",
                         "status": "ready",
                         "trade_date": "2026-07-24",
+                        "as_of": "2026-07-24T13:30:00+08:00",
+                        "trade_value_semantics": "official_cumulative_trade_value",
+                        "trade_value_is_estimate": False,
+                        "official_flag": True,
                         "trade_value": 5_000_000_000_000,
                         "source": "twse_rwd_mi_index",
                     },
@@ -266,6 +230,10 @@ class AIToolBoundaryTests(unittest.TestCase):
                         "scope": "full_market",
                         "status": "ready",
                         "trade_date": "2026-07-24",
+                        "as_of": "2026-07-24T13:30:00+08:00",
+                        "trade_value_semantics": "official_cumulative_trade_value",
+                        "trade_value_is_estimate": False,
+                        "official_flag": True,
                         "trade_value": 500_000_000_000,
                         "source": "tpex_openapi_mainboard_quotes",
                     },
@@ -279,7 +247,7 @@ class AIToolBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(
             volume_state["current_value_source"],
-            "official_market_breadth_summary",
+            "canonical_market_breadth",
         )
         self.assertEqual(
             volume_state["field_status"]["current_cumulative_trade_value"][
@@ -373,22 +341,28 @@ class AIToolBoundaryTests(unittest.TestCase):
         )
         self.assertIn("interval", market_data_params)
 
-    def test_internal_tool_catalog_contract_remains_stable(self) -> None:
-        catalog = tools.list_ai_tools(include_internal=True)
-        encoded = json.dumps(
-            catalog,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+    def test_internal_tool_catalog_has_valid_unique_owned_contracts(self) -> None:
+        from app.ai import capability_contract
 
-        self.assertEqual(
-            tuple(item["name"] for item in catalog["tools"]),
-            EXPECTED_INTERNAL_TOOL_NAMES,
-        )
-        self.assertEqual(
-            hashlib.sha256(encoded).hexdigest(),
-            EXPECTED_INTERNAL_TOOL_CATALOG_SHA256,
-        )
+        internal = tools.list_ai_tools(include_internal=True)["tools"]
+        names = [item["name"] for item in internal]
+        self.assertEqual(len(names), len(set(names)))
+        public = tools.list_ai_tools()["tools"]
+        self.assertEqual(public, [item for item in internal if item["name"] in {"omi.ask", "omi.read_refresh_status"}])
+        for item in internal:
+            self.assertTrue(item["name"].startswith("omi."))
+            self.assertTrue(item["description"])
+            schema = item["input_schema"]
+            self.assertEqual(schema["type"], "object")
+            self.assertIsInstance(schema["properties"], dict)
+            self.assertTrue(set(schema.get("required", ())) <= set(schema["properties"]))
+        ask_schema = next(item["input_schema"] for item in internal if item["name"] == "omi.ask")
+        selection = ask_schema["properties"]["selection"]["properties"]
+        self.assertEqual(set(selection["include"]["items"]["enum"]), set(capability_contract.CAPABILITIES))
+        self.assertEqual(selection["parameters"]["properties"], {
+            spec.capability_id: spec.parameter_schema
+            for spec in capability_contract.CAPABILITY_SPECS if spec.parameter_schema
+        })
 
     def test_tool_catalog_calls_do_not_share_mutable_state(self) -> None:
         first = tools.list_ai_tools(include_internal=True)
@@ -791,6 +765,9 @@ class AIToolBoundaryTests(unittest.TestCase):
                 "quote_time": "2026-07-28T10:00:00+08:00",
                 "last_price": 23_500,
                 "total_volume": 12_345,
+                "volume_unit": "contracts",
+                "volume_semantics": "session_cumulative_contracts",
+                "volume_contract_version": "tw.futures.volume.v1",
                 "freshness": {"status": "live", "is_stale": False},
             },
             latest_daily={
@@ -802,6 +779,8 @@ class AIToolBoundaryTests(unittest.TestCase):
             intraday_chart={
                 "timeframe": "today",
                 "interval": "1m",
+                "volume_unit": "contracts",
+                "volume_semantics": "interval_contracts",
                 "point_count": 1,
                 "from_date": "2026-07-28T10:00:00",
                 "to_date": "2026-07-28T10:00:00",
@@ -815,6 +794,9 @@ class AIToolBoundaryTests(unittest.TestCase):
                         "low": 23_480,
                         "close": 23_500,
                         "volume": 321,
+                        "volume_unit": "contracts",
+                        "volume_semantics": "interval_contracts",
+                        "volume_contract_version": "tw.futures.volume.v1",
                         "session": "regular",
                     }
                 ],

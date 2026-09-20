@@ -1394,6 +1394,7 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
         )
     auction = {
         "kind": "quote_auction",
+        "historical_capture": quote.get("auction_history"),
         "status": auction_status,
         "available": auction_available,
         "applicability_status": (
@@ -2178,6 +2179,9 @@ def _compact_intraday_history(
         if series_coverage
         else history.get("coverage_status")
     )
+    point_count = history.get("point_count")
+    if not isinstance(point_count, int) or isinstance(point_count, bool) or point_count < 0:
+        point_count = len(points)
     return {
         "status": (
             "partial"
@@ -2202,13 +2206,16 @@ def _compact_intraday_history(
         "source": history.get("source"),
         "from_time": _json_value(history.get("from_time") or first_point.get("time")),
         "to_time": _json_value(history.get("to_time") or (latest_point or {}).get("time")),
-        "point_count": history.get("point_count") if history.get("point_count") is not None else len(points),
+        "point_count": point_count,
         "returned_point_count": len(compact_points),
+        "presentation_events": list(history.get("presentation_events") or []),
+        "display_event_count": len(history.get("presentation_events") or []),
         "bar_limit": point_limit,
-        "truncated": len(points) > len(compact_points),
+        "truncated": bool(history.get("truncated")) or point_count > len(compact_points),
         "coverage_status": coverage_status,
         "series_coverage": series_coverage,
         "materialization_policy": history.get("materialization_policy"),
+        "market_phase": history.get("market_phase"),
         "session_scope": history.get("session_scope"),
         "materialization_state": history.get("materialization_state"),
         "is_historical": history.get("is_historical", False),
@@ -2310,6 +2317,7 @@ def _compact_intraday_history(
         "partial_bar_policy": history.get("partial_bar_policy"),
         "aggregation_method": history.get("aggregation_method"),
         "cached_count": history.get("cached_count"),
+        "read_diagnostics": history.get("read_diagnostics"),
         "refreshed_count": refreshed_count,
         "cache_status": history.get("cache_status") or (
             "persisted_hit"

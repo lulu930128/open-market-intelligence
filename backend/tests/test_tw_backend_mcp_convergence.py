@@ -214,7 +214,7 @@ def test_reader_provider_io_is_reported_without_fabricating_a_tool_run():
 @pytest.mark.parametrize("available,close_price,close_date,expected_final", [
     (True, 143, date(2026, 9, 7), True),
     (False, None, date(2026, 9, 7), False),
-    (True, 144, date(2026, 9, 7), False),
+    (True, 144, date(2026, 9, 7), True),
     (True, 143, date(2026, 9, 4), False),
 ])
 def test_screening_uses_canonical_session_close_and_preserves_observation_phase(
@@ -235,7 +235,22 @@ def test_screening_uses_canonical_session_close_and_preserves_observation_phase(
             "component_sources": [{"provider": "twse_mis", "source": "twse_mis_twse_registered_universe",
                                    "raw_result_id": "raw_fetch_result:2303", "event_at": event.isoformat()}],
         }], now=event)
-        with patch.object(tw_intraday_state, "read_taiwan_session_close", return_value=object()) as reader, \
+        from app.market_data.contracts import (
+            AuthorityClass, InstrumentKey, InstrumentType, Market, ObservationState,
+            QuoteObservation, SourceLineage, TradeObservationState,
+        )
+        close_event = event.replace(day=close_date.day)
+        quote = QuoteObservation(
+            instrument=InstrumentKey(market=Market.TW, symbol="2303", venue="TWSE", instrument_type=InstrumentType.STOCK),
+            lineage=SourceLineage(provider="twse_mis", source="twse_mis_quote_depth",
+                authority=AuthorityClass.EXCHANGE, event_at=close_event,
+                received_at=at(13, 34), fetched_at=at(13, 34), raw_receipt_id="raw_fetch_result:2303"),
+            trade_date=close_date, currency="TWD", state=ObservationState.AVAILABLE,
+            trade_state=TradeObservationState.TRADE_OBSERVED, last_trade_price=close_price,
+            previous_close=130, open_price=130, high_price=close_price, low_price=130,
+        ) if available else None
+        with patch.object(tw_intraday_state, "read_taiwan_session_closes",
+                          return_value={"2303": SimpleNamespace(resolved=SimpleNamespace(quote=quote))}) as reader, \
              patch.object(tw_intraday_state, "project_taiwan_session_close", return_value={
                  "available": available, "status": "session_final" if available else "unavailable",
                  "price": close_price, "trade_date": close_date, "event_time": event,
@@ -243,11 +258,17 @@ def test_screening_uses_canonical_session_close_and_preserves_observation_phase(
             result = tw_intraday_state.build_tw_intraday_screening_snapshot(
                 db, parameters={"metric": "change_pct", "limit": 1}, generated_at=at(14),
             )
-        row = result["rows"][0]
         reader.assert_called_once()
-        assert row["current_price"] == 143
-        assert row["session_phase"] == "closing_auction"
-        assert row["request_session_phase"] == "post_close"
-        assert (row["freshness_status"] == "latest_completed_session") is expected_final
-        assert row["decision_usable"] is expected_final
+        if not expected_final:
+            assert result["rows"] == []
+            assert result["facts_usable_for_ranking"] is False
+        else:
+            row = result["rows"][0]
+            # Completed evidence replaces the rolling price rather than requiring
+            # the old scheduler row to already match the canonical close.
+            assert row["current_price"] == close_price
+            assert row["session_phase"] == "closing_auction"
+            assert row["request_session_phase"] == "post_close"
+            assert row["freshness_status"] == "latest_completed_session"
+            assert row["decision_usable"] is True
     engine.dispose()

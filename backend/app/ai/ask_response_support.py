@@ -859,6 +859,7 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
         status_text = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items())) or "no slots"
         return {
             "kind": "compact_context_status_digest",
+            "breadth": compact.get("breadth") or (data or {}).get("breadth") or {},
             "as_of": result.get("as_of"),
             "target": target,
             "display": f"{label}｜{status_text}",

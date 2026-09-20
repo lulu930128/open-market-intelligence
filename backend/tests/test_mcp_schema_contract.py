@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import ast
+import importlib.util
 from pathlib import Path
 import unittest
 
@@ -11,25 +11,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_SERVER_PATH = REPO_ROOT / "agents" / "omi_mcp_server" / "server.py"
 
 
-def _literal_assignment(path: Path, name: str) -> object:
-    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if any(
-            isinstance(target, ast.Name) and target.id == name
-            for target in node.targets
-        ):
-            return ast.literal_eval(node.value)
-    raise AssertionError(f"{name} is not defined in {path}")
-
-
 class McpSchemaContractTests(unittest.TestCase):
     def test_repo_mcp_capability_enum_matches_backend_registry(self) -> None:
-        capability_ids = _literal_assignment(
-            MCP_SERVER_PATH,
-            "CAPABILITY_IDS",
-        )
+        # The backend-generated snapshot is applied at module load; the static
+        # emergency fallback is not the effective public capability inventory.
+        spec = importlib.util.spec_from_file_location("mcp_schema_contract_test", MCP_SERVER_PATH)
+        server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(server)
+        capability_ids = server.CAPABILITY_IDS
 
         self.assertEqual(
             set(capability_ids),

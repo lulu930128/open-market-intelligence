@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from numbers import Real
 from typing import Any
 
@@ -7,10 +9,18 @@ from sqlalchemy.orm import Session
 
 from app.ai import agentic_policy, capability_contract
 from app.jobs import service as job_service
+from app.jobs.taiwan_intraday_demand import consumer_request
 
 
 AI_REFRESH_JOB_TYPE = "ai.tool_refresh"
 PUBLIC_STATUS_VERSION = "omi.ai.refresh.status.v1"
+PUBLIC_DEMAND_REASONS = frozenset({
+    "CANONICAL_CURRENT_SESSION_READY", "CURRENT_SESSION_BASELINE_NOT_READY",
+    "CANONICAL_PERSISTENCE_REJECTED", "TW_INTRADAY_DEMAND_EXPIRED",
+    "TW_INTRADAY_DEMAND_SUBMIT_FAILED", "TW_INTRADAY_DEMAND_TIMEOUT",
+    "TW_INTRADAY_DEMAND_ACQUISITION_FAILED", "TW_INTRADAY_DEMAND_PROVIDER_BACKOFF",
+    "TW_INTRADAY_DEMAND_INSTRUMENT_UNAVAILABLE", "TW_INTRADAY_DEMAND_FAILED",
+})
 
 
 class AiRefreshJobNotFoundError(Exception):
@@ -117,7 +127,8 @@ def read_refresh_status(
         raise AiRefreshJobNotFoundError(
             f"AI refresh job id={job_id} not found."
         ) from exc
-    if str(job.job_type) != AI_REFRESH_JOB_TYPE:
+    demand = consumer_request(job)
+    if str(job.job_type) != AI_REFRESH_JOB_TYPE and demand is None:
         # Deliberately hide whether a non-AI job id exists.
         raise AiRefreshJobNotFoundError(
             f"AI refresh job id={job_id} not found."
@@ -135,10 +146,18 @@ def read_refresh_status(
         else {}
     )
     public_status = str(serialized.get("public_status") or "unknown")
+    if demand is not None and public_status == "queued" and datetime.now(timezone.utc) >= datetime.fromisoformat(demand["expires_at"]):
+        # Expiration is a read projection; only a command may terminalize a row.
+        public_status = "expired"
     operation = _operation(request=request, result=result)
     capabilities = _requested_capabilities(request)
     target_id = str(serialized.get("target") or "").strip() or None
     target_type = _target_type(operation)
+    if demand is not None:
+        operation = "tw.refresh_intraday_bars"
+        capabilities = ["intraday.bars"]
+        target_id = demand["stock_id"]
+        target_type = "tw_stock"
     target = {
         **({"type": target_type} if target_type else {}),
         **({"id": target_id} if target_id else {}),
@@ -160,6 +179,11 @@ def read_refresh_status(
                 "allow_external_fetch": False,
             },
         }
+        if demand is not None:
+            resume["arguments"]["market_data_params"] = {
+                "trade_date": demand["trade_date"], "include_intraday": True,
+                "intraday_interval": "1m",
+            }
 
     error = None
     if public_status in {"failed", "cancelled", "expired"}:
@@ -176,7 +200,7 @@ def read_refresh_status(
         "kind": "ai_refresh_status",
         "version": PUBLIC_STATUS_VERSION,
         "job_id": int(job.id),
-        "job_type": AI_REFRESH_JOB_TYPE,
+        "job_type": str(job.job_type),
         "status": public_status,
         "operation_status": _operation_status(public_status),
         "evidence_status": _evidence_status(public_status),
@@ -189,22 +213,40 @@ def read_refresh_status(
                 (),
             )
         ),
-        "provider_set": [
+        "provider_set": [] if demand is not None else [
             str(value)
             for value in request.get("provider_set") or []
             if str(value).strip()
         ],
-        "date_range": (
+        "date_range": ({"from": demand["trade_date"], "to": demand["trade_date"]} if demand is not None else (
             request.get("date_range")
             if isinstance(request.get("date_range"), dict)
             else {}
-        ),
+        )),
         "include_today": request.get("include_today"),
         "progress": {
             "current": int(serialized.get("progress_current") or 0),
             "total": int(serialized.get("progress_total") or 0),
         },
-        "result_summary": _numeric_summary(result),
+        "result_summary": (
+            {key: result[key] for key in ("attempt_count", "external_call_count", "external_call_budget_used", "bars_written_count", "reread_count", "current_session_bar_count")
+             if isinstance(result.get(key), int) and not isinstance(result[key], bool)}
+            if demand is not None else _numeric_summary(result)
+        ),
+        "requested_trade_date": demand["trade_date"] if demand else None,
+        "reason_code": (
+            result.get("reason_code")
+            if demand and result.get("reason_code") in PUBLIC_DEMAND_REASONS else None
+        ),
+        "next_retry_at": result.get("next_retry_at") if demand and public_status == "queued" else None,
+        "expires_at": demand["expires_at"] if demand else None,
+        "retry_not_before_at": result.get("retry_not_before_at") if demand else None,
+        "materialization": ({
+            key: result.get(key) for key in (
+                "reread_ready", "reread_trade_date", "snapshot_phase", "snapshot_revision",
+                "external_call_count", "bars_written_count",
+            )
+        } if demand else None),
         "evidence_rebuild_required": evidence_rebuild_required,
         "retryable": bool(error and error.get("retryable")),
         "error": error,

@@ -28,6 +28,7 @@ from app.market.public_quote_platform import acquire_taiwan_public_last_trade_qu
 from app.market.quote_depth import (
     _apply_headline_compatibility_aliases,
     _finalize_shared_projection_semantics,
+    _row_to_response,
     get_taiwan_stock_quote_depth,
 )
 from app.market.schemas import TaiwanStockQuoteDepthRead
@@ -225,6 +226,44 @@ def test_quote_depth_get_projects_shared_quote_and_typed_depth_without_io() -> N
         assert order_book["dataset_health"]["dataset_id"] == (
             "tw.quote.order_book.snapshot"
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_confirmed_session_trade_reclassifies_awaiting_phase_without_retiming_price() -> None:
+    db, engine = _db()
+    try:
+        earlier = TaiwanStockQuoteSnapshot(
+            stock_id="2330", provider="twse_mis", trade_date=NOW.date(),
+            session_phase="regular_live",
+            quote_time=NOW - timedelta(minutes=60), fetched_at=NOW - timedelta(minutes=60),
+            last_price=2390, total_volume_lots=100, source="twse_mis",
+        )
+        latest = TaiwanStockQuoteSnapshot(
+            stock_id="2330", provider="twse_mis", trade_date=NOW.date(),
+            session_phase="regular_live",
+            quote_time=NOW, fetched_at=NOW, last_price=None,
+            total_volume_lots=None, source="twse_mis",
+        )
+        db.add_all([earlier, latest])
+        db.commit()
+        with patch.object(db, "commit", side_effect=AssertionError("read wrote")):
+            result = _row_to_response(db, latest, phase="regular_live", now=NOW)
+        assert result["instrument_phase"] == "regular_traded"
+        assert result["observation_reason_code"] == "ACTUAL_TRADE_PRICE_AVAILABLE"
+        assert result["actual_trade_occurred"] is True
+        assert result["last_trade_price"] == 2390
+        assert result["last_trade_time"] == NOW - timedelta(minutes=60)
+        assert result["actual_trade_price_cached"] is True
+        assert result["official_close_available"] is False
+
+        earlier.trade_date = NOW.date() - timedelta(days=1)
+        db.commit()
+        missing = _row_to_response(db, latest, phase="regular_live", now=NOW)
+        assert missing["instrument_phase"] == "awaiting_first_trade"
+        assert missing["actual_trade_occurred"] is False
+        assert missing["last_trade_price"] is None
     finally:
         db.close()
         engine.dispose()

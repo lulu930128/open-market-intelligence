@@ -611,7 +611,11 @@ def evaluate_technical_evidence_sufficiency(
     count_sufficient = daily_bar_count >= required_daily_bars
     factors_sufficient = available_factor_count >= required_factor_count
     volume_unit = str(chart.get("volume_unit") or "").strip().lower()
-    volume_lineage_ok = volume_unit in {"share", "shares"}
+    volume_lineage_ok = volume_unit in {"share", "shares"} or bool(
+        volume_unit == "contracts" and chart.get("instrument_type") == "futures"
+        and chart.get("volume_semantics") and chart.get("volume_contract_version")
+        and chart.get("contract_months")
+    )
     decision_usable = bool(
         count_sufficient
         and factors_sufficient
@@ -1212,6 +1216,10 @@ def _normalize_technical_points(rows: list[dict[str, Any]]) -> list[dict[str, An
                 "volume": _finite_number(_first_value(row, ("volume", "trade_volume", "total_volume"))),
                 "trade_value": _finite_number(row.get("trade_value")),
                 "session": _json_value(row.get("session")),
+                **{key: row.get(key) for key in (
+                    "volume_unit", "volume_semantics", "volume_contract_version",
+                    "contract_month", "instrument_type", "provider", "source", "interval",
+                ) if key in row},
             }
         )
     return points
@@ -1373,6 +1381,7 @@ def _technical_report_from_points(
 
     return {
         "timeframe": timeframe,
+        **_point_volume_metadata(points),
         "phase": "intraday" if is_intraday else "historical",
         "score": score,
         "title": title,
@@ -1412,8 +1421,20 @@ def _serialized_chart(chart: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _point_volume_metadata(points: list[dict[str, Any]]) -> dict[str, Any]:
+    if not points:
+        return {}
+    metadata: dict[str, Any] = {}
+    for key in ("volume_unit", "volume_semantics", "volume_contract_version", "instrument_type"):
+        values = {point.get(key) for point in points}
+        metadata[key] = next(iter(values)) if len(values) == 1 else None
+    metadata["contract_months"] = sorted({str(point["contract_month"]) for point in points if point.get("contract_month")})
+    return metadata
+
+
 def _chart_from_points(*, timeframe: str, points: list[dict[str, Any]]) -> dict[str, Any]:
     return {
+        **_point_volume_metadata(points),
         "timeframe": timeframe,
         "point_count": len(points),
         "from_date": points[0]["time"] if points else None,

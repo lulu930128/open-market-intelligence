@@ -110,55 +110,32 @@ def _include_tw_intraday(
     payload: AiAskRequest,
     *,
     policy: dict[str, Any] | None = None,
-    allow_persisted_cache: bool = True,
 ) -> bool:
-    can_external_fetch = (
-        bool(policy.get("can_external_fetch"))
-        if isinstance(policy, dict)
-        else bool(payload.allow_external_fetch)
-    )
+    """Select a canonical reader independently of acquisition/fallback policy."""
     market_data_params = payload.market_data_params if isinstance(payload.market_data_params, dict) else {}
-    cache_only = str(payload.realtime_policy or "") == "cache_only"
-    refresh_policy = (
-        policy.get("refresh_policy")
-        if isinstance(policy, dict)
-        and isinstance(policy.get("refresh_policy"), dict)
-        else payload.refresh_policy
-        if isinstance(payload.refresh_policy, dict)
-        else {}
-    )
-    cached_fallback_allowed = allow_persisted_cache and bool(
-        market_data_params.get(
-            "fallback_to_cached",
-            refresh_policy.get("fallback_to_cached", True),
-        )
-    )
-    reader_allowed = bool(
-        can_external_fetch or cache_only or cached_fallback_allowed
-    )
-    if "include_intraday" in market_data_params:
-        return bool(market_data_params.get("include_intraday")) and reader_allowed
+    if "include_intraday" in market_data_params and not market_data_params["include_intraday"]:
+        return False
 
     query_plan = (
         policy.get("query_plan")
         if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict)
         else {}
     )
-    selected_capabilities = {
-        str(value)
-        for value in query_plan.get("selected_capabilities") or []
-        if value
-    }
-    if "intraday.bars" in selected_capabilities:
-        return reader_allowed
+    if any(key in query_plan for key in ("selected_capabilities", "optional_selected_capabilities")):
+        return _requests_capability(payload, capability_id="intraday.bars", policy=policy)
+
+    selection = payload.selection if isinstance(payload.selection, dict) else {}
+    if "intraday.bars" in (selection.get("exclude") or []):
+        return False
+    if any(selection.get(key) for key in ("include", "required", "optional")):
+        return _requests_capability(payload, capability_id="intraday.bars", policy=policy)
+    if "include_intraday" in market_data_params:
+        return bool(market_data_params["include_intraday"])
 
     return decision_core.include_tw_intraday(
         question=payload.question,
         requested_horizon=payload.analysis_horizon,
         strategy_profile=payload.strategy_profile,
-        allow_external_fetch=(
-            reader_allowed
-        ),
     )
 
 
@@ -274,7 +251,13 @@ def _tw_market_data_params(
     requested_trade_date = parse_market_trade_date(params.get("trade_date"))
     if requested_trade_date is not None:
         params["trade_date"] = requested_trade_date.isoformat()
-        params["include_intraday"] = False
+        # A status continuation pins canonical bars to the original exchange
+        # date. Explicit cache-only bar reads also support this exact window.
+        params["include_intraday"] = bool(
+            params.get("include_intraday") is True
+            and payload.realtime_policy == "cache_only"
+            and _requests_capability(payload, capability_id="intraday.bars", policy=policy)
+        )
     return params
 
 
@@ -398,7 +381,6 @@ def _read_market_context(
             include_intraday=_include_tw_intraday(
                 payload,
                 policy=policy,
-                allow_persisted_cache=False,
             ),
             market_data_params=_tw_market_data_params(payload, policy=policy),
         )
@@ -485,7 +467,6 @@ def _build_market_context_brief(
             include_intraday=_include_tw_intraday(
                 payload,
                 policy=policy,
-                allow_persisted_cache=False,
             ),
             analysis_horizon=payload.analysis_horizon,
             market_data_params=_market_data_params(payload, policy=policy),

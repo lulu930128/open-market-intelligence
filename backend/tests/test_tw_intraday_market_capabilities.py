@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from app.ai.schemas import AiAskRequest
 from app.db.models import (
     Base,
     StockMaster,
+    TaiwanIntradayStockState,
     TaiwanMarketMinuteState,
     WatchlistGroup,
     WatchlistItem,
@@ -45,7 +47,7 @@ class _FakeResponse:
 
 
 class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
-    def test_recent_observation_with_old_trade_remains_factual_not_decision_ready(self) -> None:
+    def test_recent_observation_with_old_trade_is_excluded_from_ranking(self) -> None:
         now = datetime(2026, 9, 8, 10, 5, tzinfo=TAIWAN_TZ)
         self.db.add(StockMaster(stock_id="2454", stock_name="MediaTek", market="TWSE",
                                 instrument_type="stock", industry="半導體業", is_active=True))
@@ -54,12 +56,13 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         row.update(price_as_of=now - timedelta(minutes=8), has_actual_trade=True, price_source="session_cache")
         persist_taiwan_intraday_stock_states(self.db, rows=[row], now=now)
         result = build_tw_intraday_screening_snapshot(self.db, generated_at=now)
-        selected = result["rows"][0]
-        self.assertEqual(selected["observation_received_freshness"], "current")
-        self.assertEqual(selected["last_trade_recency"], "delayed")
-        self.assertTrue(selected["facts_usable_for_ranking"])
-        self.assertFalse(selected["decision_usable"])
-        self.assertFalse(selected["execution_grade_usable"])
+        self.assertEqual(result["rows"], [])
+        self.assertEqual(result["observation_received_freshness"], "current")
+        self.assertEqual(result["last_trade_recency"], "delayed")
+        self.assertTrue(result["facts_usable"])
+        self.assertFalse(result["facts_usable_for_ranking"])
+        self.assertFalse(result["decision_usable"])
+        self.assertEqual(result["coverage"]["ranking_excluded_count"], 1)
         tomorrow_preopen = now.replace(day=9, hour=8, minute=55)
         preopen = build_tw_intraday_screening_snapshot(self.db, generated_at=tomorrow_preopen)
         self.assertEqual(preopen["status"], "not_applicable")
@@ -355,7 +358,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
 
         snapshots = build_tw_intraday_group_snapshots(
             self.db,
-            generated_at=observed_at.replace(minute=5),
+            generated_at=observed_at,
         )
         hot_groups = snapshots["hot_groups"]
         semiconductor = next(
@@ -432,12 +435,14 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             include_watchlist_groups=False,
         )["hot_groups"]
 
-        self.assertEqual(weekend["status"], "ready")
+        self.assertEqual(weekend["status"], "partial")
         self.assertEqual(
             weekend["freshness_status"],
             "latest_completed_session",
         )
-        self.assertTrue(weekend["facts_usable"])
+        self.assertFalse(weekend["facts_usable"])
+        self.assertFalse(weekend["facts_usable_for_ranking"])
+        self.assertIsNone(weekend["groups"][0]["mean_return_pct"])
         self.assertFalse(weekend["decision_usable"])
         self.assertTrue(weekend["current_for_requested_session"])
         self.assertEqual(
@@ -852,13 +857,190 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             generated_at=checked_at,
         )
 
-        self.assertEqual(len(ranking["rows"]), 1)
-        row = ranking["rows"][0]
-        self.assertEqual(row["freshness_status"], "delayed")
-        self.assertEqual(row["observation_age_seconds"], 300)
-        self.assertEqual(row["allowed_age_seconds"], 90)
-        self.assertTrue(row["facts_usable"])
-        self.assertFalse(row["decision_usable"])
+        self.assertEqual(ranking["rows"], [])
+        self.assertEqual(ranking["freshness_status"], "delayed")
+        self.assertTrue(ranking["facts_usable"])
+        self.assertFalse(ranking["decision_usable"])
+        self.assertEqual(ranking["pagination"]["total_eligible_count"], 0)
+
+    def _persist_ranking_universe(self, prices: dict[str, float], now: datetime) -> None:
+        self.db.add_all([
+            StockMaster(stock_id=stock_id, stock_name=stock_id, market="TWSE",
+                        instrument_type="stock", industry="半導體業", is_active=True)
+            for stock_id in prices
+        ])
+        self.db.commit()
+        persist_taiwan_intraday_stock_states(
+            self.db, now=now,
+            rows=[self._stock_state_row(stock_id, "TWSE", price, 100, now)
+                  for stock_id, price in prices.items()],
+        )
+
+    def test_ranking_eligibility_precedes_sort_and_pagination(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 140, "2454": 130, "3711": 102, "2303": 101}, now)
+        for stock_id, minutes in (("2330", 60), ("2454", 8)):
+            state = self.db.query(TaiwanIntradayStockState).filter_by(stock_id=stock_id).one()
+            state.price_as_of = now - timedelta(minutes=minutes)
+            state.decision_usable = True  # Old persisted readiness must be rechecked on read.
+        self.db.commit()
+        with patch.object(self.db, "commit", side_effect=AssertionError("read wrote")):
+            first = build_tw_intraday_screening_snapshot(self.db, parameters={"limit": 1}, generated_at=now)
+            second = build_tw_intraday_screening_snapshot(self.db, parameters={"limit": 1, "offset": 1}, generated_at=now)
+        self.assertEqual(first["rows"][0]["stock_id"], "3711")
+        self.assertEqual(second["rows"][0]["stock_id"], "2303")
+        self.assertEqual(second["rows"][0]["rank"], 2)
+        self.assertEqual(first["pagination"]["total_eligible_count"], 2)
+        self.assertEqual(first["coverage"]["ranking_excluded_count"], 2)
+
+    def test_groups_exclude_stale_members_from_all_current_aggregates(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 190, "2454": 101, "3711": 102, "2303": 103}, now)
+        stale = self.db.query(TaiwanIntradayStockState).filter_by(stock_id="2330").one()
+        stale.price_as_of = now - timedelta(hours=1)
+        stale.five_minute_return = stale.fifteen_minute_return = 999
+        stale.estimated_trade_value = 999_000_000
+        self.db.commit()
+        result = build_tw_intraday_group_snapshots(self.db, generated_at=now)
+        group = result["hot_groups"]["groups"][0]
+        sector = result["sectors"]["items"][0]
+        self.assertEqual(group["member_count"], 4)
+        self.assertEqual(group["factual_count"], 4)
+        self.assertEqual(group["observed_count"], 3)
+        self.assertEqual(group["ranking_excluded_count"], 1)
+        self.assertTrue(group["ranking_eligible"])
+        self.assertAlmostEqual(group["mean_return_pct"], 2)
+        self.assertAlmostEqual(group["median_return_pct"], 2)
+        self.assertAlmostEqual(sector["change_pct"], 2)
+        self.assertEqual(group["estimated_trade_value"], 30_600_000)
+        self.assertIsNone(group["median_five_minute_return"])
+        self.assertIsNone(group["median_fifteen_minute_return"])
+        stale.price_as_of = now
+        stale.lineage_complete = False
+        self.db.commit()
+        self.assertEqual(build_tw_intraday_group_snapshots(self.db, generated_at=now)["hot_groups"]["groups"][0]["observed_count"], 3)
+
+    def test_sparse_reference_is_null_on_read_even_for_old_persisted_metrics(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 110}, now)
+        state = self.db.query(TaiwanIntradayStockState).one()
+        state.samples_json = json.dumps([{"time": (now - timedelta(minutes=60)).isoformat(), "price": 100}])
+        state.five_minute_return = state.fifteen_minute_return = 10
+        self.db.commit()
+        for metric in ("five_minute_return", "fifteen_minute_return"):
+            ranked = build_tw_intraday_screening_snapshot(self.db, parameters={"metric": metric}, generated_at=now)
+            self.assertEqual(ranked["rows"], [])
+            self.assertEqual(ranked["reason_code"], "INTRADAY_METRIC_INSUFFICIENT_DATA")
+        row = build_tw_intraday_screening_snapshot(self.db, generated_at=now)["rows"][0]
+        self.assertIsNone(row["five_minute_return"])
+        self.assertIsNone(row["fifteen_minute_return"])
+        self.assertEqual(row["five_minute_return_status"], "insufficient_data")
+
+    def test_rolling_reference_tolerance_and_actual_trade_clock(self) -> None:
+        from app.market.tw_intraday_state import _rolling_reference
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        for minutes in (5, 15):
+            target = now - timedelta(minutes=minutes)
+            for seconds, accepted in ((0, True), (90, True), (91, False), (1200, False)):
+                with self.subTest(minutes=minutes, gap=seconds):
+                    stamp = target - timedelta(seconds=seconds)
+                    samples = [{"time": target.isoformat(), "price_as_of": stamp.isoformat(), "price": 100}]
+                    self.assertEqual(_rolling_reference(samples, current_time=now, minutes=minutes) is not None, accepted)
+            self.assertIsNone(_rolling_reference(
+                [{"time": (target + timedelta(seconds=1)).isoformat(), "price": 100}],
+                current_time=now, minutes=minutes,
+            ))
+
+    def test_vwap_is_unavailable_and_depth_metric_is_unsupported(self) -> None:
+        from app.market.tw_intraday_state import SUPPORTED_INTRADAY_METRICS
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 110}, now)
+        state = self.db.query(TaiwanIntradayStockState).one()
+        self.assertIsNone(state.vwap_estimate)
+        self.assertIsNone(state.vwap_deviation_pct)
+        state.vwap_estimate, state.vwap_deviation_pct, state.order_book_imbalance = 105, 4.76, 0.8
+        state.calculation_version = "tw.stock.intraday.state.derived.v2"
+        self.db.commit()
+        row = build_tw_intraday_screening_snapshot(self.db, generated_at=now)["rows"][0]
+        self.assertIsNone(row["vwap_deviation_pct"])
+        self.assertIsNone(row["order_book_imbalance"])
+        for metric, status in (("vwap_deviation_pct", "unavailable"), ("order_book_imbalance", "unsupported")):
+            result = build_tw_intraday_screening_snapshot(self.db, parameters={"metric": metric}, generated_at=now)
+            self.assertEqual(result["status"], status)
+            self.assertEqual(result["rows"], [])
+            self.assertIsNotNone(result["reason_code"])
+            self.assertFalse(result["facts_usable_for_ranking"])
+        self.assertNotIn("order_book_imbalance", SUPPORTED_INTRADAY_METRICS)
+        self.assertEqual(result["missing"], [])
+        context = read_tw_screening_context(
+            self.db, now=lambda: now,
+            market_data_params={
+                "requested_capabilities": ["screening.intraday"],
+                "capability_parameters": {"screening.intraday": {"metric": "order_book_imbalance"}},
+            },
+        )
+        selection = capability_contract.normalize_selection(
+            selection={"include": ["screening.intraday"]}, output="evidence_only",
+            realtime_policy="cache_only", payload_level="compact", scope_type="market",
+            target_market="TW", question_intent="general",
+        )
+        projected, _ = capability_contract.project_selected_data(
+            response={"target": {"type": "market", "market": "TW"},
+                      "result": {"data": context["data"]}, "freshness": context["freshness"]},
+            selection=selection,
+        )
+        self.assertEqual(projected["screening.intraday"]["status"], "unsupported")
+        self.assertEqual(projected["screening.intraday"]["reason_code"], "FULL_MARKET_DEPTH_PRODUCER_UNSUPPORTED")
+        self.assertFalse(projected["screening.intraday"].get("facts_usable", False))
+        persist_taiwan_intraday_stock_states(self.db, rows=[self._stock_state_row("2330", "TWSE", 110, 100, now)], now=now)
+        self.assertIsNone(state.vwap_estimate)
+        self.assertIsNone(state.vwap_deviation_pct)
+
+    def test_ordinary_universe_and_bounded_denominator_share_breadth_owner(self) -> None:
+        from app.market.tw_current_market_operations import TaiwanRegisteredStockUniverseReader
+        from app.market.tw_universe import list_taiwan_stock_ids
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 110, "2454": 101, "020001": 102, "2881A": 103}, now)
+        self.assertEqual(TaiwanRegisteredStockUniverseReader(self.db)("TWSE"), ["2330", "2454"])
+        self.assertEqual(list_taiwan_stock_ids(self.db), ["2330", "2454"])
+        bounded = build_tw_intraday_screening_snapshot(self.db, parameters={"universe": {"stock_ids": ["2330", "2330"], "markets": ["TWSE"]}}, generated_at=now)
+        self.assertEqual(bounded["coverage"]["universe_count"], 1)
+        self.assertEqual(bounded["coverage"]["coverage_ratio"], 1)
+        self.assertEqual(bounded["coverage"]["requested_stock_count"], 1)
+        full = build_tw_intraday_screening_snapshot(self.db, generated_at=now)
+        groups = build_tw_intraday_group_snapshots(self.db, generated_at=now)
+        self.assertEqual(full["coverage"]["universe_count"], 2)
+        self.assertEqual(groups["hot_groups"]["coverage"]["universe_count"], 2)
+        self.assertEqual(groups["sectors"]["items"][0]["member_count"], 2)
+
+    def test_future_or_missing_trade_clock_and_incomplete_lineage_cannot_rank(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 110}, now)
+        state = self.db.query(TaiwanIntradayStockState).one()
+        for price_at, receipt_at, lineage in (
+            (now + timedelta(seconds=1), now, True),
+            (now, now + timedelta(seconds=1), True),
+            (None, now, True),
+            (now, now, False),
+        ):
+            state.price_as_of, state.snapshot_as_of, state.lineage_complete = price_at, receipt_at, lineage
+            state.decision_usable = True
+            self.db.commit()
+            self.assertEqual(build_tw_intraday_screening_snapshot(self.db, generated_at=now)["rows"], [])
+            group = build_tw_intraday_group_snapshots(self.db, generated_at=now)["hot_groups"]["groups"][0]
+            self.assertIsNone(group["mean_return_pct"])
+            self.assertIsNone(group["estimated_trade_value"])
+            self.assertFalse(group["ranking_eligible"])
+
+    def test_latest_unclassified_state_does_not_resurrect_an_older_provider_for_ranking(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        self._persist_ranking_universe({"2330": 110}, now - timedelta(seconds=30))
+        latest = self._stock_state_row("2330", "TWSE", 110, 100, now)
+        latest.update(provider="other_provider", has_actual_trade=False, current_price=None)
+        persist_taiwan_intraday_stock_states(self.db, rows=[latest], now=now)
+        self.assertEqual(build_tw_intraday_screening_snapshot(self.db, generated_at=now)["rows"], [])
+        group = build_tw_intraday_group_snapshots(self.db, generated_at=now)["hot_groups"]["groups"][0]
+        self.assertEqual(group["observed_count"], 0)
 
     @staticmethod
     def _stock_state_row(

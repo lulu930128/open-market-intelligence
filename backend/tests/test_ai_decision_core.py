@@ -332,20 +332,6 @@ class AiDecisionCoreTests(unittest.TestCase):
             selection={"include": ["intraday.bars"]},
         )
 
-        self.assertFalse(
-            ai_ask._include_tw_intraday(
-                payload,
-                policy={
-                    "can_external_fetch": False,
-                    "refresh_policy": {"fallback_to_cached": True},
-                    "query_plan": {
-                        "selected_capabilities": ["intraday.bars"],
-                    },
-                },
-                allow_persisted_cache=False,
-            )
-        )
-
         self.assertTrue(
             ai_ask._include_tw_intraday(
                 payload,
@@ -359,7 +345,7 @@ class AiDecisionCoreTests(unittest.TestCase):
             )
         )
 
-    def test_prefer_live_respects_disabled_persisted_fallback(self) -> None:
+    def test_prefer_live_disabled_fallback_does_not_disable_canonical_reader(self) -> None:
         payload = AiAskRequest(
             question="TAIEX 即時走勢",
             target={"type": "tw_index", "id": "TAIEX"},
@@ -369,7 +355,7 @@ class AiDecisionCoreTests(unittest.TestCase):
             selection={"include": ["intraday.bars"]},
         )
 
-        self.assertFalse(
+        self.assertTrue(
             ai_ask._include_tw_intraday(
                 payload,
                 policy={

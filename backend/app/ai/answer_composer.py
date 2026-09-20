@@ -1534,6 +1534,143 @@ def build_market_breadth_consumer_answer(
     return answer
 
 
+def has_answer_content(answer: dict[str, Any]) -> bool:
+    """Readiness requires substantive content, not a confidence-only label."""
+    if text_value(answer.get("headline")) or text_list(answer.get("summary")):
+        return True
+    text = text_value(answer.get("text"))
+    label_only = {consumer_text(
+        {key: answer.get(key) for key in ("stance_label", "confidence_label")},
+        response_preferences={"locale": locale},
+    ) for locale in ("zh-TW", "en-US", "ja-JP")}
+    return bool(text and text not in label_only)
+
+
+def build_intraday_evidence_gap_answer(
+    *, target: dict[str, Any], background_date: str | None,
+    response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    label = text_value(target.get("label")) or text_value(target.get("id")) or ""
+    headline = (
+        f"{label}: insufficient intraday evidence" if english
+        else f"{label}：ザラ場の判断に必要なデータが不足" if japanese
+        else f"{label}：盤中證據不足"
+    )
+    summary = [
+        "Required intraday bars are missing or unusable; daily structure cannot establish the current intraday direction."
+        if english else "必要な分足が不足または利用不可です。日足の構造だけでは現在のザラ場の方向を判断できません。"
+        if japanese else "必要的分鐘 K 缺失或不可用，完成日線結構不足以判斷現在的盤中方向。"
+    ]
+    if background_date:
+        summary.append(
+            f"Technical structure dated {background_date} is background only." if english
+            else f"{background_date} のテクニカル構造は背景情報です。" if japanese
+            else f"技術結構日期 {background_date}，僅供背景參考。"
+        )
+    answer = {
+        "kind": "consumer_market_answer", "style": "intraday_evidence_gap",
+        "source": "canonical_intraday_quality", "headline": headline,
+        "summary": summary, "detail": "\n".join(summary),
+        "stance": "insufficient_data", "confidence": "low",
+        "stance_label": stance_label("insufficient_data", response_preferences),
+        "confidence_label": confidence_label("low", response_preferences),
+        "action_plan": [], "scenarios": [], "data_limits": summary[:1],
+    }
+    answer["text"] = consumer_text(answer, response_preferences=response_preferences)
+    return answer
+
+
+def build_selected_market_consumer_answer(
+    *,
+    target: dict[str, Any],
+    projected_data: dict[str, Any],
+    quality: dict[str, Any],
+    response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Render the selected canonical snapshot without another read or aggregation."""
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    summary: list[str] = []
+    limits: list[str] = []
+    sources: list[str] = []
+    breadth = projected_data.get("market.breadth")
+    if isinstance(breadth, dict) and any(
+        breadth.get(key) is not None for key in ("advance_count", "decline_count", "unchanged_count")
+    ):
+        breadth_answer = build_market_breadth_consumer_answer(
+            target=target, analysis_digest={"breadth": breadth}, missing=[], warnings=[],
+            summary_limit=3, response_preferences=response_preferences,
+        )
+        summary.extend(breadth_answer["summary"])
+        limits.extend(breadth_answer["data_limits"])
+        observed_at = breadth.get("as_of") or breadth.get("trade_date")
+        if observed_at:
+            summary.append(f"as_of: {observed_at}")
+        sources.append("market.breadth")
+
+    indices = projected_data.get("market.indices")
+    if isinstance(indices, dict):
+        index_count = 0
+        for item in indices.get("items") or []:
+            if not isinstance(item, dict) or item.get("close") is None:
+                continue
+            summary.append(
+                f"{item.get('name') or item.get('index_id')}: {item['close']} "
+                f"({item.get('quote_semantics') or 'unknown'}; "
+                f"as_of: {item.get('as_of') or item.get('event_time') or item.get('trade_date') or '?'})"
+            )
+            index_count += 1
+        if index_count:
+            sources.append("market.indices")
+
+    ranking = projected_data.get("screening.intraday")
+    if isinstance(ranking, dict) and ranking.get("rows"):
+        metric = str(ranking.get("metric") or "?")
+        unit = "%" if ranking.get("unit") == "percent" else str(ranking.get("unit") or "?")
+        coverage = ranking.get("coverage") if isinstance(ranking.get("coverage"), dict) else {}
+        eligible = coverage.get("ranking_eligible_count")
+        universe = coverage.get("universe_count")
+        def count(value: Any) -> str:
+            return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else "?"
+        scope = "Limited sample ranking" if english else "限定サンプルの順位" if japanese else "有限樣本排名"
+        summary.append(
+            f"{scope}: {metric}; {count(eligible)} / {count(universe)}; "
+            f"as_of: {ranking.get('event_time') or ranking.get('as_of') or '?'}"
+        )
+        for row in ranking["rows"]:
+            if not isinstance(row, dict):
+                continue
+            value = row.get("value")
+            summary.append(
+                f"{row.get('rank', '?')}. {row.get('stock_id', '?')} "
+                f"{row.get('stock_name') or ''}: {value if value is not None else '?'} {unit}"
+            )
+        sources.append("screening.intraday")
+    if not sources:
+        return {}
+    if quality.get("status") != "ready":
+        limits.insert(0, (
+            "Evidence is incomplete; these facts do not establish a market-wide trading conclusion."
+            if english else "データは不完全です。取得済みの事実だけでは市場全体の売買判断はできません。"
+            if japanese else "資料尚不完整；以下已取得的事實不足以形成全市場交易結論。"
+        ))
+    answer = {
+        "kind": "consumer_market_answer", "style": "selected_market_facts",
+        "source": "canonical_selected_evidence", "source_capabilities": sources,
+        "headline": "Available market facts" if english else "取得済みの市場データ" if japanese else "已取得的市場資料",
+        "summary": summary, "data_limits": list(dict.fromkeys(limits)),
+        "action_plan": [], "scenarios": [], "risks": [], "counter_evidence": [],
+        "confidence": "low" if quality.get("status") != "ready" else "medium",
+        "detail": "\n".join(summary),
+    }
+    answer["text"] = consumer_text(
+        answer, summary_limit=len(summary), response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_consumer_human_answer(
     *,
     question_intent: str,

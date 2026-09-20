@@ -106,18 +106,19 @@ def test_qualified_formal_close_component_preserves_close_without_making_1m_bar(
     assert component.volume is not None
     assert component.volume.value == Decimal("1000")
 
-    with patch.object(
-        tw_bar_service_module,
-        "_qualified_formal_close_component",
-        return_value=component,
+    with (
+        patch.object(tw_bar_service_module, "read_taiwan_latest_daily_evidence", return_value=SimpleNamespace(daily=None)),
+        patch.object(tw_bar_service_module, "read_taiwan_session_close", return_value=result),
+        patch.object(tw_bar_service_module, "project_taiwan_session_close", return_value={
+            "available": True, "trade_date": trade_date, "price": 2390,
+            "provider": "twse_mis", "source": "twse_mis_quote_depth", "event_time": close_at,
+        }),
     ):
         events = TaiwanBarService(object()).read_current_session_presentation_events(
             series=SimpleNamespace(
                 current_session_coverage=SimpleNamespace(trade_date=trade_date),
-                bars=(object(),),
-                instrument=instrument,
-            ),
-            requested_at=requested_at,
+                bars=(), instrument=instrument,
+            ), requested_at=requested_at,
         )
 
     assert len(events) == 1
@@ -356,7 +357,12 @@ def test_current_session_read_excludes_previous_session() -> None:
         )
         assert delta.current_session_coverage.snapshot_bar_count == 5
         assert delta.identity.series_revision != result.identity.series_revision
-        assert recent_snapshot_queries == []
+        revision_queries = [query for query in recent_snapshot_queries if query.lstrip().upper().startswith("SELECT")]
+        assert len(revision_queries) == 1
+        assert "market_intraday_bar_lineage.updated_at" in revision_queries[0]
+        assert "market_intraday_bar.open_price" not in revision_queries[0]
+        assert delta.read_diagnostics.snapshot_cache_status == "hit"
+        assert delta.read_diagnostics.final_series_revision == delta.identity.series_revision
 
         exact_snapshot_queries: list[str] = []
         event.listen(
@@ -502,6 +508,168 @@ def test_current_session_trailing_only_snapshot_remains_warming() -> None:
             "TW_CHART_SNAPSHOT_TRAILING_ONLY",
         )
         assert coverage.snapshot_bar_count == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_completed_missing_session_is_degraded_and_keeps_expected_coverage() -> None:
+    db, engine = _db()
+    try:
+        result = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330",
+            interval="1m",
+            requested_at=datetime(2026, 9, 5, 14, 0, tzinfo=TAIPEI),
+        )
+        coverage = result.current_session_coverage
+        assert coverage is not None
+        assert coverage.trade_date == date(2026, 9, 4)
+        assert coverage.status.value == "missing"
+        assert coverage.snapshot_phase.value == "degraded"
+        assert coverage.expected_bucket_count == 265
+        assert coverage.missing_bucket_count == 265
+        assert coverage.repair_recommended is True
+        assert coverage.snapshot_reason_codes == ("TW_CHART_SNAPSHOT_MISSING_POST_CLOSE",)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_regular_bar_phase_survives_ai_pipeline_without_execution_promotion() -> None:
+    from app.ai.capability_contract import _canonical_intraday_value
+    from app.ai.market_context.taiwan_bar_projection import project_taiwan_bar_series
+    from app.ai.market_context.taiwan_projection import _compact_intraday_history
+    from app.ai.realtime_contract import classify_observation
+
+    db, engine = _db()
+    try:
+        _seed_session(db, trade_date=date(2026, 9, 1), provider=KGI_INTRADAY_PROVIDER,
+                      source_name=KGI_INTRADAY_SOURCE, parser_version=KGI_INTRADAY_PARSER_VERSION,
+                      authority="broker", minutes=5)
+        now = datetime(2026, 9, 1, 9, 6, tzinfo=TAIPEI)
+        series = TaiwanBarService(db).read_current_session_bars(instrument_id="2330", interval="1m", requested_at=now)
+        history = project_taiwan_bar_series(series, session_scope="current_session")
+        compact = _compact_intraday_history(history, point_limit=160)
+        projected = _canonical_intraday_value({"series": {"1m": compact}})
+        assert projected["market_phase"] == "regular"
+        for surface in (history, compact, projected):
+            assessment = classify_observation(surface, market="TW", realtime_policy="require_live", now=now)
+            assert assessment["state"] == "live"
+            assert assessment["execution_grade_usable"] is False
+            historical = classify_observation(surface, market="TW", realtime_policy="require_live", now=now + timedelta(days=1))
+            assert historical["state"] != "live"
+            assert historical["execution_grade_usable"] is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_complete_snapshot_survives_bar_limit_and_ai_projection_pipeline() -> None:
+    from app.ai.capability_contract import _canonical_intraday_value
+    from app.ai.data_quality_contract import build_quality_contract
+    from app.ai.market_context.taiwan_bar_projection import project_taiwan_bar_series
+    from app.ai.market_context.taiwan_projection import _compact_intraday_history
+
+    db, engine = _db()
+    try:
+        _seed_session(
+            db,
+            trade_date=date(2026, 9, 1),
+            provider=NSTOCK_INTRADAY_PROVIDER,
+            source_name=NSTOCK_INTRADAY_SOURCE,
+            parser_version=NSTOCK_INTRADAY_PARSER_VERSION,
+            authority="vendor",
+            minutes=265,
+        )
+        for limit in (160, 500):
+            series = TaiwanBarService(db).read_current_session_bars(
+                instrument_id="2330", interval="1m", limit=limit,
+                requested_at=datetime(2026, 9, 1, 14, 0, tzinfo=TAIPEI),
+            )
+            history = project_taiwan_bar_series(series, session_scope="current_session")
+            compact = _compact_intraday_history(history, point_limit=limit)
+            projected = _canonical_intraday_value({"series": {"1m": compact}})
+            assert projected["market_phase"] == series.market_phase == "post_close"
+            returned_count = min(limit, 265)
+            assert projected["point_count"] == 265
+            assert projected["returned_point_count"] == returned_count
+            assert projected["truncated"] is (limit < 265)
+            assert projected["series_coverage"]["missing_bucket_count"] == 0
+            quality = build_quality_contract(
+                canonical={
+                    "ok": True, "request_status": "completed",
+                    "target": {"type": "tw_stock", "market": "TW"},
+                    "status": {"readiness": {"decision_required": False}},
+                    "evidence": {},
+                },
+                selection={"output": "evidence_only"},
+                manifest={"capabilities": [{
+                    "capability": "intraday.bars", "domain": "price",
+                    "slot": "intraday_bars", "required": True, "status": "available",
+                    "returned_count": returned_count, "canonical_available_count": 265,
+                    "truncated": projected["truncated"],
+                }]},
+                projected_data={"intraday.bars": projected},
+                realtime_assessments={}, scope_type="stock",
+            )["capabilities"]["intraday.bars"]
+            assert quality["canonical_dataset_coverage"] == "complete"
+            assert quality["consumer_projection_coverage"] == (
+                "truncated" if limit < 265 else "complete"
+            )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_legacy_current_session_and_derived_projection_share_full_snapshot() -> None:
+    from app.market.tw_intraday_platform import read_taiwan_intraday_bars, project_taiwan_intraday_bars
+    from app.ai.market_context.taiwan_bar_projection import project_taiwan_bar_series
+    from app.market.intraday import get_market_intraday_history
+
+    db, engine = _db()
+    now = datetime(2026, 9, 1, 14, 0, tzinfo=TAIPEI)
+    try:
+        before = read_taiwan_intraday_bars(db, stock_id="2330", range_value="1d", requested_at=now)
+        assert before.current_session_coverage.missing_bucket_count == 265
+        _seed_session(
+            db, trade_date=now.date(), provider=NSTOCK_INTRADAY_PROVIDER,
+            source_name=NSTOCK_INTRADAY_SOURCE, parser_version=NSTOCK_INTRADAY_PARSER_VERSION,
+            authority="vendor", minutes=265,
+        )
+        repaired = read_taiwan_intraday_bars(
+            db, stock_id="2330", range_value="1d", requested_at=now,
+            bypass_snapshot_cache=True,
+        )
+        points, metadata = project_taiwan_intraday_bars(db, repaired)
+        assert len(points) == 265
+        assert metadata["series_coverage"]["continuous_session_covered"] is True
+        assert repaired.current_session_coverage.session_completed is True
+        assert repaired.current_session_coverage.snapshot_revision != before.current_session_coverage.snapshot_revision
+        current = TaiwanBarService(db).read_current_session_bars(instrument_id="2330", requested_at=now)
+        assert current.current_session_coverage == repaired.current_session_coverage
+        history = get_market_intraday_history(db, stock_id="2330", range_value="1d", requested_at=now)
+        assert history["series_coverage"] == metadata["series_coverage"]
+        derived = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330", interval="5m", limit=20, requested_at=now,
+        )
+        projected = project_taiwan_bar_series(derived, session_scope="current_session")
+        assert projected["point_count"] == 53
+        assert projected["returned_point_count"] == 20
+        assert projected["truncated"] is True
+        assert projected["series_coverage"]["expected_bucket_count"] == 265
+        assert projected["series_coverage"]["missing_bucket_count"] == 0
+        # A physical row with unknown finalization cannot fill a canonical slot.
+        db.query(MarketIntradayBarLineage).first().finalization = "unknown"
+        db.commit()
+        unfinalized = read_taiwan_intraday_bars(
+            db, stock_id="2330", range_value="1d", requested_at=now,
+            bypass_snapshot_cache=True,
+        )
+        assert len(unfinalized.bars) == 264
+        assert unfinalized.current_session_coverage.missing_bucket_count == 1
+        _, metadata = project_taiwan_intraday_bars(db, unfinalized)
+        assert metadata["series_coverage"]["continuous_session_covered"] is False
+        assert project_taiwan_bar_series(unfinalized, session_scope="current_session")["is_partial"] is True
     finally:
         db.close()
         engine.dispose()

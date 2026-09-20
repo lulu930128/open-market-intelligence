@@ -224,20 +224,21 @@ def _futures_volume_chart(
         volume_contracts = point.get("volume_contracts")
         if volume_contracts is None:
             volume_contracts = point.get("volume")
-        point["volume_contracts"] = volume_contracts
-        point["volume_unit"] = "contracts"
-        point["volume_semantics"] = "interval_contracts"
+        qualified = point.get("volume_unit") == "contracts" and bool(point.get("volume_contract_version"))
+        point["volume_contracts"] = volume_contracts if qualified else None
+        point["volume_unit"] = point.get("volume_unit")
+        point["volume_semantics"] = point.get("volume_semantics")
         point["volume_status"] = (
-            "available" if volume_contracts is not None else "missing"
+            "available" if qualified and volume_contracts is not None else "missing"
         )
-        has_volume = has_volume or volume_contracts is not None
+        has_volume = has_volume or (qualified and volume_contracts is not None)
         session = str(point.get("session") or "").strip()
         if session and session not in sessions:
             sessions.append(session)
         normalized_points.append(point)
     output["points"] = normalized_points
-    output["volume_unit"] = "contracts"
-    output["volume_semantics"] = "interval_contracts"
+    output["volume_unit"] = chart.get("volume_unit")
+    output["volume_semantics"] = chart.get("volume_semantics")
     output["volume_status"] = "available" if has_volume else "missing"
     output["session"] = sessions[0] if len(sessions) == 1 else None
     output["sessions"] = sessions
@@ -246,6 +247,7 @@ def _futures_volume_chart(
             point
             for point in reversed(source_points)
             if isinstance(point, dict)
+            and point.get("volume_unit") == "contracts" and point.get("volume_contract_version")
             and (
                 point.get("volume_contracts") is not None
                 or point.get("volume") is not None
@@ -477,9 +479,10 @@ def _build_tw_futures_compact(
     }
     quote["settlement_price"] = _nonzero_optional(raw_quote.get("settlement_price"))
     quote["open_interest"] = _nonzero_optional(raw_quote.get("open_interest"))
-    quote["total_volume_contracts"] = raw_quote.get("total_volume")
-    quote["volume_unit"] = "contracts"
-    quote["volume_semantics"] = "session_cumulative_contracts"
+    quote["total_volume_contracts"] = raw_quote.get("total_volume") if raw_quote.get("volume_unit") == "contracts" and raw_quote.get("volume_contract_version") else None
+    quote["volume_unit"] = raw_quote.get("volume_unit")
+    quote["volume_semantics"] = raw_quote.get("volume_semantics")
+    quote["volume_contract_version"] = raw_quote.get("volume_contract_version")
     quote["volume_status"] = (
         "available"
         if quote["total_volume_contracts"] is not None

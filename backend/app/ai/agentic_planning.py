@@ -29,6 +29,7 @@ def _completed_us_intraday_request(trade_date: str | None, session_scope: str) -
 
 TW_STOCK_REFRESH_KEYS = agentic_policy.TW_STOCK_REFRESH_KEYS
 TW_CAPABILITY_REFRESH_TOOLS = {
+    "intraday.bars": ("market_intraday_bar", "tw.refresh_intraday_bars"),
     "daily.ohlcv": ("market_daily_price", "tw.refresh_daily_price"),
     "technical.structure": ("market_daily_price", "tw.refresh_daily_price"),
     "chips.institutional": (
@@ -754,6 +755,7 @@ def plan_tw_stock_tools(
     can_call_llm: bool,
     requested_capabilities: tuple[str, ...] | None = None,
     force_selected_capabilities: bool = False,
+    trade_date: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_stock_id = str(stock_id or "").strip()
@@ -770,6 +772,7 @@ def plan_tw_stock_tools(
             if (
                 dataset not in missing
                 and not force_selected_capabilities
+                and capability != "intraday.bars"
             ) or tool_name in seen_tools:
                 continue
             seen_tools.add(tool_name)
@@ -781,6 +784,7 @@ def plan_tw_stock_tools(
                         "include_today": None,
                         "sleep_seconds": 0.05,
                         "requested_capabilities": [capability],
+                        **({"trade_date": trade_date, "interval": "1m"} if capability == "intraday.bars" else {}),
                     },
                     "reason": (
                         f"Selected capability {capability} is missing or stale; "

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+
 from conftest import REPO_ROOT
 
 
@@ -96,3 +98,23 @@ def test_taiwan_unified_routers_do_not_own_aggregation_or_formulas() -> None:
         "MarketDailyPrice",
     ):
         assert forbidden not in source
+
+
+def test_legacy_intraday_is_a_bar_adapter_without_independent_resolution() -> None:
+    source = _source("backend/app/market/tw_intraday_platform.py")
+    functions = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef)}
+    reader = functions["read_taiwan_intraday_bars"]
+    assert "TaiwanBarService" in reader
+    for forbidden in ("MarketDataGateway", "build_taiwan_intraday_requirement", "resolve_bars"):
+        assert forbidden not in reader
+    projection = functions["project_taiwan_intraday_bars"]
+    assert "current_session_coverage" in projection
+    for forbidden in ("datetime.combine", "time(9", "time(13", "265"):
+        assert forbidden not in projection
+    assert "expected_minutes" not in {
+        node.id for node in ast.walk(ast.parse(projection)) if isinstance(node, ast.Name)
+    }
+    outcome = _source("backend/app/watchlists/radar_outcome_service.py")
+    assert "read_taiwan_intraday_bars" not in outcome
+    assert "TaiwanBarService" in outcome

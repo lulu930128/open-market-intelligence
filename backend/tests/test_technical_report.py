@@ -32,6 +32,7 @@ from app.market.technical_report import (
     build_stock_technical_report,
 )
 from app.market.tw_bar_contracts import TaiwanBarSessionScope
+from app.market_data.contracts import InstrumentKey, InstrumentType, Market
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 
 
@@ -557,7 +558,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["phase"], "post_close")
         self.assertFalse(report["decision_usable"])
         self.assertIsNone(report["score"])
-        self.assertIn("TW_TECHNICAL_HISTORY_GAP", report["missing"])
+        self.assertIn("TW_TECHNICAL_DECISION_WINDOW_GAP", report["missing"])
         self.assertEqual(report["rows"][0]["key"], "official_close_price")
         self.assertEqual(report["rows"][0]["label"], "正式收盤")
         self.assertEqual(report["rows"][0]["value"], 605.0)
@@ -775,6 +776,13 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertFalse(monthly["decision_usable"])
         self.assertTrue(weekly["rows"])
         self.assertTrue(monthly["rows"])
+        for report in (weekly, monthly):
+            self.assertNotIn("日線", report["summary"])
+            state = report["data"]["current_state"]
+            self.assertEqual(state["timeframe"], report["timeframe"])
+            self.assertEqual(state["headline"]["key"], "insufficient_evidence")
+            self.assertIsNone(report["data"]["decision_state"])
+            self.assertFalse(report["data"]["current_state_decision_usable"])
 
     def test_historical_cutoff_applies_to_all_technical_evidence(self) -> None:
         cutoff = date(2026, 2, 20)
@@ -818,6 +826,26 @@ class TechnicalReportTests(unittest.TestCase):
             evidence["indicators"]["corporate_action"]["relevant_analysis_end"],
             cutoff.isoformat(),
         )
+
+    def test_period_component_coverage_counts_missing_daily_constituents(self) -> None:
+        from app.market.tw_bar_service import TaiwanBarService
+
+        self.db.query(MarketDailyPrice).filter(
+            MarketDailyPrice.stock_id == "2330",
+            MarketDailyPrice.trade_date == date(2026, 3, 4),
+        ).delete()
+        self.db.commit()
+        for interval in ("1w", "1mo"):
+            series = TaiwanBarService(self.db).read_bars(
+                instrument_id="2330", interval=interval,
+                from_time=datetime(2026, 1, 1, tzinfo=TAIPEI_TZ),
+                to_time=datetime(2026, 3, 21, tzinfo=TAIPEI_TZ),
+                include_partial=False,
+                requested_at=datetime.now(TAIPEI_TZ),
+            )
+            march = next(state for state in series.bar_states if state.start_at.astimezone(TAIPEI_TZ).month == 3)
+            self.assertEqual(march.component_missing_trading_day_count, 1)
+            self.assertEqual(series.bar_states[1].component_missing_trading_day_count, 0)
 
     def test_stock_context_auto_horizon_defaults_to_swing_score(self) -> None:
         context = ai_tools.read_stock_context(
@@ -1024,15 +1052,11 @@ class TechnicalReportTests(unittest.TestCase):
                 ),
             )
             return SimpleNamespace(
-                instrument=SimpleNamespace(
-                    symbol=instrument_id,
-                    model_dump=lambda **_kwargs: {
-                        "market": "TW",
-                        "symbol": instrument_id,
-                        "instrument_type": "stock",
-                        "venue": "TWSE",
-                    },
+                instrument=InstrumentKey(
+                    market=Market.TW, symbol=instrument_id,
+                    instrument_type=InstrumentType.STOCK, venue="TWSE",
                 ),
+                market_phase="regular",
                 requested_interval=interval,
                 base_interval="1m",
                 bars=bars,
@@ -1062,10 +1086,12 @@ class TechnicalReportTests(unittest.TestCase):
                 ),
                 current_session_coverage=SimpleNamespace(
                     trade_date=date(2026, 3, 20),
+                    snapshot_bar_count=len(bars),
                     snapshot_phase=SimpleNamespace(value="ready"),
                     status=SimpleNamespace(value="complete_session"),
                     model_dump=lambda **_kwargs: {"status": "complete_session", "missing_bucket_count": 0},
                 ),
+                read_diagnostics=None,
                 warnings=(),
                 limitations=(),
             )
@@ -1257,6 +1283,7 @@ class TechnicalReportTests(unittest.TestCase):
                 )
             revision = (interval.replace("m", "1") + "e" * 64)[:64]
             bar_series = SimpleNamespace(
+                market_phase="regular",
                 instrument=SimpleNamespace(
                     symbol=instrument_id,
                     model_dump=lambda **_kwargs: {
@@ -1286,6 +1313,7 @@ class TechnicalReportTests(unittest.TestCase):
                 session_resolution=(
                     SimpleNamespace(trade_date=date(2026, 3, 20)),
                 ),
+                read_diagnostics=None,
                 warnings=(),
                 limitations=(),
             )
@@ -1538,6 +1566,13 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["value_label"], "vs 昨收")
         self.assertGreater(report["value"], 0)
         self.assertTrue(any(row["key"] == "daily_background" for row in report["rows"]))
+        state = report["data"]["current_state"]
+        self.assertEqual(state["timeframe"], "today")
+        self.assertEqual(state["basis"], "current_session_observation")
+        self.assertEqual(state["position"]["price"], 183.0)
+        self.assertEqual(state["position"]["order"], [])
+        self.assertNotIn("daily_background", [item["key"] for item in state["evidence"]])
+        self.assertIsNone(report["data"]["decision_state"])
 
     def test_today_report_accepts_datetime_intraday_point_time(self) -> None:
         point_time = datetime(2026, 3, 23, 9, 1, tzinfo=TAIPEI_TZ)

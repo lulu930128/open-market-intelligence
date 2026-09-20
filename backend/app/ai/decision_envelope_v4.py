@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from app.ai import (
+    answer_composer,
     answer_localization,
     capability_contract,
     contract_manifest,
@@ -671,6 +672,8 @@ def _compact_quality(quality: dict[str, Any]) -> None:
                 "computed_at",
                 "served_at",
                 "units",
+                "continuity",
+                "current_session_identity",
                 "issues",
             )
             if key in item
@@ -1461,6 +1464,12 @@ def _finalize_projection(
     projection: dict[str, Any],
     max_bytes: int,
 ) -> None:
+    readiness = _dict(_dict(envelope.get("status")).get("readiness"))
+    if readiness.get("answer_kind") != "evidence_only":
+        readiness["answer_ready"] = bool(
+            readiness.get("response_ready")
+            and answer_composer.has_answer_content(_dict(envelope.get("answer")))
+        )
     for _ in range(6):
         actual_bytes = _json_bytes(envelope)
         budget_met = actual_bytes <= max_bytes
@@ -2021,6 +2030,9 @@ def _brief_capability_summary(
                     "source_point_count",
                     "aggregated_point_count",
                     "partial_bar_count",
+                    "presentation_events",
+                    "display_event_count",
+                    "read_diagnostics",
                     "cache_status",
                     "cache_hit",
                     "cache_trade_date",
@@ -2243,6 +2255,8 @@ def _brief_capability_summary(
                     "decision_usable",
                     "generated_at",
                     "basis_revision",
+                    "requested_timeframe", "structure_timeframe", "structure_input_usable",
+                    "observation_semantics", "observation", "method_applicability", "parameter_contract",
                     "evidence_timeframes",
                     "reference",
                     "axis",
@@ -2280,6 +2294,7 @@ def _brief_capability_summary(
                     "method_family_count",
                     "primary_label",
                     "trigger_ids",
+                    "geometry_status", "scanner_eligible", "scanner_reason_codes",
                     "limitations",
                 ),
                 limit=8,
@@ -2689,6 +2704,9 @@ def _compact_to_required_core(
                 "facts_usable",
                 "decision_usable",
                 "payload_included",
+                "units",
+                "continuity",
+                "current_session_identity",
                 "issues",
             )
             if key in item
@@ -3089,12 +3107,20 @@ def _fit_budget(
         )
         for capability_id in required
     }
-    required_core = {
-        capability_id: _brief_capability_summary(
-            capability_id,
-            data[capability_id],
+    explicit_fields = _dict(selection.get("fields"))
+
+    def budget_summary(capability_id: str, value: Any) -> Any:
+        # Field projection already applied the caller's allowlisted selection.
+        # A second lossy summary must not silently discard requested evidence.
+        if capability_id in required and explicit_fields.get(capability_id):
+            return deepcopy(value)
+        return _brief_capability_summary(
+            capability_id, value,
             minimum_rows=required_row_requirements.get(capability_id),
         )
+
+    required_core = {
+        capability_id: budget_summary(capability_id, data[capability_id])
         for capability_id in required
         if capability_id in data
     }
@@ -3186,15 +3212,7 @@ def _fit_budget(
         for capability_id, value in list(data.items()):
             if capability_id == "diagnostics.source_health":
                 continue
-            summary_value = _brief_capability_summary(
-                capability_id,
-                value,
-                minimum_rows=(
-                    required_row_requirements.get(capability_id)
-                    if capability_id in required
-                    else None
-                ),
-            )
+            summary_value = budget_summary(capability_id, value)
             if (
                 summary_value == value
                 or _json_bytes(summary_value) >= _json_bytes(value)
@@ -4134,16 +4152,56 @@ def build(
         canonical,
         quality=quality,
     )
-    answer = _dict(canonical.get("answer"))
-    if answer and quality.get("status") == "blocked":
-        preferences = _dict(_dict(canonical.get("execution")).get("policy")).get(
-            "response_preferences"
+    preferences = _dict(_dict(canonical.get("execution")).get("policy")).get(
+        "response_preferences"
+    )
+    if scope_type == "market" and selection.get("output") != "evidence_only":
+        factual_answer = answer_composer.build_selected_market_consumer_answer(
+            target=_dict(canonical.get("target")), projected_data=projected_data,
+            quality=quality, response_preferences=preferences,
         )
+        if factual_answer:
+            canonical["answer"] = factual_answer
+    requested_horizon = _dict(
+        _dict(source_response.get("policy")).get("analysis_horizon")
+    ).get("effective")
+    intraday_quality = _dict(_dict(quality.get("capabilities")).get("intraday.bars"))
+    if (
+        requested_horizon == "intraday"
+        and "intraday.bars" in selection.get("required", [])
+        and intraday_quality.get("decision_usable") is not True
+        and selection.get("output") != "evidence_only"
+    ):
+        technical_quality = _dict(_dict(quality.get("capabilities")).get("technical.structure"))
+        gap_answer = answer_composer.build_intraday_evidence_gap_answer(
+            target=_dict(canonical.get("target")),
+            background_date=_dict(technical_quality.get("temporal")).get("latest_date"),
+            response_preferences=preferences,
+        )
+        factual_answer = _dict(canonical.get("answer"))
+        if factual_answer.get("style") == "selected_market_facts":
+            gap_answer["summary"].extend(_list(factual_answer.get("summary")))
+            gap_answer["detail"] = "\n".join(gap_answer["summary"])
+            gap_answer["text"] = answer_localization.consumer_text(
+                gap_answer, summary_limit=len(gap_answer["summary"]),
+                response_preferences=preferences,
+            )
+        canonical["answer"] = gap_answer
+        decision = _dict(canonical.get("decision"))
+        for key, empty in (
+            ("action_plan", []), ("scenarios", []), ("price_levels", {}), ("position", {}),
+        ):
+            decision[key] = empty
+        canonical["decision"] = decision
+        _dict(_dict(canonical.get("status")).get("readiness"))["decision_ready"] = False
+    answer = _dict(canonical.get("answer"))
+    if answer_composer.has_answer_content(answer) and quality.get("status") == "blocked":
         answer["confidence_label"] = answer_localization.confidence_label(
             answer.get("confidence"), preferences
         )
         answer["text"] = answer_localization.consumer_text(
-            answer, response_preferences=preferences
+            answer, response_preferences=preferences,
+            summary_limit=max(3, len(_list(answer.get("summary")))) if answer.get("style") in {"selected_market_facts", "intraday_evidence_gap"} else 3,
         )
         canonical["answer"] = answer
     canonical["transport_ok"] = True

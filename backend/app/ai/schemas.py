@@ -19,7 +19,7 @@ class AiRefreshStatusRead(BaseModel):
     kind: Literal["ai_refresh_status"] = "ai_refresh_status"
     version: Literal["omi.ai.refresh.status.v1"] = "omi.ai.refresh.status.v1"
     job_id: int
-    job_type: Literal["ai.tool_refresh"] = "ai.tool_refresh"
+    job_type: Literal["ai.tool_refresh", "tw.bootstrap_intraday_base_1m"] = "ai.tool_refresh"
     status: str
     operation_status: str
     evidence_status: str
@@ -41,6 +41,12 @@ class AiRefreshStatusRead(BaseModel):
     updated_at: datetime
     poll_url: str
     resume: dict[str, Any] | None = None
+    requested_trade_date: str | None = None
+    reason_code: str | None = None
+    next_retry_at: datetime | None = None
+    expires_at: datetime | None = None
+    materialization: dict[str, Any] | None = None
+    retry_not_before_at: datetime | None = None
 
 
 class StrategyProfileRead(BaseModel):

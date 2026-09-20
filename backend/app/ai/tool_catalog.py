@@ -392,7 +392,7 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                 "name": "omi.read_refresh_status",
                 "title": "Read OMI Refresh Status",
                 "description": (
-                    "Read one redacted ai.tool_refresh background job. Operation "
+                    "Read one redacted AI refresh or allowlisted Taiwan intraday consumer job. Operation "
                     "completion never implies fresh evidence; completed jobs return a "
                     "cache-only omi.ask resume template."
                 ),

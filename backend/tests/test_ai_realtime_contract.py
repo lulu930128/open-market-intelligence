@@ -126,6 +126,7 @@ class AiRealtimeContractTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "live")
         self.assertEqual(result["observation_kind"], "intraday_bar")
+        self.assertFalse(result["execution_grade_usable"])
         self.assertEqual(result["effective_interval_seconds"], 60)
         self.assertEqual(result["canonical_session_phase"], "regular")
         self.assertTrue(result["policy_satisfied"])

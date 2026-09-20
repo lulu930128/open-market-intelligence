@@ -23,6 +23,7 @@ from app.ai.market_payload_contract import (
 from app.db.models import StockMaster
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.index_resolution import project_taiwan_index_headline
+from app.market.taiwan_market_state import compose_taiwan_market_volume_state
 from app.market.taiwan_industries import (
     canonical_tw_sector_identity,
     normalize_tw_industry_label,
@@ -545,142 +546,7 @@ def _volume_state_with_breadth_current_value(
     *,
     breadth: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    output = dict(volume_state)
-    if output.get("current_cumulative_trade_value") is not None:
-        native_markets = [
-            str(item.get("market"))
-            for item in output.get("markets") or []
-            if isinstance(item, dict)
-            and item.get("market")
-            and item.get("cumulative_trade_value") is not None
-        ]
-        output.setdefault(
-            "available_cumulative_trade_value",
-            output.get("current_cumulative_trade_value"),
-        )
-        output.setdefault("trade_value_available", True)
-        output.setdefault("trade_value_complete", True)
-        output.setdefault("trade_value_coverage_status", "complete")
-        output.setdefault("trade_value_authority_status", "unavailable")
-        output.setdefault(
-            "trade_value_status",
-            f"{output['trade_value_authority_status']}_complete"
-            if output["trade_value_authority_status"] != "unavailable"
-            else "complete",
-        )
-        output.setdefault("included_markets", native_markets or ["TWSE", "TPEX"])
-        output.setdefault("missing_markets", [])
-        output.setdefault("trade_value_estimate", None)
-        output.setdefault("trade_value_estimate_method", "not_estimated")
-        return output
-    markets = (
-        breadth.get("markets")
-        if isinstance(breadth, dict) and isinstance(breadth.get("markets"), dict)
-        else {}
-    )
-    selected = [
-        markets.get(market)
-        for market in ("TWSE", "TPEX")
-        if isinstance(markets.get(market), dict)
-    ]
-    trade_dates = {
-        str(item.get("trade_date"))
-        for item in selected
-        if item.get("trade_date")
-    }
-    values = [
-        item.get("trade_value")
-        for item in selected
-        if isinstance(item.get("trade_value"), (int, float))
-    ]
-    available_markets = [
-        str(item.get("market") or item.get("index_id"))
-        for item in selected
-        if isinstance(item.get("trade_value"), (int, float))
-    ]
-    missing_markets = [
-        market for market in ("TWSE", "TPEX") if market not in available_markets
-    ]
-    available_value = int(sum(values)) if values else None
-    output["available_cumulative_trade_value"] = available_value
-    output["trade_value_available"] = available_value is not None
-    output["trade_value_complete"] = (
-        len(selected) == 2 and len(values) == 2 and len(trade_dates) == 1
-    )
-    output["trade_value_coverage_status"] = (
-        "complete"
-        if output["trade_value_complete"]
-        else "partial"
-        if available_value is not None
-        else "missing"
-    )
-    selected_authorities = [
-        "estimated" if item.get("trade_value_is_estimate") else "official"
-        for item in selected
-        if isinstance(item.get("trade_value"), (int, float))
-    ]
-    output["trade_value_authority_status"] = (
-        selected_authorities[0]
-        if selected_authorities
-        and all(value == selected_authorities[0] for value in selected_authorities)
-        else "mixed"
-        if selected_authorities
-        else "unavailable"
-    )
-    output["trade_value_status"] = (
-        f"{output['trade_value_authority_status']}_complete"
-        if output["trade_value_coverage_status"] == "complete"
-        else output["trade_value_coverage_status"]
-    )
-    output["included_markets"] = available_markets
-    output["missing_markets"] = missing_markets
-    output["trade_value_estimate"] = None
-    output["trade_value_estimate_method"] = "not_estimated"
-    field_status = (
-        dict(output.get("field_status"))
-        if isinstance(output.get("field_status"), dict)
-        else {}
-    )
-    if len(selected) == 2 and len(values) == 2 and len(trade_dates) == 1:
-        output["current_cumulative_trade_value"] = int(sum(values))
-        output["current_value_source"] = "official_market_breadth_summary"
-        output["trade_date"] = next(iter(trade_dates))
-        output["as_of"] = (
-            breadth.get("as_of")
-            or output.get("as_of")
-            or output["trade_date"]
-        )
-        output["markets"] = [
-            {
-                "market": item.get("market"),
-                "index_id": item.get("index_id"),
-                "currency": "TWD",
-                "trade_value_unit": "TWD",
-                "cumulative_trade_value": item.get("trade_value"),
-                "trade_value_semantics": item.get("trade_value_semantics"),
-                "trade_value_is_estimate": bool(item.get("trade_value_is_estimate")),
-                "quality_status": item.get("status"),
-                "source": item.get("source"),
-                "official_flag": not bool(item.get("trade_value_is_estimate")),
-            }
-            for item in selected
-        ]
-        field_status["current_cumulative_trade_value"] = {
-            "status": "available",
-            "source": "official_market_breadth_summary",
-            "trade_date": output["trade_date"],
-        }
-    else:
-        field_status["current_cumulative_trade_value"] = {
-            "status": "missing",
-            "reason": (
-                "TWSE and TPEX same-date official trade values are not both "
-                "available."
-            ),
-        }
-    output["field_status"] = field_status
-    return output
-
+    return compose_taiwan_market_volume_state(volume_state, breadth=breadth)
 
 def _market_evidence_as_of(
     *,
@@ -745,6 +611,7 @@ def _market_breadth_from_index_summary(
 
     indices = summary.get("indices") if isinstance(summary, dict) else None
     breadth_by_market: dict[str, dict[str, Any]] = {}
+    completed_auctions: list[dict[str, Any]] = []
     for index_id, market in (("TAIEX", "TWSE"), ("TPEX", "TPEX")):
         index_item = next(
             (
@@ -755,6 +622,10 @@ def _market_breadth_from_index_summary(
             None,
         )
         raw_breadth = index_item.get("breadth") if isinstance(index_item, dict) else None
+        historical = (index_item.get("latest_completed_auctions") or
+            (raw_breadth.get("latest_completed_auctions", []) if isinstance(raw_breadth, dict) else [])) if isinstance(index_item, dict) else []
+        completed_auctions.extend({**_json_event_value(item), "market": market}
+            for item in historical if isinstance(item, dict))
         if not isinstance(raw_breadth, dict) or not raw_breadth.get("total_count"):
             continue
 
@@ -886,7 +757,11 @@ def _market_breadth_from_index_summary(
         breadth_by_market[market] = breadth
 
     if not breadth_by_market:
-        return None
+        return ({"status": "missing", "facts_usable": False, "decision_usable": False,
+                 "current_for_requested_session": False, "markets": {},
+                 "latest_completed_auctions": completed_auctions,
+                 "limitations": ["CURRENT_ACTUAL_BREADTH_UNAVAILABLE"]}
+                if completed_auctions else None)
 
     missing_markets = [
         market for market in ("TWSE", "TPEX") if market not in breadth_by_market
@@ -1049,37 +924,12 @@ def _market_breadth_from_index_summary(
         if not any(item.get("universe_count") is not None for item in auction_components.values()):
             for key in ("advance_count", "decline_count", "unchanged_count", "coverage_count", "universe_count", "unknown_count"):
                 auction_breadth[key] = None
-    trade_value_included_markets = [
-        market
-        for market, item in breadth_by_market.items()
-        if item.get("trade_value") is not None
-    ]
-    trade_value_missing_markets = [
-        market
-        for market in ("TWSE", "TPEX")
-        if market not in trade_value_included_markets
-    ]
-    cumulative_trade_value = _sum_optional("trade_value")
-    trade_value_authorities = [
-        "estimated" if item.get("trade_value_is_estimate") else "official"
-        for item in breadth_by_market.values()
-        if item.get("trade_value") is not None
-    ]
-    trade_value_authority_status = (
-        trade_value_authorities[0]
-        if trade_value_authorities
-        and all(value == trade_value_authorities[0] for value in trade_value_authorities)
-        else "mixed"
-        if trade_value_authorities
-        else "unavailable"
-    )
-    trade_value_coverage_status = (
-        "complete"
-        if not trade_value_missing_markets
-        else "partial"
-        if cumulative_trade_value is not None
-        else "missing"
-    )
+    value_composition = compose_taiwan_market_volume_state({}, breadth={"markets": breadth_by_market})
+    trade_value_included_markets = value_composition["included_markets"]
+    trade_value_missing_markets = value_composition["missing_markets"]
+    cumulative_trade_value = value_composition["available_cumulative_trade_value"]
+    trade_value_authority_status = value_composition["trade_value_authority_status"]
+    trade_value_coverage_status = value_composition["trade_value_coverage_status"]
     market_completion_ratio = len(breadth_by_market) / 2
     (
         combined_coverage_ratio,
@@ -1183,7 +1033,7 @@ def _market_breadth_from_index_summary(
         "limit_down_count": _sum_optional("limit_down_count"),
         "trade_value": cumulative_trade_value,
         "trade_value_available": cumulative_trade_value is not None,
-        "trade_value_complete": not trade_value_missing_markets,
+        "trade_value_complete": value_composition["trade_value_complete"],
         "trade_value_coverage_status": trade_value_coverage_status,
         "trade_value_authority_status": trade_value_authority_status,
         "trade_value_status": (
@@ -1203,6 +1053,7 @@ def _market_breadth_from_index_summary(
         "missing_markets": missing_markets,
         "markets": breadth_by_market,
         "auction_breadth": auction_breadth,
+        "latest_completed_auctions": completed_auctions,
         "market_completion_ratio": market_completion_ratio,
         "close_reconciliation": {
             "status": (

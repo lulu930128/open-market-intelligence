@@ -48,6 +48,12 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
         external_fetch=True,
         writes_cache=True,
     ),
+    "tw.refresh_intraday_bars": ToolDefinition(
+        name="tw.refresh_intraday_bars",
+        description="Materialize current-session Taiwan 1m bars for one active ordinary stock through the canonical bounded job.",
+        external_fetch=True,
+        writes_cache=True,
+    ),
     "tw.refresh_daily_price": ToolDefinition(
         name="tw.refresh_daily_price",
         description="Refresh daily OHLCV cache for one Taiwan stock.",

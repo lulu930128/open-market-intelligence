@@ -336,6 +336,8 @@ class TaiwanIntradayContractAcceptanceTests(unittest.TestCase):
                             "close": 250.0,
                             "trade_value": 123_000_000,
                             "source": "official_index_summary",
+                            "official_flag": True,
+                            "trade_value_is_estimate": False,
                             "breadth": None,
                             "breadth_status": {
                                 "status": "missing",

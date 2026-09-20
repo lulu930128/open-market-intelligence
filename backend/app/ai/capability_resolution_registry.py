@@ -192,6 +192,7 @@ SCHEDULER_OWNED_CAPABILITIES = frozenset(
         "market.margin_short",
         "market.chips",
         "screening.intraday",
+        "screening.price_map",
         "market.hot_groups",
         "derivatives.positioning",
         "derivatives.structure",

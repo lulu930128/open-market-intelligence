@@ -97,6 +97,7 @@ PRICE_KEYS = {
     "bid",
     "ask",
 }
+HISTORICAL_COMPANION_KEYS = {"historical_capture", "auction_history"}
 
 
 def _numeric_observation(value: Any) -> bool:
@@ -119,8 +120,8 @@ def _has_price_observation(value: Any, *, depth: int = 0) -> bool:
             return True
         return any(
             _has_price_observation(child, depth=depth + 1)
-            for child in value.values()
-            if isinstance(child, (dict, list))
+            for key, child in value.items()
+            if key not in HISTORICAL_COMPANION_KEYS and isinstance(child, (dict, list))
         )
     if isinstance(value, list):
         return any(
@@ -155,6 +156,8 @@ def _latest_time(value: Any, *, keys: set[str]) -> datetime | None:
             return
         if isinstance(item, dict):
             for key, child in item.items():
+                if key in HISTORICAL_COMPANION_KEYS:
+                    continue
                 if key in keys:
                     parsed = _parse_datetime(child)
                     if parsed is not None:
@@ -273,8 +276,8 @@ def _has_observation(value: Any, *, depth: int = 0) -> bool:
                 return True
         return any(
             _has_observation(child, depth=depth + 1)
-            for child in value.values()
-            if isinstance(child, (dict, list))
+            for key, child in value.items()
+            if key not in HISTORICAL_COMPANION_KEYS and isinstance(child, (dict, list))
         )
     if isinstance(value, list):
         return any(
@@ -528,7 +531,7 @@ def classify_observation(
     )
     latest_session = _first_bool(value, "is_latest_session_quote") is True
     historical = (
-        _first_bool(value, "is_historical") is True
+        _first_bool(value, "is_historical", "historical") is True
         or str(quote_semantics or "").casefold().startswith("historical_")
     )
     has_observation = _has_observation(value)
@@ -793,6 +796,8 @@ def classify_observation(
         and policy_satisfied
         and actual_price_usable
         and not auction_observation
+        and not intraday_bar_observation
+        and source_decision_usable is not False
     )
     refresh_possible_now = (
         continuous

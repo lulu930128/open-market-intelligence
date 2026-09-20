@@ -1034,8 +1034,10 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
             intraday.assert_not_called()
             self.assertFalse(response["policy"]["can_external_fetch"])
-            self.assertFalse(response["result"]["data"]["index_intraday"]["enabled"])
-            self.assertEqual(response["result"]["data"]["slots"]["index_intraday"]["status"], "not_requested")
+            # Untrusted requests may read canonical cache; acquisition remains denied.
+            self.assertTrue(response["result"]["data"]["index_intraday"]["enabled"])
+            self.assertFalse(response["result"]["data"]["index_intraday"]["is_live"])
+            self.assertNotEqual(response["result"]["data"]["slots"]["index_intraday"]["status"], "not_requested")
         finally:
             db.close()
 

@@ -71,12 +71,12 @@ class IntradayContractRemediationTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.market.intraday.read_taiwan_latest_daily_evidence",
+                "app.market.tw_bar_service.read_taiwan_latest_daily_evidence",
                 return_value=evidence,
             ),
-            patch("app.market.intraday.read_taiwan_session_close", return_value=object()),
+            patch("app.market.tw_bar_service.read_taiwan_session_close", return_value=object()),
             patch(
-                "app.market.intraday.project_taiwan_session_close",
+                "app.market.tw_bar_service.project_taiwan_session_close",
                 return_value={
                     "available": True,
                     "status": "session_final",
@@ -163,12 +163,12 @@ class IntradayContractRemediationTests(unittest.TestCase):
         )
         with (
             patch(
-                "app.market.intraday.read_taiwan_latest_daily_evidence",
+                "app.market.tw_bar_service.read_taiwan_latest_daily_evidence",
                 return_value=missing_daily,
             ),
-            patch("app.market.intraday.read_taiwan_session_close", return_value=object()),
+            patch("app.market.tw_bar_service.read_taiwan_session_close", return_value=object()),
             patch(
-                "app.market.intraday.project_taiwan_session_close",
+                "app.market.tw_bar_service.project_taiwan_session_close",
                 return_value={
                     "available": True,
                     "status": "session_final",
@@ -186,6 +186,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             projected = _append_completed_session_close_marker(
                 object(),
                 stock_id="2330",
+                requested_at=datetime.fromisoformat("2026-08-31T13:34:00+08:00"),
                 points=[
                     {
                         "time": "2026-08-31T13:24:00+08:00",
@@ -1164,7 +1165,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             }
         )
 
-        with unittest.mock.patch.object(
+        with patch.object(taiwan_stock.TaiwanBarService, "read_current_session_presentation_events", return_value=()), unittest.mock.patch.object(
             taiwan_stock,
             "project_taiwan_bar_series",
             return_value=get_history.return_value,
@@ -2022,7 +2023,7 @@ class IntradayContractRemediationTests(unittest.TestCase):
             intraday_history=intraday_history,
         )
 
-        with unittest.mock.patch.object(
+        with patch.object(taiwan_stock.TaiwanBarService, "read_current_session_presentation_events", return_value=()), unittest.mock.patch.object(
             taiwan_stock,
             "project_taiwan_bar_series",
             return_value=intraday_history.return_value,

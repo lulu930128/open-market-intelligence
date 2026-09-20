@@ -366,6 +366,7 @@ class TechnicalEvidenceTests(unittest.TestCase):
             bars=[
                 SimpleNamespace(
                     start_at=datetime.combine(point["time"], datetime.min.time()),
+                    end_at=datetime.combine(point["time"] + timedelta(days=2), datetime.min.time()),
                     open_price=point["open"],
                     high_price=point["high"],
                     low_price=point["low"],
@@ -677,6 +678,8 @@ class TechnicalEvidenceTests(unittest.TestCase):
 
     def test_structure_v2_is_shadow_only_and_exposes_counter_evidence(self) -> None:
         indicators = {
+            "stock_id": "2330",
+            "lineage": {"dataset_id": "tw.daily.ohlcv", "series_revision": "completed-fixture"},
             "status": "ready",
             "as_of": "2026-08-12",
             "price_basis": "raw_unadjusted",
@@ -713,6 +716,11 @@ class TechnicalEvidenceTests(unittest.TestCase):
         )
 
         self.assertEqual(result["version"], "tw_technical_current_state_v2")
+        self.assertEqual(result["symbol"], "2330")
+        self.assertEqual(result["market"], "TW")
+        self.assertEqual(result["timeframe"], "daily")
+        self.assertEqual(result["latest_price"], 482.5)
+        self.assertEqual(result["lineage"], indicators["lineage"])
         self.assertEqual(result["mode"], "shadow")
         self.assertFalse(result["active_score_impact"])
         self.assertTrue(result["decision_usable"])

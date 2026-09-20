@@ -1015,6 +1015,10 @@ def _canonical_coverage_status(
     )
     manifest_explicit = _normalized_status(manifest_item.get("coverage_status"))
     if capability_id in {"daily.ohlcv", "intraday.bars"}:
+        # An empty expected session is missing, even when the series also
+        # marks its unmet coverage as partial. Do not hide the stronger fact.
+        if explicit == "missing":
+            return "missing"
         # Dataset incompleteness is distinct from response byte/point trimming.
         # Never let a continuous returned prefix or an optimistic manifest
         # override the selected series' explicit incompleteness.
@@ -1231,8 +1235,14 @@ def _payload_semantic_quality(
         return None
 
     quality = _dict(payload.get("quality"))
+    unavailable_status = next(
+        (status for value in (quality.get("status"), payload.get("status"))
+         if (status := _normalized_status(value)) in {"unsupported", "unavailable"}),
+        None,
+    )
     has_typed_top_level_quality = bool(
-        _normalized_status(payload.get("freshness_status")) != "unknown"
+        unavailable_status
+        or _normalized_status(payload.get("freshness_status")) != "unknown"
         or any(
             isinstance(payload.get(key), bool)
             for key in (
@@ -1245,7 +1255,10 @@ def _payload_semantic_quality(
     if not quality and not has_typed_top_level_quality:
         return None
     explicit_status = _normalized_status(
-        quality.get("status")
+        # Availability of the requested metric is independent of the age of
+        # its underlying price observations. Fresh prices cannot supply it.
+        unavailable_status
+        or quality.get("status")
         or payload.get("freshness_status")
         or payload.get("status")
     )
@@ -1271,6 +1284,8 @@ def _payload_semantic_quality(
         for value in values
         if str(value).strip()
     ]
+    if unavailable_status and payload.get("reason_code"):
+        issues.append(str(payload["reason_code"]))
     if (
         explicit_status == "unknown"
         and facts_usable is None
@@ -1347,8 +1362,8 @@ def _quality_for_capability(
         and (
             payload.get("available") is False
             or _normalized_status(payload.get("availability_status"))
-            in {"missing", "unavailable", "error"}
-            or explicit_payload_status in {"missing", "unavailable", "error"}
+            in {"missing", "unavailable", "unsupported", "error"}
+            or explicit_payload_status in {"missing", "unavailable", "unsupported", "error"}
         )
     )
     semantic_payload_empty = _semantic_payload_empty(
@@ -1791,7 +1806,7 @@ def _quality_for_capability(
         ),
         "refresh_possible_now": (
             False
-            if applicability_status == "not_applicable"
+            if applicability_status == "not_applicable" or status == "unsupported"
             else item["fill_state"]["refresh_possible_now"]
             if isinstance(item.get("fill_state"), dict)
             else realtime.get("refresh_possible_now")
@@ -1807,7 +1822,9 @@ def _quality_for_capability(
             payload.get("refresh_requested") if isinstance(payload, dict) else None,
         ),
         "refresh_recommended": (
-            item["fill_state"]["refresh_required"]
+            False
+            if status == "unsupported"
+            else item["fill_state"]["refresh_required"]
             if isinstance(item.get("fill_state"), dict)
             else
             False
@@ -1854,10 +1871,46 @@ def _quality_for_capability(
     }
 
 
+def _expected_completed_technical_relation(
+    *, quote_payload: dict[str, Any], technical_payload: dict[str, Any],
+    quote_date: str, technical_date: str, target: dict[str, Any],
+) -> bool:
+    """Accept only a traceable completed-daily basis for the resolved target."""
+    relation = _dict(quote_payload.get("session_date_relation"))
+    lineage = _dict(technical_payload.get("lineage"))
+    symbol = str(target.get("id") or "")
+    quote_symbol = quote_payload.get("symbol") or quote_payload.get("stock_id")
+    quote_instrument = _dict(_dict(quote_payload.get("quote")).get("instrument"))
+    quote_symbol = quote_symbol or quote_instrument.get("symbol")
+    return bool(
+        symbol
+        and str(target.get("market") or "").upper() == "TW"
+        and technical_payload.get("market") == "TW"
+        and technical_payload.get("symbol") == symbol
+        and (not quote_symbol or quote_symbol == symbol)
+        and relation.get("expected") is True
+        and relation.get("status") == "aligned"
+        and relation.get("relation") == "expected_current_session_vs_completed_daily"
+        and relation.get("quote_date") == quote_date
+        and relation.get("current_session_date") == quote_date
+        and relation.get("completed_daily_date") == technical_date
+        and relation.get("previous_trading_day") == technical_date
+        and technical_date < quote_date
+        and technical_payload.get("timeframe") in {"daily", "1d"}
+        and technical_payload.get("decision_snapshot") == "completed"
+        and technical_payload.get("price_basis") == "raw_unadjusted"
+        and quote_payload.get("price_basis", "raw_unadjusted") == "raw_unadjusted"
+        and lineage.get("dataset_id") == "tw.daily.ohlcv"
+        and bool(lineage.get("series_revision"))
+        and str(_dict(lineage.get("latest_component")).get("event_at") or "")[:10] == technical_date
+    )
+
+
 def _fusion_issues(
     capabilities: dict[str, dict[str, Any]],
     *,
     projected_data: dict[str, Any],
+    target: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     quote = capabilities.get("quote.snapshot")
@@ -1867,13 +1920,25 @@ def _fusion_issues(
         technical_date = _dict(technical.get("temporal")).get("latest_date")
         quote_price = _price_value(projected_data.get("quote.snapshot"))
         technical_price = _price_value(projected_data.get("technical.structure"))
+        expected_relation = bool(
+            quote_date and technical_date
+            and _expected_completed_technical_relation(
+                quote_payload=_dict(projected_data.get("quote.snapshot")),
+                technical_payload=_dict(projected_data.get("technical.structure")),
+                quote_date=quote_date, technical_date=technical_date, target=target or {},
+            )
+        )
         if (
             quote_date
             and technical_date
             and quote_date != technical_date
-            and quote_price is not None
-            and technical_price is not None
-            and quote_price != technical_price
+            and not expected_relation
+            and (
+                str((target or {}).get("market") or "").upper() == "TW"
+                or quote_price is not None
+                and technical_price is not None
+                and quote_price != technical_price
+            )
         ):
             technical["decision_usable"] = False
             technical["issues"] = list(
@@ -2049,6 +2114,7 @@ def build_quality_contract(
     fusion_issues = _fusion_issues(
         required_capability_rows,
         projected_data=projected_data,
+        target=_dict(canonical.get("target")),
     )
     required_rows = list(required_capability_rows.values())
     supplemental_rows = [

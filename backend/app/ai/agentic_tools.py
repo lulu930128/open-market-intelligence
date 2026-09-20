@@ -874,6 +874,7 @@ def run_tw_stock_tool_session(
     requested_capabilities: tuple[str, ...] | None = None,
     force_selected_capabilities: bool = False,
     progress_callback: progress_events.ProgressCallback | None = None,
+    trade_date: str | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = str(stock_id or "").strip()
     budget = normalize_tool_budget(raw_budget)
@@ -915,6 +916,7 @@ def run_tw_stock_tool_session(
         can_call_llm=bool(policy.get("can_plan_tools")),
         requested_capabilities=requested_capabilities,
         force_selected_capabilities=force_selected_capabilities,
+        trade_date=trade_date,
     )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(

@@ -60,6 +60,7 @@ LIMITED_STATUSES = {
 }
 NEUTRAL_STATUSES = {"not_applicable", "not_requested"}
 EXECUTABLE_FILL_OPERATIONS = {
+    "tw.refresh_intraday_bars",
     "tw.refresh_daily_price",
     "tw.refresh_institutional",
     "tw.refresh_margin",
@@ -84,6 +85,7 @@ EXECUTABLE_FILL_OPERATIONS = {
     "crypto.refresh_derivatives",
 }
 FILL_OPERATION_PRODUCED_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "tw.refresh_intraday_bars": ("intraday.bars",),
     "tw.refresh_daily_price": ("daily.ohlcv",),
     "tw.refresh_institutional": ("chips.institutional",),
     "tw.refresh_margin": ("chips.margin",),
@@ -108,6 +110,7 @@ FILL_OPERATION_PRODUCED_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "crypto.refresh_derivatives": ("crypto.derivatives",),
 }
 FILL_OPERATIONS_WRITING_CACHE = {
+    "tw.refresh_intraday_bars",
     "tw.refresh_daily_price",
     "tw.refresh_institutional",
     "tw.refresh_margin",
@@ -281,6 +284,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "capability_expectation",
             "source_status",
             "session_date_relation",
+            "price_basis",
             "current_session_expected",
             "current_session_satisfied",
             "expected_trade_date",
@@ -491,6 +495,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "capability_expectation",
             "source_status",
             "session_date_relation",
+            "price_basis",
             "current_session_expected",
             "current_session_satisfied",
             "expected_trade_date",
@@ -776,6 +781,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "data.quote.components.auction",
         ),
         fields=(
+            "historical_capture",
             "change_reference",
             "kind",
             "status",
@@ -813,6 +819,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "lot_size",
         ),
         default_fields=(
+            "historical_capture",
             "change_reference",
             "status",
             "available",
@@ -1199,6 +1206,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "aggregated_point_count",
             "expected_point_count",
             "cache_status",
+            "presentation_events",
+            "display_event_count",
+            "read_diagnostics",
             "cache_hit",
             "cache_trade_date",
             "cache_latest_time",
@@ -1366,6 +1376,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "source_point_count",
             "aggregated_point_count",
             "cache_status",
+            "presentation_events",
+            "display_event_count",
+            "read_diagnostics",
             "cache_hit",
             "cache_trade_date",
             "cache_latest_time",
@@ -1376,6 +1389,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         default_limit=20,
         fill_operations=(
+            ("stock", "tw.refresh_intraday_bars"),
             ("us_stock", "us.refresh_intraday_bars"),
             ("jp_stock", "jp.refresh_intraday_trend"),
             ("jp_index", "jp.refresh_intraday_trend"),
@@ -1383,7 +1397,6 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             ("kr_index", "kr.refresh_index_intraday_trend"),
             ("crypto_asset", "crypto.refresh_ohlcv"),
         ),
-        refresh_strategies=(("stock", "reader_fetch"),),
         refresh_requires_market_open_scopes=("stock",),
     ),
     CapabilitySpec(
@@ -1583,6 +1596,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "composite_state",
             "fallback_reason",
             "technical_price_basis",
+            "price_basis",
             "bid_ask_price_used",
             "scores",
             "levels",
@@ -1652,6 +1666,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "composite_state",
             "fallback_reason",
             "technical_price_basis",
+            "price_basis",
             "bid_ask_price_used",
             "levels",
             "reports",
@@ -1994,6 +2009,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "decision_usable",
             "generated_at",
             "basis_revision",
+            "requested_timeframe", "structure_timeframe", "observation_semantics", "method_applicability",
+            "structure_input_usable", "observation",
             "evidence_timeframes",
             "reference",
             "axis",
@@ -2022,6 +2039,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "decision_usable",
             "generated_at",
             "basis_revision",
+            "requested_timeframe", "structure_timeframe", "observation_semantics", "method_applicability",
+            "structure_input_usable", "observation",
             "evidence_timeframes",
             "reference",
             "axis",
@@ -2046,11 +2065,12 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
                 "candidate_close": {
                     "type": "number",
                     "exclusiveMinimum": 0,
-                }
+                },
+                "timeframe": {"type": "string", "enum": ["today", "daily", "weekly", "monthly"], "default": "daily"},
             },
             "additionalProperties": False,
         },
-        schema_version="tw.stock.price_map.v3",
+        schema_version="tw.stock.price_map.v4",
         frequency="daily",
         event_time_basis="latest_resolved_completed_market_period",
         unit_semantics="TWD_per_share_and_percent_distance",
@@ -2862,6 +2882,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "oldest_price_as_of",
             "newest_price_as_of",
             "auction_breadth",
+            "latest_completed_auctions",
             "label",
             "advance",
             "advance_count",
@@ -2948,6 +2969,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "oldest_price_as_of",
             "newest_price_as_of",
             "auction_breadth",
+            "latest_completed_auctions",
             "label",
             "advance",
             "advance_count",
@@ -4151,6 +4173,38 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         side_effect_policy="cache_read_only_no_refresh",
     ),
     CapabilitySpec(
+        capability_id="screening.price_map", schema_version="tw.screening.price_map.v1",
+        domain="screening", slot="screening_price_map", scopes=("market",), markets=("TW",),
+        paths=("compact.screening.price_map", "data.screening.price_map"),
+        fields=("kind", "version", "status", "freshness_status", "computed_at", "as_of", "empty_result_is_valid", "decision_usable", "zone_side",
+                "structure_timeframe", "relation", "lane", "expected_basis_date", "rows", "coverage", "pagination",
+                "facts_usable", "facts_usable_for_ranking", "intraday_research_usable", "execution_grade_usable",
+                "cache_policy", "missing", "warnings", "source_refs"),
+        default_fields=("status", "freshness_status", "computed_at", "structure_timeframe", "relation", "lane", "empty_result_is_valid", "decision_usable", "zone_side",
+                        "expected_basis_date", "rows", "coverage", "pagination", "facts_usable_for_ranking",
+                        "intraday_research_usable", "execution_grade_usable", "cache_policy", "missing", "warnings"),
+        default_limit=200, title="Taiwan Price Map screening",
+        description="Cache-only screening over revisioned completed-period zones and canonical current observations. Reactions require ordered samples; indicative observations are separate from actual trades.",
+        parameter_schema={
+            "type": "object", "properties": {
+                "timeframe": {"type": "string", "enum": ["daily", "weekly", "monthly"], "default": "daily"},
+                "zone_side": {"type": "string", "enum": ["any", "upside", "downside"], "default": "any"},
+                "relation": {"type": "string", "enum": ["near_zone", "touching", "above_zone", "below_zone", "support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest"], "default": "near_zone"},
+                "lane": {"type": "string", "enum": ["actual", "indicative"], "default": "actual"},
+                "near_pct": {"type": "number", "minimum": 0, "maximum": 5, "default": 0.5},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0},
+                "universe": {"type": "object", "properties": {
+                    "markets": {"type": "array", "items": {"type": "string", "enum": ["TWSE", "TPEX"]}, "minItems": 1, "maxItems": 2},
+                    "stock_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 20}, "maxItems": 2500},
+                }, "additionalProperties": False},
+            }, "additionalProperties": False,
+        },
+        writes_cache=False,
+        unit_semantics="TWD_per_share_and_percent_distance", event_time_basis="completed_structure_and_current_observation",
+        side_effect_policy="scheduler_owned_cache_read_only",
+    ),
+    CapabilitySpec(
         capability_id="screening.intraday",
         schema_version="tw.screening.intraday.v2",
         domain="screening",
@@ -4222,8 +4276,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         title="Taiwan intraday stock screening",
         description=(
             "Deterministic ranking over scheduler-owned Taiwan rolling "
-            "intraday stock state. The read path is cache-only and never "
-            "fans out to per-stock providers."
+            "intraday stock state, with current-trade eligibility applied before pagination. "
+            "VWAP is unavailable without canonical session volume-weighted evidence; "
+            "order_book_imbalance is unsupported by the full-market producer. "
+            "The read path is cache-only and never fans out to per-stock providers."
         ),
         markets=("TW",),
         parameter_schema={
@@ -4243,6 +4299,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
                         "vwap_deviation_pct",
                         "order_book_imbalance",
                     ],
+                    "description": (
+                        "order_book_imbalance requests return unsupported (no full-market depth producer); "
+                        "vwap_deviation_pct returns unavailable until canonical session VWAP is materialized."
+                    ),
                     "default": "change_pct",
                 },
                 "sort_order": {
@@ -4329,6 +4389,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "decision_usable",
             "current_for_requested_session",
             "is_complete",
+            "ranking_scope",
             "event_time",
             "computed_at",
             "data_mode",
@@ -4364,6 +4425,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "decision_usable",
             "current_for_requested_session",
             "is_complete",
+            "ranking_scope",
             "event_time",
             "computed_at",
             "data_mode",
@@ -4428,6 +4490,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "same_time_baseline_20d",
             "baseline_readiness_status",
             "available_sample_days",
+            "baseline_diagnostics",
             "expected_5d_ready_after_sessions",
             "expected_20d_ready_after_sessions",
             "next_fill",
@@ -4463,6 +4526,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "same_time_baseline_20d",
             "baseline_readiness_status",
             "available_sample_days",
+            "baseline_diagnostics",
             "expected_5d_ready_after_sessions",
             "expected_20d_ready_after_sessions",
             "next_fill",
@@ -5179,6 +5243,7 @@ DOMAIN_CAPABILITIES = {
         "screening.ranking",
         "screening.coverage",
         "screening.intraday",
+        "screening.price_map",
         "market.hot_groups",
     ),
     "hot_groups": ("market.hot_groups",),
@@ -6384,6 +6449,9 @@ def _canonical_intraday_value(value: Any) -> Any:
         "materialization_state",
         "requested_trade_date",
         "session_coverage",
+        "series_coverage",
+        "coverage_status",
+        "truncated",
         "is_partial",
         "is_historical",
         "session_phase",

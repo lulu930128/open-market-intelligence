@@ -227,6 +227,7 @@ def execute_tool_stages(
         and (
             current_freshness.get("refresh_recommended")
             or continuation_selected
+            or "intraday.bars" in (selected_v4_capabilities or ())
         )
         and query_plan.get("external_refresh_allowed", True)
     ):
@@ -242,6 +243,7 @@ def execute_tool_stages(
                 requested_capabilities=selected_v4_capabilities,
                 force_selected_capabilities=continuation_selected,
                 progress_callback=progress_callback,
+                **({"trade_date": str(regional_params["trade_date"])} if regional_params.get("trade_date") else {}),
             ),
         )
         tool_plan = tool_session["tool_plan"]

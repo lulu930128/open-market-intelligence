@@ -245,6 +245,45 @@ def test_depth_candidate_read_is_provider_fair_before_total_bound(db: Session) -
     assert closing_reads[0].provider == MIS_ORDER_BOOK_DESCRIPTOR.provider_key
 
 
+def test_dated_auction_history_filters_date_and_visibility_before_latest(db: Session) -> None:
+    from app.market.taiwan_realtime_platform import read_taiwan_auction_history
+    from app.market.taiwan_quote_evidence import read_taiwan_quote_evidence_bundle
+    from app.market.quote_depth import project_taiwan_quote_evidence_bundle
+
+    acquire_taiwan_auction(db, stock_id="2330", requested_at=NOW,
+                          policy=RealtimePolicy.PREFER_LIVE,
+                          session=MarketSession.CLOSING_AUCTION,
+                          acquisition=_adapter(indicative=True), descriptors=(KGI_AUCTION_DESCRIPTOR,))
+    base = db.query(TaiwanStockAuctionSnapshot).one()
+    original_event = base.event_at
+    values = {column.name: getattr(base, column.name) for column in TaiwanStockAuctionSnapshot.__table__.columns if column.name != "id"}
+    db.add(TaiwanStockAuctionSnapshot(**{**values, "event_at": NOW + timedelta(days=1), "trade_date": NOW.date() + timedelta(days=1)}))
+    db.commit()
+    cutoff = NOW.replace(hour=16)
+    history = read_taiwan_auction_history(db, stock_id="2330", trade_date=NOW.date(), as_of=cutoff, max_candidates=1)
+    assert history["capture_status"] == "captured"
+    assert len(history["observations"]) == 1
+    assert history["observations"][0]["lineage"]["event_at"].startswith(original_event.isoformat())
+    assert history["decision_usable"] is history["indicator_usable"] is history["execution_grade_usable"] is False
+    bundle = read_taiwan_quote_evidence_bundle(db, stock_id="2330", requested_at=cutoff)
+    assert bundle.auction.resolved.auction is None
+    assert bundle.auction_history == history
+    outward = project_taiwan_quote_evidence_bundle(db=db, stock_id="2330", bundle=bundle)
+    assert outward["auction_history"] == history
+    from app.ai.market_context.taiwan_projection import _quote_components
+    from app.ai.realtime_contract import classify_observation
+    auction_component = _quote_components(outward)["auction"]
+    assert auction_component["historical_capture"] == history
+    without_history = {key: value for key, value in auction_component.items() if key != "historical_capture"}
+    assert classify_observation(auction_component, market="TW", realtime_policy="require_live", now=cutoff) == classify_observation(without_history, market="TW", realtime_policy="require_live", now=cutoff)
+    historical_quality = classify_observation(history, market="TW", realtime_policy="require_live", now=cutoff)
+    assert historical_quality["execution_grade_usable"] is False
+    assert historical_quality["decision_usable"] is False
+    before_receipt = read_taiwan_auction_history(db, stock_id="2330", trade_date=NOW.date(), as_of=NOW-timedelta(seconds=1))
+    assert before_receipt["capture_status"] == "missing"
+    assert db.query(TaiwanStockQuoteSnapshot).count() == 0
+
+
 def test_trial_auction_stays_provisional_and_never_becomes_quote(db: Session) -> None:
     result = acquire_taiwan_auction(
         db,

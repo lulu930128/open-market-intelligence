@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from app.market.tw_bar_contracts import TaiwanBarSeriesRead
+from app.market.tw_bar_contracts import TaiwanBarSeriesRead, TaiwanChartPresentationEvent
 from app.market.tw_chart_service import TaiwanChartBundleRead
 from app.market.tw_intraday_universe import intraday_materialization_policy
 
@@ -25,6 +25,7 @@ def project_taiwan_bar_series(
     *,
     session_scope: str | None = None,
     expected_trade_date: date | None = None,
+    presentation_events: tuple[TaiwanChartPresentationEvent, ...] = (),
 ) -> dict[str, Any]:
     states = {item.start_at: item for item in series.bar_states}
     points: list[dict[str, Any]] = []
@@ -73,6 +74,7 @@ def project_taiwan_bar_series(
     observed_trade_dates = sorted({bar.start_at.date().isoformat() for bar in series.bars})
     payload = {
         "kind": "taiwan_bar_series",
+        "market_phase": series.market_phase,
         "stock_id": series.instrument.symbol,
         "instrument": series.instrument.model_dump(mode="json"),
         "interval": series.requested_interval,
@@ -86,6 +88,12 @@ def project_taiwan_bar_series(
         "from_time": series.history.available_from,
         "to_time": series.history.available_to,
         "point_count": len(points),
+        "cached_count": len(points),
+        "cache_hit": bool(points),
+        "cache_status": "persisted_hit" if points else "persisted_miss",
+        "read_diagnostics": series.read_diagnostics.model_dump(mode="json") if series.read_diagnostics else None,
+        "presentation_events": [event.model_dump(mode="json") for event in presentation_events],
+        "display_event_count": len(presentation_events),
         "points": points,
         "is_partial": not series.history.requested_coverage_satisfied,
         "coverage_status": series.history.history_status.value,
@@ -115,6 +123,11 @@ def project_taiwan_bar_series(
             payload["series_coverage"] = current_session_coverage.model_dump(mode="json")
             payload["coverage_status"] = current_session_coverage.status.value
             payload["is_partial"] = current_session_coverage.status.value not in {"complete_prefix", "complete_session"}
+            # The Bar owner evaluates the full snapshot before applying the
+            # consumer's point limit. Keep that count through AI projection.
+            payload["point_count"] = current_session_coverage.snapshot_bar_count
+            payload["returned_point_count"] = len(points)
+            payload["truncated"] = current_session_coverage.snapshot_bar_count > len(points)
         snapshot_phase = (
             current_session_coverage.snapshot_phase.value
             if current_session_coverage is not None

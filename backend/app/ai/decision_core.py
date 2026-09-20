@@ -870,11 +870,8 @@ def include_tw_intraday(
     question: str,
     requested_horizon: str | None,
     strategy_profile: str | None,
-    allow_external_fetch: bool,
 ) -> bool:
-    if not allow_external_fetch:
-        return False
-
+    """Infer read scope; acquisition permission belongs to refresh policy."""
     horizon, _ = infer_analysis_horizon(
         question=question,
         requested_horizon=requested_horizon,

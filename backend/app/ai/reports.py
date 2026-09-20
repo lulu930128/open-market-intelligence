@@ -690,7 +690,7 @@ def build_market_brief(
     overview = tools.read_market_overview(
         db=db,
         limit=limit,
-        include_intraday=include_intraday or analysis_horizon == "intraday",
+        include_intraday=include_intraday,
         market_data_params=market_data_params,
     )
     summary = _compact_market_summary(overview)

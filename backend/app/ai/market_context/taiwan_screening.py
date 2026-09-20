@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.ai.market_context.taiwan_projection import _with_evidence_passport
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.tw_screening import build_tw_screening_snapshot
+from app.market.tw_price_map_screening import build_tw_price_map_screening_snapshot
 from app.market.tw_intraday_state import (
     build_tw_intraday_group_snapshots,
     build_tw_intraday_screening_snapshot,
@@ -20,6 +21,7 @@ SCREENING_CAPABILITIES = frozenset(
         "screening.ranking",
         "screening.coverage",
         "screening.intraday",
+        "screening.price_map",
         "market.hot_groups",
         "market.sectors",
     }
@@ -99,6 +101,10 @@ def read_tw_screening_context(
         else {}
     )
     generated_at = now()
+    price_map_snapshot = (
+        build_tw_price_map_screening_snapshot(db, parameters=capability_parameters.get("screening.price_map"), generated_at=generated_at)
+        if "screening.price_map" in requested_capabilities else None
+    )
     daily_requested = bool(
         requested_capabilities
         & {"screening.ranking", "screening.coverage"}
@@ -184,6 +190,23 @@ def read_tw_screening_context(
     warnings: list[str] = []
     source_refs: list[dict[str, Any]] = []
     as_of_values: list[Any] = []
+    if price_map_snapshot is not None:
+        screening["price_map"] = deepcopy(price_map_snapshot)
+        freshness_by_capability["screening.price_map"] = {
+            "status": price_map_snapshot["freshness_status"],
+            "is_current": price_map_snapshot["coverage"]["complete"],
+            "facts_usable": price_map_snapshot["facts_usable"],
+            "facts_usable_for_ranking": price_map_snapshot["facts_usable_for_ranking"],
+            "intraday_research_usable": price_map_snapshot["intraday_research_usable"],
+            "execution_grade_usable": False,
+            "dataset": "taiwan_price_map_snapshot",
+            "as_of": price_map_snapshot["as_of"],
+            "coverage": price_map_snapshot["coverage"],
+        }
+        missing.extend(price_map_snapshot["missing"])
+        warnings.extend(price_map_snapshot["warnings"])
+        source_refs.extend(price_map_snapshot["source_refs"])
+        as_of_values.append(price_map_snapshot["as_of"])
     if daily_snapshot is not None:
         freshness_by_capability.update(
             deepcopy(daily_snapshot["freshness_by_capability"])
@@ -197,8 +220,15 @@ def read_tw_screening_context(
     if intraday_snapshot is not None:
         screening["intraday"] = deepcopy(intraday_snapshot)
         freshness_by_capability["screening.intraday"] = {
-            "status": intraday_snapshot.get("freshness_status") or intraday_snapshot["status"],
-            "is_current": intraday_snapshot.get("freshness_status") in {"current", "latest_completed_session"},
+            "status": (
+                intraday_snapshot["status"]
+                if intraday_snapshot["status"] in {"unsupported", "unavailable", "not_applicable"}
+                else intraday_snapshot.get("freshness_status") or intraday_snapshot["status"]
+            ),
+            "is_current": bool(
+                intraday_snapshot.get("facts_usable_for_ranking")
+                and intraday_snapshot.get("freshness_status") in {"current", "latest_completed_session"}
+            ),
             "facts_usable": bool(intraday_snapshot.get("facts_usable")),
             "facts_usable_for_ranking": bool(intraday_snapshot.get("facts_usable_for_ranking")),
             "intraday_research_usable": bool(intraday_snapshot.get("intraday_research_usable")),
@@ -283,6 +313,12 @@ def read_tw_screening_context(
             "as_of": as_of,
         },
     }
+    if "screening.price_map" in freshness_by_capability:
+        slots["screening_price_map"] = _slot(
+            capability="screening.price_map", payload_ref="screening.price_map",
+            freshness=freshness_by_capability["screening.price_map"],
+            missing=price_map_snapshot["missing"], warnings=price_map_snapshot["warnings"],
+        )
     if "screening.ranking" in freshness_by_capability:
         slots["screening_ranking"] = _slot(
             capability="tw_screening_ranking",

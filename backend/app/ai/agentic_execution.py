@@ -15,6 +15,7 @@ from app.db.session import SessionLocal
 from app.config import settings
 from app.jobs.market_refresh_priority import request_market_refresh_priority
 from app.jobs import service as job_service
+from app.jobs.taiwan_intraday_demand import enqueue_consumer_demand
 from app.jp_market import service as jp_market_service
 from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market import service as kr_market_service
@@ -1124,6 +1125,47 @@ def execute_tool_plan(
                 "OMI tool budget reached max_total_seconds; remaining planned tools were skipped."
             )
             break
+
+        if tool_name == "tw.refresh_intraday_bars":
+            # This operation owns its canonical JobRun; never wrap it in a second
+            # ai.tool_refresh or the generic detached deadline worker.
+            calls = min(2, budget["max_external_fetches"] - external_fetches)
+            try:
+                job, created = enqueue_consumer_demand(
+                    db, stock_id=str(args.get("stock_id") or ""), consumer="ai",
+                    requested_at=agentic_common._now(),
+                    trade_date=args.get("trade_date"),
+                    timeout_seconds=budget["max_total_seconds"] - (perf_counter() - started),
+                    max_external_calls=calls,
+                )
+                if job is None:
+                    run = _empty_tool_run(step=step, definition=definition, status="skipped", error="TW_INTRADAY_DEMAND_OUTSIDE_SESSION")
+                else:
+                    if created:
+                        external_fetches += calls
+                    active = job.status in {"queued", "running"}
+                    run = {
+                        "tool": tool_name, "arguments": args, "reason": step.get("reason"),
+                        "status": "background_running" if active else "success" if job.status == "success" else "error",
+                        "transport_status": "background_running" if active else "success",
+                        "operation_status": "pending" if active else "succeeded" if job.status == "success" else "failed",
+                        "evidence_status": "pending" if active else "rebuild_required",
+                        "request_status": "background_in_progress" if active else "completed",
+                        "external_fetch": True, "writes_cache": True,
+                        "writes_market_cache": True, "writes_user_data": False,
+                        "result_summary": {}, "error": None if active or job.status == "success" else "TW_INTRADAY_DEMAND_INCOMPLETE",
+                        "background_completion_possible": active,
+                        "job": {"job_id": job.id, "status": _public_job_status(job),
+                                "deduplicated": not created,
+                                "poll_url": f"/api/ai/refresh-status/{job.id}",
+                                "status_url": f"/api/ai/refresh-status/{job.id}"},
+                    }
+            except Exception as exc:
+                run = _empty_tool_run(step=step, definition=definition, status="error", error=str(exc))
+            runs.append(run)
+            _emit_tool_progress(progress_callback, tool_name=tool_name, status=run["status"],
+                                reason=step.get("reason"), external_fetch=True, writes_cache=True, error=run.get("error"))
+            continue
 
         tracking_job_id: int | None = None
         repair_priority = None
