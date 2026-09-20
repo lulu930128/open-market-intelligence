@@ -10,6 +10,12 @@ US historical intraday 的 `fill_state` 由 capability contract 依 canonical co
 
 ## 架構原則
 
+Canonical read selection 不以 external acquisition／fallback permission 為條件；明確排除的能力仍不讀取。`require_live` 可讀取本機 evidence，但必須獨立通過既有 realtime policy，不能把 cache 存在視為即時成功。
+
+市場 Human Answer 由既有 answer composer 渲染同一份 selected canonical evidence，再進單一 v4 projection。Breadth、指數與盤中 ranking 不另讀 snapshot；排名保留時間、metric 與 eligible／universe 的有限樣本限制。非 `evidence_only` 的 `answer_ready` 需在最終 response budget projection 後仍有實質文字；`response_ready` 只代表回應已完成。必要盤中 bars 不可用時，intraday 主結論與 action synthesis 必須由 canonical quality 降級，完成日線只作有日期的背景。
+
+TW current quote 與 completed daily technical structure 的跨日融合，只接受 backend 已分類的 expected session-date relation，且 target、日線 timeframe、completed snapshot、raw-unadjusted basis 與 daily lineage 相符。此例外不要求 caller 額外選 `daily.ohlcv`，也不提升原本 stale／unusable technical evidence。
+
 已授權的 TW／US 個股 external refresh 執行可在
 `enable_market_refresh_priority` 啟用後，向 jobs transaction owner 登記有限時效的
 foreground demand。EOD scheduler 在既有 provider／release／quota 邊界內優先調度；
@@ -53,6 +59,11 @@ flowchart LR
 HTTP body、SSE `final` 與 MCP result 必須保留相同 envelope 語意。Transport 可以
 不同，但 `ok`、`request_status`、target、readiness、freshness、limitations、
 fill plan 與 error 不得分叉。
+
+Capability payload 明確回報 `unsupported`／`unavailable` 時，quality 與 manifest
+保留該 availability outcome、owner reason code 與不可用事實；底層 observation 的
+`current`／`delayed`／`stale` 僅保留在 freshness axis，不得將無 producer 的 metric
+提升為可用資料。`unsupported` 不建議或宣稱可立即 refresh。
 
 ## Request v4
 
@@ -118,6 +129,16 @@ fill plan 與 error 不得分叉。
 - `selection.limits`：每個 capability 的 bounded row/item limit。
 - `selection.max_response_bytes`：outward response hard budget；backend 仍會套用
   server-side 上下限。
+
+自然語言 selection inference 將「不要用昨日日 K 冒充今天分 K」視為替代限制，
+不把其中提到的資料誤當成正向要求或整個 domain 排除。明示的 v4 selection 優先；
+市場大盤、廣度、量能與熱門族群可合併選取，排行、Price Map 與 auction aliases
+各走既有 capability。只要量能或族群時不隱性追加法人排行。
+
+Response budget 不得悄悄移除 required capability 的 explicit fields 或所需 rows。
+若保留 required evidence 後仍超出上限，回 `RESPONSE_BUDGET_TOO_SMALL`。
+收盤 presentation events 與 Bar count 分開投影；brief response 保留展示事件與其
+cache diagnostics，不能藉收盤事件使 missing bars 變成可用分 K。
 
 Consumer 不得指定 SQL、內部 Python function、任意 provider URL 或無界 backfill。
 `/api/ai/tools` 是 public request schema 與 capability catalog 的真相來源，
@@ -500,6 +521,7 @@ Market chips projection 與 Source Health 共用 calendar release window 的 exp
 `market.breadth.auction_breadth` 來自 canonical indicative companion，各市場有自己的 lineage、時間、coverage 與 freshness。Actual-trade screening 盤前明示 not_applicable；此 checkpoint 不宣稱已實作 auction screening／auction group ranking。Screening/Hot Groups 的 ranking-facts 軸不取代原本 decision gate。Legacy dashboard breadth 仍須等待正式 session acceptance 後才移除。
 
 台股五檔／試撮的自然語言選擇沿用 bounded quote reader，explicit selection 仍優先於 NLP。
+Backend 自動加入的 optional evidence（例如 Atlas 的 `auto_planning` selection）不構成使用者 explicit selection。Planner 先完成自然語言選取，再消耗 automatic planning hint，避免 normalization 將已限定的 Price Map／Hot Groups／intraday ranking 擴張成整個 legacy screening domain；保留 caller exclusions、optional evidence 與 typed parameters。正向需求、否定與替代限制共用中文／英文句界，包含全形問號、驚嘆號與換行。
 Market source-health-only read 不附帶建立市場 breadth 或 daily universe；dataset 在 builder 前篩選，limit 同時限制建構資源與回傳數量。受限結果明示 truncated／partial，summary 僅描述已檢查部分，不代表全市場已健康。
 
 Reader 內的 canonical provider attempts 另傳入 refresh reconciliation；它可以回報 provider fetch attempted 而 tool run attempted 為 false，不虛構額外 tool invocation。MCP schema fallback 由 backend public-contract generator 產生；source snapshot 通過不代表外部 client 已 reload。

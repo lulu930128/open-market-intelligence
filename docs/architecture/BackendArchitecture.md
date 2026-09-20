@@ -547,6 +547,14 @@ Refreshable capability 另要求：
 
 `omi.decision.v4` 維持 public business contract；底層 provider/canonical migration 不應迫使 HTTP/SSE/MCP 分叉。
 
+台股 legacy intraday 的 `read_taiwan_intraday_bars`／`project_taiwan_intraday_bars` 保留為 range／response 相容 adapter：讀取只委派 `TaiwanBarService`，不再建立另一份 read requirement、provider selection 或固定分鐘完整度算法。`range=1d` 使用 canonical current-session snapshot；其他 range 使用同一 Bar history owner。Registry／catalog 的公開 read callable 維持 adapter 路徑，語意 owner 為 Bar service；acquisition 仍由原 platform／transaction 擁有。
+
+Current-session coverage 的 `session_completed` 是 session axis，和 snapshot phase、item finalization 分開。AI 的 total／returned／truncated 取自完整 snapshot 與實際投影，不以裁切點數改寫 coverage。close-tail 與明示 TW history refresh 在寫入後略過最近快照 TTL 回讀並更新 current snapshot；工作回傳成功不代替 coverage。Radar outcome 的 OHLC fallback 讀 canonical daily Bar projection，只有 final／corrected 且日期符合才可採用，不能在 consumer 將尾端分鐘當作正式收盤。
+
+US off-session intraday 由交易日曆決定最近已收盤的 regular session，即使 cache 完全為空或只有較舊日期仍保留 expected date／slots。其完成時間使用 regular close（含 early close），和 Daily 發布緩衝分離。`POST /api/us-market/intraday/{symbol}/refresh` 可明示 `trade_date`，共用既有 bounded historical acquisition；cache-only GET 不因此取得副作用。全市場分鐘線調度與跨入口工作協調仍依 active exec plan 進行，這些契約不代表全市場 acquisition 已啟用。
+
+US Today 的 `us.chart.session_summary.v1` 由同一 Market Truth component generation 投影，透過既有 Intraday read response 提供。摘要固定使用 selected session 的 canonical 1m 序列，成交量以股、成交值以 USD 呈現；均價沿用 Shared Technical Engine 的分時段重置。昨收沿用已解析 close roles 並核對 series 的前一交易日，昨量只取同次 resolved Daily 的 exact prior session。相對量沿用既有 bounded historical volume reader，只在 regular scope 提供。缺分鐘量、部分市場量、baseline 不足、stale 及指數量能不適用均保留限制；分鐘成交量不得代替單筆成交或五檔。摘要與比較資料納入 snapshot revision；取得摘要不刷新 provider、不寫入 DB，不另建 polling 或 provider selection。
+
 ## 19. Frontend / MCP / Kuro
 
 ### Frontend
@@ -667,7 +675,7 @@ REST quote-depth、legacy Chart quote-side、Today、Depth/Auction、AI/MCP 共�
 
 `tw_breadth_projection.project_breadth_coverage` 擁有 additive 接收／可分類比例與獨立 partition 投影。Canonical unknown 不含 missing；Dashboard legacy unknown 包含 missing。Dashboard 的舊 coverage_reason_counts 只保留摘要相容投影，細項由 classification_reason_counts 承載；移除舊摘要的 gate 是 Dashboard/MCP consumer 採用新欄位並完成版本遷移，禁止再把細項加回舊摘要加總。
 
-`MarketBreadthObservation.limits` 是 actual-trade 對交易所門檻的觀測計數及各側可判定範圍。只有非空 universe 全部可判定，outward limit_up_count/limit_down_count 才有精確值；缺門檻不轉成 false/0。方向、limit、資料接收與 decision usability 分開。分類子原因只細分 mapping_error，不由無成交推論停牌。
+`MarketBreadthObservation.limits` 是 actual-trade 對交易所門檻的觀測計數及各側可判定範圍。只有非空 universe 全部可判定，outward limit_up_count/limit_down_count 才有精確值；缺門檻不轉成 false/0。方向、limit、資料接收與 decision usability 分開。分類子原因核對 mapping_error、reference_price_unavailable 與 actual_trade_unavailable；缺少參考價或實際成交價不等於代號映射失敗，也不由無成交推論停牌。
 
 逐股價格前態存於既有 current breadth snapshot 的 typed companion JSON，與原 observation/receipt 由同一 transaction owner 保存。Public quote repository 的 shared current-stock reader 合併同日、同 venue 的 MIS quote actual observations 與 breadth companion，逐筆核對原 receipt/hash/source；acquisition 與 cache-only quote consumer 共用此讀取結果。Provider 接受明確前態，不持有程序全域價格 cache、不讀寫 DB。缺少本次成交價不清除最後真實成交；carry-forward 保留原價格時間與 receipt，不以本次接收時間更新原價格 freshness。最新 observation lineage 與價格 lineage 分開投影。沒有可信歷史前態時保持缺值直到取得新 actual evidence。
 
@@ -684,3 +692,11 @@ Migration 20260908_0082 為 additive nullable companion 欄位。Current reposit
 0083 正式採用前的 schema compatibility 僅允許略過尚無 published snapshot 的讀寫，回傳 persistence limitation；正式 DB 全數採用後移除此 seam。既有 receipt 不由 GET 自動回填，需受控重新處理或後續 acquisition。TPEX published aggregate 仍未接入，缺精確來源時保持 unknown。
 
 整合驗證補充：TWSE published breadth 的純解析與 typed payload 位於 `app/parsers/twse_published_breadth.py`，read repository 不反向依賴 provider adapter。Completed Dashboard 保留 resolver 允許的 partial facts，並沿用 official breadth projection 的 aggregate scope／精確合計與 usability。新增 price-state reader 的 schema inspection 使用 session-owned connection，避免 Engine inspector 干擾尚未提交的 SQLite transaction。
+
+### 台股單股 intraday consumer demand
+
+明示 viewer／AI command 共用 `jobs/taiwan_intraday_demand.py` 的 consumer episode，materialization 沿用既有 bootstrap JobRun type。AI 委派後不另包 generic refresh job。SQLite 專用的 active demand partial index 保證新單股 identity 的 concurrent admission；其他 dialect 不建立此索引，consumer demand 保持 unavailable。Migration 可接受 baseline 已建立的索引。Retry dispatch 使用 DB compare-and-swap。索引尚未採用時 command fail closed，純讀不修復 schema。舊 multi-stock operator target 不納入此去重或 consumer status allowlist。
+
+Viewer retry 只由有效 heartbeat 觸發，caller deadline／external-call budget 不因背景執行而增加。Provider backoff 保存在 episode；實際 IO／寫入量與保守 budget reservation 分開，未知量為 null。Materialization outcome 必須重讀原 symbol/date 的 canonical Bar snapshot；partial coverage 不推導 live 或 decision readiness。Status GET 只做 redacted projection，continuation 使用原日期與 cache-only reader。
+
+此 slice 仍依賴 single-runtime-owner：既有 startup interrupted-job cleanup 不具跨 worker owner lease，不能以 admission index 宣稱多 worker lifecycle 支援。正式 schema／runtime／provider／consumer 採用另行驗證。

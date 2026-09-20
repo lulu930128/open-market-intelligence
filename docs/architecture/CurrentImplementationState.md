@@ -24,6 +24,8 @@
 
 ## State matrix
 
+2026-09-14 台股 close-truth source checkpoint：Source `accepted`；Runtime `not_reverified`；Live `pending`；Product `partial`。Quote candidate qualification／原 receipt confirmation、index-specific close evaluation、bar phase、volume／breadth qualification、canonical auction history 與注入式 Daily coverage 已有 source regression。主驗證 486 tests／20 subtests、32 architecture tests、compileall 通過，另有 historical companion／authority 補測與 frontend typecheck。依唯讀現存 DB 回查可讀 2330／3711／3042 正確價格與 2330 試撮，EOD 保留 1931／1973；不可等同 runtime 採用或兩個正式 sessions 已驗收。Temporal 邊界見 [MarketTemporalContract](MarketTemporalContract.md)。
+
 | Surface | Source | Runtime | Live | Product | Last verified at | Evidence | Limitations |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Instruction／truth navigation | accepted | not_applicable | not_applicable | accepted | 2026-08-27 | `AGENTS.md`; `docs/architecture/index.md`; nested `AGENTS.md` | Source-only governance；不代表 mechanical enforcement |

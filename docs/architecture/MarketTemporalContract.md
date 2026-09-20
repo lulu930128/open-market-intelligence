@@ -213,7 +213,10 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Midpoint 是研究估計，只能保存在獨立估計欄位與帶 `is_estimate` 的結構；不能填入 `price`、`latest_price` 或 `last_price`。
 - `quote.session_close` 預設 outward projection 保留 facts／research／decision usability。Quality 按此 dataset 解讀 `session_final`，保留 official-daily reconciliation pending，但不把 pending 本身視為 availability blocker；mismatch 與未滿足 require-live policy 仍會限制 decision。
 - Breadth 的完成 session projection 保留 `observation_market_session`；canonical persisted observation 的 provisional 不因讀取時鐘而變更。只有 classified constituents 全部具 closing-match evidence、exchange authority 與收盤確認邊界後的 receipt，producer 才能持久化非 provisional observation。Unknown／missing coverage 仍獨立存在，不因 finality 歸零。
-- Screening 僅對本次 bounded rows 讀 canonical session-close owner；price、trade date、event time 與 lineage 均符合時才採 completed-session freshness。其餘 rows 仍保留 delayed／stale；coverage ready 不等於價格新鮮。
+- Screening 與 Hot Groups／Sectors 在排序、分頁、mean／median／momentum 聚合前共用 `tw_intraday_state` ranking eligibility：expected session、actual trade、完整 lineage、成交與 receipt 時間都必須符合 current gate；receipt current 不使 old trade 可排名。Completed-session 候選需經既有 canonical session-close owner 確認 price、trade date、event time 與 lineage；沒有確認的 cache 不參與排名。Observation coverage 與 ranking coverage 分開，排除 stale 不縮小 universe。
+- Breadth registered-universe reader、intraday screener 與 groups 委派 `tw_universe` ordinary-stock reader；沿用 `regular_stock_code`，bounded stock IDs 同時約束 numerator 與 denominator。
+- 5m／15m return 的 reference 使用成交時間、必須在目標時間以前且 gap 不超過 `ROLLING_REFERENCE_MAX_GAP_SECONDS`；稀疏或舊版已存 metrics 在讀取時重新投影為 insufficient_data／null。全市場 state 沒有 canonical 1m volume-weighted 輸入時，VWAP deviation 為 unavailable，公式 owner 保持 `TaiwanTechnicalService.session_average()`。Full-market depth imbalance 沒有 producer 時回 unsupported，不逐檔抓 depth。
+- Quote 先合併已確認的同 session 成交事實，再由既有 observation classifier 重算 instrument phase／reason；保留原成交時間，不因收到新 snapshot 升格成新成交或 official close。
 - Taiwan Bar owner 將 explicit presentation date 與 implicit current session 綁到同一 window；其他 exact date 限制 from/to，不回退到其他日期。對外保留 expected／observed dates、history identity 與 materialization state；`not_materialized` 不代表任意標的已取得 Tier-A 資格。
 
 ## 台股盤前／盤中 evidence lane
@@ -234,6 +237,28 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - 分時成交值不含獨立 close marker；缺少真實 turnover 時的 close-volume 乘積只能標估算。部分有值只呈現 partial subtotal。
 - 昨量錨定顯示交易日的前一交易日，保留 official daily aggregate 與 quote cumulative 的範圍差異；同時段相對量引用既有 volume-pace owner。
 - Quote freshness、官方收盤確認及各欄位時間仍各自保留。摘要不因收盤價確認而升格 stale quote，不以 bar 尾端時刻重新推定 canonical coverage。
+
+## 台股收盤 evidence 與有界回查
+
+- Public quote 候選先通過顯示交易日與角色資格，再套 provider candidate bound。Current breadth price-state bridge 保留原始 trade receipt；讀取時點不能製造 session-close confirmation。Tier-A 收盤確認仍是有界股票集合與時窗，不能代表全市場確認。
+- Index official-close 最早評估時間由 `official_index_contract.py` 擁有，與股票 Daily release 分開。最早評估不代表 provider 發布保證；reconciliation 必須驗證官方日期、receipt、authority 與 finalization，breadth ready 不足以停止重試。
+- Bar 的 market phase 由 `TaiwanBarService` 傳遞至 AI compact／capability；current interval bar 可以滿足研究用 freshness，但不因此取得 execution usability。
+- 成交值與 baseline 組合由 `taiwan_market_state.py` 擁有。兩市場 component 需有可比日期、分鐘、scope 與明示 authority；baseline 另需相同 comparison date、minute、component scope 與足夠樣本。Warnings、ratio、field status 隨資格重算。AI 只委派組合與投影。
+- Breadth 的參考價缺失、實際成交價缺失各有 coverage partition，diagnostic reasons 另行核對；舊 `mapping_error` partition 仍可讀，新分類不將缺價解釋為 symbol mapping failure。Trade-value semantics／estimate flag 經既有 canonical companion 保存；舊 row 缺 metadata 保留 unknown，不推定 official。
+- `TaiwanAuctionRepository` 依交易日及可見 receipt 時間查詢；歷史 reader 位於既有 realtime platform，與 current applicability 分開。盤後 history 可讀但保持 indicative／provisional，decision／indicator／execution usability 均為 false。沒有可見 row 僅表示 missing，不能證明從未採集；不引用 acceptance capture table 作 production fallback。
+- Shared EOD coverage 由 job composition 注入 `qualify_taiwan_eod_universe`，以既有 Daily batch source／receipt／OHLC 資格判 current。拒絕原因與 provider receipt diagnostics 分開，不把 transport success 當 coverage success，也不縮小 active ordinary-stock 分母。Diagnostic parser 只處理有界已存 receipts，不 acquire 或寫入。
+
+## 台股盤中觀察修復的讀取契約
+
+- `TaiwanBarService.read_current_session_presentation_events` 是 chart 與 AI 共用的收盤展示事件 owner。即使當日分 K 為空，仍可呈現符合日期、receipt 與 authority 的收盤 evidence；`presentation_events`、`display_event_count` 不計入 bar count、coverage、materialization 或 technical eligibility。Official close 的價格來源與 session-close 成交量來源分別保存，事件使用獨立 evidence ID，修正事件不改寫 Bar revision。
+- 完成交易日的 intraday ranking 與 Hot Groups 使用同一 session-close requirement 進行有界批次讀取，再以 detached input 更新價格、漲跌幅、累計量及估算成交值。收盤時窗與可見 receipt 在 candidate bound 前過濾；不用新價格搭配舊 rolling volume 或短週期報酬。不改寫 scheduler rows、不縮減原始 universe 分母。Partial group 可保留 `facts_usable`，但 `ranking_scope=qualified_sample_only`、`is_complete=false`、`decision_usable=false`。
+- Completed-session 讀取明確傳遞 market-owned trade date；`requested_at` 只保留當次可見時間，不能用週末日曆日期取代最近交易日，也不能移動 receipt cutoff 製造 confirmation。Breadth companion 在有界選取前檢查 snapshot 與 raw receipt 可見性，逐 symbol 再驗原始 lineage；一般 ingestion／live reader 未指定 trade date 時仍限當日。Single／batch close 共用此日期語意。Detached ranking input 的 observation phase 由成交 event time 決定，與 request phase 分開。
+- Current breadth 的 `auction_breadth` 仍表示當前時段適用性。`latest_completed_auctions` 從既有 canonical snapshots 讀取當日已完成的開盤／收盤試撮，各至多一筆；驗證 phase、trade date、receipt 可見性與 lineage。盤後保留 historical／indicative／provisional，current／live／decision 為 false，不用它補 current actual breadth。 Actual breadth 缺失時保留既有 `breadth=null`，由 index summary 的獨立 `latest_completed_auctions` 提供歷史證據；HTTP／AI／廣度明細都不以零值補出 actual counts。
+- MIS batch diagnostics 分開記錄 attempted、failed、skipped，並保留安全的 HTTP／timeout／parse／budget／guard 原因。429 後未送出的批次不算 failure；成功批次保留 partial coverage，retry 不擴大既有 budget。Last-good fallback 保留原始 event 與 observation receipt；新嘗試的 raw fetch 時間不能使舊 evidence 變 current。
+- Source-health 單項 malformed metadata 以 unavailable diagnostic 回報，其他 entries 繼續可讀；這不等同 provider failure，也不能取代當時的 provider error／raw receipt。
+- Current-session Bar 的 `read_diagnostics` 分開 snapshot cache、canonical store 與最終 series revision。Recent snapshot reuse 先比對有界 DB row／lineage revision；新增、刪除或修正後必須重新解析。按指定 revision 取 immutable snapshot 的既有語意不變。Canonical Bar projection 明示 persisted hit／miss，不以 missing legacy cache metadata 推斷 miss。
+- Futures volume metadata 由已實作的 futures provider parser／persistence owner 宣告 contracts、interval／session／trading-day 語意與 contract month，經 normalization、technical report 與 outward quality 原樣傳遞。AI 不依 TXF 名稱補單位；未知 provider 或 metadata 仍不能通過 volume unit guard。
+- 同分鐘量能 baseline 額外揭露歷史 session 數、可用樣本數及 date／minute／market component／scope／lineage 篩除原因。零樣本不補零或插值，一個 prior-session sample 仍為 warming-up。離線 latency 與 bytes 量測不表示 runtime／live SLO 已驗收。
 
 ## Negative acceptance
 

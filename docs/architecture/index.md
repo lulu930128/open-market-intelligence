@@ -12,6 +12,7 @@
 - [Atlas Company News](AtlasCompanyNews.md)：OLA 個股新聞 Document 的唯讀 API 與 omi.ask 整合。
 - [Financial Date Semantics](FinancialDateSemantics.md)：財務期間與日期語意。
 - [Market Temporal Contract](MarketTemporalContract.md)：Market Session、item finalization、authority、release、reconciliation 與 freshness 的正交 axes。
+- [Taiwan Technical Research](TaiwanTechnicalResearch.md)：技術參數、Price Map 結構、背景 snapshot 與唯讀 Scanner 的責任與驗收。
 - [Radar v2](RadarV2.md)：Radar contract、evaluation 與 legacy audit boundary。
 
 ## Planned Direction

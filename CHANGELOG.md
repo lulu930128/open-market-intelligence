@@ -4,6 +4,34 @@
 
 ## [Unreleased]
 
+## [4.5.3] - 2026-09-21
+
+### Changed
+
+- 台股 Price Map 升級為 v4，加入日／週／月結構、參數 revision、背景 snapshot 與唯讀 Scanner，並保留 coverage、缺值及方法適用範圍。
+- 統一台股 Viewer 與 AI 的有界盤中資料需求，透過既有 job owner 去重、重讀 canonical evidence 並控制重試。
+- 美股 Today 圖表加入 selected-session 摘要，保留 regular／extended session、歷史日期及 coverage 語意。
+- 同步 AI／MCP 的能力選擇、資料品質、回答內容與 response budget，並更新前端技術指標、週期切換及設定後的重新讀取流程。
+
+### Fixed
+
+- 修正台股收盤行情、指數官方收盤、排行資格、廣度與成交值的日期、時間、來源及單位判定；空白分 K 與收盤展示事件分開呈現。
+- EOD coverage 改由 canonical daily 資格判定，保留來源缺漏與失敗診斷；降低日線 lineage 與交易日曆的重複讀取。
+- 修正盤中 demand migration 在全新資料庫重複建立索引的問題，並將專用 unique index 限定於 SQLite，避免影響其他 dialect 的既有 jobs。
+- 對齊主版本、Frontend package／lockfile 與三語 README 的版本標示為 4.5.3。
+
+### Notes
+
+- 新增 migration `20260914_0087` 與 `20260920_0088`。Price Map snapshot producer 預設關閉；正式採用需完成 migration、Backend／Frontend／MCP 同批更新及獨立驗收。
+- 本次為 source commit checkpoint；runtime、live provider 與正式交易時段驗收另行記錄。
+
+## [4.5.2] - 2026-09-13
+
+### Changed
+
+- 整合日本、韓國 canonical daily 與 cache-only read，補齊台股 session summary、盤中圖表模式及跨市場 registry／outward contract。
+- 將 release metadata 升為 4.5.2，並修補 Next.js、ESLint config 與 sharp 依賴，使 release CI 的 production audit 通過。
+
 ## [4.5.1] - 2026-09-08
 
 ### Fixed
