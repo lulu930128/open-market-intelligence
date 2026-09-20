@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from app.market.daily_ohlcv_platform import qualify_taiwan_eod_universe
 
 from app.db.models import (
     Base,
@@ -27,7 +28,7 @@ from app.market_data.eod_coverage import (
 )
 from app.jobs import eod_coverage as eod_coverage_jobs
 from app.jobs import service as job_service
-from app.sources.defaults import TPEX_DAILY_QUOTES_SOURCE_NAME
+from app.sources.defaults import TPEX_DAILY_QUOTES_SOURCE_NAME, TWSE_DAILY_TRADING_SOURCE_NAME
 from app.observability.provider_http import (
     ProviderHttpError,
     ProviderHttpFailure,
@@ -55,16 +56,19 @@ def db() -> Session:
         engine.dispose()
 
 
-def _source_and_raw(db: Session) -> tuple[SourceRegistry, RawFetchResult]:
+def _source_and_raw(db: Session, source_name: str = TWSE_DAILY_TRADING_SOURCE_NAME) -> tuple[SourceRegistry, RawFetchResult]:
     source = SourceRegistry(
-        source_name="coverage-fixture",
+        source_name=source_name,
+        reliability_level="official",
+        parser_type="twse_daily",
         source_type="fixture",
         category="market_data",
         enabled=True,
     )
     db.add(source)
     db.flush()
-    raw = RawFetchResult(source_id=source.id, raw_text="[]")
+    raw = RawFetchResult(source_id=source.id, raw_text="[]", content_hash="coverage-fixture",
+                         fetched_at=datetime(2026, 8, 25, 8, tzinfo=timezone.utc))
     db.add(raw)
     db.flush()
     return source, raw
@@ -142,7 +146,7 @@ def test_tw_coverage_partitions_current_partial_stale_and_missing(db: Session) -
                 stock_id="1101",
                 trade_date=EXPECTED,
                 close_price=50,
-            ),
+            open_price=50, high_price=50, low_price=50,),
             MarketDailyPrice(
                 source_id=source.id,
                 raw_result_id=raw.id,
@@ -156,12 +160,12 @@ def test_tw_coverage_partitions_current_partial_stale_and_missing(db: Session) -
                 stock_id="5501",
                 trade_date=STALE,
                 close_price=20,
-            ),
+            open_price=20, high_price=20, low_price=20,),
         ]
     )
     db.commit()
 
-    coverage = compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED)
+    coverage = compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED, taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert coverage.universe_count == 4
     assert coverage.current_symbols == {"1101"}
@@ -232,7 +236,7 @@ def test_us_coverage_uses_official_active_non_etf_non_test_stock_universe(db: Se
         market="US",
         expected_trade_date=EXPECTED,
         us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-    )
+    taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert coverage.universe_count == 4
     assert coverage.current_symbols == {"A"}
@@ -255,7 +259,7 @@ def test_us_coverage_excludes_incompatible_daily_parser_lineage(db: Session) -> 
         market="US",
         expected_trade_date=EXPECTED,
         us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-    )
+    taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert coverage.current_symbols == set()
     assert coverage.partial_symbols == {"A"}
@@ -281,7 +285,7 @@ def test_us_coverage_rejects_rows_the_canonical_repository_would_reject(db: Sess
         market="US",
         expected_trade_date=EXPECTED,
         us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-    )
+    taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert coverage.current_symbols == set()
     assert coverage.partial_symbols == {"HASH", "LEGACY"}
@@ -290,7 +294,7 @@ def test_us_coverage_rejects_rows_the_canonical_repository_would_reject(db: Sess
 def test_persisted_checkpoint_is_idempotent_and_cache_projection_is_read_only(db: Session) -> None:
     db.add(StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"))
     db.commit()
-    coverage = compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED)
+    coverage = compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED, taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     first = persist_eod_coverage(db, coverage)
     second = persist_eod_coverage(db, coverage)
@@ -319,7 +323,7 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
         market="US",
         expected_trade_date=EXPECTED,
         us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-    )
+    taiwan_daily_qualifier=qualify_taiwan_eod_universe)
     row = persist_eod_coverage(db, initial)
     row.cursor_symbol = "B"
     db.commit()
@@ -351,7 +355,7 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
             max_runtime_seconds=30,
             sleep_seconds=0,
             us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
         second = reconcile_eod_coverage(
             db,
             market="US",
@@ -360,7 +364,7 @@ def test_us_repair_rotates_after_cursor_and_resumes_only_unresolved_symbols(db: 
             max_runtime_seconds=30,
             sleep_seconds=0,
             us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert calls == ["C", "B"]
     assert first["postcondition_met"] is False
@@ -434,7 +438,7 @@ def test_daily_parser_guard_refuses_large_same_date_regression_before_delete(db:
                 stock_id=f"{index:04d}",
                 trade_date=EXPECTED,
                 close_price=10,
-            )
+            open_price=10, high_price=10, low_price=10,)
             for index in range(100)
         ]
     )
@@ -494,7 +498,7 @@ def test_us_rate_limit_stops_shard_and_persists_retry_boundary(db: Session) -> N
             sleep_seconds=0,
             error_backoff_seconds=300,
             us_port=US_FULL_MARKET_EOD_LIFECYCLE,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert refresh.call_count == 1
     assert result["status"] == "partial"
@@ -570,14 +574,14 @@ def test_release_guard_retry_is_rechecked_without_bypassing_provider_backoff(
             stock_id="2330",
             trade_date=date(2026, 8, 26),
             close_price=100,
-        )
+        open_price=100, high_price=100, low_price=100,)
     )
     db.commit()
     expected = date(2026, 8, 27)
     now = datetime(2026, 8, 27, 16, 13, tzinfo=timezone.utc)
     row = persist_eod_coverage(
         db,
-        compute_eod_coverage(db, market="TW", expected_trade_date=expected),
+        compute_eod_coverage(db, market="TW", expected_trade_date=expected, taiwan_daily_qualifier=qualify_taiwan_eod_universe),
     )
     row.repair_status = "deferred"
     row.next_retry_at = now + timedelta(hours=15)
@@ -596,7 +600,7 @@ def test_release_guard_retry_is_rechecked_without_bypassing_provider_backoff(
         market="TW",
         expected_trade_date=expected,
         now=now,
-    ) is True
+    taiwan_daily_qualifier=qualify_taiwan_eod_universe) is True
 
     row.repair_status = "rate_limited"
     row.detail_json = json.dumps({"repair": {"phase": "provider_refresh"}})
@@ -607,7 +611,7 @@ def test_release_guard_retry_is_rechecked_without_bypassing_provider_backoff(
         market="TW",
         expected_trade_date=expected,
         now=now,
-    ) is False
+    taiwan_daily_qualifier=qualify_taiwan_eod_universe) is False
 
 
 def test_reconcile_bypasses_expired_release_semantics_but_keeps_pinned_date(
@@ -622,14 +626,14 @@ def test_reconcile_bypasses_expired_release_semantics_but_keeps_pinned_date(
             stock_id="2330",
             trade_date=date(2026, 8, 26),
             close_price=100,
-        )
+        open_price=100, high_price=100, low_price=100,)
     )
     db.commit()
     expected = date(2026, 8, 27)
     now = datetime(2026, 8, 27, 16, 13, tzinfo=timezone.utc)
     row = persist_eod_coverage(
         db,
-        compute_eod_coverage(db, market="TW", expected_trade_date=expected),
+        compute_eod_coverage(db, market="TW", expected_trade_date=expected, taiwan_daily_qualifier=qualify_taiwan_eod_universe),
     )
     row.repair_status = "deferred"
     row.next_retry_at = now + timedelta(hours=15)
@@ -655,7 +659,7 @@ def test_reconcile_bypasses_expired_release_semantics_but_keeps_pinned_date(
             db,
             market="TW",
             expected_trade_date=expected,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert result == repair_result
     assert repair.call_args.kwargs["computation"].expected_trade_date == expected
@@ -682,6 +686,7 @@ def test_twse_parser_uses_expected_trade_date_for_dateless_weekend_payload(db: S
 
 def test_tw_healthy_lifecycle_performs_zero_provider_calls(db: Session) -> None:
     source, raw = _source_and_raw(db)
+    tpex_source, tpex_raw = _source_and_raw(db, TPEX_DAILY_QUOTES_SOURCE_NAME)
     db.add_all(
         [
             StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"),
@@ -692,14 +697,14 @@ def test_tw_healthy_lifecycle_performs_zero_provider_calls(db: Session) -> None:
                 stock_id="2330",
                 trade_date=EXPECTED,
                 close_price=100,
-            ),
+            open_price=100, high_price=100, low_price=100,),
             MarketDailyPrice(
-                source_id=source.id,
-                raw_result_id=raw.id,
+                source_id=tpex_source.id,
+                raw_result_id=tpex_raw.id,
                 stock_id="6488",
                 trade_date=EXPECTED,
                 close_price=200,
-            ),
+            open_price=200, high_price=200, low_price=200,),
         ]
     )
     db.commit()
@@ -710,7 +715,7 @@ def test_tw_healthy_lifecycle_performs_zero_provider_calls(db: Session) -> None:
             market="TW",
             expected_trade_date=EXPECTED,
             repair=True,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     refresh.assert_not_called()
     assert result["status"] == "completed"
@@ -732,6 +737,8 @@ def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
     source, raw = _source_and_raw(db)
     tpex_source = SourceRegistry(
         source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+        reliability_level="official",
+        parser_type="tpex_daily_quotes",
         source_type="api",
         category="market_data",
         endpoint_url="https://example.test/tpex",
@@ -749,7 +756,7 @@ def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
                 stock_id="2330",
                 trade_date=EXPECTED,
                 close_price=100,
-            ),
+            open_price=100, high_price=100, low_price=100,),
         ]
     )
     db.commit()
@@ -772,7 +779,7 @@ def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
                 stock_id="6488",
                 trade_date=trade_date,
                 close_price=200,
-            )
+            open_price=200, high_price=200, low_price=200,)
         )
         db.commit()
         return {
@@ -800,7 +807,7 @@ def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
             repair=True,
             max_symbols=500,
             max_runtime_seconds=1800,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert calls == [tpex_source.id]
     assert result["status"] == "completed"
@@ -832,7 +839,7 @@ def test_tw_transport_success_with_previous_date_payload_is_not_repair_success(
                 stock_id="6488",
                 trade_date=STALE,
                 close_price=200,
-            ),
+            open_price=200, high_price=200, low_price=200,),
         ]
     )
     db.commit()
@@ -862,7 +869,7 @@ def test_tw_transport_success_with_previous_date_payload_is_not_repair_success(
             market="TW",
             expected_trade_date=EXPECTED,
             repair=True,
-        )
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
 
     assert result["status"] == "partial"
     assert result["postcondition_met"] is False
@@ -891,12 +898,12 @@ def test_scheduler_decision_recomputes_persisted_coverage_instead_of_trusting_ch
         stock_id="2330",
         trade_date=EXPECTED,
         close_price=100,
-    )
+    open_price=100, high_price=100, low_price=100,)
     db.add(row)
     db.commit()
     persist_eod_coverage(
         db,
-        compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED),
+        compute_eod_coverage(db, market="TW", expected_trade_date=EXPECTED, taiwan_daily_qualifier=qualify_taiwan_eod_universe),
     )
     row.trade_date = STALE
     db.commit()
@@ -905,4 +912,4 @@ def test_scheduler_decision_recomputes_persisted_coverage_instead_of_trusting_ch
         "app.market_data.eod_coverage.expected_eod_trade_date",
         return_value=EXPECTED,
     ):
-        assert should_enqueue_eod_reconcile(db, market="TW") is True
+        assert should_enqueue_eod_reconcile(db, market="TW", taiwan_daily_qualifier=qualify_taiwan_eod_universe) is True

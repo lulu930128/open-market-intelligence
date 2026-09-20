@@ -166,7 +166,7 @@ forbidden_names = [
 [[rules]]
 id = "tw_radar_canonical_intraday_access"
 kind = "python_forbidden_import_names"
-description = "Taiwan radar outcome readers must use tw.intraday.bars instead of persisted bar rows."
+description = "Taiwan radar outcome readers must use canonical Bar projections instead of persisted bar rows or local session aggregation."
 roots = ["backend/app/watchlists/radar_outcome_service.py"]
 extensions = [".py"]
 modules = ["app.db.models"]

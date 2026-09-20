@@ -68,6 +68,9 @@ def market_summary_payload(
                     "limit_up_count": 10,
                     "limit_down_count": 1,
                     "trade_value": trade_value,
+                    "official_flag": True,
+                    "trade_value_is_estimate": False,
+                    "trade_value_semantics": "official_cumulative_trade_value",
                     "source": f"{market.lower()}_official_breadth",
                 },
                 "breadth_status": {
@@ -103,6 +106,19 @@ class TaiwanMarketStateTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.db.close()
+
+    def test_baseline_does_not_substitute_an_earlier_minute(self) -> None:
+        for trade_date in (date(2026, 9, 10), date(2026, 9, 11)):
+            persist_taiwan_market_minute_state(self.db, payload=market_summary_payload(
+                trade_date, hour=9, minute=5, twse_trade_value=1000, tpex_trade_value=300,
+            ))
+        persist_taiwan_market_minute_state(self.db, payload=market_summary_payload(
+            date(2026, 9, 14), hour=9, minute=6, twse_trade_value=2000, tpex_trade_value=600,
+        ))
+        result = read_taiwan_market_volume_state(self.db)
+        self.assertEqual(result["current_cumulative_trade_value"], 2600)
+        self.assertEqual(result["same_time_baseline_5d"]["sample_days"], 0)
+        self.assertIsNone(result["same_time_baseline_5d"]["pace_ratio"])
 
     def test_minute_state_upserts_and_builds_same_time_volume_baselines(self) -> None:
         history_dates = [
@@ -172,6 +188,12 @@ class TaiwanMarketStateTests(unittest.TestCase):
 
         self.assertEqual(state["status"], "ready")
         self.assertEqual(state["comparison_minute"], "10:30")
+        # SQLite stores this exchange minute as naive local time; the fallback
+        # projection must not reinterpret it as UTC and shift it to 18:30.
+        self.assertTrue(all(
+            datetime.fromisoformat(item["as_of"]).strftime("%H:%M%z") == "10:30+0800"
+            for item in state["markets"]
+        ))
         self.assertEqual(state["current_cumulative_trade_value"], 240)
         self.assertEqual(state["available_cumulative_trade_value"], 240)
         self.assertTrue(state["trade_value_available"])

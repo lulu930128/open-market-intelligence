@@ -46,6 +46,11 @@ from app.kr_market.trading_calendar import (
 
 
 class TaiwanTradingCalendarTests(unittest.TestCase):
+    def test_2025_lunar_new_year_settlement_days_are_not_trading_days(self) -> None:
+        self.assertFalse(is_taiwan_trading_day(date(2025, 1, 23)))
+        self.assertFalse(is_taiwan_trading_day(date(2025, 1, 24)))
+        self.assertEqual(next_taiwan_trading_day(date(2025, 1, 22)), date(2025, 2, 3))
+
     def test_2025_restored_public_holidays_are_not_trading_days(self) -> None:
         for holiday in (
             date(2025, 9, 29),

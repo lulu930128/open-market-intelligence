@@ -1078,7 +1078,10 @@ class MarketDataGateway:
                 def post_acquisition(
                     _acquired: QuoteAcquisitionResult,
                 ) -> tuple[QuoteCandidateBatch, object]:
-                    batch = reader.read_quote_candidates(requirement)
+                    reread_requirement = _post_acquisition_reread_requirement(
+                        requirement, _acquired.receipts,
+                    )
+                    batch = reader.read_quote_candidates(reread_requirement)
                     if len(batch.candidates) > requirement.bounds.max_candidates:
                         raise ValueError(
                             "candidate reader exceeded bounds.max_candidates"
@@ -1086,11 +1089,11 @@ class MarketDataGateway:
                     return batch, resolve_quote(
                         batch.candidates,
                         policy=requirement.realtime_policy,
-                        now=requirement.requested_at,
+                        now=reread_requirement.requested_at,
                         max_age=timedelta(
                             seconds=requirement.freshness.max_age_seconds
                         ),
-                        requirement=requirement,
+                        requirement=reread_requirement,
                     )
 
                 gate = self._execute_route_resolution_gate(
@@ -1135,7 +1138,10 @@ class MarketDataGateway:
                             acquired,
                         )
                         self._validate_persistence_result(acquired, persistence)
-                        final_batch = reader.read_quote_candidates(requirement)
+                        reread_requirement = _post_acquisition_reread_requirement(
+                            requirement, acquired.receipts,
+                        )
+                        final_batch = reader.read_quote_candidates(reread_requirement)
                         if (
                             len(final_batch.candidates)
                             > requirement.bounds.max_candidates
@@ -1146,11 +1152,11 @@ class MarketDataGateway:
                         resolved = resolve_quote(
                             final_batch.candidates,
                             policy=requirement.realtime_policy,
-                            now=requirement.requested_at,
+                            now=reread_requirement.requested_at,
                             max_age=timedelta(
                                 seconds=requirement.freshness.max_age_seconds
                             ),
-                            requirement=requirement,
+                            requirement=reread_requirement,
                         )
                     elif acquisition.attempted:
                         persistence = _not_persisted(

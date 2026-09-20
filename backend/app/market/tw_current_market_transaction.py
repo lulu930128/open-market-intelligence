@@ -312,7 +312,11 @@ class TaiwanCurrentMarketTransaction:
                         ensure_ascii=False,
                         separators=(",", ":"),
                         sort_keys=True,
-                    )
+                    ),
+                    "TW_BREADTH_TRADE_VALUE:" + json.dumps({
+                        "trade_value_semantics": observation.trade_value_semantics,
+                        "trade_value_is_estimate": observation.trade_value_is_estimate,
+                    }, sort_keys=True)
                 ]
             ),
         }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from time import monotonic
+
 from app.market.providers.tw_intraday_bars import (
     NStockIntradayAdapter,
     YahooIntradayAdapter,
@@ -29,7 +31,9 @@ class TaiwanIntradayAcquisitionExecutor:
         nstock: NStockIntradayAdapter | None = None,
         yahoo: YahooIntradayAdapter | None = None,
         clock,
+        deadline_monotonic: float | None = None,
     ) -> None:
+        self._deadline = deadline_monotonic
         self._adapters = {
             NSTOCK_INTRADAY_PROVIDER: nstock or NStockIntradayAdapter(clock=clock),
             YAHOO_INTRADAY_PROVIDER: yahoo or YahooIntradayAdapter(clock=clock),
@@ -79,7 +83,17 @@ class TaiwanIntradayAcquisitionExecutor:
                     f"PROVIDER_ADAPTER_UNAVAILABLE:{route.provider_key}"
                 )
             else:
+                if self._deadline is not None:
+                    remaining = int(self._deadline - monotonic())
+                    if remaining < 1:
+                        raise TimeoutError("TW_INTRADAY_DEMAND_DEADLINE")
+                    route = route.model_copy(update={
+                        "timeout_seconds": min(route.timeout_seconds, remaining),
+                    })
                 acquired = adapter.acquire_route(requirement, route)
+                if self._deadline is not None and monotonic() >= self._deadline:
+                    # A late provider callback must not reach persistence or fallback.
+                    raise TimeoutError("TW_INTRADAY_DEMAND_DEADLINE")
                 attempted_statuses.append(acquired.summary.status)
                 external_calls += acquired.summary.external_calls
                 providers.extend(acquired.summary.providers_attempted)

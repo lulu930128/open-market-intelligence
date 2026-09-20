@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -49,6 +49,7 @@ TW_REFRESH_OPERATION = "tw.reconcile_full_market_eod"
 US_REFRESH_OPERATION = "us.reconcile_full_market_eod"
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 TaiwanVenueRefresher = Callable[..., dict[str, Any]]
+TaiwanDailyQualifier = Callable[..., dict[str, Any]]
 
 
 class USFullMarketEodPort(Protocol):
@@ -101,6 +102,8 @@ class CoverageComputation:
     stale_symbols: frozenset[str]
     missing_symbols: frozenset[str]
     ineligible_members: tuple[IneligibleUniverseMember, ...] = ()
+    qualification_reasons: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    provider_diagnostics: tuple[dict[str, Any], ...] = ()
 
     @property
     def universe_count(self) -> int:
@@ -184,9 +187,9 @@ class CoverageComputation:
                     else "missing"
                 ),
                 "reason": (
-                    "expected_session_usable_close_present"
+                    ("expected_session_canonical_daily_qualified" if self.market == "TW" else "expected_session_usable_close_present")
                     if member.symbol in self.current_symbols
-                    else "expected_session_row_close_missing"
+                    else ("expected_session_row_not_canonical_qualified" if self.market == "TW" else "expected_session_row_close_missing")
                     if member.symbol in self.partial_symbols
                     else "latest_row_before_expected_session"
                     if member.symbol in self.stale_symbols
@@ -195,6 +198,8 @@ class CoverageComputation:
             }
             for member in self.members
         ]
+        for item in symbol_classifications:
+            item["qualification_reasons"] = list(self.qualification_reasons.get(item["symbol"], ()))
         ineligible_classifications = [
             {
                 "symbol": member.symbol,
@@ -219,6 +224,7 @@ class CoverageComputation:
         )
         return {
             "coverage_ratio": self.current_count / denominator,
+            "provider_diagnostics": list(self.provider_diagnostics),
             "observed_ratio": (self.current_count + self.partial_count) / denominator,
             "venue_breakdown": venue_breakdown,
             "current_sample": sorted(self.current_symbols)[:10],
@@ -237,8 +243,8 @@ class CoverageComputation:
                 symbol_classifications + ineligible_classifications
             ),
             "classification": {
-                "current": "latest row is on expected_trade_date and has a usable close",
-                "partial": "latest row is on expected_trade_date but has no usable close",
+                "current": "expected session satisfies canonical market-owned Daily qualification" if self.market == "TW" else "latest row is on expected_trade_date and has a usable close",
+                "partial": "expected session has a row but does not satisfy canonical Daily qualification" if self.market == "TW" else "latest row is on expected_trade_date but has no usable close",
                 "stale": "latest row is before expected_trade_date",
                 "missing": "no row exists on or before expected_trade_date",
             },
@@ -412,6 +418,7 @@ def compute_eod_coverage(
     market: str,
     expected_trade_date: date | None = None,
     us_port: USFullMarketEodPort | None = None,
+    taiwan_daily_qualifier: TaiwanDailyQualifier | None = None,
 ) -> CoverageComputation:
     normalized = normalize_coverage_market(market)
     expected = expected_trade_date or expected_eod_trade_date(
@@ -427,7 +434,18 @@ def compute_eod_coverage(
 
     latest_by_symbol: dict[str, date] = {}
     usable_expected_symbols: set[str] = set()
+    qualification_reasons: dict[str, tuple[str, ...]] = {}
+    provider_diagnostics = ()
     if symbols and normalized == "TW":
+        if taiwan_daily_qualifier is None:
+            raise ValueError("TW EOD coverage requires an injected canonical Daily qualification port")
+        qualification = taiwan_daily_qualifier(db, trade_date=expected)
+        provider_diagnostics = tuple(qualification.get("provider_diagnostics", ()))
+        usable_expected_symbols = set(qualification["qualified_symbols"]) & set(symbols)
+        qualification_reasons = {
+            symbol: tuple(reasons) for symbol, reasons in qualification["rejection_reasons"].items()
+            if symbol in symbols and symbol not in usable_expected_symbols
+        }
         latest_by_symbol = {
             str(symbol): latest
             for symbol, latest in (
@@ -438,17 +456,6 @@ def compute_eod_coverage(
                 .all()
             )
             if latest is not None
-        }
-        usable_expected_symbols = {
-            str(symbol)
-            for (symbol,) in (
-                db.query(MarketDailyPrice.stock_id)
-                .filter(MarketDailyPrice.stock_id.in_(symbols))
-                .filter(MarketDailyPrice.trade_date == expected)
-                .filter(MarketDailyPrice.close_price.isnot(None))
-                .distinct()
-                .all()
-            )
         }
     current, partial, stale, missing = _classify_symbols(
         members=members,
@@ -470,6 +477,8 @@ def compute_eod_coverage(
         universe_hash=_universe_hash(members),
         members=members,
         current_symbols=current,
+        qualification_reasons=qualification_reasons,
+        provider_diagnostics=provider_diagnostics,
         partial_symbols=partial,
         stale_symbols=stale,
         missing_symbols=missing,
@@ -709,6 +718,7 @@ def should_enqueue_eod_reconcile(
     expected_trade_date: date | None = None,
     now: datetime | None = None,
     us_port: USFullMarketEodPort | None = None,
+    taiwan_daily_qualifier: TaiwanDailyQualifier | None = None,
 ) -> bool:
     normalized = normalize_coverage_market(market)
     decision_now = now or utc_now()
@@ -722,6 +732,7 @@ def should_enqueue_eod_reconcile(
         market=normalized,
         expected_trade_date=expected,
         us_port=us_port,
+        taiwan_daily_qualifier=taiwan_daily_qualifier,
     )
     dataset_id = eod_lifecycle_contract(normalized).dataset_id
     scope_key = TW_SCOPE_KEY if normalized == "TW" else US_SCOPE_KEY
@@ -857,6 +868,7 @@ def _repair_tw_eod(
     error_backoff_seconds: int,
     max_calls: int,
     venue_refresher: TaiwanVenueRefresher | None,
+    taiwan_daily_qualifier: TaiwanDailyQualifier,
     priority_symbols: Callable[[], tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     source_by_venue = (
@@ -902,6 +914,7 @@ def _repair_tw_eod(
                 db,
                 market="TW",
                 expected_trade_date=computation.expected_trade_date,
+                taiwan_daily_qualifier=taiwan_daily_qualifier,
             )
             after_coverage = _tw_venue_coverage(refreshed_attempt, venue)
             observed_trade_dates = _iso_trade_dates(
@@ -1012,6 +1025,7 @@ def _repair_tw_eod(
         db,
         market="TW",
         expected_trade_date=computation.expected_trade_date,
+        taiwan_daily_qualifier=taiwan_daily_qualifier,
     )
     refreshed_row = persist_eod_coverage(
         db,
@@ -1258,6 +1272,7 @@ def reconcile_eod_coverage(
     error_backoff_seconds: int = 1800,
     progress_callback: ProgressCallback | None = None,
     taiwan_venue_refresher: TaiwanVenueRefresher | None = None,
+    taiwan_daily_qualifier: TaiwanDailyQualifier | None = None,
     us_port: USFullMarketEodPort | None = None,
     priority_symbols: Callable[[], tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
@@ -1277,6 +1292,7 @@ def reconcile_eod_coverage(
         market=normalized,
         expected_trade_date=expected_trade_date,
         us_port=us_port,
+        taiwan_daily_qualifier=taiwan_daily_qualifier,
     )
     row = persist_eod_coverage(db, computation)
     if computation.status == "healthy":
@@ -1380,6 +1396,7 @@ def reconcile_eod_coverage(
             error_backoff_seconds=error_backoff_seconds,
             max_calls=min(bounds.max_calls, bounds.max_symbols),
             venue_refresher=taiwan_venue_refresher,
+            taiwan_daily_qualifier=taiwan_daily_qualifier,
             priority_symbols=priority_symbols,
         )
     if us_port is None:

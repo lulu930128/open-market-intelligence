@@ -756,6 +756,9 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "missing_count": not_received_count,
         "coverage_reason_counts": dict(observation.coverage_reason_counts),
         "classification_diagnostics": dict(observation.classification_diagnostics),
+        "trade_value_semantics": observation.trade_value_semantics,
+        "trade_value_is_estimate": observation.trade_value_is_estimate,
+        "official_flag": observation.official and observation.trade_value_is_estimate is False,
         "limits": observation.limits.model_dump(mode="json") if observation.limits else None,
         "limit_up_count": observation.limits.up.observed_count if observation.limits and observation.universe_count and observation.limits.up.unknown_count == 0 else None,
         "limit_down_count": observation.limits.down.observed_count if observation.limits and observation.universe_count and observation.limits.down.unknown_count == 0 else None,
@@ -795,6 +798,22 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "limitations": list(result.limitations),
         "warnings": list(result.limitations),
     }
+
+
+def read_taiwan_completed_auction_breadth(db: Session, *, venue: str, requested_at: datetime) -> list[dict]:
+    """Historical indicative evidence; current applicability remains independent."""
+    observations = TaiwanCurrentMarketRepository(db).read_completed_auction_observations(
+        venue=venue, requested_at=requested_at,
+    )
+    return [{
+        **observation.model_dump(mode="json"),
+        "status": "historical", "coverage_count": observation.classified_count,
+        "market_session": observation.session.value,
+        "as_of": observation.lineage.event_at.isoformat(),
+        "received_at": observation.lineage.received_at.isoformat(),
+        "is_provisional": True, "decision_usable": False,
+        "freshness": {"status": "historical", "is_current": False, "is_live": False},
+    } for observation in observations]
 
 
 def read_taiwan_breadth_lanes(db: Session, *, venue: str, requested_at: datetime) -> dict:

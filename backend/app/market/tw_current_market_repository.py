@@ -18,7 +18,7 @@ from app.db.models import (
     TaiwanCurrentBreadthSnapshot,
     TaiwanCurrentIndexSnapshot,
 )
-from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
+from app.market.trading_calendar import TAIWAN_TZ, TAIWAN_SESSION_OPEN_TIME, TAIWAN_SESSION_CLOSE_TIME, is_taiwan_trading_day
 from app.market.tw_current_market_capabilities import (
     TW_CURRENT_BREADTH_CAPABILITY_ID,
     TW_CURRENT_BREADTH_DATASET_ID,
@@ -68,6 +68,20 @@ _RAW_FETCH_LINEAGE_COLUMNS = (
     RawFetchResult.content_hash,
     RawFetchResult.parser_version,
 )
+def _breadth_trade_value_metadata(limitations_json: str | None) -> dict:
+    """Optional canonical companion; older rows retain unknown value authority."""
+    try:
+        entries = json.loads(limitations_json or "[]")
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, str) and entry.startswith("TW_BREADTH_TRADE_VALUE:"):
+                value = json.loads(entry.partition(":")[2])
+                if isinstance(value, dict):
+                    return {key: value.get(key) for key in ("trade_value_semantics", "trade_value_is_estimate")}
+    except (TypeError, ValueError):
+        pass
+    return {}
+
+
 def _breadth_coverage_reason_counts(
     limitations_json: str | None,
     *,
@@ -453,6 +467,55 @@ class TaiwanCurrentMarketRepository:
             ),
         )
 
+    def read_completed_auction_observations(self, *, venue: str, requested_at: datetime) -> tuple[AuctionBreadthObservation, ...]:
+        """Latest saved observation per completed auction, within the requested day."""
+        day = requested_at.astimezone(TAIWAN_TZ).date()
+        table = TaiwanCurrentBreadthSnapshot
+        schema = inspect(self._db.connection())
+        if not schema.has_table(table.__tablename__) or "auction_observation_json" not in {c["name"] for c in schema.get_columns(table.__tablename__)}:
+            return ()
+        # Two bounded phase windows; do not scan regular-session snapshots.
+        found = []
+        for phases, complete_time in ((("pre_open", "opening_auction"), TAIWAN_SESSION_OPEN_TIME), (("closing_auction",), TAIWAN_SESSION_CLOSE_TIME)):
+            if requested_at.astimezone(TAIWAN_TZ).time().replace(tzinfo=None) < complete_time:
+                continue
+            rows = (self._db.query(table, RawFetchResult, SourceRegistry)
+                .join(RawFetchResult, RawFetchResult.id == table.raw_result_id)
+                .join(SourceRegistry, SourceRegistry.id == table.source_id)
+                .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS), load_only(
+                    table.id, table.provider, table.source, table.authority, table.raw_contract_version,
+                    table.source_id, table.raw_result_id, table.auction_observation_json))
+                .filter(table.venue == venue, table.trade_date == day,
+                        table.auction_observation_json.isnot(None),
+                        func.json_valid(table.auction_observation_json) == 1,
+                        func.json_extract(table.auction_observation_json, "$.session").in_(phases),
+                        table.event_at <= requested_at, table.received_at <= requested_at.astimezone(timezone.utc),
+                        RawFetchResult.fetched_at <= requested_at.astimezone(timezone.utc))
+                .order_by(table.event_at.desc(), table.id.desc()).limit(8).all())
+            for row, raw, source in rows:
+                if not self._identity_valid(provider=row.provider, source_name=row.source,
+                    authority=row.authority, parser_version=row.raw_contract_version,
+                    source_id=row.source_id, raw_result_id=row.raw_result_id,
+                    source=source, raw=raw, capability_id=TW_CURRENT_BREADTH_CAPABILITY_ID):
+                    continue
+                try:
+                    auction = AuctionBreadthObservation.model_validate_json(row.auction_observation_json)
+                    lineage = auction.lineage
+                    valid = (auction.venue == venue and auction.trade_date == day
+                        and lineage.provider == row.provider and lineage.source == row.source
+                        and lineage.content_hash == raw.content_hash
+                        and lineage.raw_receipt_id == f"raw_fetch_result:{raw.id}"
+                        and lineage.event_at is not None and lineage.event_at <= requested_at
+                        and lineage.event_at.astimezone(TAIWAN_TZ).date() == day
+                        and lineage.received_at is not None and lineage.received_at <= requested_at
+                        and lineage.fetched_at is not None and lineage.fetched_at <= requested_at)
+                except (ValueError, TypeError):
+                    continue
+                if valid:
+                    found.append(auction)
+                    break
+        return tuple(found)
+
     def read_market_breadth_candidates(
         self,
         requirement: DataRequirementV2,
@@ -585,6 +648,7 @@ class TaiwanCurrentMarketRepository:
                     price_states=json.loads(row.price_states_json) if "price_states_json" in stored_columns and row.price_states_json else {},
                     limits=json.loads(row.limits_json) if "limits_json" in stored_columns and row.limits_json else None,
                     classification_diagnostics=json.loads(row.classification_diagnostics_json) if "classification_diagnostics_json" in stored_columns and row.classification_diagnostics_json else {},
+                    **_breadth_trade_value_metadata(row.limitations_json),
                     coverage_reason_counts=_breadth_coverage_reason_counts(
                         row.limitations_json,
                         universe_count=row.universe_count,
@@ -865,8 +929,18 @@ __all__ = [
 
 
 def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime,
-                            symbols: tuple[str, ...] | None = None) -> dict[str, dict]:
-    """Restore only receipt-backed same-session prices; never repair on a read."""
+                            symbols: tuple[str, ...] | None = None,
+                            trade_date: date | None = None) -> dict[str, dict]:
+    """Read one session's prices at a separate receipt-visibility cutoff.
+
+    Live ingestion defaults to the request day. Completed-session consumers
+    supply their market-owned trade date without moving the receipt cutoff.
+    """
+    request_day = requested_at.astimezone(TAIWAN_TZ).date()
+    expected_date = trade_date or request_day
+    if expected_date > request_day:
+        return {}
+    visible_at = requested_at.astimezone(timezone.utc)
     table = TaiwanCurrentBreadthSnapshot.__tablename__
     schema = inspect(db.connection())
     if not schema.has_table(table) or "price_states_json" not in {c["name"] for c in schema.get_columns(table)}:
@@ -875,12 +949,17 @@ def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime
     column = TaiwanCurrentBreadthSnapshot.price_states_json
     projection = func.json_extract(column, '$.' + json.dumps(single_symbol)) if single_symbol else column
     row = (db.query(projection)
+           .select_from(TaiwanCurrentBreadthSnapshot)
+           .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentBreadthSnapshot.raw_result_id)
            .filter(func.json_valid(column) == 1)
            .filter(TaiwanCurrentBreadthSnapshot.venue == venue)
            .filter(TaiwanCurrentBreadthSnapshot.provider == "twse_mis")
            .filter(TaiwanCurrentBreadthSnapshot.source == "twse_mis_live_breadth")
-           .filter(TaiwanCurrentBreadthSnapshot.trade_date == requested_at.astimezone(TAIWAN_TZ).date())
+           .filter(TaiwanCurrentBreadthSnapshot.trade_date == expected_date)
            .filter(TaiwanCurrentBreadthSnapshot.event_at <= requested_at)
+           .filter(TaiwanCurrentBreadthSnapshot.received_at <= visible_at,
+                   TaiwanCurrentBreadthSnapshot.fetched_at <= visible_at,
+                   RawFetchResult.fetched_at <= visible_at)
            .order_by(TaiwanCurrentBreadthSnapshot.event_at.desc(), TaiwanCurrentBreadthSnapshot.id.desc())
            .first())
     if row is None or not row[0]:
@@ -909,19 +988,21 @@ def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime
     receipts = {}
     ids = sorted(receipt_ids)
     for offset in range(0, len(ids), 400):
-        for raw_id, content_hash, source_name in (db.query(RawFetchResult.id, RawFetchResult.content_hash, SourceRegistry.source_name)
+        for raw_id, content_hash, source_name, fetched_at in (db.query(RawFetchResult.id, RawFetchResult.content_hash, SourceRegistry.source_name, RawFetchResult.fetched_at)
                 .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
                 .filter(SourceRegistry.source_name.in_(("twse_mis_live_breadth", "twse_mis_quote_depth")))
                 .filter(RawFetchResult.fetched_at <= requested_at.astimezone(timezone.utc))
                 .filter(RawFetchResult.id.in_(ids[offset:offset + 400])).all()):
-            receipts[f"raw_fetch_result:{raw_id}"] = (content_hash, source_name)
+            receipts[f"raw_fetch_result:{raw_id}"] = (content_hash, source_name, _aware(fetched_at))
     states = {}
     for code, state in parsed.items():
         if (state.lineage.raw_receipt_id and state.lineage.provider == "twse_mis"
             and state.lineage.source in {"twse_mis_live_breadth", "twse_mis_quote_depth"}
             and state.lineage.content_hash is not None
-            and receipts.get(state.lineage.raw_receipt_id) == (state.lineage.content_hash, state.lineage.source)
-            and state.trade_date == requested_at.astimezone(TAIWAN_TZ).date()
+            and receipts.get(state.lineage.raw_receipt_id) == (state.lineage.content_hash, state.lineage.source, state.lineage.fetched_at)
+            and state.lineage.received_at is not None
+            and state.lineage.received_at <= requested_at
+            and state.trade_date == expected_date
             and state.price_as_of <= requested_at):
             states[code] = state.model_dump(mode="python")
     return states

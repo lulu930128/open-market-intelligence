@@ -16,7 +16,7 @@ from app.market.official_index_transaction import TaiwanOfficialIndexTransaction
 from app.market.providers.tw_official_index import (
     TW_OFFICIAL_INDEX_DESCRIPTORS,
 )
-from app.market.taiwan_rules import expected_daily_price_date
+from app.market.official_index_contract import expected_taiwan_index_close_date
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.contracts import (
     CanonicalModel,
@@ -314,7 +314,7 @@ def read_taiwan_official_index(
     requested_at: datetime | None = None,
 ) -> MarketDataResultV1:
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    latest_completed = expected_daily_price_date(now=effective_requested_at)
+    latest_completed = expected_taiwan_index_close_date(now=effective_requested_at)
     effective_trade_date = (
         min(trade_date, latest_completed)
         if trade_date is not None and latest_completed is not None
@@ -363,7 +363,7 @@ def read_taiwan_official_index_series(
     """Read a bounded canonical completed-session index series."""
 
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    latest_completed = expected_daily_price_date(now=effective_requested_at)
+    latest_completed = expected_taiwan_index_close_date(now=effective_requested_at)
     if latest_completed is None:
         return ()
     effective_to_date = min(to_date, latest_completed) if to_date else latest_completed
@@ -401,7 +401,7 @@ def refresh_taiwan_official_index(
 ) -> TaiwanIndexRefreshResult:
     normalized_index_id = _normalize_index_id(index_id)
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    expected_date = expected_daily_price_date(now=effective_requested_at)
+    expected_date = expected_taiwan_index_close_date(now=effective_requested_at)
     if expected_date is None or trade_date != expected_date:
         raise ValueError(
             "official index refresh trade_date must equal the latest expected "

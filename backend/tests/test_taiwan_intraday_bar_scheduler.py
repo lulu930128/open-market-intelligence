@@ -142,12 +142,17 @@ def test_close_tail_reconciliation_is_bounded_fetch_only_and_truthful() -> None:
     db = _FakeDb()
     refreshed: list[str] = []
     seen_max_symbols: list[int] = []
+    persisted = {}
+    rereads = []
 
     def universe_resolver(_db, *, max_symbols: int):
         seen_max_symbols.append(max_symbols)
         return {"symbols": ["2330", "2330", "3711"]}
 
     def reader(_db, *, stock_id: str, **_kwargs):
+        if _kwargs.get("bypass_snapshot_cache"):
+            rereads.append(stock_id)
+            return persisted[stock_id]
         return {
             "coverage": {
                 "status": "partial_prefix",
@@ -161,7 +166,7 @@ def test_close_tail_reconciliation_is_bounded_fetch_only_and_truthful() -> None:
         refreshed.append(stock_id)
         assert [item.provider_key for item in descriptors] == ["nstock", "yahoo_finance_chart"]
         complete = stock_id == "2330"
-        return {
+        persisted[stock_id] = {
             "provider": "nstock",
             "source": "nstock_minute_stock_data",
             "coverage": {
@@ -172,6 +177,8 @@ def test_close_tail_reconciliation_is_bounded_fetch_only_and_truthful() -> None:
                 "last_bar_at": "2026-08-28T13:24:00+08:00",
             },
         }
+        # Acquisition's transport result is deliberately not coverage evidence.
+        return {"status": "success"}
 
     result = reconcile_taiwan_intraday_close_tails(
         now=datetime(2026, 8, 28, 13, 25, 5, tzinfo=TAIWAN_TZ),
@@ -185,6 +192,7 @@ def test_close_tail_reconciliation_is_bounded_fetch_only_and_truthful() -> None:
 
     assert seen_max_symbols == [3]
     assert refreshed == ["2330", "3711"]
+    assert rereads == refreshed
     assert result["status"] == "partial"
     assert result["requested_count"] == 2
     assert result["complete_count"] == 1

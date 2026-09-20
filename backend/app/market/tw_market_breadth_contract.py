@@ -22,6 +22,8 @@ BREADTH_COVERAGE_REASON_KEYS = (
     "suspended_or_not_tradable",
     "provider_missing",
     "mapping_error",
+    "reference_price_unavailable",
+    "actual_trade_unavailable",
     "unknown",
 )
 
@@ -178,9 +180,9 @@ def breadth_classification_reason(row: Mapping[str, Any]) -> tuple[str, str | No
         and not has_actual_trade and volume == 0 and previous_close is not None):
         return "valid_no_trade", None
     if previous_close is None:
-        return "mapping_error", "reference_price_missing"
+        return "reference_price_unavailable", "reference_price_missing"
     if not has_actual_trade and (volume or 0) > 0:
-        return "mapping_error", str(row.get("actual_trade_reason_code") or "actual_trade_unavailable")
+        return "actual_trade_unavailable", str(row.get("actual_trade_reason_code") or "actual_trade_unavailable")
     return "unknown", None
 
 
@@ -212,6 +214,6 @@ def breadth_classification_diagnostics(rows: list[Mapping[str, Any]]) -> dict[st
             continue
         seen.add(code)
         reason, detail = breadth_classification_reason(row)
-        if reason == "mapping_error" and detail:
+        if reason in {"mapping_error", "reference_price_unavailable", "actual_trade_unavailable"} and detail:
             counts[detail] = counts.get(detail, 0) + 1
     return counts

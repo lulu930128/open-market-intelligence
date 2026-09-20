@@ -166,6 +166,8 @@ class ViewerLeaseState(CanonicalModel):
     fallback_source: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=512)
     error: str | None = Field(default=None, max_length=1_000)
+    materialization_job_id: int | None = Field(default=None, ge=1)
+    materialization_error_code: str | None = Field(default=None, max_length=128)
 
 
 class ViewerLeasePortSummary(CanonicalModel):

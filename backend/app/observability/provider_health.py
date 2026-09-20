@@ -615,69 +615,78 @@ def enrich_source_health_entries(
         provider = _normalized_provider(entry.get("provider"))
         target = _normalized_key(entry.get("target"))
         resource = _normalized_key(entry.get("resource"), default="unknown")
-        summary = provider_event_summary(
-            db,
-            market=market,
-            provider=provider,
-            resource=resource,
-            target=target,
-        )
-        latest_event = summary.get("latest_event") if isinstance(summary.get("latest_event"), dict) else None
-        latest_event_detail = (
-            latest_event.get("detail")
-            if latest_event and isinstance(latest_event.get("detail"), dict)
-            else {}
-        )
-        next_eligible_refresh_at = _parse_datetime(
-            latest_event_detail.get("next_eligible_refresh_at")
-        )
-        refresh_eligible = bool(
-            next_eligible_refresh_at is None
-            or _utc_datetime(next_eligible_refresh_at) <= _now()
-        )
-        enriched_entry = dict(entry)
-        enriched_entry.update(
-            {
-                "latest_event_id": latest_event.get("id") if latest_event else None,
-                "latest_event_at": latest_event.get("event_time") if latest_event else None,
-                "latest_event_status": latest_event.get("status") if latest_event else None,
-                "latest_event_severity": latest_event.get("severity") if latest_event else None,
-                "latest_event_message": (
-                    latest_event.get("error_message") or latest_event.get("message")
-                    if latest_event
-                    else None
-                ),
-                "latest_event_scope": "historical_provider_event",
-                "historical_latest_event_at": (
-                    latest_event.get("event_time") if latest_event else None
-                ),
-                "historical_latest_event_status": (
-                    latest_event.get("status") if latest_event else None
-                ),
-                "historical_latest_event_severity": (
-                    latest_event.get("severity") if latest_event else None
-                ),
-                "historical_latest_event_message": (
-                    latest_event.get("error_message")
-                    or latest_event.get("message")
-                    if latest_event
-                    else None
-                ),
-                "latest_event_detail": latest_event_detail or None,
-                "next_eligible_refresh_at": (
-                    _utc_datetime(next_eligible_refresh_at).isoformat()
-                    if next_eligible_refresh_at
-                    else None
-                ),
-                "refresh_eligible": refresh_eligible,
-                "recent_event_count": int(summary["recent_event_count"] or 0),
-                "recent_error_count": int(summary["recent_error_count"] or 0),
-                "consecutive_error_count": summary["consecutive_error_count"],
+        try:
+            summary = provider_event_summary(
+                db,
+                market=market,
+                provider=provider,
+                resource=resource,
+                target=target,
+            )
+            latest_event = summary.get("latest_event") if isinstance(summary.get("latest_event"), dict) else None
+            latest_event_detail = (
+                latest_event.get("detail")
+                if latest_event and isinstance(latest_event.get("detail"), dict)
+                else {}
+            )
+            next_eligible_refresh_at = _parse_datetime(
+                latest_event_detail.get("next_eligible_refresh_at")
+            )
+            refresh_eligible = bool(
+                next_eligible_refresh_at is None
+                or _utc_datetime(next_eligible_refresh_at) <= _now()
+            )
+            enriched_entry = dict(entry)
+            enriched_entry.update(
+                {
+                    "latest_event_id": latest_event.get("id") if latest_event else None,
+                    "latest_event_at": latest_event.get("event_time") if latest_event else None,
+                    "latest_event_status": latest_event.get("status") if latest_event else None,
+                    "latest_event_severity": latest_event.get("severity") if latest_event else None,
+                    "latest_event_message": (
+                        latest_event.get("error_message") or latest_event.get("message")
+                        if latest_event
+                        else None
+                    ),
+                    "latest_event_scope": "historical_provider_event",
+                    "historical_latest_event_at": (
+                        latest_event.get("event_time") if latest_event else None
+                    ),
+                    "historical_latest_event_status": (
+                        latest_event.get("status") if latest_event else None
+                    ),
+                    "historical_latest_event_severity": (
+                        latest_event.get("severity") if latest_event else None
+                    ),
+                    "historical_latest_event_message": (
+                        latest_event.get("error_message")
+                        or latest_event.get("message")
+                        if latest_event
+                        else None
+                    ),
+                    "latest_event_detail": latest_event_detail or None,
+                    "next_eligible_refresh_at": (
+                        _utc_datetime(next_eligible_refresh_at).isoformat()
+                        if next_eligible_refresh_at
+                        else None
+                    ),
+                    "refresh_eligible": refresh_eligible,
+                    "recent_event_count": int(summary["recent_event_count"] or 0),
+                    "recent_error_count": int(summary["recent_error_count"] or 0),
+                    "consecutive_error_count": summary["consecutive_error_count"],
+                }
+            )
+            enriched_entry["status_dimensions"] = build_status_dimensions(
+                enriched_entry
+            )
+        except (ValueError, TypeError, KeyError, AttributeError):
+            # A malformed historical diagnostic must not erase readable dataset
+            # evidence or mark every provider failed. No read-side repair.
+            enriched_entry = dict(entry)
+            enriched_entry["provider_event_diagnostics"] = {
+                "status": "unavailable", "reason_code": "MALFORMED_PROVIDER_HEALTH_ENTRY",
             }
-        )
-        enriched_entry["status_dimensions"] = build_status_dimensions(
-            enriched_entry
-        )
+            enriched_entry["status_dimensions"] = build_status_dimensions(enriched_entry)
         enriched.append(enriched_entry)
     return enriched
 

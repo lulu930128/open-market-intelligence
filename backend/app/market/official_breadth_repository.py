@@ -212,6 +212,8 @@ class TaiwanOfficialBreadthRepository:
             unknown_count=unknown_count,
             missing_count=missing_count,
             trade_value=(Decimal(trade_value) if trade_value_complete else None),
+            trade_value_is_estimate=False if trade_value_complete else None,
+            trade_value_semantics="official_sum_active_ordinary_stock_turnover" if trade_value_complete else None,
             currency=("TWD" if trade_value_complete else None),
             state=(
                 ObservationState.PARTIAL

@@ -160,10 +160,13 @@ def _fetch_messages(
     timeout_seconds: int,
     *,
     initial_decision: TwseMisGuardDecision | None = None,
+    diagnostics: dict[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], int, int]:
     batches = list(_chunks(codes, _BATCH_SIZE))
     messages: list[dict[str, object]] = []
     failed = 0
+    skipped = 0
+    failures = []
     external_calls = 0
     started_at = monotonic()
     for index, batch in enumerate(batches):
@@ -173,7 +176,8 @@ def _fetch_messages(
             else TWSE_MIS_PROVIDER_GUARD.before_request()
         )
         if not decision.allowed:
-            failed += len(batches) - index
+            skipped += len(batches) - index
+            failures.append({"batch_ordinal": index + 1, "reason": "guard_open", "attempted": False})
             break
         attempt = decision.attempt
         if attempt is None:
@@ -181,7 +185,8 @@ def _fetch_messages(
         remaining_seconds = timeout_seconds - (monotonic() - started_at)
         if remaining_seconds <= 0:
             TWSE_MIS_PROVIDER_GUARD.cancel_attempt(attempt)
-            failed += len(batches) - index
+            skipped += len(batches) - index
+            failures.append({"batch_ordinal": index + 1, "reason": "budget_exhausted", "attempted": False})
             break
         external_calls += 1
         try:
@@ -205,12 +210,21 @@ def _fetch_messages(
                     detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
                 )
             failed += 1
+            failures.append({"batch_ordinal": index + 1, "attempted": True,
+                "reason": "rate_limited" if status_code == 429 else "http_error" if status_code else
+                          "timeout" if "timeout" in type(exc).__name__.lower() else
+                          "parse_error" if isinstance(exc, (ValueError, TypeError)) else "transport_error",
+                "http_status": status_code,
+            })
             if status_code == 429 or not TWSE_MIS_PROVIDER_GUARD.snapshot().allowed:
-                failed += len(batches) - index - 1
+                skipped += len(batches) - index - 1
                 break
         else:
             messages.extend(batch_messages)
             TWSE_MIS_PROVIDER_GUARD.record_success(attempt)
+    if diagnostics is not None:
+        diagnostics.update(attempted_batch_count=external_calls, failed_batch_count=failed, skipped_batch_count=skipped,
+            batch_failures=failures, elapsed_ms=round((monotonic() - started_at) * 1000))
     return messages, failed, external_calls
 
 
@@ -239,7 +253,7 @@ def _cache(market: str, payload: dict[str, object] | None) -> None:
         "expires_at": monotonic() + _CACHE_TTL_SECONDS,
         "payload": payload,
     }
-    if payload is not None and payload.get("failed_batch_count", 0) == 0:
+    if payload is not None and payload.get("failed_batch_count", 0) == 0 and not payload.get("skipped_batch_count"):
         _LAST_GOOD[market] = payload
 
 
@@ -546,6 +560,7 @@ def read_twse_mis_current_breadth(
             raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
         external_calls = 0
         provider_io_started = False
+        batch_diagnostics: dict[str, object] = {}
         try:
             codes = list(dict.fromkeys(universe_reader(market)))
             minimum = 500 if market == "TWSE" else 250
@@ -561,31 +576,33 @@ def read_twse_mis_current_breadth(
                 codes,
                 market,
                 timeout_seconds,
-                initial_decision=decision,
+                initial_decision=decision, diagnostics=batch_diagnostics,
             )
             provider_io_started = True
-            payload = _build_payload(market, codes, messages, failed_batches, prior_states=prior_states)
+            incomplete_batches = failed_batches + int(batch_diagnostics.get("skipped_batch_count", 0))
+            payload = _build_payload(market, codes, messages, incomplete_batches, prior_states=prior_states)
             if payload is None:
                 raise ValueError("TWSE MIS breadth returned no canonical candidate")
+            payload.update(batch_diagnostics, failed_batch_count=failed_batches)
             _cache(market, payload)
             guard = TWSE_MIS_PROVIDER_GUARD.snapshot()
             return CurrentMarketProviderPayload(
                 payload=payload,
-                status="available" if failed_batches == 0 else "partial",
+                status="available" if incomplete_batches == 0 else "partial",
                 url=twse_mis.STOCK_INFO_URL,
                 status_code=429 if guard.status == "rate_limited" else 200,
                 operational_status=(
                     OperationalStatus.RATE_LIMITED
                     if guard.status == "rate_limited"
                     else OperationalStatus.HEALTHY
-                    if failed_batches == 0 and guard.allowed
+                    if incomplete_batches == 0 and guard.allowed
                     else OperationalStatus.DEGRADED
                 ),
                 detail_code=(
                     guard.detail_code
                     if not guard.allowed
                     else "TWSE_MIS_BREADTH_AVAILABLE"
-                    if failed_batches == 0
+                    if incomplete_batches == 0
                     else "TWSE_MIS_BREADTH_PARTIAL"
                 ),
                 retry_after_seconds=(
@@ -611,17 +628,18 @@ def read_twse_mis_current_breadth(
                 payload=stale,
                 status="stale" if stale else "failed",
                 url=twse_mis.STOCK_INFO_URL,
-                status_code=status_code,
+                status_code=429 if guard.status == "rate_limited" else status_code,
                 error=None if stale else f"{type(exc).__name__}: {exc}",
                 operational_status=(
                     OperationalStatus.RATE_LIMITED
-                    if status_code == 429
+                    if status_code == 429 or guard.status == "rate_limited"
                     else OperationalStatus.FAILED
                 ),
                 detail_code=guard.detail_code,
                 retry_after_seconds=guard.retry_after_seconds,
                 cooldown_until=guard.cooldown_until,
                 external_calls=external_calls,
+                diagnostics=batch_diagnostics,
             )
 
 

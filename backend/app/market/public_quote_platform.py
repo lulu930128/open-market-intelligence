@@ -236,6 +236,7 @@ class TaiwanPublicQuoteCandidateReader:
                 max_candidates=requirement.bounds.max_candidates,
                 trade_date=expected_trade_date,
                 allowed_sessions=None,
+                requested_at=requirement.requested_at,
             )
         limitations = [
             limitation
@@ -337,6 +338,7 @@ class TaiwanPublicQuoteCandidateReader:
                     and legal_session_event
                     and confirmed_at is not None
                     and confirmed_at >= confirmation_boundary
+                    and confirmed_at <= requirement.requested_at
                 )
                 if session_close_confirmed:
                     freshness = EvidenceFreshness.FRESH
@@ -378,14 +380,15 @@ class TaiwanPublicQuoteCandidateReader:
                     freshness = EvidenceFreshness.FRESH
                 else:
                     freshness = EvidenceFreshness.STALE
-                candidates.append(
-                    ResolutionCandidate(
-                        observation=observation,
-                        freshness=freshness,
-                        provider_priority=stored.provider_priority,
-                        session=stored.market_session or requirement.session,
+                if not self._session_close or exchange_authority:
+                    candidates.append(
+                        ResolutionCandidate(
+                            observation=observation,
+                            freshness=freshness,
+                            provider_priority=stored.provider_priority,
+                            session=stored.market_session or requirement.session,
+                        )
                     )
-                )
             freshness_values.append(freshness)
             provider_health.append(
                 ProviderResourceHealth(
@@ -504,6 +507,24 @@ def read_taiwan_session_close(
             session_close=True,
         ),
     )
+
+
+
+def read_taiwan_session_closes(
+    db: Session, *, instruments: tuple[InstrumentKey, ...], requested_at: datetime,
+) -> dict[str, MarketDataResultV1]:
+    """Batch storage IO, keeping the single-quote resolver's qualification rules."""
+    repository = TaiwanPublicQuoteRepository(db)
+    repository.preload_session_close_candidates(instruments, requested_at=requested_at)
+    reader = TaiwanPublicQuoteCandidateReader(repository, session_close=True)
+    gateway = MarketDataGateway()
+    return {
+        instrument.symbol: gateway.resolve_quote(
+            build_taiwan_session_close_requirement(
+                instrument=instrument, policy=RealtimePolicy.CACHE_ONLY, requested_at=requested_at,
+            ), reader=reader,
+        ) for instrument in instruments
+    }
 
 
 def _acquisition_bounds(
@@ -849,6 +870,7 @@ def project_taiwan_session_close(
         if session_final and quote is not None
         else None
     )
+
     closing_match_volume_lots = (
         _board_lot_value(quote.last_trade_quantity)
         if session_final and quote is not None

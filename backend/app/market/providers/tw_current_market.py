@@ -66,6 +66,7 @@ class CurrentMarketProviderPayload:
     retry_after_seconds: int | None = None
     cooldown_until: datetime | None = None
     external_calls: int = 1
+    diagnostics: dict[str, Any] | None = None
     method: str = "GET"
 
 
@@ -174,9 +175,9 @@ def _breadth_coverage_reason_counts(
 
 def _raw_text(payload: CurrentMarketProviderPayload) -> str:
     if payload.payload is None:
-        return ""
+        return json.dumps({"acquisition_diagnostics": payload.diagnostics}, sort_keys=True) if payload.diagnostics else ""
     return json.dumps(
-        payload.payload,
+        {**payload.payload, **({"acquisition_diagnostics": payload.diagnostics} if payload.diagnostics else {})},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -192,6 +193,7 @@ def _lineage(
     event_at: datetime,
     fetched_at: datetime,
     content_hash: str,
+    received_at: datetime | None = None,
 ) -> SourceLineage:
     return SourceLineage(
         provider=binding.descriptor.provider_key,
@@ -199,7 +201,7 @@ def _lineage(
         authority=binding.descriptor.authority,
         raw_contract_version=binding.parser_version,
         event_at=event_at,
-        received_at=fetched_at,
+        received_at=received_at or fetched_at,
         fetched_at=fetched_at,
         content_hash=content_hash,
     )
@@ -284,7 +286,7 @@ def _summary(
 ) -> AcquisitionSummary:
     completed = error is None and observation_count > 0
     raw = payload.payload or {}
-    partial = bool(raw.get("failed_batch_count") or raw.get("acquisition_fallback"))
+    partial = bool(raw.get("failed_batch_count") or raw.get("skipped_batch_count") or raw.get("acquisition_fallback"))
     return AcquisitionSummary(
         attempted=True,
         status=(AcquisitionStatus.PARTIAL if completed and partial
@@ -434,12 +436,17 @@ class CurrentBreadthAdapter:
             raise ValueError("current breadth adapter requires dataset target")
         fetched_at = _aware(self._clock(), label="current breadth adapter clock")
         payload = self._reader(requirement.target.scope_key, route.timeout_seconds)
+        if payload.payload and not payload.payload.get("acquisition_fallback"):
+            # Keep the original observation receipt when last-good data is reused.
+            payload.payload.setdefault("observation_received_at", fetched_at.isoformat())
         raw_text = _raw_text(payload)
         content_hash = sha256(raw_text.encode("utf-8")).hexdigest()
         observation: MarketBreadthObservation | None = None
         error = payload.error
         try:
             raw = payload.payload or {}
+            observation_received_at = _datetime(raw.get("observation_received_at")) or fetched_at
+            attempt_diagnostics = (payload.diagnostics or {}) if raw.get("acquisition_fallback") else raw
             event_at = (
                 _datetime(raw.get("snapshot_as_of"))
                 or _datetime(raw.get("as_of"))
@@ -488,7 +495,7 @@ class CurrentBreadthAdapter:
                             market=Market.TW, venue=requirement.target.scope_key,
                             lineage=_lineage(
                                 binding=self.binding, event_at=auction_at,
-                                fetched_at=fetched_at, content_hash=content_hash,
+                                fetched_at=fetched_at, content_hash=content_hash, received_at=observation_received_at,
                             ),
                             session=taiwan_market_session(auction_at),
                             trade_date=_date(raw_auction.get("trade_date")) or trade_date,
@@ -507,7 +514,7 @@ class CurrentBreadthAdapter:
                     binding=self.binding,
                     event_at=event_at,
                     fetched_at=fetched_at,
-                    content_hash=content_hash,
+                    content_hash=content_hash, received_at=observation_received_at,
                 ),
                 session=taiwan_market_session(event_at),
                 trade_date=trade_date,
@@ -536,7 +543,7 @@ class CurrentBreadthAdapter:
                         **state,
                         "lineage": state.get("lineage") or _lineage(
                             binding=self.binding, event_at=_datetime(state.get("price_as_of")),
-                            fetched_at=fetched_at, content_hash=content_hash,
+                            fetched_at=fetched_at, content_hash=content_hash, received_at=observation_received_at,
                         ),
                     }
                     for code, state in (raw.get("price_states") or {}).items()
@@ -546,16 +553,19 @@ class CurrentBreadthAdapter:
                 auction=auction,
                 acquisition_diagnostics=BreadthAcquisitionDiagnostics(
                     auction_error_code=auction_error_code,
+                    attempted_batch_count=attempt_diagnostics.get("attempted_batch_count"),
+                    skipped_batch_count=attempt_diagnostics.get("skipped_batch_count", 0),
+                    batch_failures=attempt_diagnostics.get("batch_failures", ()),
                     failed_batch_count=raw.get("failed_batch_count", 0),
                     received_count=universe - not_received,
-                    acquisition_complete=raw.get("failed_batch_count", 0) == 0 and not raw.get("acquisition_fallback"),
+                    acquisition_complete=raw.get("failed_batch_count", 0) == 0 and not raw.get("skipped_batch_count") and not raw.get("acquisition_fallback"),
                     fallback_used=bool(raw.get("acquisition_fallback")),
                     latest_attempt_status=(
                         raw.get("latest_attempt_status", "failed") if raw.get("acquisition_fallback")
-                        else "partial" if raw.get("failed_batch_count", 0) else "complete"
+                        else "partial" if raw.get("failed_batch_count", 0) or raw.get("skipped_batch_count") else "complete"
                     ),
                     latest_attempt_failed_batch_count=(
-                        None if raw.get("acquisition_fallback") else raw.get("failed_batch_count", 0)
+                        attempt_diagnostics.get("failed_batch_count") if raw.get("acquisition_fallback") else raw.get("failed_batch_count", 0)
                     ),
                 ),
                 trade_value=trade_value,
@@ -565,6 +575,8 @@ class CurrentBreadthAdapter:
                     else ObservationState.PARTIAL if incomplete else ObservationState.AVAILABLE
                 ),
                 price_semantics="current_last_trade_vs_reference",
+                trade_value_semantics=raw.get("trade_value_semantics"),
+                trade_value_is_estimate=raw.get("trade_value_is_estimate"),
                 official=self.binding.descriptor.authority.value == "exchange",
                 provisional=not (
                     classified > 0

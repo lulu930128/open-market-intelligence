@@ -39,6 +39,7 @@ from app.jobs.taiwan_intraday_bar_scheduler import (
 from app.jobs.taiwan_session_close_scheduler import (
     add_taiwan_session_close_jobs,
 )
+from app.jobs.taiwan_price_map_snapshot_scheduler import add_taiwan_price_map_snapshot_jobs
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
     us_intraday_materializer_jobs_requested,
@@ -122,6 +123,7 @@ from app.market.trading_calendar import (
     is_taiwan_trading_day,
     taiwan_presentation_session,
 )
+from app.market.official_index_contract import expected_taiwan_index_close_date
 from app.market.tw_derivatives import (
     DERIVATIVES_RELEASE_TIME,
     DERIVATIVES_MAX_REFRESH_ATTEMPTS,
@@ -1514,7 +1516,7 @@ def _reconcile_taiwan_official_index_rows(
 ) -> list[dict[str, Any]]:
     """Bounded scheduler-owned repair for the two official cash indices."""
 
-    expected_index_date = expected_daily_price_date(now=requested_at)
+    expected_index_date = expected_taiwan_index_close_date(now=requested_at)
     if expected_index_date is None:
         return []
     results: list[dict[str, Any]] = []
@@ -1587,7 +1589,7 @@ def _reconcile_taiwan_index_daily_bars(
 
     from app.market.trading_calendar import latest_completed_taiwan_session_date
 
-    official_trade_date = expected_daily_price_date(now=requested_at)
+    official_trade_date = expected_taiwan_index_close_date(now=requested_at)
     derived_trade_date = latest_completed_taiwan_session_date(requested_at)
     results: list[dict[str, Any]] = []
     try:
@@ -2450,6 +2452,7 @@ def _add_market_chip_daily_refresh_jobs(scheduler: Any) -> bool:
 
 
 def enqueue_market_eod_coverage_reconcile() -> None:
+    from app.market.daily_ohlcv_platform import qualify_taiwan_eod_universe
     from app.us_market.daily_rollout import (
         us_daily_full_market_acquisition_enabled,
     )
@@ -2481,6 +2484,7 @@ def enqueue_market_eod_coverage_reconcile() -> None:
                 market=market,
                 expected_trade_date=expected_trade_date,
                 us_port=us_port,
+                taiwan_daily_qualifier=qualify_taiwan_eod_universe,
             ):
                 continue
             job, created = enqueue_eod_coverage_reconcile(
@@ -2666,6 +2670,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_taiwan_quote_contract_scheduler
         and not settings.enable_taiwan_intraday_bar_scheduler
         and not settings.enable_taiwan_session_close_scheduler
+        and not settings.enable_taiwan_price_map_snapshot_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
@@ -2765,6 +2770,7 @@ def start_scheduler() -> Any | None:
     taiwan_intraday_bar_scheduler_enabled = add_taiwan_intraday_bar_jobs(
         scheduler
     )
+    add_taiwan_price_map_snapshot_jobs(scheduler)
     taiwan_session_close_scheduler_enabled = add_taiwan_session_close_jobs(
         scheduler
     )

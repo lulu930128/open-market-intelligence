@@ -6,6 +6,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+PRICE_MAP_KIND = "tw_stock_price_map"
+PRICE_MAP_VERSION = "tw.stock.price_map.v4"
+METHODOLOGY_ID = "tw_stock_price_map_confluence"
+METHODOLOGY_VERSION = "3.0.0"
+
+
 PriceMapStatus = Literal[
     "ready", "partial", "pending", "stale", "missing", "not_applicable"
 ]
@@ -64,6 +70,9 @@ class StockPriceMapZoneRead(BaseModel):
     primary_evidence_id: str
     primary_label: str
     trigger_ids: list[str] = Field(default_factory=list)
+    geometry_status: Literal["ready", "unavailable"] = "unavailable"
+    scanner_eligible: bool = False
+    scanner_reason_codes: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
 
 
@@ -102,7 +111,7 @@ class StockPriceMapCandidateRead(BaseModel):
 class StockPriceMapTechnicalSummaryRead(BaseModel):
     headline: str
     summary: str
-    score: int
+    score: int | None
     value: float | None = None
     value_label: str
     confidence: str
@@ -178,7 +187,13 @@ class StockPriceMapRead(BaseModel):
     status: PriceMapStatus
     decision_usable: bool
     generated_at: datetime
+    structure_input_usable: bool = False
+    observation: dict[str, Any] | None = None
     basis_revision: str
+    requested_timeframe: Literal["today", "daily", "weekly", "monthly"] = "daily"
+    structure_timeframe: Literal["daily", "weekly", "monthly"] = "daily"
+    observation_semantics: str = "completed_daily_reference"
+    method_applicability: dict[str, str] = Field(default_factory=dict)
     evidence_timeframes: list[str] = Field(default_factory=list)
     reference: StockPriceMapReferenceRead
     axis: StockPriceMapAxisRead

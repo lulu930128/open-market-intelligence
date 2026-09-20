@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
@@ -22,6 +24,27 @@ _CACHE_LOCK = RLock()
 _CACHE_STATE: dict[str, Any] | None = None
 _CACHE_PATH: Path | None = None
 _CACHE_MTIME_NS: int | None = None
+_LOOKUP_SNAPSHOT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "exchange_calendar_lookup_snapshot", default=None,
+)
+
+
+@contextmanager
+def exchange_calendar_read_scope():
+    """Pin one calendar snapshot for a bounded synchronous calculation.
+
+    Nested bar/indicator reads share that snapshot. A subsequent calculation
+    checks the file again, so external calendar updates are not hidden by a TTL.
+    Explicit-path reads and refresh/write operations retain their normal behavior.
+    """
+    if _LOOKUP_SNAPSHOT.get() is not None:
+        yield
+        return
+    token = _LOOKUP_SNAPSHOT.set(read_exchange_calendar_cache())
+    try:
+        yield
+    finally:
+        _LOOKUP_SNAPSHOT.reset(token)
 
 
 @dataclass(frozen=True)
@@ -241,7 +264,8 @@ def cached_market_holiday(
     path: Path | None = None,
 ) -> CachedHolidayLookup:
     normalized_market = str(market or "").strip().lower()
-    payload = read_exchange_calendar_cache(path=path)
+    snapshot = _LOOKUP_SNAPSHOT.get() if path is None else None
+    payload = snapshot if snapshot is not None else read_exchange_calendar_cache(path=path)
     entry = (payload.get("markets") or {}).get(normalized_market)
     if not isinstance(entry, dict):
         return CachedHolidayLookup(covered=False, name=None)
@@ -342,6 +366,7 @@ __all__ = [
     "CalendarCacheUpdate",
     "CachedHolidayLookup",
     "cached_market_holiday",
+    "exchange_calendar_read_scope",
     "invalidate_exchange_calendar_cache",
     "market_calendar_cache_metadata",
     "read_exchange_calendar_cache",

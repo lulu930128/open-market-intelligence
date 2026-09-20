@@ -439,10 +439,28 @@ def _observation_for_row(
     *,
     clock_phase: str,
     now: datetime | None,
+    confirmed_trade_row: TaiwanStockQuoteSnapshot | None = None,
 ) -> dict[str, Any]:
     local_now = _local_now(now)
     message = _raw_message_for_row(row)
+    actual_trade = resolve_twse_mis_actual_trade(
+        expected_trade_date=_expected_trade_date_for_phase(clock_phase, now=local_now),
+        observation_trade_date=row.trade_date if row is not None else None,
+        provider_event_time=(
+            _taiwan_exchange_datetime(row.quote_time) if row is not None else None
+        ),
+        trial_status=message.get("ts") if message is not None else None,
+        last_trade_price=row.last_price if row is not None else None,
+        last_trade_volume_lots=(
+            _last_trade_volume_lots_for_row(row) if row is not None else None
+        ),
+        cumulative_volume_lots=(
+            row.total_volume_lots if row is not None else None
+        ),
+    )
     observation = resolve_twse_mis_observation(
+        confirmed_trade_occurred=bool(actual_trade["actual_trade_occurred"] or confirmed_trade_row is not None),
+        confirmed_trade_price_available=bool(actual_trade["actual_trade_price_available"] or confirmed_trade_row is not None),
         request_now=local_now,
         market_calendar_phase=taiwan_market_session_phase(local_now),
         legacy_clock_phase=clock_phase,
@@ -457,21 +475,6 @@ def _observation_for_row(
             _as_int(message.get("ps")) if message is not None else None
         ),
         last_trade_price=row.last_price if row is not None else None,
-        cumulative_volume_lots=(
-            row.total_volume_lots if row is not None else None
-        ),
-    )
-    actual_trade = resolve_twse_mis_actual_trade(
-        expected_trade_date=_expected_trade_date_for_phase(clock_phase, now=local_now),
-        observation_trade_date=row.trade_date if row is not None else None,
-        provider_event_time=(
-            _taiwan_exchange_datetime(row.quote_time) if row is not None else None
-        ),
-        trial_status=message.get("ts") if message is not None else None,
-        last_trade_price=row.last_price if row is not None else None,
-        last_trade_volume_lots=(
-            _last_trade_volume_lots_for_row(row) if row is not None else None
-        ),
         cumulative_volume_lots=(
             row.total_volume_lots if row is not None else None
         ),
@@ -1088,6 +1091,10 @@ def _row_to_response(
             trade_date=_expected_trade_date_for_phase(effective_phase, now=now),
             event_time_upper_bound=row.quote_time,
         )
+    if confirmed_trade_row is not None:
+        observation = _observation_for_row(
+            row, clock_phase=phase, now=now, confirmed_trade_row=confirmed_trade_row,
+        )
     semantics = _price_semantics_contract(
         row=row,
         phase=effective_phase,
@@ -1538,6 +1545,24 @@ def _finalize_shared_projection_semantics(
     depth_at = event_datetime(payload.get("depth_event_time"))
     trade_at = event_datetime(payload.get("last_trade_time"))
     local_now = _local_now(requested_at)
+    if payload.get("instrument_phase") == "awaiting_first_trade" and payload.get("actual_trade_occurred"):
+        # Canonical breadth-backed quotes can arrive after the empty legacy
+        # projection. Reclassify with the confirmed fact, preserving its clock.
+        observation = resolve_twse_mis_observation(
+            request_now=local_now,
+            market_calendar_phase=taiwan_market_session_phase(local_now),
+            legacy_clock_phase=phase,
+            provider_event_time=trade_at,
+            trial_status=payload.get("trial_status"),
+            indicative_price=None,
+            indicative_volume_lots=None,
+            last_trade_price=None,
+            cumulative_volume_lots=None,
+            confirmed_trade_occurred=True,
+            confirmed_trade_price_available=last_trade_available,
+        )
+        payload["instrument_phase"] = observation["instrument_phase"]
+        payload["observation_reason_code"] = observation["reason_code"]
     event_phase = taiwan_market_session_phase(depth_at) if depth_at else None
     expected_event_phase = "preopen" if phase == "preopen_auction" else phase
     payload["last_trade_before_auction"] = bool(
@@ -2250,6 +2275,7 @@ def project_taiwan_quote_evidence_bundle(
                 "auction",
                 "bar_series",
             ],
+            "auction_history": bundle.auction_history,
             "data_core_components": {
                 "quote.snapshot": _component_evidence(
                     quote_result,

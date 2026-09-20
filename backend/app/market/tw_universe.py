@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster
+from app.market.index_parsers import regular_stock_code
 
 
 TAIWAN_STOCK_MARKETS = ("TWSE", "TPEX")
@@ -67,7 +68,10 @@ def list_taiwan_stock_universe(
         query = query.filter(StockMaster.stock_id.in_(included))
     if excluded:
         query = query.filter(StockMaster.stock_id.notin_(excluded))
-    return query.order_by(StockMaster.stock_id.asc()).all()
+    return [
+        row for row in query.order_by(StockMaster.stock_id.asc()).all()
+        if regular_stock_code(row.stock_id) is not None
+    ]
 
 
 def list_taiwan_stock_ids(

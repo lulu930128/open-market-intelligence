@@ -225,7 +225,8 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
         reasons = payload["coverage_reason_counts"]
         self.assertEqual(reasons["advance"], 1)
         self.assertEqual(reasons["valid_no_trade"], 1)
-        self.assertEqual(reasons["mapping_error"], 1)
+        self.assertEqual(reasons["mapping_error"], 0)
+        self.assertEqual(reasons["reference_price_unavailable"], 1)
         self.assertEqual(reasons["provider_missing"], 1)
         self.assertEqual(sum(reasons.values()), len(codes))
         self.assertEqual(payload["unchanged_count"], 0)

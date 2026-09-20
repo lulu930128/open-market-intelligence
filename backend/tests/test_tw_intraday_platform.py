@@ -496,7 +496,10 @@ def test_nstock_trailing_window_projects_incomplete_session_coverage() -> None:
             descriptors=(NSTOCK_INTRADAY_DESCRIPTOR,),
             acquisition=executor,
         )
-        points, metadata = project_taiwan_intraday_bars(db, result)
+        canonical = read_taiwan_intraday_bars(
+            db, stock_id="2330", interval="1m", range_value="1d", requested_at=now,
+        )
+        points, metadata = project_taiwan_intraday_bars(db, canonical)
 
         coverage = metadata["series_coverage"]
         assert len(points) == 2
@@ -598,7 +601,8 @@ def test_cache_only_history_and_trend_do_not_call_provider_or_commit(monkeypatch
             requested_at=now,
         )
 
-        assert shared.acquisition.attempted is False
+        assert shared.current_session_coverage is not None
+        assert shared.current_session_coverage.trade_date == now.date()
         raw_receipt_selects = [
             statement
             for statement in statements

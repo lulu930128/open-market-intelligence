@@ -96,12 +96,19 @@ class OfficialDailyParseIssue(CanonicalModel):
     count: int = Field(ge=1)
 
 
+class OfficialDailyRejectedRow(CanonicalModel):
+    symbol: str
+    trade_date: date | None = None
+    reason_code: str
+
+
 class OfficialDailyParseResult(CanonicalModel):
     venue: str = Field(pattern=r"^(TWSE|TPEX)$")
     input_row_count: int = Field(ge=0)
     matched_row_count: int = Field(ge=0)
     records: tuple[OfficialDailyRecord, ...] = Field(default=(), max_length=20_000)
     issues: tuple[OfficialDailyParseIssue, ...] = Field(default=(), max_length=32)
+    rejected_rows: tuple[OfficialDailyRejectedRow, ...] = Field(default=(), max_length=20_000)
 
 
 TWSE_OFFICIAL_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
@@ -345,6 +352,7 @@ def parse_twse_official_daily_payload(
     if not isinstance(payload, list):
         raise ValueError("TWSE official daily payload must be a JSON list")
     issues: Counter[str] = Counter()
+    rejected_rows: list[OfficialDailyRejectedRow] = []
     records: list[OfficialDailyRecord] = []
     matched = 0
     seen: set[tuple[str, date]] = set()
@@ -376,6 +384,10 @@ def parse_twse_official_daily_payload(
             price_change=_decimal(row.get("Change") or row.get("price_change")),
         )
         if issue is not None:
+            if symbol:
+                rejected_rows.append(OfficialDailyRejectedRow(
+                    symbol=symbol, trade_date=_date(row.get("Date") or row.get("date") or row.get("TradeDate") or row.get("交易日期")), reason_code=issue,
+                ))
             issues[issue] += 1
             continue
         assert record is not None
@@ -395,6 +407,7 @@ def parse_twse_official_daily_payload(
         matched_row_count=matched,
         records=tuple(records),
         issues=_issues(issues),
+        rejected_rows=tuple(rejected_rows),
     )
 
 
@@ -456,6 +469,7 @@ def parse_twse_rwd_official_daily_payload(
     fields, rows = _twse_rwd_daily_table(payload)
     field_index = {name: index for index, name in enumerate(fields)}
     issues: Counter[str] = Counter()
+    rejected_rows: list[OfficialDailyRejectedRow] = []
     records: list[OfficialDailyRecord] = []
     matched = 0
     seen: set[tuple[str, date]] = set()
@@ -490,6 +504,10 @@ def parse_twse_rwd_official_daily_payload(
             ),
         )
         if issue is not None:
+            if symbol:
+                rejected_rows.append(OfficialDailyRejectedRow(
+                    symbol=symbol, trade_date=payload_date, reason_code=issue,
+                ))
             issues[issue] += 1
             continue
         assert record is not None
@@ -509,6 +527,7 @@ def parse_twse_rwd_official_daily_payload(
         matched_row_count=matched,
         records=tuple(records),
         issues=_issues(issues),
+        rejected_rows=tuple(rejected_rows),
     )
 
 
@@ -535,6 +554,7 @@ def parse_tpex_official_daily_payload(
     rows = payload if isinstance(payload, list) else _first_tpex_table(payload)
     payload_date = None if isinstance(payload, list) else _date(payload.get("date"))
     issues: Counter[str] = Counter()
+    rejected_rows: list[OfficialDailyRejectedRow] = []
     records: list[OfficialDailyRecord] = []
     matched = 0
     seen: set[tuple[str, date]] = set()
@@ -578,6 +598,10 @@ def parse_tpex_official_daily_payload(
         matched += 1
         record, issue = _record(venue="TPEX", symbol=symbol, **values)
         if issue is not None:
+            if symbol:
+                rejected_rows.append(OfficialDailyRejectedRow(
+                    symbol=symbol, trade_date=values["trade_date"], reason_code=issue,
+                ))
             issues[issue] += 1
             continue
         assert record is not None
@@ -597,6 +621,7 @@ def parse_tpex_official_daily_payload(
         matched_row_count=matched,
         records=tuple(records),
         issues=_issues(issues),
+        rejected_rows=tuple(rejected_rows),
     )
 
 
@@ -684,6 +709,7 @@ def endpoint_for_resource(resource_id: str) -> str:
 __all__ = [
     "OfficialDailyParseIssue",
     "OfficialDailyParseResult",
+    "OfficialDailyRejectedRow",
     "OfficialDailyRecord",
     "OfficialIssuedSharesRecord",
     "TPEX_DAILY_PARSER_VERSION",

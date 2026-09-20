@@ -26,7 +26,7 @@ from app.market.providers.tw_index_daily_bars import (
     parse_tpex_official_5s_series,
 )
 from app.market.providers import tpex, twse
-from app.market.taiwan_rules import expected_daily_price_date
+from app.market.official_index_contract import expected_taiwan_index_close_date
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     latest_completed_taiwan_session_date,
@@ -93,7 +93,7 @@ def refresh_taiex_official_daily_bar(
         or effective_requested_at.utcoffset() is None
     ):
         raise ValueError("requested_at must be timezone-aware")
-    expected_date = expected_daily_price_date(now=effective_requested_at)
+    expected_date = expected_taiwan_index_close_date(now=effective_requested_at)
     if trade_date != expected_date:
         raise ValueError(
             "TAIEX official daily refresh trade_date must equal latest released "

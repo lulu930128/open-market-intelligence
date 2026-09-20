@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import asdict
+import hashlib
+import json
 from typing import Any
 
 from app.config import settings
@@ -57,6 +59,12 @@ class TechnicalAnalysisParameters:
     atr_expansion_multiplier: float
     atr_expansion_min_pct: float
     bollinger_squeeze_bandwidth_pct: float
+
+    @property
+    def revision(self) -> str:
+        """Content identity of the resolved, immutable calculation parameters."""
+        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @property
     def ma_windows_text(self) -> str:
@@ -567,6 +575,7 @@ def build_taiwan_technical_parameter_contract(
     return {
         "contract_version": "tw.technical.parameters.v1",
         "authority": "backend",
+        "parameter_revision": resolved.revision,
         "defaults": defaults,
         "ranges": {
             "period": {"min": 1, "max": MAX_WINDOW, "step": 1},

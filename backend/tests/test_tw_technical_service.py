@@ -44,11 +44,11 @@ INSTRUMENT = InstrumentKey(
 )
 
 
-def _series(*, technical_eligible: bool = True) -> TaiwanBarSeriesRead:
+def _series(*, technical_eligible: bool = True, count: int = 80) -> TaiwanBarSeriesRead:
     start = datetime(2026, 6, 1, tzinfo=TAIPEI)
     bars: list[BarObservation] = []
     states: list[TaiwanBarOutwardState] = []
-    for offset in range(80):
+    for offset in range(count):
         bar_start = start + timedelta(days=offset)
         price = Decimal("100") + Decimal(offset) / Decimal("2")
         bar = BarObservation(
@@ -413,15 +413,131 @@ def test_short_history_is_observable_but_not_decision_usable() -> None:
     assert "TW_TECHNICAL_INSUFFICIENT_BARS" in result.input_quality["reason_codes"]
 
 
-def test_history_gap_blocks_even_when_indicator_warmup_is_complete() -> None:
+def test_recent_gap_blocks_even_when_indicator_warmup_is_complete() -> None:
     series = _series()
-    # June 10 is a trading day inside this otherwise sufficient calculation window.
+    # July 15 is a trading day inside the latest 60-bar dependency window.
     gapped = series.model_copy(update={
-        "bars": series.bars[:9] + series.bars[10:],
-        "bar_states": series.bar_states[:9] + series.bar_states[10:],
+        "bars": series.bars[:44] + series.bars[45:],
+        "bar_states": series.bar_states[:44] + series.bar_states[45:],
     })
     result = TaiwanTechnicalService().calculate(gapped)
     assert result.warmup["ma"]["status"] == "ready"
     assert result.input_quality["missing_trading_day_count"] == 1
     assert not result.decision_usable
-    assert "TW_TECHNICAL_HISTORY_GAP" in result.input_quality["reason_codes"]
+    assert "TW_TECHNICAL_DECISION_WINDOW_GAP" in result.input_quality["reason_codes"]
+
+
+def test_early_gap_is_history_warning_outside_current_decision_window() -> None:
+    series = _series(count=400)
+    gapped = series.model_copy(update={
+        "bars": series.bars[:9] + series.bars[11:],
+        "bar_states": series.bar_states[:9] + series.bar_states[11:],
+        "history": series.history.model_copy(update={"requested_coverage_satisfied": False}),
+    })
+    result = TaiwanTechnicalService().calculate(gapped)
+    assert result.decision_usable
+    assert result.input_quality["status"] == "ready"
+    assert result.input_quality["decision_window"]["available_bars"] == 60
+    assert result.input_quality["decision_window"]["missing_trading_day_count"] == 0
+    assert result.input_quality["history_coverage"]["missing_trading_day_count"] == 2
+    assert result.input_quality["history_coverage"]["status"] == "partial"
+    assert "TW_TECHNICAL_HISTORY_GAP_OUTSIDE_DECISION_WINDOW" in result.warnings
+
+
+def _period_series(interval: str, count: int = 80) -> TaiwanBarSeriesRead:
+    series = _series(count=count)
+    bars, states = [], []
+    for index, (bar, state) in enumerate(zip(series.bars, series.bar_states)):
+        if interval == "1w":
+            start = datetime(2020, 1, 6, tzinfo=TAIPEI) + timedelta(weeks=index)
+            end = start + timedelta(days=4, hours=13, minutes=30)
+        else:
+            year, month = divmod(2020 * 12 + index, 12)
+            start = datetime(year, month + 1, 1, tzinfo=TAIPEI)
+            end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        bars.append(bar.model_copy(update={"interval": interval, "start_at": start, "end_at": end}))
+        states.append(state.model_copy(update={"start_at": start, "component_missing_trading_day_count": 0}))
+    return series.model_copy(update={
+        "requested_interval": interval, "derived": True,
+        "bars": tuple(bars), "bar_states": tuple(states),
+        "history": series.history.model_copy(update={"requested_coverage_satisfied": False}),
+    })
+
+
+@pytest.mark.parametrize("interval,count", [("1w", 179), ("1mo", 119)])
+def test_period_history_shortfall_does_not_block_completed_warmup(interval, count) -> None:
+    result = TaiwanTechnicalService().calculate(_period_series(interval, count))
+    assert result.decision_usable
+    assert result.input_quality["decision_window"]["continuous"]
+    assert result.input_quality["history_coverage"]["requested_complete"] is False
+    assert "TW_TECHNICAL_HISTORY_INCOMPLETE" in result.warnings
+
+
+@pytest.mark.parametrize("interval", ["1w", "1mo"])
+@pytest.mark.parametrize("offset,usable", [(5, True), (-5, False)])
+def test_period_component_gap_qualifies_only_recent_window(interval, offset, usable) -> None:
+    series = _period_series(interval)
+    states = list(series.bar_states)
+    states[offset] = states[offset].model_copy(update={"component_missing_trading_day_count": 1})
+    result = TaiwanTechnicalService().calculate(series.model_copy(update={"bar_states": tuple(states)}))
+    assert result.decision_usable is usable
+    assert result.input_quality["history_coverage"]["missing_trading_day_count"] == 1
+    if not usable:
+        assert "TW_TECHNICAL_DECISION_WINDOW_GAP" in result.input_quality["reason_codes"]
+
+
+@pytest.mark.parametrize("interval", ["1w", "1mo"])
+def test_missing_whole_period_inside_window_blocks(interval) -> None:
+    series = _period_series(interval)
+    result = TaiwanTechnicalService().calculate(series.model_copy(update={
+        "bars": series.bars[:40] + series.bars[41:],
+        "bar_states": series.bar_states[:40] + series.bar_states[41:],
+    }))
+    assert not result.decision_usable
+    assert "TW_TECHNICAL_DECISION_WINDOW_GAP" in result.input_quality["reason_codes"]
+
+
+@pytest.mark.parametrize("interval", ["1w", "1mo"])
+def test_current_period_does_not_complete_decision_warmup(interval) -> None:
+    series = _period_series(interval, 60)
+    last = series.bars[-1]
+    partial = last.model_copy(update={"end_at": last.start_at + timedelta(days=1, hours=13)})
+    result = TaiwanTechnicalService().calculate(series.model_copy(update={"bars": (*series.bars[:-1], partial)}))
+    assert result.decision_bar_count == 59
+    assert not result.decision_usable
+    assert "TW_TECHNICAL_INSUFFICIENT_BARS" in result.input_quality["reason_codes"]
+
+
+@pytest.mark.parametrize("interval", ["1w", "1mo"])
+def test_unknown_recent_period_component_coverage_fails_closed(interval) -> None:
+    series = _period_series(interval)
+    state = series.bar_states[-3].model_copy(update={"component_missing_trading_day_count": None})
+    result = TaiwanTechnicalService().calculate(series.model_copy(update={
+        "bar_states": (*series.bar_states[:-3], state, *series.bar_states[-2:]),
+    }))
+    assert not result.decision_usable
+    assert "TW_TECHNICAL_COMPONENT_COVERAGE_UNKNOWN" in result.input_quality["reason_codes"]
+
+
+def test_recent_bar_order_is_blocking_even_with_enough_history() -> None:
+    series = _series()
+    bars = (*series.bars[:-3], series.bars[-2], series.bars[-3], series.bars[-1])
+    result = TaiwanTechnicalService().calculate(series.model_copy(update={"bars": bars}))
+    assert not result.decision_usable
+    assert "TW_TECHNICAL_BAR_ORDER_INVALID" in result.input_quality["reason_codes"]
+
+
+@pytest.mark.parametrize("interval", ["1w", "1mo"])
+def test_partial_period_changes_observation_not_completed_structures_or_revision(interval) -> None:
+    series = _period_series(interval)
+    last = series.bars[-1]
+    partial = last.model_copy(update={"end_at": last.start_at + timedelta(days=1, hours=13)})
+    first = TaiwanTechnicalService().calculate(series.model_copy(update={"bars": (*series.bars[:-1], partial)}))
+    changed = partial.model_copy(update={"close_price": partial.close_price + Decimal("2")})
+    second = TaiwanTechnicalService().calculate(series.model_copy(update={"bars": (*series.bars[:-1], changed)}))
+    assert first.decision_bar_count == 79
+    assert first.decision_usable and second.decision_usable
+    assert first.technical_revision == second.technical_revision
+    assert first.structures == second.structures
+    assert first.signals == second.signals
+    assert first.points[-1]["close"] != second.points[-1]["close"]

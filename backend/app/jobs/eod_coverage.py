@@ -9,7 +9,7 @@ from app.config import settings
 from app.jobs.market_refresh_priority import active_market_refresh_priorities
 from app.jobs import service as job_service
 from app.jobs.job_types import MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE
-from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
+from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue, qualify_taiwan_eod_universe
 from app.market_data.eod_coverage import (
     eod_reconcile_bounds,
     normalize_coverage_market,
@@ -34,6 +34,7 @@ def run_eod_coverage_reconcile_job(
             db,
             market=market,
             repair=repair,
+            taiwan_daily_qualifier=qualify_taiwan_eod_universe,
             expected_trade_date=expected_trade_date,
             job_id=job_id,
             max_symbols=max_symbols,

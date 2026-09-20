@@ -1108,7 +1108,8 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             now=datetime(2026, 7, 20, 13, 46, tzinfo=taipei),
         )
 
-        self.assertFalse(complete_view["refresh_recommended"])
+        # Breadth readiness alone does not prove a qualified official close.
+        self.assertTrue(complete_view["refresh_recommended"])
 
     def test_breadth_status_contract_marks_partial_coverage(self) -> None:
         payload = indices._with_breadth_status_contract(

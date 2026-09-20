@@ -517,8 +517,9 @@ def test_taiwan_platform_preserves_public_shape_with_neutral_coordinator() -> No
         warmup_db: Session,
         stock_id: str,
         requested_at: datetime,
-    ) -> None:
+    ):
         warmup_calls.append((warmup_db, stock_id, requested_at))
+        return SimpleNamespace(id=7), True
 
     try:
         state = acquire_taiwan_realtime_quote_lease(
@@ -537,6 +538,7 @@ def test_taiwan_platform_preserves_public_shape_with_neutral_coordinator() -> No
 
     assert state.lease_id == "public-platform-token"
     assert state.stock_id == "2330"
+    assert state.materialization_job_id == 7
     assert state.provider == "kgi_superpy"
     assert state.owner_kind == "frontend_viewer"
 

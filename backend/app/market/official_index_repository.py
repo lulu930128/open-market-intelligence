@@ -17,8 +17,8 @@ from app.db.models import (
 from app.market.official_index_contract import (
     TPEX_INDEX_SOURCE_NAME,
     TWSE_INDEX_SOURCE_NAME,
+    taiwan_index_close_release_at,
 )
-from app.market.taiwan_rules import taiwan_daily_price_release_at
 from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_PROVIDER, TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market_data.contracts import (
     AuthorityClass,
@@ -107,7 +107,7 @@ class TaiwanOfficialIndexRepository:
                 rows_examined=1,
                 limitations=("INDEX_RECEIPT_AFTER_REQUESTED_AT",),
             )
-        release_at = taiwan_daily_price_release_at(trade_date).astimezone(
+        release_at = taiwan_index_close_release_at(trade_date).astimezone(
             timezone.utc
         )
         if fetched_at < release_at:

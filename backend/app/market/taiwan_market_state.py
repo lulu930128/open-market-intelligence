@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 import json
 from statistics import median
@@ -265,6 +266,12 @@ def _eligible_session_trade_value(
         }
 
     breadth_value = _as_int(breadth.get("trade_value"))
+    breadth_authority_known = (
+        breadth.get("trade_value_is_estimate") is True
+        or breadth.get("official_flag") is True and breadth.get("trade_value_is_estimate") is False
+    )
+    if breadth_value is not None and not breadth_authority_known:
+        breadth_value = None
     if breadth_value is not None:
         is_estimate = bool(breadth.get("trade_value_is_estimate"))
         return {
@@ -284,8 +291,14 @@ def _eligible_session_trade_value(
 
     item_trade_date = _as_trade_date(item.get("time") or item.get("trade_date"))
     item_value = _as_int(item.get("trade_value"))
+    item_authority_known = (
+        item.get("trade_value_is_estimate") is True
+        or (item.get("official_flag") is True or item.get("official") is True)
+        and item.get("trade_value_is_estimate") is not True
+    )
     if (
         item_value is not None
+        and item_authority_known
         and item_trade_date == trade_date
         and (
             finalized
@@ -617,7 +630,8 @@ def _complete_minute_groups(
 
 def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
     status = str(row.trade_value_quality_status or "unknown").strip().lower()
-    if not row.lineage_complete or row.cumulative_trade_value is None or status not in {"ready", "estimated"}:
+    value = _as_int(row.cumulative_trade_value)
+    if not row.lineage_complete or value is None or value < 0 or status not in {"ready", "estimated"}:
         return False
     # Historical v2 rows may already contain a stale component marked ready.
     # Validate persisted lineage on reads without rewriting historical data.
@@ -632,6 +646,7 @@ def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
         return False
     return bool(
         event_at is not None
+        and row.trade_date == _row_minute_at(row).date()
         and event_at.replace(second=0, microsecond=0) == _row_minute_at(row)
     )
 
@@ -678,6 +693,9 @@ def _baseline_payload(
     *,
     dates: list[str] | None = None,
     authorities: list[str] | None = None,
+    comparison_minute: str | None = None,
+    comparison_trade_date: str | None = None,
+    component_scope: dict[str, list[Any]] | None = None,
 ) -> dict[str, Any]:
     selected = values[-days:]
     selected_dates = (dates or [])[-len(selected) :] if selected else []
@@ -691,6 +709,9 @@ def _baseline_payload(
         if sample_complete
         and current_value is not None
         and baseline not in {None, 0}
+        and comparison_minute is not None and comparison_trade_date is not None
+        and component_scope is not None and set(component_scope) == SUPPORTED_MARKETS
+        and all(scope[0] and scope[1] and isinstance(scope[2], bool) for scope in component_scope.values())
         else None
     )
     authority_set = {value for value in selected_authorities if value}
@@ -740,7 +761,11 @@ def _baseline_payload(
             for index, value in enumerate(selected)
         ],
         "median_cumulative_trade_value": baseline,
+        "comparison_minute": comparison_minute,
+        "comparison_trade_date": comparison_trade_date,
+        "component_scope": component_scope or {},
         "pace_ratio": ratio,
+        "decision_usable": ratio is not None,
         "pace_ratio_status": (
             "calculated"
             if ratio is not None
@@ -749,6 +774,126 @@ def _baseline_payload(
             else "current_or_baseline_unavailable"
         ),
     }
+
+
+def compose_taiwan_market_volume_state(
+    volume_state: dict[str, Any], *, breadth: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Read-only composition of canonical values and comparable baselines."""
+    output = deepcopy(volume_state)
+    current = _as_int(output.get("current_cumulative_trade_value"))
+    if current is not None and current < 0:
+        current = None
+    if current is None:
+        markets = (breadth or {}).get("markets") or {}
+        components = []
+        for market in ("TWSE", "TPEX"):
+            item = markets.get(market) if isinstance(markets, dict) else None
+            if not isinstance(item, dict):
+                continue
+            value = _as_int(item.get("trade_value"))
+            if value is None or value < 0:
+                continue
+            event = _as_taiwan_datetime(item.get("as_of") or item.get("snapshot_as_of"))
+            components.append({
+                **item, "market": market, "cumulative_trade_value": value,
+                "as_of": event.isoformat() if event else None,
+                "comparison_minute": event.strftime("%H:%M") if event else None,
+                "currency": "TWD", "trade_value_unit": "TWD",
+                # Missing authority is unknown, never implicitly official.
+                "official_flag": item.get("official_flag") is True,
+            })
+        dates = {_as_trade_date(item.get("trade_date")) for item in components}
+        minutes = {item["comparison_minute"] for item in components}
+        scopes = {item.get("scope") for item in components}
+        target_date = _as_trade_date(output.get("trade_date"))
+        qualified = (
+            len(components) == 2 and len(dates) == 1 and None not in dates
+            and (target_date is None or next(iter(dates)) >= target_date)
+            and len(minutes) == 1 and None not in minutes
+            and len(scopes) == 1 and scopes <= {
+                "full_market", "full_market_registered_stock_universe", "registered_universe",
+                "active_ordinary_stock_universe",
+            }
+            and all(
+                _as_taiwan_datetime(item["as_of"]).date() in dates
+                and taiwan_market_session_phase(_as_taiwan_datetime(item["as_of"])) in {"regular", "closing_auction", "close_resolution", "post_close"}
+                and item.get("trade_value_semantics") not in {None, "", "unavailable"}
+                and item.get("trade_value_is_estimate") in (True, False)
+                and item.get("trade_value_is_estimate") is not None
+                and (item.get("trade_value_is_estimate") is True or item["official_flag"])
+                for item in components
+            )
+        )
+        available = sum(item["cumulative_trade_value"] for item in components) if components else None
+        current = available if qualified else None
+        output.update(
+            current_cumulative_trade_value=current,
+            available_cumulative_trade_value=available,
+            trade_value_available=available is not None,
+            trade_value_complete=qualified,
+            trade_value_coverage_status="complete" if qualified else "partial" if components else "missing",
+            included_markets=[item["market"] for item in components],
+            missing_markets=[market for market in ("TWSE", "TPEX") if market not in {item["market"] for item in components}],
+            trade_value_components=components,
+        )
+        authorities = {
+            "estimated" if item.get("trade_value_is_estimate") is True
+            else "official" if item["official_flag"] else "unavailable"
+            for item in components
+        }
+        authority = next(iter(authorities)) if len(authorities) == 1 else "mixed" if authorities else "unavailable"
+        output["trade_value_authority_status"] = authority
+        output["trade_value_status"] = f"{authority}_complete" if qualified else output["trade_value_coverage_status"]
+        if qualified:
+            prior_minute = output.get("as_of")
+            output.update(
+                current_value_source="canonical_market_breadth",
+                trade_date=next(iter(dates)).isoformat(),
+                as_of=max(item["as_of"] for item in components),
+                comparison_minute=next(iter(minutes)), markets=components,
+                official_cumulative_trade_value=current if authority == "official" else None,
+                estimated_cumulative_trade_value=current if authority in {"estimated", "mixed"} else None,
+                trade_value_estimate=current if authority in {"estimated", "mixed"} else None,
+                trade_value_estimate_method="sum_market_estimates" if authority in {"estimated", "mixed"} else "not_estimated",
+            )
+            # An independently selected current value cannot reuse a delta's old endpoint.
+            if prior_minute != output["as_of"]:
+                for key in ("previous_minute_cumulative_trade_value", "one_minute_trade_value_change"):
+                    output[key] = None
+                    output.setdefault("field_status", {})[key] = {"status": "missing", "reason": "Current component selection differs from the minute-state delta endpoint."}
+            output["warnings"] = [warning for warning in output.get("warnings") or [] if warning != "TWSE and TPEX cumulative trade value are not both available at the selected minute."]
+        output.setdefault("field_status", {})["current_cumulative_trade_value"] = {
+            "status": "available" if qualified else "missing",
+            "source": "canonical_market_breadth" if qualified else None,
+            "reason": None if qualified else "TWSE and TPEX values require matching date, minute, scope and explicit authority.",
+        }
+    component_scope = {
+        item["market"]: [item.get("scope"), item.get("trade_value_semantics"), item.get("trade_value_is_estimate")]
+        for item in output.get("markets") or [] if isinstance(item, dict) and item.get("market")
+    }
+    for days in (5, 20):
+        key = f"same_time_baseline_{days}d"
+        baseline = output.setdefault(key, {})
+        median_value = _as_float(baseline.get("median_cumulative_trade_value"))
+        sample_days = _as_int(baseline.get("sample_days")) or 0
+        comparable = bool(
+            current is not None and median_value is not None and median_value > 0
+            and sample_days >= days and baseline.get("sample_status") == "complete"
+            and output.get("comparison_minute") is not None
+            and baseline.get("comparison_minute") == output["comparison_minute"]
+            and baseline.get("comparison_trade_date") == output.get("trade_date")
+            and set(component_scope) == SUPPORTED_MARKETS
+            and all(scope[0] and scope[1] and isinstance(scope[2], bool) for scope in component_scope.values())
+            and baseline.get("component_scope") == component_scope
+        )
+        baseline.update(
+            pace_ratio=current / median_value if comparable else None,
+            decision_usable=comparable,
+            pace_ratio_status="calculated" if comparable else "insufficient_history" if sample_days < days else "incomparable_current_or_baseline",
+        )
+    output["status"] = "ready" if output["same_time_baseline_5d"]["decision_usable"] else "partial"
+    return output
 
 
 def read_taiwan_market_volume_state(
@@ -785,6 +930,7 @@ def read_taiwan_market_volume_state(
             "same_time_baseline_20d": _baseline_payload(None, [], 20),
             "baseline_readiness_status": "warming_up",
             "available_sample_days": 0,
+            "baseline_diagnostics": {"prior_session_count": 0, "usable_sample_count": 0, "reason": "NO_CURRENT_SESSION"},
             "expected_5d_ready_after_sessions": 5,
             "expected_20d_ready_after_sessions": 20,
             "next_fill": "scheduler_accumulation",
@@ -899,24 +1045,51 @@ def read_taiwan_market_volume_state(
     historical_dates: list[str] = []
     historical_authorities: list[str] = []
     comparison_time = selected_minute.time()
+    component_scope = {
+        market: [row.breadth_scope, row.trade_value_semantics, row.trade_value_is_estimate]
+        for market, row in selected_rows.items()
+    }
+    baseline_diagnostics = {
+        "prior_session_count": len(rows_by_date), "usable_sample_count": 0,
+        "missing_comparison_minute": 0, "missing_market_component": 0,
+        "scope_mismatch": 0, "unusable_value_or_lineage": 0,
+        "trade_date_mismatch": 0,
+    }
     for trade_date_value in sorted(rows_by_date):
-        groups = _complete_minute_groups(rows_by_date[trade_date_value])
-        candidates = [
-            minute_at
-            for minute_at, rows_by_market in groups.items()
-            if minute_at.time() <= comparison_time
-            and SUPPORTED_MARKETS.issubset(rows_by_market)
-        ]
+        session_rows = rows_by_date[trade_date_value]
+        if any(_row_minute_at(row).time() == comparison_time
+               and row.trade_date != _row_minute_at(row).date() for row in session_rows):
+            baseline_diagnostics["trade_date_mismatch"] += 1
+            continue
+        groups = _complete_minute_groups(session_rows)
+        candidates = [minute_at for minute_at in groups if minute_at.time() == comparison_time]
         if not candidates:
+            baseline_diagnostics["missing_comparison_minute"] += 1
             continue
         selected_history_rows = groups[max(candidates)]
+        if any(row.trade_date != _row_minute_at(row).date() for row in selected_history_rows.values()):
+            baseline_diagnostics["trade_date_mismatch"] += 1
+            continue
+        if not SUPPORTED_MARKETS.issubset(selected_history_rows):
+            baseline_diagnostics["missing_market_component"] += 1
+            continue
+        if any(component_scope.get(market) != [row.breadth_scope, row.trade_value_semantics, row.trade_value_is_estimate]
+               for market, row in selected_history_rows.items()):
+            baseline_diagnostics["scope_mismatch"] += 1
+            continue
         value = _combined_trade_value(selected_history_rows)
-        if value is not None:
-            historical_values.append(value)
-            historical_dates.append(trade_date_value.isoformat())
-            historical_authorities.append(
-                _trade_value_authority_status(selected_history_rows)
-            )
+        if value is None:
+            baseline_diagnostics["unusable_value_or_lineage"] += 1
+            continue
+        historical_values.append(value)
+        historical_dates.append(trade_date_value.isoformat())
+        historical_authorities.append(_trade_value_authority_status(selected_history_rows))
+    baseline_diagnostics["usable_sample_count"] = len(historical_values)
+    baseline_diagnostics["reason"] = (
+        "NO_PRIOR_SESSIONS" if not rows_by_date else
+        "NO_COMPARABLE_SAMPLES" if not historical_values else
+        "WARMING_UP" if len(historical_values) < 5 else "AVAILABLE"
+    )
     historical_values = historical_values[-max(lookback_days, 20) :]
     historical_dates = historical_dates[-max(lookback_days, 20) :]
     historical_authorities = historical_authorities[-max(lookback_days, 20) :]
@@ -930,6 +1103,9 @@ def read_taiwan_market_volume_state(
             {
                 "market": market,
                 "index_id": row.index_id,
+                "scope": row.breadth_scope,
+                "trade_date": row.trade_date.isoformat(),
+                "as_of": _row_minute_at(row).isoformat(),
                 "currency": "TWD",
                 "trade_value_unit": "TWD",
                 "cumulative_trade_value": row.cumulative_trade_value,
@@ -1041,7 +1217,7 @@ def read_taiwan_market_volume_state(
         "currency": "TWD",
         "trade_value_unit": "TWD",
         "comparison_minute": selected_minute.strftime("%H:%M"),
-        "calculation_basis": "TWSE+TPEX cumulative trade value compared with prior sessions at or before the same minute",
+        "calculation_basis": "TWSE+TPEX cumulative trade value compared with prior sessions at the same minute and component scope",
         "current_cumulative_trade_value": current_value,
         "official_cumulative_trade_value": official_current_value,
         "estimated_cumulative_trade_value": estimated_current_value,
@@ -1078,6 +1254,9 @@ def read_taiwan_market_volume_state(
             5,
             dates=historical_dates,
             authorities=historical_authorities,
+            comparison_minute=selected_minute.strftime("%H:%M"),
+            comparison_trade_date=latest_trade_date.isoformat(),
+            component_scope=component_scope,
         ),
         "same_time_baseline_20d": _baseline_payload(
             current_value,
@@ -1085,9 +1264,13 @@ def read_taiwan_market_volume_state(
             20,
             dates=historical_dates,
             authorities=historical_authorities,
+            comparison_minute=selected_minute.strftime("%H:%M"),
+            comparison_trade_date=latest_trade_date.isoformat(),
+            component_scope=component_scope,
         ),
         "baseline_readiness_status": baseline_readiness_status,
         "available_sample_days": len(historical_values),
+        "baseline_diagnostics": baseline_diagnostics,
         "expected_5d_ready_after_sessions": max(5 - len(historical_values), 0),
         "expected_20d_ready_after_sessions": max(20 - len(historical_values), 0),
         "next_fill": (

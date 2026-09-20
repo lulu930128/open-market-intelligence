@@ -63,7 +63,10 @@ def test_limit_does_not_require_direction_reference_and_mapping_is_explained():
     assert payload["advance_count"] == 0
     assert payload["limits"]["up"]["observed_count"] == 1
     assert payload["classification_diagnostics"]["reference_price_missing"] == 1
-    assert sum(payload["classification_diagnostics"].values()) == payload["coverage_reason_counts"]["mapping_error"] == 2
+    assert sum(payload["classification_diagnostics"].values()) == 2
+    assert payload["coverage_reason_counts"]["mapping_error"] == 0
+    assert payload["coverage_reason_counts"]["reference_price_unavailable"] == 1
+    assert payload["coverage_reason_counts"]["actual_trade_unavailable"] == 1
 
 
 def test_future_and_previous_day_states_cannot_supply_a_price():
@@ -104,6 +107,9 @@ def test_persisted_state_survives_new_reader_and_preserves_original_receipt():
         public_quote = read_taiwan_quote_evidence_projection(db=db, stock_id="2330", requested_at=NOW)
         assert public_quote["last_trade_price"] == float(states["2330"]["price"])
         assert public_quote["headline_price"] == float(states["2330"]["price"])
+        assert public_quote["actual_trade_occurred"] is True
+        assert public_quote["instrument_phase"] == "regular_traded"
+        assert public_quote["observation_reason_code"] == "ACTUAL_TRADE_PRICE_AVAILABLE"
         next_payload = _build_payload("TWSE", ["2330", "2454"], [message(z="-", tv="0", t="10:20:00")], 0, prior_states=states)
         acquire(next_payload, NOW + timedelta(minutes=5))
         recovered = read_breadth_price_states(db, venue="TWSE", requested_at=NOW + timedelta(minutes=6))

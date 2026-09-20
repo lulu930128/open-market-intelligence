@@ -296,13 +296,20 @@ def _signal_viewer_baseline_warmup(
     if owner_kind != "frontend_viewer" or enqueuer is None:
         return state
     try:
-        enqueuer(db, state.stock_id, requested_at)
+        job, _created = enqueuer(db, state.stock_id, requested_at)
+        if job is not None:
+            return state.model_copy(update={"materialization_job_id": job.id})
     except Exception as exc:
         logger.warning(
             "Taiwan viewer baseline warmup signal failed stock_id=%s: %s",
             state.stock_id,
             exc,
         )
+        return state.model_copy(update={"materialization_error_code": (
+            "TW_INTRADAY_DEMAND_SCHEMA_NOT_READY"
+            if str(exc) == "TW_INTRADAY_DEMAND_SCHEMA_NOT_READY"
+            else "TW_INTRADAY_DEMAND_COMMAND_FAILED"
+        )})
     return state
 
 
@@ -411,14 +418,20 @@ def heartbeat_taiwan_realtime_quote_lease(
     lease_id: str,
     *,
     coordinator: ViewerLeaseCoordinator | None = None,
+    baseline_warmup_enqueuer: TaiwanBaselineWarmupEnqueuer | None = None,
+    requested_at: datetime | None = None,
 ) -> ViewerLeaseState | None:
     state = (coordinator or _TAIWAN_REALTIME_VIEWER_LEASES).heartbeat(lease_id)
-    if state is None or coordinator is not None:
+    if state is None:
         return state
-    return _sync_if_live(
-        db,
-        state,
-        requested_at=datetime.now(TAIWAN_TZ),
+    now = requested_at or datetime.now(TAIWAN_TZ)
+    if coordinator is None:
+        state = _sync_if_live(db, state, requested_at=now)
+    if not state.lease_id:
+        return state
+    return _signal_viewer_baseline_warmup(
+        db, state, requested_at=now, owner_kind=state.owner_kind,
+        enqueuer=baseline_warmup_enqueuer,
     )
 
 

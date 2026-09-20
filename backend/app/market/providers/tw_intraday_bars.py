@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 from app.market.providers import http_get
+from app.observability.provider_http import ProviderHttpError
 from app.market.tw_intraday_capabilities import (
     NSTOCK_INTRADAY_PARSER_VERSION,
     NSTOCK_INTRADAY_PROVIDER,
@@ -61,6 +62,7 @@ class IntradayProviderPayload:
     status_code: int | None = None
     content_type: str | None = None
     error: str | None = None
+    retry_after_seconds: int | None = None
 
 
 Clock = Callable[[], datetime]
@@ -238,6 +240,11 @@ def _result(
         if status is AcquisitionStatus.PARTIAL
         else ("PROVIDER_REQUEST_OR_PARSE_FAILED",)
     )
+    retry_after = payload.retry_after_seconds
+    if retry_after is None and payload.status_code == 429:
+        retry_after = 180
+    if retry_after is not None:
+        limitations = (*limitations, f"PROVIDER_RETRY_AFTER_SECONDS:{max(0, retry_after)}")
     return BarAcquisitionResult(
         summary=AcquisitionSummary(
             attempted=True,
@@ -356,6 +363,8 @@ class NStockIntradayAdapter:
                 status="failed",
                 url=NSTOCK_MINUTE_URL,
                 error=f"{type(exc).__name__}: {exc}"[:1000],
+                status_code=exc.http_status_code if isinstance(exc, ProviderHttpError) else None,
+                retry_after_seconds=exc.retry_after_seconds if isinstance(exc, ProviderHttpError) else None,
             )
         bars: list[BarObservation] = []
         parse_error = None
@@ -549,6 +558,8 @@ class YahooIntradayAdapter:
                     symbol=_yahoo_symbol(instrument.symbol, instrument.venue)
                 ),
                 error=f"{type(exc).__name__}: {exc}"[:1000],
+                status_code=exc.http_status_code if isinstance(exc, ProviderHttpError) else None,
+                retry_after_seconds=exc.retry_after_seconds if isinstance(exc, ProviderHttpError) else None,
             )
         bars: list[BarObservation] = []
         parse_error = None

@@ -33,6 +33,7 @@ from app.market.tw_bar_contracts import (
     TPEX_DERIVED_DAILY_SOURCE,
 )
 from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.market.official_index_contract import taiwan_index_close_release_at
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.candidate_repository import (
     CandidateReadLimitExceeded,
@@ -61,6 +62,7 @@ from app.sources.defaults import (
 
 _RAW_FETCH_LINEAGE_COLUMNS = (
     RawFetchResult.id,
+    RawFetchResult.source_id,
     RawFetchResult.fetched_at,
     RawFetchResult.content_hash,
     RawFetchResult.parser_version,
@@ -89,6 +91,7 @@ class TaiwanOfficialDailyUniverseRead:
     rows_rejected: int = 0
     duplicate_candidate_count: int = 0
     limitations: tuple[str, ...] = ()
+    rejection_reasons: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,8 +182,13 @@ def _receipt_is_release_qualified(
     *,
     trade_date: date,
     fetched_at: datetime,
+    instrument_type: InstrumentType = InstrumentType.STOCK,
 ) -> bool:
-    release_at = taiwan_daily_price_release_at(trade_date).astimezone(timezone.utc)
+    release_at = (
+        taiwan_index_close_release_at(trade_date)
+        if instrument_type is InstrumentType.INDEX
+        else taiwan_daily_price_release_at(trade_date)
+    ).astimezone(timezone.utc)
     return _as_aware_utc(fetched_at) >= release_at
 
 
@@ -247,6 +255,7 @@ class TaiwanOfficialDailyBarRepository:
                 SourceRegistry,
                 MarketDailyPriceLineage,
             )
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
             .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
             .outerjoin(
@@ -270,7 +279,7 @@ class TaiwanOfficialDailyBarRepository:
         rows = (
             query.order_by(MarketDailyPrice.trade_date.desc(), MarketDailyPrice.id.desc())
             .limit(5000 * len(bindings) + 1)
-            .all()
+            .yield_per(min(max_rows, 256))
         )
         eligible_dates: list[date] = []
         seen_dates: set[date] = set()
@@ -332,6 +341,7 @@ class TaiwanOfficialDailyBarRepository:
                         and _receipt_is_release_qualified(
                             trade_date=row.trade_date,
                             fetched_at=raw.fetched_at,
+                            instrument_type=instrument.instrument_type,
                         )
                     )
                 )
@@ -447,9 +457,17 @@ class TaiwanOfficialDailyBarRepository:
                         )
                     )
                     continue
+            elif raw_result is not None and raw_result.source_id != row.source_id:
+                rejections.append(CandidateRowRejection(
+                    provider=binding.provider, source=source.source_name,
+                    storage_row_id=row.id, raw_result_id=raw_result.id,
+                    event_date=row.trade_date, reason_code="DAILY_LINEAGE_IDENTITY_MISMATCH",
+                ))
+                continue
             elif raw_result is None or not _receipt_is_release_qualified(
                 trade_date=row.trade_date,
                 fetched_at=raw_result.fetched_at,
+                instrument_type=instrument.instrument_type,
             ):
                 rejections.append(
                     CandidateRowRejection(
@@ -788,11 +806,10 @@ class TaiwanOfficialDailyBarRepository:
                 StockMaster,
             )
             .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
-            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
+            .outerjoin(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
             .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)
             .filter(MarketDailyPrice.trade_date == trade_date)
-            .filter(SourceRegistry.source_name.in_(tuple(source_to_binding)))
             .filter(MarketDailyPrice.stock_id.in_(universe_symbols))
             .order_by(
                 MarketDailyPrice.stock_id.asc(),
@@ -809,21 +826,33 @@ class TaiwanOfficialDailyBarRepository:
 
         candidates: dict[str, list[tuple[int, BarObservation]]] = {}
         rejected = 0
+        rejection_reasons: list[tuple[str, str]] = []
         for row, raw_result, source, stock in rows:
+            if source is None or raw_result is None or raw_result.source_id != row.source_id:
+                rejected += 1
+                rejection_reasons.append((row.stock_id, "DAILY_LINEAGE_IDENTITY_MISMATCH"))
+                continue
             binding = source_to_binding.get(source.source_name)
             if binding is None or str(stock.market or "").strip().upper() != binding.venue:
                 rejected += 1
+                rejection_reasons.append((row.stock_id, "DAILY_SOURCE_NOT_QUALIFIED"))
                 continue
             if not _receipt_is_release_qualified(
                 trade_date=row.trade_date,
                 fetched_at=raw_result.fetched_at,
-            ) or _missing_ohlc(row):
+            ):
                 rejected += 1
+                rejection_reasons.append((row.stock_id, "DAILY_RECEIPT_BEFORE_RELEASE"))
+                continue
+            if _missing_ohlc(row):
+                rejected += 1
+                rejection_reasons.append((row.stock_id, "DAILY_REQUIRED_OHLC_MISSING"))
                 continue
             if str(source.reliability_level or "").strip().lower() not in (
                 _TRUSTED_OFFICIAL_RELIABILITY
             ):
                 rejected += 1
+                rejection_reasons.append((row.stock_id, "DAILY_SOURCE_AUTHORITY_UNQUALIFIED"))
                 continue
             instrument_type = (
                 InstrumentType.ETF
@@ -875,6 +904,7 @@ class TaiwanOfficialDailyBarRepository:
                 )
             except (TypeError, ValueError, ValidationError):
                 rejected += 1
+                rejection_reasons.append((row.stock_id, "DAILY_CANONICAL_VALUE_INVALID"))
                 continue
             candidates.setdefault(row.stock_id, []).append(
                 (max(int(source.priority), 0), bar)
@@ -916,9 +946,27 @@ class TaiwanOfficialDailyBarRepository:
             selected_count_by_market=tuple(selected_counts.items()),
             rows_examined=len(rows),
             rows_rejected=rejected,
+            rejection_reasons=tuple(rejection_reasons),
             duplicate_candidate_count=duplicate_count,
             limitations=tuple(limitations),
         )
+
+    def load_official_daily_receipts(
+        self, *, trade_date: date, as_of: datetime, max_receipts_per_source: int = 3,
+    ) -> tuple[tuple[RawFetchResult, SourceRegistry], ...]:
+        """Bounded diagnostic receipts, independent of canonical bar qualification."""
+        if not 1 <= max_receipts_per_source <= 8:
+            raise ValueError("daily diagnostic receipt bound must be between 1 and 8")
+        rows = []
+        for binding in (binding for bindings in _SOURCES_BY_VENUE.values() for binding in bindings):
+            rows.extend(self._db.query(RawFetchResult, SourceRegistry)
+                        .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
+                        .filter(SourceRegistry.source_name == binding.source_name)
+                        .filter(RawFetchResult.fetched_at >= taiwan_daily_price_release_at(trade_date).astimezone(timezone.utc))
+                        .filter(RawFetchResult.fetched_at <= _as_aware_utc(as_of))
+                        .order_by(RawFetchResult.fetched_at.desc(), RawFetchResult.id.desc())
+                        .limit(max_receipts_per_source).all())
+        return tuple(rows)
 
     def latest_market_contribution_date(
         self,

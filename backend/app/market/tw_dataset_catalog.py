@@ -547,7 +547,7 @@ TW_DATASET_CONTRACTS = (
         refresh_operation="tw.refresh_intraday_bars",
         refresh_bounds=_bounds(2, 40, 1, 93),
         repairable=True,
-        postcondition="Provider observations and raw receipts commit atomically, then repository reread resolves bounded bars without presenting a quote snapshot as a bar.",
+        postcondition="Provider observations and raw receipts commit atomically, then TaiwanBarService rereads the full canonical snapshot; coverage is independent of response limits and a quote snapshot is never a bar.",
         lineage=TaiwanDatasetLineageStatus.DERIVED_COMPONENT_LINEAGE,
         lineage_fields=(
             *_CANONICAL_LINEAGE,

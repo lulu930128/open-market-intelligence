@@ -59,6 +59,11 @@ from app.market.providers import fetch_json as provider_fetch_json
 from app.market.providers import http_get
 from app.market.providers import tpex, twse, yahoo
 from app.market.taiwan_rules import expected_daily_price_date
+from app.market.official_index_contract import (
+    expected_taiwan_index_close_date,
+    taiwan_index_close_release_at,
+)
+from app.market.index_resolution import project_taiwan_index_headline
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
@@ -268,7 +273,8 @@ def market_index_summary_needs_reconciliation(
 
     if not is_taiwan_trading_day(local_now.date()):
         return False
-    if local_now.time() < TAIWAN_INDEX_LIVE_REFRESH_END_TIME:
+    expected_date = expected_taiwan_index_close_date(now=local_now)
+    if expected_date != local_now.date() or local_now < taiwan_index_close_release_at(expected_date):
         return False
     if not allow_late and local_now.time() > TAIWAN_INDEX_RECONCILIATION_END_TIME:
         return False
@@ -295,6 +301,17 @@ def market_index_summary_needs_reconciliation(
 
         item_as_of = _summary_payload_as_of(item)
         if item_as_of is None or item_as_of.astimezone(TAIPEI_TZ) < session_close:
+            return True
+
+        # Consume canonical finality; breadth completion cannot confirm a price.
+        headline = project_taiwan_index_headline(item)
+        if not isinstance(headline, dict) or not (
+            headline.get("official_close_confirmed") is True
+            and headline.get("finalization") in {"final", "corrected"}
+            and headline.get("authority") == "official_exchange"
+            and headline.get("compatibility_fallback") is False
+            and _parse_trade_date(headline.get("trade_date")) == expected_date
+        ):
             return True
 
         breadth = item.get("breadth")
@@ -374,7 +391,7 @@ def _summary_cache_view(
         now = now.replace(tzinfo=TAIPEI_TZ)
     else:
         now = now.astimezone(TAIPEI_TZ)
-    expected_date = expected_daily_price_date(now=now)
+    expected_date = expected_taiwan_index_close_date(now=now)
     as_of = _summary_payload_as_of(payload)
     live_age_seconds = (
         max((now - as_of.astimezone(TAIPEI_TZ)).total_seconds(), 0)
@@ -4223,7 +4240,7 @@ def _market_index_chart_freshness(
         latest_data_date = latest_value if isinstance(latest_value, date) else None
 
     local_now = now or datetime.now(TAIPEI_TZ)
-    expected_data_date = expected_daily_price_date(now=local_now)
+    expected_data_date = expected_taiwan_index_close_date(now=local_now)
     if latest_data_date is None:
         return {
             "latest_data_date": None,
@@ -4491,7 +4508,7 @@ def _market_index_summary(
                 )
             return view
 
-        expected_date = expected_daily_price_date()
+        expected_date = expected_taiwan_index_close_date()
         local_indices: list[dict] = []
         local_updated_at: list[datetime] = []
 
@@ -4681,7 +4698,7 @@ def _market_index_summary(
         )
         indices.append(index_payload)
 
-    expected_date = expected_daily_price_date()
+    expected_date = expected_taiwan_index_close_date()
     stale_index_ids = _stale_market_index_ids(
         {"indices": indices},
         expected_date=expected_date,
@@ -4743,6 +4760,7 @@ def _shared_current_market_summary(
         read_taiwan_current_breadth,
         read_taiwan_current_index,
         read_taiwan_breadth_lanes,
+        read_taiwan_completed_auction_breadth,
     )
 
     now = requested_at or datetime.now(TAIPEI_TZ)
@@ -4767,7 +4785,11 @@ def _shared_current_market_summary(
         )
         current = project_taiwan_current_index(index_result)
         breadth = project_taiwan_current_breadth(breadth_result)
+        completed_auctions = read_taiwan_completed_auction_breadth(
+            db, venue=venue, requested_at=now,
+        )
         breadth_lanes = read_taiwan_breadth_lanes(db, venue=venue, requested_at=now)
+        breadth["latest_completed_auctions"] = completed_auctions
         if breadth.get("status") == "missing":
             breadth_payload = None
         else:
@@ -4888,6 +4910,7 @@ def _shared_current_market_summary(
                 "point_count": 0,
                 "points": [],
                 "breadth": breadth_payload,
+                "latest_completed_auctions": completed_auctions,
                 "error_message": None if close is not None else "Current canonical cache is missing.",
                 "acquisition_policy": "cache_only",
                 "current_observation": current,

@@ -435,6 +435,8 @@ class TaiwanAuctionRepository(_RealtimeRepository):
         *,
         max_candidates: int,
         auction_type: AuctionType,
+        trade_date: date | None = None,
+        as_of: datetime | None = None,
     ) -> tuple[PersistedAuctionRead, ...]:
         self._validate_target(instrument)
         if not 1 <= max_candidates <= 8:
@@ -445,6 +447,17 @@ class TaiwanAuctionRepository(_RealtimeRepository):
             .filter(TaiwanStockAuctionSnapshot.market == instrument.venue)
             .filter(TaiwanStockAuctionSnapshot.auction_type == auction_type.value)
         )
+        if trade_date is not None:
+            base_query = base_query.filter(TaiwanStockAuctionSnapshot.trade_date == trade_date)
+        if as_of is not None:
+            base_query = base_query.join(
+                RawFetchResult, RawFetchResult.id == TaiwanStockAuctionSnapshot.raw_result_id,
+            ).filter(
+                TaiwanStockAuctionSnapshot.event_at <= _as_taiwan(as_of),
+                TaiwanStockAuctionSnapshot.received_at <= _as_utc(as_of),
+                TaiwanStockAuctionSnapshot.fetched_at <= _as_utc(as_of),
+                RawFetchResult.fetched_at <= _as_utc(as_of),
+            )
         rows: list[TaiwanStockAuctionSnapshot] = []
         for binding in sorted(
             (

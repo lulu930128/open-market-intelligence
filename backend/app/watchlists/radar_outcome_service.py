@@ -17,8 +17,8 @@ from app.db.models import (
 )
 from app.market.daily_ohlcv_platform import read_taiwan_official_daily
 from app.market.trading_calendar import TAIWAN_TZ, next_taiwan_trading_day
-from app.market.tw_intraday_platform import read_taiwan_intraday_bars
-from app.market_data.contracts import QuantityUnit
+from app.market.tw_bar_service import TaiwanBarService
+from app.market_data.contracts import BarFinalization, QuantityUnit
 from app.watchlists import service as watchlist_service
 from app.watchlists.radar_rule_contract import (
     RADAR_V1_RULE_VERSION,
@@ -604,55 +604,33 @@ def _next_intraday_outcome_bar(
 ) -> WatchlistRadarOutcomeBar | None:
     trade_date = next_taiwan_trading_day(after_date, include_value=False)
     try:
-        result = read_taiwan_intraday_bars(
-            db,
-            stock_id=stock_id,
-            interval="1m",
-            range_value="5d",
+        # The Bar owner combines continuous trading and a qualified formal close.
+        # A last minute alone cannot establish a completed-session outcome.
+        result = TaiwanBarService(db).read_bars(
+            instrument_id=stock_id,
+            interval="1d",
+            from_time=datetime.combine(trade_date, time.min, tzinfo=TAIWAN_TZ),
+            to_time=datetime.combine(trade_date + timedelta(days=1), time.min, tzinfo=TAIWAN_TZ),
+            include_partial=True,
         )
     except ValueError:
         return None
-    rows = [
-        bar
-        for bar in result.resolved.bars
-        if bar.start_at.astimezone(TAIWAN_TZ).date() == trade_date
-    ]
-    if not rows or rows[-1].start_at.astimezone(TAIWAN_TZ).time() < time(13, 25):
+    bar = next((
+        item for item in result.bars
+        if item.start_at.astimezone(TAIWAN_TZ).date() == trade_date
+        and item.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+    ), None)
+    if bar is None:
         return None
-
-    open_price = next(
-        (
-            float(row.open_price if row.open_price is not None else row.close_price)
-            for row in rows
-            if row.close_price is not None
-        ),
-        None,
-    )
-    high_prices = [
-        float(row.high_price if row.high_price is not None else row.close_price)
-        for row in rows
-        if row.close_price is not None
-    ]
-    low_prices = [
-        float(row.low_price if row.low_price is not None else row.close_price)
-        for row in rows
-        if row.close_price is not None
-    ]
-    sources = sorted({row.lineage.source for row in rows})
-    volume = sum(
-        int(row.volume.value)
-        for row in rows
-        if row.volume is not None and row.volume.unit is QuantityUnit.SHARE
-    ) or None
-
     return WatchlistRadarOutcomeBar(
         trade_date=trade_date,
-        open_price=open_price,
-        high_price=max(high_prices) if high_prices else None,
-        low_price=min(low_prices) if low_prices else None,
-        close_price=float(rows[-1].close_price),
-        trade_volume=volume,
-        source=f"tw.intraday.bars:{','.join(sources) or 'unknown'}",
+        open_price=float(bar.open_price),
+        high_price=float(bar.high_price),
+        low_price=float(bar.low_price),
+        close_price=float(bar.close_price),
+        trade_volume=(int(bar.volume.value) if bar.volume is not None
+                      and bar.volume.unit is QuantityUnit.SHARE else None),
+        source=f"tw.bar.series:{bar.lineage.source}",
     )
 
 

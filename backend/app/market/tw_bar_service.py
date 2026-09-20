@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from decimal import Decimal
 from collections import OrderedDict
 from datetime import date, datetime, time, timedelta
 from threading import Lock
@@ -9,9 +12,11 @@ from time import monotonic
 
 from sqlalchemy.orm import Session
 
-from app.market.daily_ohlcv_platform import build_taiwan_daily_cache_requirement
+from app.market.daily_ohlcv_platform import build_taiwan_daily_cache_requirement, read_taiwan_latest_daily_evidence
+from app.observability.provider_fallback import observe_provider_fallback
 from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
+from app.market.exchange_calendar_cache import exchange_calendar_read_scope
 from app.market.intraday_repository import TaiwanIntradayBarRepository
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
@@ -21,9 +26,11 @@ from app.market.trading_calendar import (
     TAIWAN_SESSION_CLOSE_TIME,
     TAIWAN_SESSION_OPEN_TIME,
     TAIWAN_TZ,
+    has_taiwan_calendar_year,
     is_taiwan_trading_day,
     previous_taiwan_trading_day,
     taiwan_market_session,
+    taiwan_market_session_phase,
     taiwan_presentation_session,
 )
 from app.market.tw_bar_aggregation import (
@@ -43,9 +50,11 @@ from app.market.tw_bar_contracts import (
     BarBucketCoverage,
     BarBucketCoverageStatus,
     TaiwanBarSeriesRead,
+    TaiwanBarReadDiagnostics,
     TaiwanBarSessionScope,
     TaiwanBarOutwardState,
     TaiwanChartPresentationEvent,
+    TaiwanChartCloseEvidence,
     TaiwanHistoryCoverage,
     TaiwanHistoryStatus,
     TaiwanCurrentSessionCoverage,
@@ -77,6 +86,8 @@ from app.market_data.contracts import (
     InstrumentKey,
     InstrumentType,
     MarketSession,
+    Quantity,
+    QuantityUnit,
     ResolvedBarSeries,
 )
 from app.market_data.gateway import MarketDataGateway
@@ -104,7 +115,7 @@ _CURRENT_SESSION_RECENT_LIVE_TTL_SECONDS = 1.0
 _CURRENT_SESSION_RECENT_OFF_SESSION_TTL_SECONDS = 15.0
 _current_session_recent_cache: OrderedDict[
     tuple[object, str, str, bool, date, datetime],
-    tuple[float, TaiwanBarSeriesRead],
+    tuple[float, str | None, TaiwanBarSeriesRead],
 ] = OrderedDict()
 
 
@@ -155,6 +166,7 @@ def _current_session_response_window(
             "bar_states": bar_states,
             "history": history,
             "identity": identity,
+            "read_diagnostics": series.read_diagnostics.model_copy(update={"final_series_revision": identity.series_revision}) if series.read_diagnostics else None,
         }
     )
 
@@ -383,6 +395,17 @@ def _current_session_snapshot_phase(
             TaiwanCurrentSessionSnapshotPhase.DEGRADED,
             "TW_CHART_SNAPSHOT_PARTIAL_PREFIX",
         )
+    if session_closed and status in {
+        TaiwanCurrentSessionCoverageStatus.MISSING,
+        TaiwanCurrentSessionCoverageStatus.TRAILING_WINDOW,
+        TaiwanCurrentSessionCoverageStatus.PARTIAL_WINDOW,
+    }:
+        # Snapshot quality is not a running acquisition job. After close,
+        # waiting for future trades cannot fill an incomplete session.
+        return (
+            TaiwanCurrentSessionSnapshotPhase.DEGRADED,
+            f"TW_CHART_SNAPSHOT_{status.value.upper()}_POST_CLOSE",
+        )
     if status is TaiwanCurrentSessionCoverageStatus.SPARSE:
         if not mostly_complete:
             if session_closed and observed_bucket_count >= 2:
@@ -489,6 +512,7 @@ def _current_session_coverage(
     return TaiwanCurrentSessionCoverage(
         trade_date=trade_date,
         status=status,
+        session_completed=session_closed,
         snapshot_phase=snapshot_phase,
         snapshot_revision=snapshot_identity.series_revision,
         snapshot_bar_count=len(snapshot_bars),
@@ -523,6 +547,7 @@ class TaiwanBarService:
         include_partial: bool,
         trade_date: date,
         requested_to: datetime,
+        storage_revision: str | None,
     ) -> None:
         coverage = series.current_session_coverage
         if coverage is None:
@@ -551,7 +576,7 @@ class TaiwanBarService:
                 requested_to,
             )
             _current_session_recent_cache.pop(recent_key, None)
-            _current_session_recent_cache[recent_key] = (monotonic(), series)
+            _current_session_recent_cache[recent_key] = (monotonic(), storage_revision, series)
             while (
                 len(_current_session_recent_cache)
                 > _CURRENT_SESSION_RECENT_CACHE_MAX_ENTRIES
@@ -567,6 +592,7 @@ class TaiwanBarService:
         trade_date: date,
         requested_to: datetime,
         local_now: datetime,
+        storage_revision: str | None,
     ) -> TaiwanBarSeriesRead | None:
         live_session = bool(
             local_now.date() == trade_date
@@ -589,8 +615,8 @@ class TaiwanBarService:
             entry = _current_session_recent_cache.get(key)
             if entry is None:
                 return None
-            cached_at, series = entry
-            if monotonic() - cached_at > ttl:
+            cached_at, cached_revision, series = entry
+            if storage_revision is None or cached_revision != storage_revision or monotonic() - cached_at > ttl:
                 _current_session_recent_cache.pop(key, None)
                 return None
             _current_session_recent_cache.move_to_end(key)
@@ -631,6 +657,9 @@ class TaiwanBarService:
             if matching_key is not None:
                 cached = _current_session_snapshot_cache.pop(matching_key)
                 _current_session_snapshot_cache[matching_key] = cached
+                if cached.read_diagnostics is not None:
+                    cached = cached.model_copy(update={"read_diagnostics": cached.read_diagnostics.model_copy(
+                        update={"snapshot_cache_status": "hit"})})
                 return _current_session_response_window(cached, limit=limit)
         return self.read_current_session_bars(
             instrument_id=instrument_id,
@@ -708,6 +737,7 @@ class TaiwanBarService:
         limit: int = 5000,
         include_partial: bool = True,
         requested_at: datetime | None = None,
+        bypass_snapshot_cache: bool = False,
     ) -> TaiwanBarSeriesRead:
         """Read only the Backend-owned Taiwan presentation session."""
 
@@ -719,6 +749,9 @@ class TaiwanBarService:
         local_now, trade_date, from_time, to_time = taiwan_current_session_bar_window(
             requested_at
         )
+        storage_revision = TaiwanIntradayBarRepository(self._db).current_session_storage_revision(
+            instrument_id=instrument_id, from_time=from_time, to_time=to_time,
+        )
         cached = self._recent_current_session_snapshot(
             instrument_id=instrument_id,
             interval=requested_interval,
@@ -726,9 +759,16 @@ class TaiwanBarService:
             trade_date=trade_date,
             requested_to=to_time,
             local_now=local_now,
+            storage_revision=storage_revision,
         )
-        if cached is not None:
-            return _current_session_response_window(cached, limit=limit)
+        if cached is not None and not bypass_snapshot_cache:
+            return _current_session_response_window(
+                cached.model_copy(update={"market_phase": taiwan_market_session_phase(local_now),
+                    "read_diagnostics": TaiwanBarReadDiagnostics(snapshot_cache_status="hit",
+                        canonical_store_status="hit" if cached.bars else "miss",
+                        final_series_revision=cached.identity.series_revision, storage_revision=storage_revision)}),
+                limit=limit,
+            )
         full_snapshot = self.read_bars(
             instrument_id=instrument_id,
             interval=requested_interval,
@@ -739,56 +779,184 @@ class TaiwanBarService:
             requested_at=local_now,
             _session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
         )
+        full_snapshot = full_snapshot.model_copy(update={"read_diagnostics": TaiwanBarReadDiagnostics(
+            snapshot_cache_status="bypassed" if bypass_snapshot_cache else "miss",
+            canonical_store_status="hit" if full_snapshot.bars else "miss",
+            final_series_revision=full_snapshot.identity.series_revision, storage_revision=storage_revision,
+        )})
         self._remember_current_session_snapshot(
             full_snapshot,
             include_partial=include_partial,
             trade_date=trade_date,
             requested_to=to_time,
+            storage_revision=storage_revision,
         )
         return _current_session_response_window(full_snapshot, limit=limit)
 
     def read_current_session_presentation_events(
-        self,
-        *,
-        series: TaiwanBarSeriesRead,
+        self, *, series: TaiwanBarSeriesRead | None = None,
+        instrument_id: str | None = None, trade_date: date | None = None,
         requested_at: datetime | None = None,
     ) -> tuple[TaiwanChartPresentationEvent, ...]:
-        """Read display-only close evidence without changing canonical Bars."""
+        """Read display-only close evidence, independent of Bar availability."""
+        effective_requested_at = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
+        if series is not None:
+            if series.current_session_coverage is None:
+                return ()
+            if series.instrument.instrument_type not in {InstrumentType.STOCK, InstrumentType.ETF}:
+                return ()
+            instrument_id = series.instrument.symbol
+            trade_date = series.current_session_coverage.trade_date
+        presentation_date = taiwan_presentation_session(effective_requested_at)["trade_date"]
+        latest_trade_date = trade_date or presentation_date
+        if not instrument_id or latest_trade_date != presentation_date:
+            return ()
+        stock_id = instrument_id
+        formal_close_at = datetime.combine(latest_trade_date, TAIWAN_SESSION_CLOSE_TIME, tzinfo=TAIWAN_TZ)
+        if effective_requested_at < formal_close_at:
+            return ()
+        official_marker: dict | None = None
+        session_marker: dict | None = None
+        try:
+            evidence = read_taiwan_latest_daily_evidence(
+                self._db,
+                stock_id,
+                to_date=latest_trade_date,
+                requested_at=effective_requested_at,
+            )
+            daily = evidence.daily
+            if (
+                daily is not None
+                and daily.trade_date == latest_trade_date
+                and evidence.resolved_health.facts_usable
+            ):
+                official_marker = {
+                    "price": float(daily.close_price),
+                    "bar_type": "official_close_marker",
+                    "source_event_type": "official_close",
+                    "market_event": "official_close",
+                    "price_semantics": "official_close",
+                    "evidence_finalization": "final",
+                    "provider": daily.provider,
+                    "source": daily.source,
+                    "evidence_event_time": daily.event_at,
+                    "official_close_price": float(daily.close_price),
+                    "official_close_trade_date": daily.trade_date,
+                    "official_close_event_time": daily.event_at,
+                    "official_close_provider": daily.provider,
+                    "official_close_source": daily.source,
+                }
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="intraday.official_close_marker_cache_read",
+            )
 
-        coverage = series.current_session_coverage
-        if coverage is None or not series.bars:
+        try:
+            projected = project_taiwan_session_close(
+                read_taiwan_session_close(
+                    self._db,
+                    stock_id=stock_id,
+                    requested_at=effective_requested_at,
+                )
+            )
+            trade_date = projected.get("trade_date")
+            if isinstance(trade_date, str):
+                try:
+                    trade_date = date.fromisoformat(trade_date)
+                except ValueError:
+                    trade_date = None
+            if (
+                projected.get("available") is True
+                and trade_date == latest_trade_date
+                and projected.get("price") is not None
+            ):
+                session_marker = {
+                    "price": float(projected["price"]),
+                    "bar_type": "session_close_marker",
+                    "source_event_type": "session_close",
+                    "market_event": "session_close",
+                    "price_semantics": "session_close",
+                    "evidence_finalization": projected.get("finalization"),
+                    "provider": projected.get("provider"),
+                    "source": projected.get("source"),
+                    "evidence_event_time": projected.get("event_time"),
+                    "session_close_price": projected.get("price"),
+                    "session_close_trade_date": trade_date,
+                    "session_close_event_time": projected.get("event_time"),
+                    "session_close_provider": projected.get("provider"),
+                    "session_close_source": projected.get("source"),
+                    "closing_match_volume_shares": projected.get(
+                        "closing_match_volume_shares"
+                    ),
+                    "closing_match_volume_lots": projected.get(
+                        "closing_match_volume_lots"
+                    ),
+                    "closing_match_volume_semantics": projected.get(
+                        "closing_match_volume_semantics"
+                    ),
+                    "closing_match_volume_source_field": projected.get(
+                        "closing_match_volume_source_field"
+                    ),
+                    "session_cumulative_volume_shares": projected.get(
+                        "session_cumulative_volume_shares"
+                    ),
+                    "session_cumulative_volume_lots": projected.get(
+                        "session_cumulative_volume_lots"
+                    ),
+                    "session_cumulative_volume_trade_date": projected.get(
+                        "session_cumulative_volume_trade_date"
+                    ),
+                    "session_cumulative_volume_event_time": projected.get(
+                        "session_cumulative_volume_event_time"
+                    ),
+                    "session_cumulative_volume_source_field": projected.get(
+                        "session_cumulative_volume_source_field"
+                    ),
+                    "volume_provider": projected.get("volume_provider"),
+                    "volume_source": projected.get("volume_source"),
+                    "volume_event_time": projected.get("volume_event_time"),
+                    "volume_status": projected.get("volume_status"),
+                    "volume_scope": projected.get("volume_scope"),
+                }
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="intraday.session_close_marker_cache_read",
+            )
+
+        marker = official_marker or session_marker
+        if marker is not None and session_marker is not None:
+            marker = {
+                **marker,
+                **{
+                    key: value
+                    for key, value in session_marker.items()
+                    if key.startswith("session_")
+                    or key.startswith("closing_match_")
+                    or key.startswith("volume_")
+                },
+            }
+
+        if marker is None:
             return ()
-        local_now = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
-        formal_close_at = datetime.combine(
-            coverage.trade_date,
-            TAIWAN_SESSION_CLOSE_TIME,
-            tzinfo=TAIWAN_TZ,
+
+        evidence = TaiwanChartCloseEvidence(**{
+            key: value for key, value in marker.items()
+            if key in TaiwanChartCloseEvidence.model_fields
+        })
+        event = TaiwanChartPresentationEvent(
+            event_type=marker["bar_type"], event_at=formal_close_at,
+            price=Decimal(str(marker["price"])), price_semantics=marker["price_semantics"],
+            market_session="closing_auction", finalization=BarFinalization.FINAL,
+            authority=AuthorityClass.EXCHANGE, official=official_marker is not None,
+            provider=marker["provider"], source=marker["source"],
+            volume=(Quantity(value=Decimal(str(evidence.closing_match_volume_shares)), unit=QuantityUnit.SHARE)
+                    if evidence.closing_match_volume_shares is not None else None),
+            evidence=evidence,
         )
-        if local_now < formal_close_at:
-            return ()
-        component = _qualified_formal_close_component(
-            self._db,
-            instrument=series.instrument,
-            trade_date=coverage.trade_date,
-            requested_at=local_now,
-        )
-        if component is None:
-            return ()
-        return (
-            TaiwanChartPresentationEvent(
-                event_type="session_close_marker",
-                event_at=formal_close_at,
-                price=component.close_price,
-                price_semantics="session_close",
-                market_session="closing_auction",
-                finalization=component.finalization,
-                authority=component.lineage.authority,
-                official=False,
-                provider=component.lineage.provider,
-                source=component.lineage.source,
-                volume=component.volume,
-            ),
-        )
+        digest = hashlib.sha256(json.dumps(event.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
+        return (event.model_copy(update={"evidence_id": digest}),)
 
     def read_scoped_bars(
         self,
@@ -826,6 +994,7 @@ class TaiwanBarService:
             requested_at=requested_at,
         )
 
+    @exchange_calendar_read_scope()
     def read_bars(
         self,
         *,
@@ -1108,6 +1277,7 @@ class TaiwanBarService:
             instrument=instrument,
             requested_interval=requested_interval,
             base_interval="1m",
+            market_phase=taiwan_market_session_phase(now),
             derived=requested_interval != "1m",
             aggregation_version=aggregation_version,
             bars=outward_bars,
@@ -1337,6 +1507,30 @@ class TaiwanBarService:
                 ordered_base,
                 target_interval=requested_interval,
             )
+            component_dates = {
+                base.start_at.astimezone(TAIWAN_TZ).date() for base in ordered_base
+            }
+
+            def missing_period_components(item: BarObservation) -> int | None:
+                first = item.start_at.astimezone(TAIWAN_TZ).date()
+                first = (
+                    first - timedelta(days=first.weekday())
+                    if requested_interval == "1w"
+                    else first.replace(day=1)
+                )
+                # end_at is the last observed daily component, not a claim that
+                # the current week/month has completed.
+                period_end = (
+                    first + timedelta(days=6)
+                    if requested_interval == "1w"
+                    else (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+                )
+                last = min(period_end, current_date, requested_to.astimezone(TAIWAN_TZ).date())
+                if not all(has_taiwan_calendar_year(year) for year in range(first.year, last.year + 1)):
+                    # Weekday fallback cannot prove historical holiday gaps.
+                    return None
+                return len(set(_trading_dates(first, last)) - component_dates)
+
             outward_states = tuple(
                 TaiwanBarOutwardState(
                     start_at=item.start_at,
@@ -1349,6 +1543,7 @@ class TaiwanBarService:
                     ),
                     persisted=False,
                     source_interval="1d",
+                    component_missing_trading_day_count=missing_period_components(item),
                     technical_eligible=all(
                         state.technical_eligible
                         for base, state in zip(ordered_base, ordered_states)
@@ -1417,6 +1612,7 @@ class TaiwanBarService:
             instrument=instrument,
             requested_interval=requested_interval,
             base_interval="1d",
+            market_phase=taiwan_market_session_phase(now),
             derived=requested_interval != "1d",
             aggregation_version=aggregation_version,
             bars=outward_bars,

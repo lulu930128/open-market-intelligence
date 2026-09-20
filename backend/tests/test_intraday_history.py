@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Base, StockMaster
 from app.market import intraday
+from app.market_data.contracts import QuantityUnit
 
 
 def make_session() -> Session:
@@ -72,22 +73,26 @@ def bar_series(
             high_price=item["high"],
             low_price=item["low"],
             close_price=item["close"],
-            volume=SimpleNamespace(value=item["volume"]),
+            volume=SimpleNamespace(value=item["volume"], unit=QuantityUnit.SHARE),
+            interval=interval,
             turnover_value=None,
             finalization=SimpleNamespace(value="final"),
             lineage=SimpleNamespace(
                 provider=("omi_taiwan_bar_service" if derived else "kgi_superpy"),
                 source=("tw.bar.aggregate" if derived else "kgi_superpy_minute_kbars"),
+                observation_id=None, raw_receipt_id=None,
             ),
         )
         for item in points
     )
     return SimpleNamespace(
         bars=bars,
+        current_session_coverage=None,
         derived=derived,
         base_interval="1m",
         aggregation_version="tw.bar.aggregate.v1" if derived else None,
         history=SimpleNamespace(
+            model_dump=lambda **kwargs: {"status": "partial", "current_cumulative_volume_complete": False},
             history_status=SimpleNamespace(value="ready"),
             requested_coverage_satisfied=True,
             requested_session_count=max(
@@ -125,14 +130,14 @@ class MarketIntradayHistoryTests(unittest.TestCase):
     ) -> dict:
         del metadata
         with (
-            patch.object(intraday, "TaiwanBarService") as service,
+            patch.object(intraday, "read_taiwan_intraday_bars") as service,
             patch.object(
                 self.db,
                 "commit",
                 side_effect=AssertionError("history GET must not commit"),
             ),
         ):
-            service.return_value.read_bars.return_value = bar_series(
+            service.return_value = bar_series(
                 points,
                 interval=interval,
             )
@@ -204,8 +209,8 @@ class MarketIntradayHistoryTests(unittest.TestCase):
 
     def test_repeated_cache_reads_never_report_refresh_updates(self) -> None:
         points = [point(9, 0, 101, 1000)]
-        with patch.object(intraday, "TaiwanBarService") as service:
-            service.return_value.read_bars.return_value = bar_series(points)
+        with patch.object(intraday, "read_taiwan_intraday_bars") as service:
+            service.return_value = bar_series(points)
             first = intraday.get_market_intraday_history(
                 self.db,
                 stock_id="2330",
@@ -221,7 +226,7 @@ class MarketIntradayHistoryTests(unittest.TestCase):
                 refresh=True,
             )
 
-        self.assertEqual(service.return_value.read_bars.call_count, 2)
+        self.assertEqual(service.call_count, 2)
         self.assertEqual(first["refreshed_count"], 0)
         self.assertEqual(second["refreshed_count"], 0)
 

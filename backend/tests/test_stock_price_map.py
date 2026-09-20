@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
@@ -82,6 +83,40 @@ def level(evidence_id: str, price: float, source_type: str = "swing") -> dict:
 
 
 class StockPriceMapPureTests(unittest.TestCase):
+    def test_hard_cap_survives_split_merge_and_tick_rounding(self) -> None:
+        for reference in (9.99, 49.95, 99.9, 499.5, 618, 1000):
+            inputs = [level(str(i), reference * (1.01 + i * 0.012)) for i in range(9)]
+            # Real exact levels arrive tick normalized from _level().
+            from app.market.taiwan_price_rules import normalize_taiwan_stock_price
+            for item in inputs:
+                item["price"] = normalize_taiwan_stock_price(item["price"])
+            zones = cluster_price_levels(inputs, reference=reference, threshold_pct=8,
+                                         zone_padding_pct=2, zone_merge_gap_ticks=100)
+            self.assertGreater(len(zones), 1)
+            self.assertEqual(zones, cluster_price_levels(reversed(inputs), reference=reference,
+                             threshold_pct=8, zone_padding_pct=2, zone_merge_gap_ticks=100))
+            self.assertEqual(sorted(e for zone in zones for e in zone["evidence_ids"]),
+                             sorted(item["evidence_id"] for item in inputs))
+            for zone in zones:
+                self.assertLessEqual(zone["upper_bound"] - zone["lower_bound"], reference * .03 + 1e-8)
+                self.assertLessEqual(zone["lower_bound"], zone["evidence_lower_bound"])
+                self.assertGreaterEqual(zone["upper_bound"], zone["evidence_upper_bound"])
+            for left, right in zip(zones, zones[1:]):
+                self.assertLess(left["upper_bound"], right["lower_bound"])
+
+    def test_hypothetical_close_zone_is_not_intraday_scanner_evidence(self) -> None:
+        hypothetical = {**level("close", 104), "evidence_state": "hypothetical",
+                        "confirmation": "hypothetical_target_close"}
+        zones = cluster_price_levels([level("swing", 103), hypothetical], reference=100, threshold_pct=2)
+        self.assertFalse(zones[0]["scanner_eligible"])
+        self.assertIn("TARGET_CLOSE_EVIDENCE_NOT_INTRADAY", zones[0]["scanner_reason_codes"])
+
+    def test_unrepresentable_width_preserves_level_and_disables_scanner(self) -> None:
+        zone = cluster_price_levels([level("tiny", .02)], reference=.01, threshold_pct=2)[0]
+        self.assertEqual(zone["evidence_lower_bound"], .02)
+        self.assertEqual(zone["lower_bound"], zone["upper_bound"])
+        self.assertFalse(zone["scanner_eligible"])
+
     def test_missing_plan_with_price_evidence_is_partial_not_missing(self) -> None:
         self.assertEqual(
             _resolve_price_map_status(
@@ -184,6 +219,11 @@ class StockPriceMapServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()
         add_daily_fixture(self.db)
+        # Cache tests isolate parameter identity; trigger behavior has separate
+        # SQLite migration/transaction regressions.
+        patcher = patch("app.market.stock_price_map.snapshot_storage_available", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self) -> None:
         engine = self.db.get_bind()
@@ -208,6 +248,19 @@ class StockPriceMapServiceTests(unittest.TestCase):
         )
         self.assertNotIn("divergence", evidence)
         self.assertNotIn("relative_strength", evidence)
+
+    @patch("app.market.stock_price_map.get_taiwan_stock_event_history", return_value=None)
+    @patch("app.market.stock_price_map.build_tw_stock_price_map_evidence", return_value={})
+    @patch("app.market.stock_price_map.build_stock_technical_report")
+    def test_unknown_report_score_is_not_projected_as_neutral(self, report_mock, _evidence, _corporate) -> None:
+        for score in (None, 0, -2, 3):
+            with self.subTest(score=score):
+                report_mock.return_value = {"title": "技術證據不足", "score": score}
+                result = build_tw_stock_price_map(
+                    db=self.db, stock_id="2330",
+                    now=datetime(2026, 8, 9, 10, tzinfo=TAIWAN_TZ),
+                )
+                self.assertEqual(StockPriceMapRead.model_validate(result).technical.score, score)
 
     @patch("app.market.stock_price_map.get_taiwan_stock_event_history")
     @patch("app.market.stock_price_map.build_tw_stock_price_map_evidence")
@@ -258,6 +311,22 @@ class StockPriceMapServiceTests(unittest.TestCase):
         self.assertEqual(evidence_mock.call_count, 1)
         self.assertEqual(corporate_mock.call_count, 1)
 
+        # Saving settings during the TTL must not relabel old evidence with
+        # the new contract, and all nested builders use the same parameters.
+        previous = evidence_mock.call_args.kwargs["parameters"]
+        changed = replace(previous, rsi_period=previous.rsi_period + 1)
+        third = build_tw_stock_price_map(
+            db=self.db, stock_id="2330", parameters=changed,
+        )
+        self.assertEqual(report_mock.call_count, 2)
+        self.assertEqual(evidence_mock.call_count, 2)
+        self.assertIs(report_mock.call_args.kwargs["parameters"], changed)
+        self.assertIs(evidence_mock.call_args.kwargs["parameters"], changed)
+        self.assertNotEqual(
+            first["parameter_contract"]["parameter_revision"],
+            third["parameter_contract"]["parameter_revision"],
+        )
+
     @patch("app.market.stock_price_map.get_taiwan_stock_event_history")
     @patch("app.market.stock_price_map.build_tw_stock_price_map_evidence")
     @patch("app.market.stock_price_map.build_stock_technical_report")
@@ -307,6 +376,7 @@ class StockPriceMapServiceTests(unittest.TestCase):
             "source_refs": [{"type": "resolved_market_data", "name": "tw.daily.ohlcv"}],
             "indicators": {
                 "corporate_action": {"coverage_status": "complete", "adjustment_applied": False},
+                "decision_usable": True,
                 "timeframes": {"daily": {"completed": {"donchian": {"lower20": 170, "upper20": 200}, "bollinger": {}, "support_resistance": {}}}},
             },
             "swings": {"pivots": []},
@@ -324,7 +394,7 @@ class StockPriceMapServiceTests(unittest.TestCase):
         )
         validated = StockPriceMapRead.model_validate(result)
 
-        self.assertEqual(validated.version, "tw.stock.price_map.v3")
+        self.assertEqual(validated.version, "tw.stock.price_map.v4")
         self.assertTrue(validated.decision_usable)
         self.assertTrue(validated.basis_revision.startswith("price-map:"))
         self.assertEqual(validated.evidence_timeframes, ["daily"])

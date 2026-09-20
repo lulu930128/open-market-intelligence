@@ -284,7 +284,7 @@ def test_twse_rwd_venue_refresh_accepts_runtime_scale_universe(
             ),
             *(
                 StockMaster(
-                    stock_id=f"X{index:04d}",
+                    stock_id=f"{1_000 + index:04d}",
                     stock_name=f"測試股票 {index}",
                     market="TWSE",
                     instrument_type="stock",

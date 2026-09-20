@@ -215,6 +215,7 @@ class Settings(BaseSettings):
         le=20,
     )
     enable_taiwan_session_close_scheduler: bool = True
+    enable_taiwan_price_map_snapshot_scheduler: bool = False
     scheduler_taiwan_session_close_max_symbols: int = Field(
         default=32,
         ge=1,

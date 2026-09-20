@@ -34,7 +34,7 @@ def test_viewer_warmup_enqueues_only_for_warming_current_session(
     def read_current_session_bars(**kwargs):
         read_calls.append(kwargs)
         return SimpleNamespace(
-            current_session_coverage=SimpleNamespace(snapshot_phase=phase)
+            current_session_coverage=SimpleNamespace(snapshot_phase=phase, repair_recommended=False)
         )
 
     monkeypatch.setattr(
@@ -52,7 +52,7 @@ def test_viewer_warmup_enqueues_only_for_warming_current_session(
         enqueue_calls.append(kwargs)
         return run, True
 
-    monkeypatch.setattr(subject, "enqueue_taiwan_intraday_bar_bootstrap", enqueue)
+    monkeypatch.setattr(subject, "enqueue_consumer_demand", enqueue)
 
     result = subject.enqueue_taiwan_intraday_viewer_warmup(
         db,
@@ -72,11 +72,7 @@ def test_viewer_warmup_enqueues_only_for_warming_current_session(
     if expected_enqueues:
         assert enqueue_calls == [
             {
-                "symbols": ["2330"],
-                "max_symbols": 1,
-                "reuse_success_within_seconds": (
-                    subject.TAIWAN_VIEWER_WARMUP_SUCCESS_REUSE_SECONDS
-                ),
+                "stock_id": "2330", "requested_at": requested_at, "consumer": "viewer",
             }
         ]
         assert result == (run, True)
@@ -94,7 +90,7 @@ def test_viewer_warmup_skips_non_trading_session_without_read_or_enqueue(
     )
     monkeypatch.setattr(
         subject,
-        "enqueue_taiwan_intraday_bar_bootstrap",
+        "enqueue_consumer_demand",
         lambda *_args, **_kwargs: pytest.fail("off-session warmup must not enqueue"),
     )
 

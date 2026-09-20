@@ -13,8 +13,6 @@ from app.market.public_quote_platform import (
     read_taiwan_session_close,
 )
 from app.market.tw_disposition import get_taiwan_disposition_status
-from app.market.tw_bar_service import TaiwanBarService
-from app.market.trading_calendar import taiwan_presentation_session
 from app.market.tw_instrument_trading_policy import (
     TaiwanInstrumentTradingMode,
     resolve_taiwan_instrument_trading_policy,
@@ -1227,175 +1225,38 @@ def _attach_cached_public_quote(
 
 
 def _append_completed_session_close_marker(
-    db: Session,
-    *,
-    stock_id: str,
-    points: list[dict],
+    db: Session, *, stock_id: str, points: list[dict],
     requested_at: datetime | None = None,
 ) -> list[dict]:
-    """Append one cache-only close event without manufacturing a trade bar."""
+    """Compatibility projection of the shared display-only presentation event."""
+    from app.market.tw_bar_service import TaiwanBarService
 
-    latest_trade_date, _ = _latest_trade_date_points(points)
-    if latest_trade_date is None:
+    trade_date, _ = _latest_trade_date_points(points)
+    events = TaiwanBarService(db).read_current_session_presentation_events(
+        instrument_id=stock_id, trade_date=trade_date, requested_at=requested_at,
+    )
+    if not events:
         return points
-    effective_requested_at = requested_at or datetime.now(TAIPEI_TZ)
-    official_marker: dict | None = None
-    session_marker: dict | None = None
-    try:
-        evidence = read_taiwan_latest_daily_evidence(
-            db,
-            stock_id,
-            to_date=latest_trade_date,
-            requested_at=effective_requested_at,
-        )
-        daily = evidence.daily
-        if (
-            daily is not None
-            and daily.trade_date == latest_trade_date
-            and evidence.resolved_health.facts_usable
-        ):
-            official_marker = {
-                "price": float(daily.close_price),
-                "bar_type": "official_close_marker",
-                "source_event_type": "official_close",
-                "market_event": "official_close",
-                "price_semantics": "official_close",
-                "evidence_finalization": "final",
-                "provider": daily.provider,
-                "source": daily.source,
-                "evidence_event_time": daily.event_at,
-                "official_close_price": float(daily.close_price),
-                "official_close_trade_date": daily.trade_date,
-                "official_close_event_time": daily.event_at,
-                "official_close_provider": daily.provider,
-                "official_close_source": daily.source,
-            }
-    except Exception as exc:
-        observe_provider_fallback(
-            exc,
-            operation="intraday.official_close_marker_cache_read",
-        )
-
-    try:
-        projected = project_taiwan_session_close(
-            read_taiwan_session_close(
-                db,
-                stock_id=stock_id,
-                requested_at=effective_requested_at,
-            )
-        )
-        trade_date = projected.get("trade_date")
-        if isinstance(trade_date, str):
-            try:
-                trade_date = date.fromisoformat(trade_date)
-            except ValueError:
-                trade_date = None
-        if (
-            projected.get("available") is True
-            and trade_date == latest_trade_date
-            and projected.get("price") is not None
-        ):
-            session_marker = {
-                "price": float(projected["price"]),
-                "bar_type": "session_close_marker",
-                "source_event_type": "session_close",
-                "market_event": "session_close",
-                "price_semantics": "session_close",
-                "evidence_finalization": projected.get("finalization"),
-                "provider": projected.get("provider"),
-                "source": projected.get("source"),
-                "evidence_event_time": projected.get("event_time"),
-                "session_close_price": projected.get("price"),
-                "session_close_trade_date": trade_date,
-                "session_close_event_time": projected.get("event_time"),
-                "session_close_provider": projected.get("provider"),
-                "session_close_source": projected.get("source"),
-                "closing_match_volume_shares": projected.get(
-                    "closing_match_volume_shares"
-                ),
-                "closing_match_volume_lots": projected.get(
-                    "closing_match_volume_lots"
-                ),
-                "closing_match_volume_semantics": projected.get(
-                    "closing_match_volume_semantics"
-                ),
-                "closing_match_volume_source_field": projected.get(
-                    "closing_match_volume_source_field"
-                ),
-                "session_cumulative_volume_shares": projected.get(
-                    "session_cumulative_volume_shares"
-                ),
-                "session_cumulative_volume_lots": projected.get(
-                    "session_cumulative_volume_lots"
-                ),
-                "session_cumulative_volume_trade_date": projected.get(
-                    "session_cumulative_volume_trade_date"
-                ),
-                "session_cumulative_volume_event_time": projected.get(
-                    "session_cumulative_volume_event_time"
-                ),
-                "session_cumulative_volume_source_field": projected.get(
-                    "session_cumulative_volume_source_field"
-                ),
-                "volume_provider": projected.get("volume_provider"),
-                "volume_source": projected.get("volume_source"),
-                "volume_event_time": projected.get("volume_event_time"),
-                "volume_status": projected.get("volume_status"),
-                "volume_scope": projected.get("volume_scope"),
-            }
-    except Exception as exc:
-        observe_provider_fallback(
-            exc,
-            operation="intraday.session_close_marker_cache_read",
-        )
-
-    marker = official_marker or session_marker
-    if marker is not None and session_marker is not None:
-        marker = {
-            **marker,
-            **{
-                key: value
-                for key, value in session_marker.items()
-                if key.startswith("session_")
-                or key.startswith("closing_match_")
-                or key.startswith("volume_")
-            },
-        }
-
-    if marker is None:
-        return points
-
-    marker_time = datetime.combine(
-        latest_trade_date,
-        time(13, 30),
-        tzinfo=TAIPEI_TZ,
-    )
-    price = marker["price"]
-    closing_match_volume_shares = _as_int(
-        marker.get("closing_match_volume_shares")
-    )
-    session_cumulative_volume_shares = _as_int(
-        marker.get("session_cumulative_volume_shares")
-    )
+    event = events[0]
+    marker_time = event.event_at
+    latest_trade_date = marker_time.date()
+    evidence = event.evidence.model_dump() if event.evidence is not None else {}
+    price = float(event.price)
     close_marker = {
-        "time": marker_time,
-        "price": price,
-        "open": price,
-        "high": price,
-        "low": price,
-        "close": price,
-        "volume": closing_match_volume_shares,
-        "cumulative_volume": session_cumulative_volume_shares,
-        "trade_value": None,
-        "transaction_count": None,
-        "finalization": "final",
-        "finalized": True,
-        "is_partial": False,
-        "synthetic": False,
-        "display_eligible": True,
-        "indicator_eligible": False,
+        **evidence,
+        "time": marker_time, "price": price,
+        "open": price, "high": price, "low": price, "close": price,
+        "volume": evidence.get("closing_match_volume_shares"),
+        "cumulative_volume": evidence.get("session_cumulative_volume_shares"),
+        "trade_value": None, "transaction_count": None,
+        "bar_type": event.event_type, "source_event_type": event.price_semantics,
+        "market_event": event.price_semantics, "price_semantics": event.price_semantics,
+        "provider": event.provider, "source": event.source,
+        "evidence_finalization": "final" if event.official else "session_final",
+        "evidence_event_time": evidence.get("official_close_event_time") if event.official else evidence.get("session_close_event_time"),
         "evidence_trade_date": latest_trade_date,
-        **marker,
+        "finalization": "final", "finalized": True, "is_partial": False,
+        "synthetic": False, "display_eligible": True, "indicator_eligible": False,
     }
     retained = [
         point
@@ -1543,6 +1404,7 @@ def get_market_intraday_history(
     range_value: str = "auto",
     refresh: bool = False,
     requested_at: datetime | None = None,
+    bypass_snapshot_cache: bool = False,
 ) -> dict:
     del refresh  # legacy GET input is intentionally non-operative.
     stock = _get_stock(db=db, stock_id=stock_id)
@@ -1553,62 +1415,18 @@ def get_market_intraday_history(
     config = intraday_history_config(interval=interval, range_value=range_value)
     fetch_range = str(config["range"])
     now = (requested_at or datetime.now(TAIPEI_TZ)).astimezone(TAIPEI_TZ)
-    from_time = None
-    if range_value != "auto":
-        days = int(config["days"])
-        from_time = (
-            datetime.combine(
-                taiwan_presentation_session(now)["trade_date"],
-                time.min,
-                tzinfo=TAIPEI_TZ,
-            )
-            if days == 1
-            else now - timedelta(days=days)
-        )
-    series = TaiwanBarService(db).read_bars(
-        instrument_id=stock_id,
-        interval=interval,
-        from_time=from_time,
-        to_time=now,
-        requested_at=now,
+    series = read_taiwan_intraday_bars(
+        db, stock_id=stock_id, interval=interval,
+        range_value=range_value, requested_at=now,
+        bypass_snapshot_cache=bypass_snapshot_cache,
     )
-    points = [
-        {
-            "time": bar.start_at,
-            "price": float(bar.close_price),
-            "open": float(bar.open_price),
-            "high": float(bar.high_price),
-            "low": float(bar.low_price),
-            "close": float(bar.close_price),
-            "volume": int(bar.volume.value) if bar.volume is not None else None,
-            "trade_value": (
-                int(bar.turnover_value)
-                if bar.turnover_value is not None
-                else None
-            ),
-            "provider": bar.lineage.provider,
-            "source": bar.lineage.source,
-            "source_interval": series.base_interval,
-            "calculation_version": series.aggregation_version,
-            "component_raw_result_ids": [],
-            "finalization": bar.finalization.value,
-        }
-        for bar in series.bars
-    ]
+    points, metadata = project_taiwan_intraday_bars(db, series)
     persisted_point_count = len(points) if not series.derived else 0
     persisted_latest_time = _point_datetime(points[-1]) if points else None
     latest_bar = series.bars[-1] if series.bars else None
     source = latest_bar.lineage.source if latest_bar is not None else "unavailable"
     provider = latest_bar.lineage.provider if latest_bar is not None else "unavailable"
-    series_coverage = {
-        "history_status": series.history.history_status.value,
-        "requested_coverage_satisfied": (
-            series.history.requested_coverage_satisfied
-        ),
-        "requested_session_count": series.history.requested_session_count,
-        "covered_session_count": series.history.covered_session_count,
-        "current_cumulative_volume_complete": False,
-    }
+    series_coverage = metadata["series_coverage"]
     is_disposition_batch = (
         trading_policy.trading_mode
         is TaiwanInstrumentTradingMode.DISPOSITION_BATCH_AUCTION

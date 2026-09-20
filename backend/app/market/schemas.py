@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from app.market_data.contracts import BreadthLimitObservation, PublishedBreadthLimits
+from app.market_data.contracts import AuctionObservation, AuctionBreadthObservation, BreadthLimitObservation, PublishedBreadthLimits
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -530,6 +530,23 @@ class ChartDrawingSnapshotRead(BaseModel):
     updated_at: datetime
 
 
+class HistoricalAuctionFreshnessRead(BaseModel):
+    status: Literal["historical"] = "historical"
+    is_current: Literal[False] = False
+    is_live: Literal[False] = False
+
+
+class TaiwanCompletedAuctionBreadthRead(AuctionBreadthObservation):
+    status: Literal["historical"] = "historical"
+    coverage_count: int = Field(ge=0)
+    market_session: str
+    as_of: datetime
+    received_at: datetime
+    is_provisional: Literal[True] = True
+    decision_usable: Literal[False] = False
+    freshness: HistoricalAuctionFreshnessRead
+
+
 class MarketBreadthRead(BaseModel):
     market: str
     version: str | None = None
@@ -579,10 +596,11 @@ class MarketBreadthRead(BaseModel):
     source: str | None = None
     provider: str | None = None
     raw_result_id: str | None = None
-    trade_value_is_estimate: bool = False
+    trade_value_is_estimate: bool | None = None
     trade_value_semantics: str | None = None
     trade_value_confidence: str | None = None
     auction_breadth: dict[str, Any] | None = None
+    latest_completed_auctions: list[TaiwanCompletedAuctionBreadthRead] = Field(default_factory=list)
 
 
 class MarketBreadthStatusRead(BaseModel):
@@ -629,6 +647,7 @@ class MarketIndexSnapshotRead(BaseModel):
     point_count: int = 0
     points: list[MarketDailyChartRead] = Field(default_factory=list)
     breadth: MarketBreadthRead | None = None
+    latest_completed_auctions: list[TaiwanCompletedAuctionBreadthRead] = Field(default_factory=list)
     breadth_status: MarketBreadthStatusRead
     error_message: str | None = None
     resolution_version: str | None = None
@@ -1025,6 +1044,8 @@ class TaiwanRealtimeQuoteLeaseCreate(BaseModel):
 
 
 class TaiwanRealtimeQuoteLeaseRead(BaseModel):
+    materialization_job_id: int | None = None
+    materialization_error_code: str | None = None
     lease_id: str | None = None
     stock_id: str
     provider: str
@@ -1388,6 +1409,24 @@ class TaiwanChangeReferenceRead(BaseModel):
         return self
 
 
+class TaiwanAuctionHistoryRead(BaseModel):
+    stock_id: str
+    trade_date: date
+    auction_type: str
+    requested_as_of: datetime
+    event_time: datetime | None = None
+    capture_status: Literal["captured", "missing"]
+    historical: Literal[True] = True
+    provisional: Literal[True] = True
+    price_semantics: Literal["indicative"] = "indicative"
+    decision_usable: Literal[False] = False
+    indicator_usable: Literal[False] = False
+    execution_grade_usable: Literal[False] = False
+    cache_only: Literal[True] = True
+    observations: list[AuctionObservation] = Field(default_factory=list, max_length=8)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class TaiwanStockQuoteDepthRead(BaseModel):
     change_reference: TaiwanChangeReferenceRead = Field(default_factory=TaiwanChangeReferenceRead)
     stock_id: str
@@ -1531,6 +1570,7 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     auction_indicative_status: str
     auction_indicative_source: str | None = None
     auction_phase: str | None = None
+    auction_history: TaiwanAuctionHistoryRead | None = None
     auction_event_time: datetime | None = None
     indicative_match_available: bool
     indicative_match_price: float | None = None
@@ -1856,7 +1896,14 @@ class TaiwanFuturesQuoteFreshnessRead(BaseModel):
     market_status: TaiwanFuturesMarketStatusRead
 
 
-class TaiwanFuturesQuoteRead(BaseModel):
+class TaiwanFuturesVolumeRead(BaseModel):
+    instrument_type: Literal["futures"] = "futures"
+    volume_unit: Literal["contracts"] | None = None
+    volume_semantics: Literal["interval_contracts", "session_cumulative_contracts", "trading_day_contracts"] | None = None
+    volume_contract_version: str | None = None
+
+
+class TaiwanFuturesQuoteRead(TaiwanFuturesVolumeRead):
     id: int
     provider: str
     market: str
@@ -1894,7 +1941,7 @@ class TaiwanFuturesQuoteRead(BaseModel):
     updated_at: datetime
 
 
-class TaiwanFuturesIntradayBarRead(BaseModel):
+class TaiwanFuturesIntradayBarRead(TaiwanFuturesVolumeRead):
     id: int
     provider: str
     market: str
@@ -1920,7 +1967,7 @@ class TaiwanFuturesIntradayBarRead(BaseModel):
     updated_at: datetime
 
 
-class TaiwanFuturesDailyBarRead(BaseModel):
+class TaiwanFuturesDailyBarRead(TaiwanFuturesVolumeRead):
     id: int
     provider: str
     market: str

@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, inspect
+from sqlalchemy import and_, func, inspect, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -14,8 +14,8 @@ from app.db.models import (
     SourceRegistry,
     TaiwanStockQuoteSnapshot,
 )
-from app.market.trading_calendar import TAIWAN_TZ
-from app.market.trading_calendar import taiwan_market_session
+from app.market.trading_calendar import TAIWAN_TZ, TAIWAN_SESSION_CLOSE_TIME, TAIWAN_CLOSE_RESOLUTION_TIME
+from app.market.trading_calendar import taiwan_market_session, taiwan_presentation_session
 from app.market.tw_current_market_repository import read_breadth_price_states
 from app.market.tw_realtime_capabilities import (
     TW_QUOTE_SNAPSHOT_CAPABILITY_ID,
@@ -83,11 +83,15 @@ def _quantity_from_lots(value: int | None) -> Quantity | None:
 class TaiwanPublicQuoteRepository:
     def __init__(self, db: Session) -> None:
         self._db = db
+        self._session_close_batch: dict[str, tuple[PersistedPublicQuoteRead, ...]] | None = None
 
     def _decode_row(
         self,
         instrument: InstrumentKey,
         row: TaiwanStockQuoteSnapshot,
+        *,
+        joined_lineage: tuple[RawFetchResult, SourceRegistry] | None = None,
+        lineage_preloaded: bool = False,
     ) -> PersistedPublicQuoteRead:
         binding = quote_source_binding(
             provider=row.provider,
@@ -130,7 +134,7 @@ class TaiwanPublicQuoteRepository:
                 rows_examined=1,
                 limitations=("PUBLIC_QUOTE_CANONICAL_STATE_MISSING",),
             )
-        joined = (
+        joined = joined_lineage if lineage_preloaded else (
             self._db.query(RawFetchResult, SourceRegistry)
             .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
             .filter(RawFetchResult.id == row.raw_result_id)
@@ -260,6 +264,131 @@ class TaiwanPublicQuoteRepository:
             rows_examined=1,
         )
 
+    @staticmethod
+    def _session_close_storage_predicates(trade_date: date) -> tuple:
+        close_at = datetime.combine(trade_date, TAIWAN_SESSION_CLOSE_TIME, tzinfo=TAIWAN_TZ)
+        confirmed_at = datetime.combine(trade_date, TAIWAN_CLOSE_RESOLUTION_TIME, tzinfo=TAIWAN_TZ)
+        return (
+            TaiwanStockQuoteSnapshot.quote_time >= close_at,
+            TaiwanStockQuoteSnapshot.quote_time <= confirmed_at,
+            or_(TaiwanStockQuoteSnapshot.received_at >= _as_utc(confirmed_at),
+                RawFetchResult.fetched_at >= _as_utc(confirmed_at)),
+        )
+
+    def preload_session_close_candidates(
+        self, instruments: tuple[InstrumentKey, ...], *, requested_at: datetime,
+    ) -> None:
+        """Request-local, bounded batch; the existing candidate reader still qualifies closes."""
+        if len(instruments) > 5000:
+            raise ValueError("session-close batch exceeds ordinary-universe bound")
+        expected = taiwan_presentation_session(requested_at)["trade_date"]
+        collected: dict[str, list[PersistedPublicQuoteRead]] = {item.symbol: [] for item in instruments}
+        for offset in range(0, len(instruments), 400):
+            chunk = {item.symbol: item for item in instruments[offset:offset + 400]}
+            # Latest actual closeout per source. Role qualification precedes the
+            # window bound, so a later no-trade receipt cannot erase the close.
+            ranked = self._db.query(
+                TaiwanStockQuoteSnapshot.id.label("id"),
+                func.row_number().over(
+                    partition_by=(TaiwanStockQuoteSnapshot.stock_id, TaiwanStockQuoteSnapshot.market,
+                                  TaiwanStockQuoteSnapshot.provider, TaiwanStockQuoteSnapshot.source),
+                    order_by=(TaiwanStockQuoteSnapshot.quote_time.desc(), TaiwanStockQuoteSnapshot.id.desc()),
+                ).label("ordinal"),
+            ).outerjoin(RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id).filter(
+                TaiwanStockQuoteSnapshot.stock_id.in_(chunk),
+                or_(*(and_(TaiwanStockQuoteSnapshot.provider == binding.descriptor.provider_key,
+                           TaiwanStockQuoteSnapshot.source == binding.source)
+                      for binding in TW_REALTIME_SOURCE_BINDINGS
+                      if binding.descriptor.capability_id == TW_QUOTE_SNAPSHOT_CAPABILITY_ID)),
+                TaiwanStockQuoteSnapshot.trade_date == expected,
+                *self._session_close_storage_predicates(expected),
+                TaiwanStockQuoteSnapshot.market_session.in_(("closing_auction", "close_resolution", "post_close")),
+                TaiwanStockQuoteSnapshot.trade_state == TradeObservationState.TRADE_OBSERVED.value,
+                TaiwanStockQuoteSnapshot.last_price.isnot(None),
+                TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at),
+                RawFetchResult.fetched_at <= _as_utc(requested_at),
+            ).subquery()
+            rows = self._db.query(TaiwanStockQuoteSnapshot, RawFetchResult, SourceRegistry).join(
+                ranked, ranked.c.id == TaiwanStockQuoteSnapshot.id,
+            ).outerjoin(RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id).outerjoin(
+                SourceRegistry, SourceRegistry.id == TaiwanStockQuoteSnapshot.source_id,
+            ).filter(ranked.c.ordinal == 1).all()
+            for row, raw, source in rows:
+                instrument = chunk[row.stock_id]
+                if row.market != instrument.venue:
+                    continue
+                collected[row.stock_id].append(self._decode_row(
+                    instrument, row, joined_lineage=(raw, source) if raw is not None and source is not None else None,
+                    lineage_preloaded=True,
+                ))
+        for venue in sorted({item.venue for item in instruments}):
+            venue_instruments = [item for item in instruments if item.venue == venue]
+            price_states = read_breadth_price_states(self._db, venue=venue,
+                requested_at=requested_at, trade_date=expected,
+                symbols=tuple(item.symbol for item in venue_instruments))
+            for instrument in venue_instruments:
+                collected[instrument.symbol] = self._merge_price_state(
+                    instrument, collected[instrument.symbol], price_states.get(instrument.symbol),
+                    trade_date=expected, allowed_sessions=(MarketSession.CLOSING_AUCTION, MarketSession.CLOSE_RESOLUTION, MarketSession.POST_CLOSE),
+                )
+        self._session_close_batch = {
+            symbol: tuple(sorted(reads, key=lambda item: (
+                -(item.observation.lineage.event_at.timestamp() if item.observation and item.observation.lineage.event_at else 0),
+                item.provider_priority,
+            ))[:8]) for symbol, reads in collected.items()
+        }
+
+    @staticmethod
+    def _merge_price_state(instrument: InstrumentKey, reads: list[PersistedPublicQuoteRead], state: dict | None, *, trade_date: date | None = None, allowed_sessions: tuple[MarketSession, ...] | None = None) -> list[PersistedPublicQuoteRead]:
+        if state is not None:
+            state = BreadthPriceState.model_validate(state)
+            if ((trade_date is not None and state.trade_date != trade_date)
+                or (allowed_sessions and taiwan_market_session(state.price_as_of) not in allowed_sessions)):
+                state = None
+        if state is not None:
+            existing = next((item for item in reads if item.provider == state.lineage.provider), None)
+            if existing is None or existing.observation is None or (
+                existing.observation.last_trade_price is None
+                or existing.observation.lineage.event_at < state.price_as_of
+            ):
+                quote = QuoteObservation(
+                    instrument=instrument, lineage=state.lineage.model_copy(update={
+                        "cache_hit": True,
+                        "observation_id": state.lineage.observation_id
+                        or f"{state.lineage.raw_receipt_id}:stock:{instrument.symbol}",
+                    }),
+                    latest_observation_lineage=(
+                        existing.observation.latest_observation_lineage or existing.observation.lineage
+                        if existing is not None and existing.observation is not None
+                        and existing.observation.trade_date == state.trade_date
+                        and (existing.observation.latest_observation_lineage or existing.observation.lineage).event_at >= state.price_as_of
+                        else None
+                    ),
+                    trade_date=state.trade_date, currency="TWD",
+                    state=ObservationState.AVAILABLE,
+                    trade_state=TradeObservationState.TRADE_OBSERVED,
+                    last_trade_price=state.price,
+                    previous_close=state.previous_close,
+                    cumulative_quantity=_quantity_from_lots(state.cumulative_volume_lots),
+                )
+                reads = [item for item in reads if item.provider != state.lineage.provider]
+                reads.append(PersistedPublicQuoteRead(
+                    observation=quote, provider=quote.lineage.provider,
+                    source=quote.lineage.source,
+                    provider_priority=quote_source_binding(
+                        provider=quote.lineage.provider, source="twse_mis_quote_depth",
+                    ).descriptor.priority,
+                    raw_result_id=int(quote.lineage.raw_receipt_id.split(":")[1]),
+                    market_session=taiwan_market_session(state.price_as_of),
+                    confirmed_at=max(
+                        (value for value in (quote.lineage.received_at, quote.lineage.fetched_at)
+                         if value is not None),
+                        default=None,
+                    ),
+                    limitations=("CURRENT_SESSION_LAST_ACTUAL_TRADE",),
+                ))
+        return reads
+
     def load_quote_candidates(
         self,
         instrument: InstrumentKey,
@@ -275,6 +404,8 @@ class TaiwanPublicQuoteRepository:
             raise ValueError("Taiwan public quote venue must be TWSE or TPEX")
         if not 1 <= max_candidates <= 8:
             raise ValueError("public quote max_candidates must be between 1 and 8")
+        if self._session_close_batch is not None:
+            return self._session_close_batch.get(instrument.symbol, ())[:max_candidates]
         base_query = (
             self._db.query(TaiwanStockQuoteSnapshot)
             .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
@@ -290,6 +421,18 @@ class TaiwanPublicQuoteRepository:
                     tuple(session.value for session in allowed_sessions)
                 )
             )
+        if requested_at is not None:
+            # Visibility is a storage predicate, not a freshness override. A
+            # later receipt must not hide the candidate visible at request time.
+            base_query = base_query.outerjoin(
+                RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id,
+            ).filter(
+                or_(TaiwanStockQuoteSnapshot.received_at.is_(None),
+                    TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at)),
+                or_(RawFetchResult.id.is_(None), RawFetchResult.fetched_at <= _as_utc(requested_at)),
+            )
+        if trade_date is not None and allowed_sessions and requested_at is not None:
+            base_query = base_query.filter(*self._session_close_storage_predicates(trade_date))
         quote_bindings = sorted(
             (
                 binding
@@ -330,8 +473,8 @@ class TaiwanPublicQuoteRepository:
                     if actual is not None:
                         row = actual
                 rows_by_id[row.id] = row
-                if len(rows_by_id) >= max_candidates:
-                    break
+                # Inspect at most one role-qualified row per registered source.
+                # The outward candidate bound applies after semantic ranking.
         if len(rows_by_id) < max_candidates:
             fallback_rows = (
                 base_query.order_by(
@@ -351,7 +494,7 @@ class TaiwanPublicQuoteRepository:
             rows_by_id.values(),
             key=lambda row: (row.quote_time, row.id),
             reverse=True,
-        )[:max_candidates]
+        )
         if not rows and requested_at is None:
             return (
                 PersistedPublicQuoteRead(
@@ -374,51 +517,26 @@ class TaiwanPublicQuoteRepository:
                         "latest_observation_lineage": latest_read.observation.lineage,
                     }))
             reads.append(read)
-            if len(reads) >= max_candidates:
-                break
-        if requested_at is not None and not allowed_sessions:
+        if requested_at is not None:
             state = read_current_stock_price_states(
                 self._db, venue=instrument.venue, requested_at=requested_at,
-                symbols=(instrument.symbol,),
+                symbols=(instrument.symbol,), trade_date=trade_date,
             ).get(instrument.symbol)
-            if state is not None:
-                state = BreadthPriceState.model_validate(state)
-                existing = next((item for item in reads if item.provider == state.lineage.provider), None)
-                if existing is None or existing.observation is None or (
-                    existing.observation.last_trade_price is None
-                    or existing.observation.lineage.event_at < state.price_as_of
-                ):
-                    quote = QuoteObservation(
-                        instrument=instrument, lineage=state.lineage.model_copy(update={
-                            "cache_hit": True,
-                            "observation_id": state.lineage.observation_id
-                            or f"{state.lineage.raw_receipt_id}:stock:{instrument.symbol}",
-                        }),
-                        latest_observation_lineage=(
-                            existing.observation.latest_observation_lineage or existing.observation.lineage
-                            if existing is not None and existing.observation is not None
-                            and existing.observation.trade_date == state.trade_date
-                            and (existing.observation.latest_observation_lineage or existing.observation.lineage).event_at >= state.price_as_of
-                            else None
-                        ),
-                        trade_date=state.trade_date, currency="TWD",
-                        state=ObservationState.AVAILABLE,
-                        trade_state=TradeObservationState.TRADE_OBSERVED,
-                        last_trade_price=state.price,
-                        previous_close=state.previous_close,
-                        cumulative_quantity=_quantity_from_lots(state.cumulative_volume_lots),
-                    )
-                    reads = [item for item in reads if item.provider != state.lineage.provider]
-                    reads.append(PersistedPublicQuoteRead(
-                        observation=quote, provider=quote.lineage.provider,
-                        source=quote.lineage.source,
-                        provider_priority=quote_source_binding(
-                            provider=quote.lineage.provider, source="twse_mis_quote_depth",
-                        ).descriptor.priority,
-                        raw_result_id=int(quote.lineage.raw_receipt_id.split(":")[1]),
-                        market_session=taiwan_market_session(state.price_as_of),
-                        limitations=("CURRENT_SESSION_LAST_ACTUAL_TRADE",),
-                    ))
+            reads = self._merge_price_state(instrument, reads, state, trade_date=trade_date, allowed_sessions=allowed_sessions)
+        expected_date = trade_date or (
+            taiwan_presentation_session(requested_at)["trade_date"]
+            if requested_at is not None else None
+        )
+        def candidate_rank(item: PersistedPublicQuoteRead) -> tuple:
+            observation = item.observation
+            valid = observation is not None
+            same_date = valid and (expected_date is None or observation.trade_date == expected_date)
+            actual = valid and observation.last_trade_price is not None and observation.trade_state is TradeObservationState.TRADE_OBSERVED
+            event = observation.lineage.event_at if valid else None
+            return (not same_date, not valid, not actual,
+                    -(event.timestamp() if event is not None else 0),
+                    item.provider_priority, item.source or "")
+        reads.sort(key=candidate_rank)
         return tuple(reads[:max_candidates]) or (PersistedPublicQuoteRead(
             limitations=("PUBLIC_QUOTE_CANDIDATE_MISSING",),
         ),)
@@ -435,6 +553,7 @@ class TaiwanPublicQuoteRepository:
 def read_current_stock_price_states(
     db: Session, *, venue: str, requested_at: datetime,
     symbols: tuple[str, ...] | None = None,
+    trade_date: date | None = None,
 ) -> dict[str, dict]:
     """One receipt-backed same-session state reader for quote and breadth.
 
@@ -442,7 +561,11 @@ def read_current_stock_price_states(
     actual trade evidence participates; neither a read nor a provider failure
     creates a new observation or changes a trade's event/receipt time.
     """
-    states = read_breadth_price_states(db, venue=venue, requested_at=requested_at, symbols=symbols)
+    expected_date = trade_date or requested_at.astimezone(TAIWAN_TZ).date()
+    if expected_date > requested_at.astimezone(TAIWAN_TZ).date():
+        return {}
+    states = read_breadth_price_states(db, venue=venue, requested_at=requested_at,
+        symbols=symbols, trade_date=expected_date)
     if symbols is not None:
         states = {code: value for code, value in states.items() if code in symbols}
     if not inspect(db.connection()).has_table(TaiwanStockQuoteSnapshot.__tablename__):
@@ -451,7 +574,7 @@ def read_current_stock_price_states(
         TaiwanStockQuoteSnapshot.market == venue,
         TaiwanStockQuoteSnapshot.provider == "twse_mis",
         TaiwanStockQuoteSnapshot.source == "twse_mis_quote_depth",
-        TaiwanStockQuoteSnapshot.trade_date == requested_at.astimezone(TAIWAN_TZ).date(),
+        TaiwanStockQuoteSnapshot.trade_date == expected_date,
         TaiwanStockQuoteSnapshot.quote_time <= requested_at.astimezone(TAIWAN_TZ),
         TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at),
         TaiwanStockQuoteSnapshot.trade_state == TradeObservationState.TRADE_OBSERVED.value,
@@ -464,7 +587,7 @@ def read_current_stock_price_states(
         (TaiwanStockQuoteSnapshot.stock_id == latest.c.stock_id)
         & (TaiwanStockQuoteSnapshot.quote_time == latest.c.event_at),
     ).filter(TaiwanStockQuoteSnapshot.market == venue,
-             TaiwanStockQuoteSnapshot.trade_date == requested_at.astimezone(TAIWAN_TZ).date(),
+             TaiwanStockQuoteSnapshot.trade_date == expected_date,
              TaiwanStockQuoteSnapshot.provider == "twse_mis",
              TaiwanStockQuoteSnapshot.source == "twse_mis_quote_depth").all()
     repository = TaiwanPublicQuoteRepository(db)

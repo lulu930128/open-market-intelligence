@@ -340,7 +340,7 @@ def _aggregated_indicator(
         else dict(point)
         for point in technical.points
     ]
-    latest_data_date = points[-1].get("time") if points else None
+    latest_data_date = series.bars[-1].end_at.date() if series.bars else None
     period = classify_latest_period(
         points,
         timeframe=timeframe,
@@ -730,27 +730,89 @@ def _today_market_session() -> dict[str, Any]:
     }
 
 
+def _today_radar_state(report: dict[str, Any]) -> dict[str, Any]:
+    """Project existing session facts; daily indicators remain background."""
+    data = report.get("data") or {}
+    intraday = data.get("intraday") or {}
+    latest = intraday.get("latest_point") or {}
+    session_rows = [
+        row for row in report.get("rows", [])
+        if row.get("key") not in {"daily_background", "institutional_flow"}
+    ]
+    return {
+        "version": "tw_technical_current_state_v1",
+        "timeframe": "today",
+        "basis": "current_session_observation",
+        "headline": {"key": report.get("phase"), "label": report.get("title"), "tone": "neutral"},
+        "qualifier": {"key": "session_observation", "label": "今日成交觀測；日線指標另作背景", "tone": "neutral"},
+        "summary": report.get("summary"),
+        "position": {
+            "price": latest.get("price"),
+            "label": report.get("value_label", "vs 昨收"),
+            "below_count": 0, "above_count": 0, "available_count": 0,
+            "order": [], "order_label": "今日成交觀測",
+            "alignment": "session_observation", "alignment_label": "日線均線不作今日排列",
+            "distance_pct": {},
+        },
+        "levels": [],
+        "evidence": [{
+            "key": row["key"], "label": row["label"],
+            "state_key": row["key"], "state_label": row.get("display_value"),
+            "tone": row.get("tone", "neutral"), "summary": row.get("description"),
+            "metrics": {"value": row.get("value")},
+        } for row in session_rows],
+        "next_conditions": [],
+    }
+
+
 def _with_evidence_passport(report: dict[str, Any]) -> dict[str, Any]:
     wrapped = dict(report)
     data = dict(wrapped.get("data") or {})
     wrapped["data"] = data
+    timeframe = str(wrapped.get("timeframe") or "daily")
+    if timeframe == "today":
+        data["current_state"] = _today_radar_state(wrapped)
+        data["current_state_status"] = str(wrapped.get("phase") or "missing")
+        data["current_state_decision_usable"] = False
+        data["decision_state"] = None
     indicator = next(
         (data[key] for key in ("daily_indicator", "indicator", "daily_background")
          if isinstance(data.get(key), dict)),
         {},
     )
     input_quality = indicator.get("input_quality") or {}
+    if input_quality:
+        data["input_quality"] = input_quality
+        wrapped["warnings"] = list(dict.fromkeys([
+            *(wrapped.get("warnings") or []), *(input_quality.get("warnings") or []),
+        ]))
     if input_quality.get("decision_usable") is False:
+        quality_summary = {
+            "today": "今日技術判斷所需的日線背景或盤中資料不足，僅保留觀測值。",
+            "daily": "日線技術判斷所需的近期歷史、暖機或連續性不足，僅保留觀測值。",
+            "weekly": "週線技術判斷所需的完成週期資料、暖機或連續性不足，僅保留觀測值。",
+            "monthly": "月線技術判斷所需的完成月度資料、暖機或連續性不足，僅保留觀測值。",
+        }[timeframe]
         wrapped.update({
             "status": "partial",
             "decision_usable": False,
             "title": "技術證據不足",
-            "summary": "日線歷史、指標暖機或序列連續性不足，僅保留觀測值。",
+            "summary": quality_summary,
             "score": None,
             "confidence": "low",
             "badges": [],
         })
         data["input_quality"] = input_quality
+        data["decision_state"] = None
+        data["current_state_decision_usable"] = False
+        if isinstance(data.get("current_state"), dict):
+            data["current_state"] = {
+                **data["current_state"],
+                "headline": {"key": "insufficient_evidence", "label": wrapped["title"], "tone": "warning"},
+                "qualifier": {"key": "insufficient_evidence", "label": quality_summary, "tone": "warning"},
+                "summary": quality_summary,
+                "next_conditions": [],
+            }
         wrapped["missing"] = list(dict.fromkeys([
             *(wrapped.get("missing") or []),
             *(input_quality.get("reason_codes") or []),
@@ -1011,6 +1073,10 @@ def _build_indicator_report(
         timeframe,
         ("技術偏多", "技術整理", "技術偏弱"),
     )
+    projection = _technical_state_projection_from_indicator(
+        indicator, parameters=technical_parameters,
+    )
+    state = {**projection["state"], "timeframe": timeframe, "basis": "completed_period"}
     return {
         "kind": "tw_stock_technical_report",
         "stock_id": stock_id,
@@ -1027,6 +1093,13 @@ def _build_indicator_report(
         "badges": badges,
         "data": {
             "indicator": indicator,
+            "current_state": state,
+            "decision_state": state,
+            "current_state_time": _json_value(indicator.get("time")),
+            "decision_state_time": _json_value(indicator.get("time")),
+            "current_state_status": "completed_period",
+            "decision_state_status": "completed_period",
+            "current_state_decision_usable": indicator.get("decision_usable") is not False,
             "market": _stock_market(db=db, stock_id=stock_id),
             "change_pct": change_pct,
             "timeframe": timeframe,
@@ -2365,10 +2438,11 @@ def build_stock_technical_report(
     include_volume_pace: bool = True,
     intraday_override: dict[str, Any] | None = None,
     to_date: date | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
     normalized_timeframe = timeframe.strip().lower()
     normalized_stock_id = stock_id.strip()
-    technical_parameters = get_technical_analysis_parameters()
+    technical_parameters = parameters or get_technical_analysis_parameters()
 
     if normalized_timeframe == "today":
         if to_date is not None:

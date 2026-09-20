@@ -145,6 +145,17 @@ class RawFetchResult(Base):
 
 class JobRun(Base):
     __tablename__ = "job_run"
+    __table_args__ = (
+        Index(
+            "uq_job_run_tw_intraday_active_demand",
+            "job_type", "target", unique=True,
+            sqlite_where=text(
+                "job_type = 'tw.bootstrap_intraday_base_1m' "
+                "AND substr(target, 1, 10) = 'tw-demand:' "
+                "AND status IN ('queued', 'running')"
+            ),
+        ).ddl_if(dialect="sqlite"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
@@ -2916,6 +2927,35 @@ class TaiwanMarketMinuteState(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanTechnicalInputRevision(Base):
+    """Storage revision maintained transactionally by daily-input triggers."""
+
+    __tablename__ = "taiwan_technical_input_revision"
+    stock_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class TaiwanPriceMapSnapshot(Base):
+    """One atomically published generation per instrument and structure period."""
+
+    __tablename__ = "taiwan_price_map_snapshot"
+    stock_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(16), primary_key=True)
+    claim_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    parameter_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    corporate_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    methodology_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    basis_date: Mapped[date] = mapped_column(Date, nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retry_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(120))
+    payload_json: Mapped[str | None] = mapped_column(Text)
 
 
 class TaiwanIntradayStockState(Base):

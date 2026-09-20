@@ -1623,6 +1623,11 @@ def build_technical_structure_v2(
     )
     return {
         "kind": "tw_technical_current_state_v2",
+        "market": "TW",
+        "symbol": indicators.get("stock_id"),
+        "timeframe": "daily",
+        "latest_price": close,
+        "lineage": dict(indicators.get("lineage") or {}),
         "version": "tw_technical_current_state_v2",
         "algorithm_version": ADVANCED_ALGORITHM_VERSION,
         "mode": "shadow",
@@ -1832,6 +1837,7 @@ def build_tw_stock_price_map_evidence(
     stock_id: str,
     corporate_event_history: Mapping[str, Any] | None = None,
     to_date: date | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
     """Build the bounded daily evidence slice required by Price Map.
 
@@ -1840,7 +1846,7 @@ def build_tw_stock_price_map_evidence(
     divergence, or benchmark-relative strength.
     """
 
-    parameters = get_technical_analysis_parameters()
+    parameters = parameters or get_technical_analysis_parameters()
     methods = indicator_method_catalog(parameters)
     maximum_indicator_warmup = max(
         int(method.get("warmup_bars") or 1)
@@ -2020,6 +2026,57 @@ def build_tw_stock_price_map_evidence(
         "missing": missing,
         "warnings": warnings,
         "source_refs": indicator_source_refs,
+    }
+
+
+def build_tw_stock_period_price_map_evidence(
+    *, db: Session, stock_id: str, timeframe: str,
+    corporate_event_history: Mapping[str, Any] | None = None,
+    to_date: date | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
+) -> dict[str, Any]:
+    """Completed weekly/monthly structure, calculated by the canonical owners."""
+    if timeframe not in {"weekly", "monthly"}:
+        raise ValueError("Period Price Map requires weekly or monthly")
+    parameters = parameters or get_technical_analysis_parameters()
+    methods = indicator_method_catalog(parameters)
+    required = max(int(method.get("warmup_bars") or 1) for method in methods.values())
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=stock_id, interval={"weekly": "1w", "monthly": "1mo"}[timeframe],
+        to_time=datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ) if to_date else None,
+        limit=min(required + 5, 1000), include_partial=False,
+    )
+    points = _series_points(series)
+    calculated, technical = _technical_points(series, parameters)
+    last_component_date = series.bars[-1].end_at.astimezone(TAIWAN_TZ).date() if series.bars else None
+    snapshot = _snapshot_for_timeframe(points, timeframe=timeframe, parameters=parameters,
+        method_catalog=methods, latest_observation_date=last_component_date,
+        calculated_points=calculated, allow_internal_calculation=False)
+    completed_count = snapshot["completed_bars"]
+    completed_bars = series.bars[:completed_count]
+    corporate = build_corporate_action_contract(corporate_event_history,
+        analysis_start=completed_bars[0].start_at.date() if completed_bars else None,
+        analysis_end=completed_bars[-1].end_at.date() if completed_bars else None)
+    usable = bool(technical.decision_usable and completed_count >= required
+                  and snapshot["completed"] and corporate["coverage_status"] == "complete")
+    snapshot.update(decision_usable=usable, input_quality=technical.input_quality,
+                    corporate_action=_corporate_summary(corporate))
+    indicators = {
+        "kind": "tw_technical_indicator_snapshot", "status": "ready" if usable else "partial",
+        "decision_usable": usable, "timeframes": {timeframe: snapshot}, "corporate_action": corporate,
+        "bar_series_revision": technical.bar_series_revision, "technical_revision": technical.technical_revision,
+        "bar_series_fingerprint": technical.bar_series_fingerprint, "parameter_contract": _indicator_parameter_contract(parameters),
+        "input_quality": technical.input_quality,
+    }
+    return {"kind": "tw_stock_price_map_evidence", "version": "tw.stock.price_map.evidence.v2",
+        "status": "ready" if usable else "partial", "price_basis": PRICE_BASIS,
+        "indicators": indicators, "as_of": last_component_date, "period": snapshot["period"],
+        "missing": [] if usable else ["completed_period_input_not_usable"],
+        "warnings": list(corporate.get("warnings") or []),
+        "method_applicability": {"volume_profile": "not_included_daily_ohlcv_method",
+                                 "anchored_vwap": "not_included_daily_ohlcv_method"},
+        "source_refs": [{"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
+                        {"type": "derived", "name": "TaiwanBarService", "interval": series.requested_interval}],
     }
 
 

@@ -142,6 +142,7 @@ from app.market.schemas import (
     TaiwanKgiDataBackfillRead,
     TaiwanKgiDataBackfillRequest,
     TaiwanStockQuoteDepthRead,
+    TaiwanAuctionHistoryRead,
     TaiwanIndexContractReplayRead,
     TaiwanQuoteContractReplayRead,
     TaiwanDispositionListRead,
@@ -1188,12 +1189,31 @@ def refresh_stock_intraday_history(
             interval=interval,
             range_value=range_value,
             refresh=False,
+            bypass_snapshot_cache=True,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.get("/quote-depth/{stock_id}/auction-history", response_model=TaiwanAuctionHistoryRead)
+def get_stock_auction_history(
+    stock_id: str, trade_date: date,
+    as_of: datetime | None = None,
+    max_candidates: int = Query(default=2, ge=1, le=8),
+    db: Session = Depends(get_db),
+):
+    from app.market.taiwan_realtime_platform import read_taiwan_auction_history
+
+    try:
+        return read_taiwan_auction_history(
+            db, stock_id=stock_id, trade_date=trade_date,
+            as_of=as_of, max_candidates=max_candidates,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/quote-depth/{stock_id}", response_model=TaiwanStockQuoteDepthRead)
@@ -1294,7 +1314,10 @@ def heartbeat_realtime_quote_lease(
     lease_id: str,
     db: Session = Depends(get_db),
 ):
-    lease = heartbeat_taiwan_realtime_quote_lease(db, lease_id)
+    lease = heartbeat_taiwan_realtime_quote_lease(
+        db, lease_id,
+        baseline_warmup_enqueuer=enqueue_taiwan_intraday_viewer_warmup,
+    )
     if lease is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1537,6 +1560,29 @@ def get_stock_overnight_impact(
         ) from exc
 
 
+@router.get("/screening/price-map")
+def get_taiwan_price_map_screening(
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    relation: str = Query(default="near_zone"),
+    zone_side: str = Query(default="any", pattern="^(any|upside|downside)$"),
+    lane: str = Query(default="actual", pattern="^(actual|indicative)$"),
+    near_pct: float = Query(default=0.5, ge=0, le=5),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=5000),
+    stock_ids: list[str] | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    from app.market.tw_price_map_screening import build_tw_price_map_screening_snapshot
+    try:
+        return build_tw_price_map_screening_snapshot(db, parameters={
+            "timeframe": timeframe, "relation": relation, "zone_side": zone_side, "lane": lane,
+            "near_pct": near_pct, "limit": limit, "offset": offset,
+            "universe": {"stock_ids": stock_ids or []},
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @router.get(
     "/technical/{stock_id}/price-map",
     response_model=StockPriceMapRead,
@@ -1544,6 +1590,7 @@ def get_stock_overnight_impact(
 def get_stock_price_map(
     stock_id: str,
     candidate_close: float | None = Query(default=None, gt=0),
+    timeframe: str = Query(default="daily", pattern="^(today|daily|weekly|monthly)$"),
     db: Session = Depends(get_db),
 ):
     try:
@@ -1551,6 +1598,7 @@ def get_stock_price_map(
             db=db,
             stock_id=stock_id,
             candidate_close=candidate_close,
+            timeframe=timeframe,
         )
     except ValueError as exc:
         raise HTTPException(

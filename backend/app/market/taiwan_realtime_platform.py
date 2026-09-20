@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -354,6 +354,7 @@ class TaiwanAuctionCandidateReader:
                 requirement.target.instrument,
                 max_candidates=requirement.bounds.max_candidates,
                 auction_type=self._applicability.auction_type,
+                as_of=requirement.requested_at,
             )
             if self._applicability.applicable is True
             and self._applicability.auction_type is not None
@@ -618,6 +619,38 @@ def read_taiwan_auction(
     )
 
 
+def read_taiwan_auction_history(
+    db: Session, *, stock_id: str, trade_date: date,
+    auction_type: AuctionType = AuctionType.CLOSING,
+    as_of: datetime | None = None, max_candidates: int = 2,
+) -> dict[str, object]:
+    """Bounded canonical historical read, independent of current applicability."""
+    cutoff = as_of or datetime.now(TAIWAN_TZ)
+    if cutoff.utcoffset() is None:
+        raise ValueError("auction history as_of requires a timezone")
+    if trade_date > cutoff.astimezone(TAIWAN_TZ).date():
+        raise ValueError("auction history trade_date cannot follow as_of")
+    reads = TaiwanAuctionRepository(db).load_candidates(
+        _load_instrument(db, stock_id), trade_date=trade_date,
+        auction_type=auction_type, as_of=cutoff, max_candidates=max_candidates,
+    )
+    observations = [read.observation for read in reads if read.observation is not None]
+    return {
+        "stock_id": stock_id, "trade_date": trade_date.isoformat(),
+        "auction_type": auction_type.value, "requested_as_of": cutoff.isoformat(),
+        "event_time": max((observation.lineage.event_at.isoformat() for observation in observations), default=None),
+        "capture_status": "captured" if observations else "missing",
+        "historical": True, "provisional": True, "price_semantics": "indicative",
+        "decision_usable": False, "indicator_usable": False,
+        "execution_grade_usable": False, "cache_only": True,
+        "observations": [observation.model_dump(mode="json") for observation in observations],
+        "limitations": list(dict.fromkeys(
+            [reason for read in reads for reason in read.limitations]
+            + ([] if observations else ["No qualified capture is visible at the requested boundary; this does not prove no acquisition occurred."]),
+        )),
+    }
+
+
 def refresh_taiwan_realtime_snapshot(
     db: Session,
     *,
@@ -726,6 +759,7 @@ __all__ = [
     "acquire_taiwan_depth",
     "build_taiwan_realtime_requirement",
     "read_taiwan_auction",
+    "read_taiwan_auction_history",
     "read_taiwan_depth",
     "refresh_taiwan_realtime_snapshot",
 ]

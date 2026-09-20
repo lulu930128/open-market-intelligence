@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from app.market.exchange_calendar_cache import exchange_calendar_read_scope
+
 from app.market.technical_evidence import (
     ADVANCED_ALGORITHM_VERSION,
     INDICATOR_ALGORITHM_VERSION,
@@ -22,6 +24,7 @@ from app.market.technical_evidence import (
     build_swing_evidence,
     build_volume_profile,
     calculate_canonical_indicator_points,
+    classify_latest_period,
     indicator_method_catalog,
 )
 from app.market.technical_parameters import (
@@ -30,13 +33,16 @@ from app.market.technical_parameters import (
     get_technical_analysis_parameters,
 )
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead
-from app.market.trading_calendar import is_taiwan_trading_day
+from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
     CanonicalModel,
     InstrumentKey,
 )
+
+
+INPUT_QUALITY_VERSION = "tw.technical.input_quality.v2"
 
 
 class TaiwanTechnicalStatus(str, Enum):
@@ -128,6 +134,7 @@ def _technical_revision(
             "contract_version": "tw.technical.revision.v1",
             "bar_series_revision": bar_revision,
             "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+            "input_quality_version": INPUT_QUALITY_VERSION,
             "parameter_contract": parameter_contract,
         },
         ensure_ascii=False,
@@ -290,7 +297,7 @@ def _input_quality(
     warmup: dict[str, dict[str, Any]],
     eligible: bool,
 ) -> dict[str, Any]:
-    """Gate the calculation input, independently of response/history limits."""
+    """Qualify recent completed inputs; report wider history separately."""
     required = max(
         (item["required_bars"] for item in warmup.values()
          if item["status"] != "unavailable"),
@@ -301,27 +308,101 @@ def _input_quality(
         reasons.append("TW_TECHNICAL_INSUFFICIENT_BARS")
     if not eligible:
         reasons.append("TW_TECHNICAL_BAR_STATE_NOT_ELIGIBLE")
-    missing_days = 0
-    if bars.requested_interval == "1d":
-        dates = [bar.start_at.date() for bar in bars.bars[:decision_bar_count]]
-        for previous, current in zip(dates, dates[1:]):
-            if current <= previous:
-                reasons.append("TW_TECHNICAL_BAR_ORDER_INVALID")
+    completed = bars.bars[:decision_bar_count]
+    window_start = max(0, decision_bar_count - required)
+    window = completed[window_start:]
+    window_states = bars.bar_states[window_start:decision_bar_count]
+    interval = bars.requested_interval
+
+    def continuity(items):
+        missing = 0
+        ordered = True
+        for previous, current in zip(items, items[1:]):
+            if current.start_at <= previous.start_at:
+                ordered = False
                 continue
-            cursor = previous + timedelta(days=1)
-            while cursor < current:
-                missing_days += int(is_taiwan_trading_day(cursor))
+            if interval not in {"1d", "1w", "1mo"}:
+                continue
+            cursor = previous.start_at.astimezone(TAIWAN_TZ).date()
+            end = current.start_at.astimezone(TAIWAN_TZ).date()
+            if interval == "1w":
+                cursor += timedelta(days=7 - cursor.weekday())
+                end -= timedelta(days=end.weekday())
+            elif interval == "1mo":
+                cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+                end = end.replace(day=1)
+            else:
                 cursor += timedelta(days=1)
-        if missing_days:
-            reasons.append("TW_TECHNICAL_HISTORY_GAP")
-    elif not bars.history.requested_coverage_satisfied:
+            while cursor < end:
+                missing += int(is_taiwan_trading_day(cursor))
+                cursor += timedelta(days=1)
+        return missing, ordered
+
+    history_missing, history_ordered = continuity(completed)
+    window_missing, window_ordered = continuity(window)
+    component_known = True
+    if interval in {"1w", "1mo"}:
+        history_missing += sum(
+            state.component_missing_trading_day_count or 0
+            for state in bars.bar_states[:decision_bar_count]
+        )
+        component_known = all(
+            state.component_missing_trading_day_count is not None
+            for state in window_states
+        )
+        window_missing += sum(
+            state.component_missing_trading_day_count or 0 for state in window_states
+        )
+        if not component_known:
+            reasons.append("TW_TECHNICAL_COMPONENT_COVERAGE_UNKNOWN")
+    if window_missing:
+        reasons.append("TW_TECHNICAL_DECISION_WINDOW_GAP")
+    if not window_ordered:
+        reasons.append("TW_TECHNICAL_BAR_ORDER_INVALID")
+    window_eligible = len(window_states) == len(window) and all(
+        state.technical_eligible for state in window_states
+    )
+    if not window_eligible:
+        reasons.append("TW_TECHNICAL_BAR_STATE_NOT_ELIGIBLE")
+    # Intraday coverage remains a separate gate; this policy only relaxes
+    # completed daily/weekly/monthly requested-history completeness.
+    if interval not in {"1d", "1w", "1mo"} and not bars.history.requested_coverage_satisfied:
         reasons.append("TW_TECHNICAL_HISTORY_INCOMPLETE")
+    history_warnings = []
+    if not bars.history.requested_coverage_satisfied:
+        history_warnings.append("TW_TECHNICAL_HISTORY_INCOMPLETE")
+    if history_missing > window_missing:
+        history_warnings.append("TW_TECHNICAL_HISTORY_GAP_OUTSIDE_DECISION_WINDOW")
+    if not history_ordered:
+        history_warnings.append("TW_TECHNICAL_HISTORY_ORDER_INVALID")
+    if interval in {"1w", "1mo"} and any(
+        state.component_missing_trading_day_count is None
+        for state in bars.bar_states[:decision_bar_count]
+    ):
+        history_warnings.append("TW_TECHNICAL_HISTORY_COMPONENT_COVERAGE_UNKNOWN")
     return {
+        "contract_version": INPUT_QUALITY_VERSION,
         "status": "partial" if reasons else "ready",
         "decision_usable": not reasons,
         "required_bars": required,
         "available_bars": decision_bar_count,
-        "missing_trading_day_count": missing_days,
+        "missing_trading_day_count": history_missing,
+        "decision_window": {
+            "required_bars": required,
+            "available_bars": len(window),
+            "from_time": window[0].start_at.isoformat() if window else None,
+            "to_time": window[-1].end_at.isoformat() if window else None,
+            "continuous": window_ordered and not window_missing and component_known,
+            "missing_trading_day_count": window_missing,
+            "eligible": window_eligible and eligible,
+        },
+        "history_coverage": {
+            "requested_complete": bars.history.requested_coverage_satisfied,
+            "missing_trading_day_count": history_missing,
+            "status": "partial" if history_warnings or history_missing else "ready",
+            "reason_codes": history_warnings,
+        },
+        "warnings": history_warnings,
         "reason_codes": list(dict.fromkeys(reasons)),
     }
 
@@ -419,6 +500,7 @@ class TaiwanTechnicalService:
         )
         return {"vwap": points[-1].get("vwap"), "time": bars.bars[-1].end_at.isoformat()}
 
+    @exchange_calendar_read_scope()
     def calculate(
         self,
         bars: TaiwanBarSeriesRead,
@@ -460,10 +542,22 @@ class TaiwanTechnicalService:
         resolved = parameters or get_technical_analysis_parameters()
         parameter_contract = {
             "schema_version": "tw.technical.parameters.v1",
+            "parameter_revision": resolved.revision,
             **asdict(resolved),
         }
         partial_index = _terminal_current_partial_index(bars)
+        period_partial = bool(
+            bars.bars and bars.requested_interval in {"1w", "1mo"}
+            and classify_latest_period(
+                [],
+                timeframe={"1w": "weekly", "1mo": "monthly"}[bars.requested_interval],
+                latest_observation_date=bars.bars[-1].end_at.astimezone(TAIWAN_TZ).date(),
+            )["status"] == "current_partial"
+        )
+        if period_partial and all(state.technical_eligible for state in bars.bar_states[:-1]):
+            partial_index = None
         decision_bar_count = (
+            len(bars.bars) - 1 if period_partial else
             partial_index
             if partial_index is not None and partial_index >= 0
             else len(bars.bars)
@@ -487,7 +581,7 @@ class TaiwanTechnicalService:
             )
         else:
             raw_points = _bar_points(bars)
-            decision_points = raw_points[:decision_bar_count]
+            decision_points = raw_points if period_partial else raw_points[:decision_bar_count]
             calculated = calculate_canonical_indicator_points(
                 decision_points,
                 parameters=resolved,
@@ -514,7 +608,7 @@ class TaiwanTechnicalService:
                 status = TaiwanTechnicalStatus.PARTIAL
             elif warming:
                 status = TaiwanTechnicalStatus.WARMING_UP
-            elif current_partial is not None or not bars.history.requested_coverage_satisfied:
+            elif current_partial is not None or period_partial or not bars.history.requested_coverage_satisfied:
                 status = TaiwanTechnicalStatus.PARTIAL
             else:
                 status = TaiwanTechnicalStatus.AVAILABLE
@@ -535,7 +629,7 @@ class TaiwanTechnicalService:
         )
         if status is TaiwanTechnicalStatus.AVAILABLE and not input_quality["decision_usable"]:
             status = TaiwanTechnicalStatus.PARTIAL
-        latest = points[-1] if points else {}
+        latest = points[decision_bar_count - 1] if points and decision_bar_count else {}
         structures = {
             key: latest.get(key)
             for key in ("support_resistance", "donchian", "bollinger")
@@ -553,7 +647,7 @@ class TaiwanTechnicalService:
         )
         technical_input_revision = (
             _bar_subset_revision(bars, stop=decision_bar_count)
-            if current_partial is not None
+            if current_partial is not None or period_partial
             else snapshot_revision or bars.identity.series_revision
         )
         return TaiwanTechnicalSeriesRead(
@@ -583,7 +677,7 @@ class TaiwanTechnicalService:
                 parameter_contract=parameter_contract,
             ),
             limitations=tuple(dict.fromkeys(limitations)),
-            warnings=bars.warnings,
+            warnings=tuple(dict.fromkeys((*bars.warnings, *input_quality["warnings"]))),
         )
 
     def calculate_advanced(

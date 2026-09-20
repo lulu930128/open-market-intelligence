@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import date, datetime
 import hashlib
 import json
 import math
@@ -12,12 +12,14 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.market.next_session_plan import build_tw_stock_next_session_plan
+from app.market.price_map_snapshot_repository import read_input_revisions, snapshot_storage_available, read_price_map_external_revision
+from app.market.stock_price_map_schemas import PRICE_MAP_KIND, PRICE_MAP_VERSION, METHODOLOGY_ID, METHODOLOGY_VERSION
 from app.market.taiwan_price_rules import (
     normalize_taiwan_stock_price,
     shift_taiwan_stock_price_by_ticks,
     taiwan_stock_tick_size,
 )
-from app.market.technical_evidence import build_tw_stock_price_map_evidence
+from app.market.technical_evidence import build_tw_stock_price_map_evidence, build_tw_stock_period_price_map_evidence
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     build_taiwan_technical_parameter_contract,
@@ -26,12 +28,9 @@ from app.market.technical_parameters import (
 from app.market.technical_report import build_stock_technical_report
 from app.market.trading_calendar import taiwan_now
 from app.market.tw_corporate_events import get_taiwan_stock_event_history
+from app.market.tw_intraday_state import read_tw_price_map_observations
 
 
-PRICE_MAP_KIND = "tw_stock_price_map"
-PRICE_MAP_VERSION = "tw.stock.price_map.v3"
-METHODOLOGY_ID = "tw_stock_price_map_confluence"
-METHODOLOGY_VERSION = "2.0.0"
 CLUSTER_MIN_TICKS = 2
 ZONE_PADDING_PCT = 0.15
 ZONE_PADDING_TICKS = 2
@@ -42,7 +41,7 @@ DISPLAY_AXIS_PERCENT = 10.0
 DISPLAY_AXIS_TICK_PCTS = (10.0, 8.0, 6.0, 4.0, 2.0, 0.0, -2.0, -4.0, -6.0, -8.0, -10.0)
 PRICE_MAP_BASIS_CACHE_TTL_SECONDS = 30.0
 _PRICE_MAP_BASIS_CACHE: dict[
-    tuple[int, str, str, float | None],
+    tuple[int, str, str, float | None, str],
     tuple[float, dict[str, Any], dict[str, Any], str | None],
 ] = {}
 _PRICE_MAP_BASIS_CACHE_LOCK = RLock()
@@ -92,17 +91,27 @@ def _basis_cache_key(
     *,
     stock_id: str,
     next_plan: Mapping[str, Any],
-) -> tuple[int, str, str, float | None]:
+    parameter_revision: str,
+) -> tuple[int, str, str, float | None, str] | None:
+    if not snapshot_storage_available(db):
+        return None
+    dependency_revision = hashlib.sha256(json.dumps({
+        "parameters": parameter_revision,
+        "bars": read_input_revisions(db, [stock_id]).get(stock_id, 0),
+        "external_evidence": read_price_map_external_revision(),
+        "methodology": METHODOLOGY_VERSION,
+    }, sort_keys=True).encode("utf-8")).hexdigest()
     return (
         id(db.get_bind()),
         stock_id,
         str(next_plan.get("as_of_trade_date") or "missing"),
         _number(next_plan.get("as_of_close")),
+        dependency_revision,
     )
 
 
 def _read_basis_cache(
-    key: tuple[int, str, str, float | None],
+    key: tuple[int, str, str, float | None, str],
 ) -> tuple[dict[str, Any], dict[str, Any], str | None] | None:
     current = time.monotonic()
     with _PRICE_MAP_BASIS_CACHE_LOCK:
@@ -117,7 +126,7 @@ def _read_basis_cache(
 
 
 def _write_basis_cache(
-    key: tuple[int, str, str, float | None],
+    key: tuple[int, str, str, float | None, str],
     *,
     report: dict[str, Any],
     evidence: dict[str, Any],
@@ -157,7 +166,7 @@ def _distance_pct(price: float, reference: float) -> float:
     return round((price / reference - 1) * 100, 4)
 
 
-def _display_axis(reference: float | None) -> dict[str, Any]:
+def _display_axis(reference: float | None, *, timeframe: str = "daily") -> dict[str, Any]:
     if reference is None:
         return {
             "basis_price": None,
@@ -170,12 +179,13 @@ def _display_axis(reference: float | None) -> dict[str, Any]:
             "ticks": [],
             "limitations": ["A completed-session reference price is required for the display axis."],
         }
+    span = {"daily": DISPLAY_AXIS_PERCENT, "weekly": 20.0, "monthly": 35.0}[timeframe]
     ticks = [
         {
             "percent": percent,
             "price": normalize_taiwan_stock_price(reference * (1 + percent / 100)),
         }
-        for percent in DISPLAY_AXIS_TICK_PCTS
+        for percent in (tick * span / DISPLAY_AXIS_PERCENT for tick in DISPLAY_AXIS_TICK_PCTS)
     ]
     prices = [float(item["price"]) for item in ticks]
     return {
@@ -183,7 +193,7 @@ def _display_axis(reference: float | None) -> dict[str, Any]:
         "lower_bound": min(prices),
         "upper_bound": max(prices),
         "range_kind": "display_range",
-        "range_percent": DISPLAY_AXIS_PERCENT,
+        "range_percent": span,
         "authority": "backend_display_contract",
         "is_legal_limit": False,
         "ticks": ticks,
@@ -258,6 +268,8 @@ def _basis_revision(
     reference: float | None,
     trade_date: Any,
     levels: Iterable[Mapping[str, Any]],
+    parameter_revision: str,
+    input_evidence: Mapping[str, Any],
 ) -> str:
     payload = {
         "price_map_version": PRICE_MAP_VERSION,
@@ -265,6 +277,8 @@ def _basis_revision(
         "stock_id": stock_id,
         "reference": reference,
         "trade_date": str(trade_date or "missing"),
+        "parameter_revision": parameter_revision,
+        "input_evidence": input_evidence,
         "levels": [
             {
                 "evidence_id": str(item.get("evidence_id") or ""),
@@ -276,7 +290,7 @@ def _basis_revision(
         ],
     }
     digest = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return f"price-map:{digest[:20]}"
 
@@ -333,6 +347,7 @@ def _collect_levels(
     evidence: Mapping[str, Any],
     next_plan: Mapping[str, Any],
     reference: float,
+    timeframe: str = "daily",
 ) -> list[dict[str, Any]]:
     levels: list[dict[str, Any]] = []
     for item in next_plan.get("levels") or []:
@@ -375,7 +390,7 @@ def _collect_levels(
         )
 
     indicators = _dict(evidence.get("indicators"))
-    daily = _dict(_dict(_dict(indicators.get("timeframes")).get("daily")).get("completed"))
+    daily = _dict(_dict(_dict(indicators.get("timeframes")).get(timeframe)).get("completed"))
     for family, keys in (
         ("donchian", (("lower20", "Donchian 下緣"), ("upper20", "Donchian 上緣"))),
         (
@@ -401,7 +416,7 @@ def _collect_levels(
                     source_type=family,
                     raw_price=values.get(key),
                     reference=reference,
-                    confirmation="completed_daily_indicator",
+                    confirmation=f"completed_{timeframe}_indicator",
                     strength="medium",
                     confidence="high",
                     evidence_state="derived",
@@ -513,6 +528,8 @@ def _collect_levels(
                 limitations=profile_limitations,
             ),
         )
+    for level in levels:
+        level["timeframe"] = timeframe
     return sorted(levels, key=lambda item: (item["price"], item["evidence_id"]))
 
 
@@ -621,7 +638,9 @@ def _padded_zone_bounds(
     limitations: list[str] = []
 
     raw_width = evidence_upper - evidence_lower
-    max_width = max(raw_width, reference * max(max_width_pct, 0) / 100)
+    max_width = reference * max(max_width_pct, 0) / 100
+    if raw_width > max_width + 1e-9:
+        raise ValueError("Raw zone exceeds hard width; split evidence before padding.")
     if upper - lower > max_width:
         extra = max(max_width - raw_width, 0) / 2
         lower = normalize_taiwan_stock_price(
@@ -645,10 +664,23 @@ def _padded_zone_bounds(
             lower = min(evidence_lower, reference_ceiling)
             limitations.append("Zone padding was clipped above the completed reference price.")
 
+    # Outward tick rounding can exceed the cap. Remove only padding, never
+    # clip or move an exact evidence level to satisfy the display policy.
+    while upper - lower > max_width + 1e-9:
+        lower_next = shift_taiwan_stock_price_by_ticks(lower, 1)
+        upper_next = shift_taiwan_stock_price_by_ticks(upper, -1)
+        can_raise = lower_next <= evidence_lower and lower_next <= upper
+        can_lower = upper_next >= evidence_upper and upper_next >= lower
+        if can_raise and (not can_lower or evidence_lower - lower >= upper - evidence_upper):
+            lower = lower_next
+        elif can_lower:
+            upper = upper_next
+        else:
+            # No legal tick interval contains this evidence within the cap.
+            lower, upper = evidence_lower, evidence_upper
+            break
     if lower >= upper:
-        lower = shift_taiwan_stock_price_by_ticks(evidence_lower, -1)
-        upper = shift_taiwan_stock_price_by_ticks(evidence_upper, 1)
-        limitations.append("Minimum one-tick research width was applied.")
+        limitations.append("ZONE_WIDTH_BELOW_TICK: no positive research band fits the hard cap.")
     return lower, upper, limitations
 
 
@@ -746,6 +778,21 @@ def _compose_zone(
         "primary_evidence_id": str(primary["evidence_id"]),
         "primary_label": str(primary["label"]),
         "trigger_ids": [],
+        "geometry_status": "ready" if lower < upper else "unavailable",
+        "scanner_eligible": bool(
+            lower < upper and side != "current"
+            and not any(item.get("evidence_state") not in {"observed", "derived", "estimated", "finalized"}
+                        or item.get("confirmation") == "hypothetical_target_close"
+                        for item in ordered)
+        ),
+        "scanner_reason_codes": list(dict.fromkeys([
+            *(["ZONE_WIDTH_BELOW_TICK"] if lower >= upper else []),
+            *(["PIVOT_ZONE"] if side == "current" else []),
+            *(["TARGET_CLOSE_EVIDENCE_NOT_INTRADAY"] if any(
+                item.get("evidence_state") == "hypothetical"
+                or item.get("confirmation") == "hypothetical_target_close"
+                for item in ordered) else []),
+        ])),
         "limitations": list(dict.fromkeys([
             *(
                 str(limitation)
@@ -769,16 +816,19 @@ def cluster_price_levels(
     zone_merge_gap_ticks: int = ZONE_MERGE_GAP_TICKS,
     max_zone_width_pct: float = MAX_ZONE_WIDTH_PCT,
 ) -> list[dict[str, Any]]:
+    if not math.isfinite(reference) or reference <= 0 or not math.isfinite(max_zone_width_pct) or max_zone_width_pct <= 0:
+        raise ValueError("Price Map reference and hard width must be finite and positive.")
     ordered = sorted(
         (dict(item) for item in levels),
         key=lambda item: (float(item["price"]), str(item["evidence_id"])),
     )
     if not ordered:
         return []
-    threshold = max(
+    hard_width = reference * max_zone_width_pct / 100
+    threshold = min(hard_width, max(
         reference * max(threshold_pct, 0) / 100,
         taiwan_stock_tick_size(reference) * max(min_ticks, 1),
-    )
+    ))
     grouped: list[list[dict[str, Any]]] = []
     for item in ordered:
         if not grouped or float(item["price"]) - float(grouped[-1][0]["price"]) > threshold:
@@ -808,7 +858,8 @@ def cluster_price_levels(
                 previous_upper,
                 max(zone_merge_gap_ticks, 0),
             )
-            if previous_side == current_side and current_lower <= merge_ceiling:
+            if (previous_side == current_side and current_lower <= merge_ceiling
+                    and current_upper - previous_lower <= hard_width + 1e-9):
                 previous.extend(group)
                 previous.sort(
                     key=lambda item: (float(item["price"]), str(item["evidence_id"]))
@@ -826,6 +877,7 @@ def cluster_price_levels(
         )
         for group in merged
     ]
+    _normalize_zone_topology(zones)
     upside = sorted(
         (zone for zone in zones if zone["side"] == "upside"),
         key=lambda zone: (zone["evidence_lower_bound"], zone["anchor_price"], zone["zone_id"]),
@@ -844,6 +896,33 @@ def cluster_price_levels(
         zones,
         key=lambda zone: (zone["evidence_lower_bound"], zone["anchor_price"], zone["zone_id"]),
     )
+
+
+def _normalize_zone_topology(zones: list[dict[str, Any]]) -> None:
+    """Trim padding only; stable raw spans and evidence membership own tiers."""
+    for side in ("upside", "downside"):
+        ordered = sorted((zone for zone in zones if zone["side"] == side),
+                         key=lambda zone: (zone["evidence_lower_bound"], zone["zone_id"]))
+        for left, right in zip(ordered, ordered[1:]):
+            if left["upper_bound"] < right["lower_bound"]:
+                continue
+            midpoint = (left["evidence_upper_bound"] + right["evidence_lower_bound"]) / 2
+            left_upper = normalize_taiwan_stock_price(midpoint, direction="down")
+            right_lower = normalize_taiwan_stock_price(midpoint, direction="up")
+            if left_upper == right_lower:
+                after = shift_taiwan_stock_price_by_ticks(right_lower, 1)
+                if after <= right["evidence_lower_bound"]:
+                    right_lower = after
+                else:
+                    left_upper = shift_taiwan_stock_price_by_ticks(left_upper, -1)
+            left["upper_bound"] = max(left["evidence_upper_bound"], min(left["upper_bound"], left_upper))
+            right["lower_bound"] = min(right["evidence_lower_bound"], max(right["lower_bound"], right_lower))
+            for zone in (left, right):
+                zone["limitations"].append("Research padding was clipped at the adjacent raw-span boundary.")
+                if zone["lower_bound"] >= zone["upper_bound"]:
+                    zone["geometry_status"] = "unavailable"
+                    zone["scanner_eligible"] = False
+                    zone["scanner_reason_codes"].append("ZONE_WIDTH_BELOW_TICK")
 
 
 def _decision_zone_link(
@@ -917,7 +996,13 @@ def build_tw_stock_price_map(
     candidate_close: float | None = None,
     now: datetime | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
+    timeframe: str = "daily",
 ) -> dict[str, Any]:
+    if timeframe not in {"today", "daily", "weekly", "monthly"}:
+        raise ValueError("Unsupported Price Map timeframe")
+    structure_timeframe = "daily" if timeframe == "today" else timeframe
+    if candidate_close is not None and structure_timeframe != "daily":
+        raise ValueError("Candidate close is only applicable to daily structure")
     normalized_stock_id = str(stock_id or "").strip()
     if not normalized_stock_id:
         raise ValueError("stock_id is required.")
@@ -936,8 +1021,9 @@ def build_tw_stock_price_map(
             db,
             stock_id=normalized_stock_id,
             next_plan=next_plan,
+            parameter_revision=resolved_parameters.revision,
         )
-        if now is None
+        if now is None and structure_timeframe == "daily"
         else None
     )
     cached_basis = _read_basis_cache(cache_key) if cache_key is not None else None
@@ -947,9 +1033,10 @@ def build_tw_stock_price_map(
         report = build_stock_technical_report(
             db=db,
             stock_id=normalized_stock_id,
-            timeframe="daily",
+            timeframe=structure_timeframe,
             include_intraday=False,
             include_volume_pace=False,
+            parameters=resolved_parameters,
         )
         evidence = {}
         evidence_error = None
@@ -962,11 +1049,14 @@ def build_tw_stock_price_map(
                     max_results=200,
                     now=local_now,
                 )
-                evidence = build_tw_stock_price_map_evidence(
+                evidence_builder = build_tw_stock_price_map_evidence if structure_timeframe == "daily" else build_tw_stock_period_price_map_evidence
+                evidence = evidence_builder(
                     db=db,
                     stock_id=normalized_stock_id,
                     corporate_event_history=corporate_history,
-                    to_date=None,
+                    to_date=date.fromisoformat(str(next_plan["as_of_trade_date"])[:10]) if next_plan.get("as_of_trade_date") else None,
+                    parameters=resolved_parameters,
+                    **({"timeframe": structure_timeframe} if structure_timeframe != "daily" else {}),
                 )
             except Exception as exc:  # truthful partial projection; read path stays cache-only
                 evidence_error = type(exc).__name__
@@ -980,7 +1070,7 @@ def build_tw_stock_price_map(
 
     corporate_action = dict(_dict(_dict(evidence.get("indicators")).get("corporate_action")))
     levels = (
-        _collect_levels(evidence=evidence, next_plan=next_plan, reference=reference)
+        _collect_levels(evidence=evidence, next_plan=next_plan if structure_timeframe == "daily" else {}, reference=reference, timeframe=structure_timeframe)
         if reference is not None
         else []
     )
@@ -1014,13 +1104,17 @@ def build_tw_stock_price_map(
         evidence_status=str(evidence.get("status") or "missing"),
         corporate_complete=corporate_complete,
     )
-    decision_usable = bool(
+    structure_input_usable = bool(
         next_plan.get("readiness", {}).get("decision_usable")
         and reference is not None
-        and levels
         and corporate_complete
+        and _dict(evidence.get("indicators")).get("decision_usable") is True
     )
-    axis = _display_axis(reference)
+    decision_usable = structure_input_usable and bool(levels)
+    if status == "ready" and not decision_usable:
+        status = "partial"
+        missing.append("technical_input_not_usable")
+    axis = _display_axis(reference, timeframe=structure_timeframe)
     markers = (
         [
             {
@@ -1035,6 +1129,15 @@ def build_tw_stock_price_map(
         if reference is not None
         else []
     )
+    observation = None
+    if timeframe == "today":
+        observation = read_tw_price_map_observations(db, stock_ids=[normalized_stock_id], now=local_now).get(normalized_stock_id)
+        if observation and observation["research_usable"]:
+            markers.append({"kind": "current_intraday", "label": "目前成交", "price": observation["price"],
+                            "timeframe": "today", "finalization": "intraday_observation",
+                            "decision_usable": bool(observation["decision_usable"] and decision_usable)})
+        else:
+            warnings.extend((observation or {}).get("reason_codes") or ["CURRENT_TRADE_OBSERVATION_MISSING"])
     decision_changes = _decision_changes(
         report,
         decision_usable=decision_usable,
@@ -1048,6 +1151,14 @@ def build_tw_stock_price_map(
         reference=reference,
         trade_date=next_plan.get("as_of_trade_date"),
         levels=levels,
+        parameter_revision=resolved_parameters.revision,
+        input_evidence={
+            "indicators": evidence.get("indicators"),
+            "corporate_action": corporate_action,
+            "status": status,
+            "decision_usable": decision_usable,
+            "zones": zones,
+        },
     )
     candidate_projections = [
         {
@@ -1071,7 +1182,13 @@ def build_tw_stock_price_map(
         "status": status,
         "decision_usable": decision_usable,
         "generated_at": local_now,
+        "structure_input_usable": structure_input_usable,
+        "observation": {key: value for key, value in observation.items() if key != "samples"} if observation else None,
         "basis_revision": basis_revision,
+        "requested_timeframe": timeframe,
+        "structure_timeframe": structure_timeframe,
+        "observation_semantics": "current_trade" if timeframe == "today" else "completed_daily_reference",
+        "method_applicability": evidence.get("method_applicability", {}),
         "evidence_timeframes": evidence_timeframes,
         "reference": {
             "price": reference,
@@ -1086,7 +1203,7 @@ def build_tw_stock_price_map(
         "technical": {
             "headline": str(report.get("title") or "資料不足"),
             "summary": str(report.get("summary") or ""),
-            "score": int(report.get("score") or 0),
+            "score": int(report["score"]) if report.get("score") is not None else None,
             "value": report.get("value"),
             "value_label": str(report.get("value_label") or ""),
             "confidence": str(report.get("confidence") or "low"),

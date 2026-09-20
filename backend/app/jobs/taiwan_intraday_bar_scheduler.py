@@ -287,13 +287,21 @@ def reconcile_taiwan_intraday_close_tails(
                     )
                     continue
 
-                refreshed = refresher(
+                refresher(
                     db,
                     stock_id=stock_id,
                     interval="1m",
                     range_value="1d",
                     requested_at=local_now,
                     descriptors=TAIWAN_INTRADAY_CLOSE_TAIL_DESCRIPTORS,
+                )
+                refreshed = reader(
+                    db,
+                    stock_id=stock_id,
+                    interval="1m",
+                    range_value="1d",
+                    requested_at=local_now,
+                    bypass_snapshot_cache=True,
                 )
                 after = _close_tail_postcondition(
                     db,

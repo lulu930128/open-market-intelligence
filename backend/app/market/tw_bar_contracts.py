@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -194,6 +194,7 @@ class TaiwanCurrentSessionCoverage(CanonicalModel):
     contract_version: str = "tw.bar.current_session_coverage.v2"
     trade_date: date
     status: TaiwanCurrentSessionCoverageStatus
+    session_completed: bool = False
     snapshot_phase: TaiwanCurrentSessionSnapshotPhase
     snapshot_revision: str = Field(min_length=64, max_length=64)
     snapshot_bar_count: int = Field(ge=0, le=5000)
@@ -331,6 +332,14 @@ class TaiwanBarOutwardState(CanonicalModel):
     persisted: bool
     source_interval: str
     technical_eligible: bool = True
+    component_missing_trading_day_count: int | None = Field(default=None, ge=0)
+
+
+class TaiwanBarReadDiagnostics(CanonicalModel):
+    snapshot_cache_status: Literal["hit", "miss", "bypassed", "not_used"] = "not_used"
+    canonical_store_status: Literal["hit", "miss"]
+    final_series_revision: str
+    storage_revision: str | None = None
 
 
 class TaiwanBarSeriesRead(CanonicalModel):
@@ -339,6 +348,7 @@ class TaiwanBarSeriesRead(CanonicalModel):
     requested_interval: str
     base_interval: str
     derived: bool
+    market_phase: str | None = None
     aggregation_version: str | None = None
     bars: tuple[BarObservation, ...] = ()
     bar_states: tuple[TaiwanBarOutwardState, ...] = ()
@@ -346,6 +356,7 @@ class TaiwanBarSeriesRead(CanonicalModel):
     history: TaiwanHistoryCoverage
     session_resolution: tuple[TaiwanSessionResolutionManifest, ...] = ()
     current_session_coverage: TaiwanCurrentSessionCoverage | None = None
+    read_diagnostics: TaiwanBarReadDiagnostics | None = None
     identity: TaiwanBarSeriesIdentity
     limitations: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -387,6 +398,35 @@ class TaiwanChartBarPoint(CanonicalModel):
     technical_eligible: bool
 
 
+class TaiwanChartCloseEvidence(CanonicalModel):
+    """Separate official-price and session-match volume provenance."""
+
+    official_close_price: float | None = None
+    official_close_trade_date: date | None = None
+    official_close_event_time: datetime | None = None
+    official_close_provider: str | None = None
+    official_close_source: str | None = None
+    session_close_price: float | None = None
+    session_close_trade_date: date | None = None
+    session_close_event_time: datetime | None = None
+    session_close_provider: str | None = None
+    session_close_source: str | None = None
+    closing_match_volume_shares: float | None = None
+    closing_match_volume_lots: float | None = None
+    closing_match_volume_semantics: str | None = None
+    closing_match_volume_source_field: str | None = None
+    session_cumulative_volume_shares: float | None = None
+    session_cumulative_volume_lots: float | None = None
+    session_cumulative_volume_trade_date: date | None = None
+    session_cumulative_volume_event_time: datetime | None = None
+    session_cumulative_volume_source_field: str | None = None
+    volume_provider: str | None = None
+    volume_source: str | None = None
+    volume_event_time: datetime | None = None
+    volume_status: str | None = None
+    volume_scope: str | None = None
+
+
 class TaiwanChartPresentationEvent(CanonicalModel):
     """Display-only market event aligned with, but not part of, a Bar series."""
 
@@ -402,6 +442,8 @@ class TaiwanChartPresentationEvent(CanonicalModel):
     provider: str
     source: str
     volume: Quantity | None = None
+    evidence: TaiwanChartCloseEvidence | None = None
+    evidence_id: str | None = None
     display_eligible: bool = True
     technical_eligible: bool = False
 
@@ -419,6 +461,7 @@ class TaiwanChartBarSeriesRead(CanonicalModel):
     presentation_events: tuple[TaiwanChartPresentationEvent, ...] = ()
     history: TaiwanHistoryCoverage
     current_session_coverage: TaiwanCurrentSessionCoverage | None = None
+    read_diagnostics: TaiwanBarReadDiagnostics | None = None
     identity: TaiwanBarSeriesIdentity
     limitations: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -457,6 +500,7 @@ def project_taiwan_chart_bar_series(
         presentation_events=presentation_events,
         history=series.history,
         current_session_coverage=series.current_session_coverage,
+        read_diagnostics=series.read_diagnostics,
         identity=series.identity,
         limitations=series.limitations,
         warnings=series.warnings,

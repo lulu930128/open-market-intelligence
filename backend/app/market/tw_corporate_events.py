@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
 import json
+from hashlib import sha256
 import logging
 import os
 from pathlib import Path
@@ -147,6 +148,12 @@ def _validated_cache(payload: Any) -> dict[str, Any]:
     if not isinstance(payload.get("providers"), dict):
         return _empty_cache()
     return payload
+
+
+def taiwan_corporate_event_revision() -> str:
+    """Content revision of the persisted cache; no acquisition or mutation."""
+    payload = read_taiwan_corporate_event_cache()
+    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def read_taiwan_corporate_event_cache(

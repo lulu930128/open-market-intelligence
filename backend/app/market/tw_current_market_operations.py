@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
 from app.market.public_quote_repository import read_current_stock_price_states as read_breadth_price_states
-from app.market.index_parsers import regular_stock_code
+from app.market.tw_universe import list_taiwan_stock_ids
 from app.market.providers.tw_current_market import CurrentBreadthAdapter, CurrentIndexAdapter
 from app.market.providers.twse_mis_current_breadth import read_twse_mis_current_breadth
 from app.market.providers.twse_mis_current_index import read_twse_mis_current_index
@@ -46,22 +44,7 @@ class TaiwanRegisteredStockUniverseReader:
         normalized = str(market or "").strip().upper()
         if normalized not in {"TWSE", "TPEX"}:
             raise ValueError("Taiwan breadth universe requires TWSE or TPEX")
-        rows = (
-            self._db.query(StockMaster.stock_id)
-            .filter(func.upper(StockMaster.market) == normalized)
-            .filter(StockMaster.instrument_type == "stock")
-            .filter(StockMaster.is_active.is_(True))
-            .order_by(StockMaster.stock_id.asc())
-            .all()
-        )
-        return list(
-            dict.fromkeys(
-                code
-                for row in rows
-                for code in [regular_stock_code(row.stock_id)]
-                if code is not None
-            )
-        )
+        return list_taiwan_stock_ids(self._db, markets=(normalized,))
 
 
 

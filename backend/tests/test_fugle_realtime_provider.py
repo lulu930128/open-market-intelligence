@@ -554,7 +554,9 @@ def test_fugle_tpex_materializer_reuses_existing_quote_and_bar_transactions() ->
 
         assert set(result) == {"quote", "bars"}
         assert result["quote"]["selected_provider"] == "fugle_marketdata", result
-        assert result["bars"]["selected_provider"] == "fugle_marketdata", result
+        # The provisional candle is persisted but cannot be selected as a
+        # finalized canonical Bar; materialization is not selected evidence.
+        assert result["bars"]["selected_provider"] is None, result
         assert db.query(TaiwanStockQuoteSnapshot).count() == 1
         assert db.query(MarketIntradayBar).count() == 1
         assert db.query(RawFetchResult).count() == 2
@@ -798,7 +800,13 @@ def test_materializer_persists_each_stream_hash_once_and_rereads() -> None:
         assert set(first) == {"index", "quote", "bars"}
         assert first["index"]["selected_provider"] == "fugle_marketdata", first
         assert first["quote"]["selected_provider"] == "fugle_marketdata"
-        assert first["bars"]["selected_provider"] == "fugle_marketdata"
+        assert first["bars"]["selected_provider"] is None
+        from app.market.tw_bar_service import TaiwanBarService
+        next_minute = TaiwanBarService(db).read_current_session_bars(
+            instrument_id="2330", requested_at=NOW + timedelta(minutes=1),
+        )
+        # Advancing the clock cannot finalize provider evidence.
+        assert next_minute.bars == ()
         assert db.query(TaiwanCurrentIndexSnapshot).count() == 2
         assert db.query(TaiwanStockQuoteSnapshot).count() == 1
         assert db.query(MarketIntradayBar).count() == 1

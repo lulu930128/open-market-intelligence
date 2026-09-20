@@ -776,6 +776,8 @@ def test_current_breadth_preserves_unknown_and_not_received_partition() -> None:
                 "received_unclassified_count": 3,
                 "not_received_count": 2,
                 "trade_value": 123_000_000,
+                "trade_value_is_estimate": True,
+                "trade_value_semantics": "estimated_latest_price_x_cumulative_volume_lots",
             },
             calls,
             "mis-breadth",
@@ -825,6 +827,9 @@ def test_current_breadth_preserves_unknown_and_not_received_partition() -> None:
         assert result.dataset_health is not None
         assert result.dataset_health.status is DatasetHealthStatus.PARTIAL
         assert reread.resolved.breadth is not None
+        assert reread.resolved.breadth.trade_value_is_estimate is True
+        assert project_taiwan_current_breadth(reread)["official_flag"] is False
+        assert project_taiwan_current_breadth(reread)["trade_value_semantics"] == "estimated_latest_price_x_cumulative_volume_lots"
     finally:
         db.close()
         engine.dispose()

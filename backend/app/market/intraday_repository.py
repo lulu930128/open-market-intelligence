@@ -84,6 +84,33 @@ class TaiwanIntradayBarRepository:
     def __init__(self, db: Session) -> None:
         self._db = db
 
+    def current_session_storage_revision(
+        self, *, instrument_id: str, from_time: datetime, to_time: datetime,
+    ) -> str | None:
+        """Bounded persisted revision check, including insert/delete/lineage corrections."""
+        inspector = inspect(self._db.get_bind())
+        if not all(inspector.has_table(model.__tablename__) for model in (
+            MarketIntradayBar, MarketIntradayBarLineage,
+        )):
+            return None
+        if "source_id" not in {item["name"] for item in inspector.get_columns(MarketIntradayBar.__tablename__)}:
+            return None
+        rows = (
+            self._db.query(
+                MarketIntradayBar.id, MarketIntradayBar.updated_at,
+                MarketIntradayBarLineage.id, MarketIntradayBarLineage.updated_at,
+                MarketIntradayBarLineage.raw_result_id,
+            )
+            .outerjoin(MarketIntradayBarLineage, MarketIntradayBarLineage.bar_id == MarketIntradayBar.id)
+            .filter(MarketIntradayBar.stock_id == instrument_id, MarketIntradayBar.interval == "1m",
+                    MarketIntradayBar.bar_time >= from_time, MarketIntradayBar.bar_time <= to_time)
+            .order_by(MarketIntradayBar.id, MarketIntradayBarLineage.id)
+            .limit(5001).all()
+        )
+        if len(rows) > 5000:
+            return None
+        return sha256(json.dumps([tuple(row) for row in rows], default=str).encode("utf-8")).hexdigest()
+
     @staticmethod
     def _validate(requirement: DataRequirementV2) -> tuple[InstrumentTarget, BarCapabilityRequest]:
         if not isinstance(requirement.target, InstrumentTarget) or not isinstance(

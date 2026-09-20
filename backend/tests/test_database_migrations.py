@@ -495,12 +495,13 @@ class DatabaseMigrationTests(unittest.TestCase):
     def test_repair_partial_jp_master_table_at_0016(self) -> None:
         with migration_test_directory() as directory:
             database_url = sqlite_url(directory / "partial_jp.db")
+            command.upgrade(create_alembic_config(database_url), "20260620_0016")
             engine = create_engine(database_url)
 
             try:
                 with engine.begin() as connection:
-                    connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-                    connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260620_0016')"))
+                    # Preserve the core schema while reproducing an incomplete JP table.
+                    connection.execute(text("DROP TABLE jp_stock_master"))
                     connection.execute(
                         text(
                             """
@@ -547,12 +548,13 @@ class DatabaseMigrationTests(unittest.TestCase):
     def test_repair_partial_jp_company_fundamental_table_at_0019(self) -> None:
         with migration_test_directory() as directory:
             database_url = sqlite_url(directory / "partial_jp_fundamental.db")
+            command.upgrade(create_alembic_config(database_url), "20260620_0019")
             engine = create_engine(database_url)
 
             try:
                 with engine.begin() as connection:
-                    connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-                    connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260620_0019')"))
+                    # Preserve the core schema while reproducing an incomplete JP table.
+                    connection.execute(text("DROP TABLE jp_company_fundamental"))
                     connection.execute(
                         text(
                             """

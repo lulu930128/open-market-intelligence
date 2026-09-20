@@ -1529,11 +1529,20 @@ def build_taiwan_source_health(
         builders = [(key, build) for key, build in builders if key == normalized_dataset]
     entries = []
     truncated = False
-    for _, build in builders:
+    for resource, build in builders:
         if limit is not None and len(entries) >= limit:
             truncated = True
             break
-        built = build()
+        try:
+            built = build()
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            built = [TaiwanSourceHealthEntry(
+                resource=resource, label=resource, frequency="unknown",
+                target=_target(stock_id=normalized_stock_id, index_id=normalized_index_id),
+                status="error", ok=False, row_count=0,
+                reason=f"SOURCE_HEALTH_ENTRY_INVALID:{type(exc).__name__}",
+                health_dimensions={"diagnostics": {"status": "unavailable"}},
+            )]
         remaining = len(built) if limit is None else limit - len(entries)
         entries.extend(built[:remaining])
         truncated = truncated or len(built) > remaining

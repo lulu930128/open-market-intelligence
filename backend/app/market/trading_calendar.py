@@ -30,6 +30,10 @@ TAIWAN_SESSION_PHASE_ALIASES = {
 TAIWAN_MARKET_HOLIDAYS: dict[int, dict[date, str]] = {
     2025: {
         date(2025, 1, 1): "New Year's Day",
+        # TWSE 2025 Lunar New Year notice: settlement only, no trading.
+        # https://eshop.twse.com.tw/zh/news/detail/8a82e9e69471d3e8019495d573f70017
+        date(2025, 1, 23): "Lunar New Year settlement-only day",
+        date(2025, 1, 24): "Lunar New Year settlement-only day",
         date(2025, 1, 27): "Lunar New Year market closure",
         date(2025, 1, 28): "Lunar New Year's Eve",
         date(2025, 1, 29): "Lunar New Year",
@@ -118,6 +122,13 @@ def is_taiwan_market_holiday(value: date) -> bool:
 
 def is_taiwan_trading_day(value: date) -> bool:
     return value.weekday() < 5 and not is_taiwan_market_holiday(value)
+
+
+def has_taiwan_calendar_year(year: int) -> bool:
+    """Whether annual holidays are known, beyond the weekday-only fallback."""
+    return year in TAIWAN_MARKET_HOLIDAYS or cached_market_holiday(
+        "tw", date(year, 1, 1),
+    ).covered
 
 
 def taiwan_market_session_phase(now: datetime) -> str:

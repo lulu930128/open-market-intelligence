@@ -14,6 +14,7 @@ from app.db.models import StockMaster
 from app.market.intraday_repository import TaiwanIntradayBarRepository
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.trading_calendar import taiwan_presentation_session
+from app.market.tw_bar_contracts import TaiwanBarSeriesRead
 from app.market.tw_instrument import (
     normalize_taiwan_instrument_id,
     resolve_taiwan_instrument,
@@ -334,20 +335,27 @@ def read_taiwan_intraday_bars(
     interval: str = "1m",
     range_value: str = "auto",
     requested_at: datetime | None = None,
-) -> MarketDataResultV1:
-    _, instrument = _instrument(db, stock_id)
+    bypass_snapshot_cache: bool = False,
+) -> TaiwanBarSeriesRead:
+    """Compatibility range adapter; the Bar owner owns all read semantics."""
+    # Streaming bootstrap imports this acquisition module during service setup.
+    from app.market.tw_bar_service import TaiwanBarService
+
+    _instrument(db, stock_id)
+    config = intraday_history_config(interval, range_value)
     now = requested_at or datetime.now(TAIPEI_TZ)
-    requirement = build_taiwan_intraday_requirement(
-        instrument=instrument,
-        interval=interval,
-        range_value=range_value,
-        policy=RealtimePolicy.CACHE_ONLY,
-        requested_at=now,
-        acquiring=False,
-    )
-    return MarketDataGateway().resolve_bars(
-        requirement,
-        reader=TaiwanIntradayBarRepository(db),
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("requested_at must be timezone-aware")
+    service = TaiwanBarService(db)
+    if range_value == "1d":
+        return service.read_current_session_bars(
+            instrument_id=stock_id, interval=interval, requested_at=now,
+            bypass_snapshot_cache=bypass_snapshot_cache,
+        )
+    return service.read_bars(
+        instrument_id=stock_id, interval=interval,
+        from_time=(None if range_value == "auto" else now - timedelta(days=int(config["days"]))),
+        to_time=now, requested_at=now,
     )
 
 
@@ -361,6 +369,7 @@ def refresh_taiwan_intraday_bars(
     requested_at: datetime | None = None,
     descriptors: Iterable[ProviderCapabilityDescriptorV2] = TW_INTRADAY_DESCRIPTORS,
     acquisition: TaiwanIntradayAcquisitionExecutor | None = None,
+    acquisition_bounds: RequestBounds | None = None,
 ) -> MarketDataResultV1:
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("intraday refresh requires prefer_live or require_live")
@@ -375,6 +384,15 @@ def refresh_taiwan_intraday_bars(
         acquiring=True,
     )
     catalog = tuple(descriptors)
+    if acquisition_bounds is not None:
+        if (
+            acquisition_bounds.max_subscriptions != 0
+            or not 1 <= acquisition_bounds.max_external_calls <= 2
+            or not 1 <= acquisition_bounds.max_provider_attempts <= 2
+            or acquisition_bounds.timeout_seconds > 40
+        ):
+            raise ValueError("Taiwan intraday acquisition bounds cannot exceed canonical limits")
+        requirement = requirement.model_copy(update={"bounds": acquisition_bounds})
     executor = acquisition or TaiwanIntradayAcquisitionExecutor(
         clock=lambda: datetime.now(TAIPEI_TZ)
     )
@@ -398,9 +416,9 @@ def _quantity_shares(bar: BarObservation) -> int | None:
 
 def project_taiwan_intraday_bars(
     db: Session,
-    result: MarketDataResultV1,
+    result: TaiwanBarSeriesRead,
 ) -> tuple[list[dict[str, object | None]], dict[str, object | None]]:
-    bars = tuple(result.resolved.bars)
+    bars = result.bars
     observation_ids = tuple(
         bar.lineage.observation_id
         for bar in bars
@@ -452,165 +470,76 @@ def project_taiwan_intraday_bars(
             }
         )
     selected = bars[-1] if bars else None
-    latest_trade_date = (
-        selected.start_at.astimezone(TAIPEI_TZ).date()
-        if selected is not None
-        else None
-    )
-    session_bars = [
-        bar
-        for bar in bars
-        if latest_trade_date is not None
-        and bar.start_at.astimezone(TAIPEI_TZ).date() == latest_trade_date
-    ]
-    continuous_bars = [
-        bar
-        for bar in session_bars
-        if time(9, 0)
-        <= bar.start_at.astimezone(TAIPEI_TZ).time()
-        < time(13, 25)
-    ]
-    first_bar_at = continuous_bars[0].start_at if continuous_bars else None
-    last_bar_at = continuous_bars[-1].start_at if continuous_bars else None
-    observed_minutes_all = {
-        bar.start_at.astimezone(TAIPEI_TZ).replace(second=0, microsecond=0)
-        for bar in continuous_bars
-    }
-    requested_local = result.requirement.requested_at.astimezone(TAIPEI_TZ)
-    expected_session_start = (
-        datetime.combine(latest_trade_date, time(9, 0), tzinfo=TAIPEI_TZ)
-        if latest_trade_date is not None
-        else None
-    )
-    expected_full_session_last = (
-        datetime.combine(latest_trade_date, time(13, 24), tzinfo=TAIPEI_TZ)
-        if latest_trade_date is not None
-        else None
-    )
-    active_same_session = bool(
-        latest_trade_date == requested_local.date()
-        and time(9, 0) <= requested_local.time() < time(13, 25)
-    )
-    expected_observed_end = expected_full_session_last
-    if active_same_session and expected_session_start is not None:
-        expected_observed_end = min(
-            requested_local.replace(second=0, microsecond=0)
-            - timedelta(minutes=1),
-            expected_full_session_last,
-        )
-    expected_minutes = (
-        {
-            expected_session_start + timedelta(minutes=offset)
-            for offset in range(
-                max(
-                    int(
-                        (expected_observed_end - expected_session_start)
-                        .total_seconds()
-                        // 60
-                    )
-                    + 1,
-                    0,
-                )
-            )
+    coverage = result.current_session_coverage
+    if coverage is None:
+        series_coverage = {
+            **result.history.model_dump(mode="json"),
+            "current_cumulative_volume_complete": False,
         }
-        if expected_session_start is not None
-        and expected_observed_end is not None
-        and expected_observed_end >= expected_session_start
-        else set()
-    )
-    observed_minutes = {
-        value for value in observed_minutes_all if value in expected_minutes
-    }
-    expected_point_count = len(expected_minutes)
-    gap_count = len(expected_minutes - observed_minutes)
-    session_start_covered = bool(
-        first_bar_at is not None
-        and first_bar_at.astimezone(TAIPEI_TZ).time() <= time(9, 1)
-    )
-    expected_window_end_covered = bool(
-        last_bar_at is not None
-        and expected_observed_end is not None
-        and last_bar_at.astimezone(TAIPEI_TZ) >= expected_observed_end
-    )
-    full_session_end_covered = bool(
-        last_bar_at is not None
-        and last_bar_at.astimezone(TAIPEI_TZ).time() >= time(13, 24)
-    )
-    expected_window_complete = bool(
-        session_start_covered and expected_window_end_covered and gap_count == 0
-    )
-    coverage_status = (
-        "missing"
-        if not continuous_bars
-        else "complete_session"
-        if expected_window_complete and full_session_end_covered
-        else "complete_prefix"
-        if expected_window_complete
-        else "sparse"
-        if session_start_covered and expected_window_end_covered
-        else "trailing_window"
-        if not session_start_covered and expected_window_end_covered
-        else "partial_prefix"
-        if session_start_covered
-        else "partial_window"
-    )
-    gap_reason = (
-        None
-        if gap_count == 0
-        else "provider_trailing_window"
-        if coverage_status == "trailing_window"
-        else "missing_expected_minutes"
-    )
-    series_coverage = {
-        "status": coverage_status,
-        "trade_date": latest_trade_date,
-        "observed_bar_count": len(session_bars),
-        "observed_regular_minute_count": len(observed_minutes_all),
-        "expected_point_count_approx": expected_point_count,
-        "expected_full_session_point_count_approx": 265,
-        "first_bar_at": first_bar_at,
-        "last_bar_at": last_bar_at,
-        "observed_start": first_bar_at,
-        "observed_end": last_bar_at,
-        "expected_session_start": expected_session_start,
-        "expected_observed_end": expected_observed_end,
-        "expected_continuous_end": (
-            datetime.combine(latest_trade_date, time(13, 25), tzinfo=TAIPEI_TZ)
-            if latest_trade_date is not None
-            else None
-        ),
-        "expected_close_time": (
-            datetime.combine(latest_trade_date, time(13, 30), tzinfo=TAIPEI_TZ)
-            if latest_trade_date is not None
-            else None
-        ),
-        "session_start_covered": session_start_covered,
-        "session_end_covered": full_session_end_covered,
-        "expected_window_end_covered": expected_window_end_covered,
-        "opening_covered": session_start_covered,
-        "current_window_complete": expected_window_complete,
-        "continuous_session_covered": coverage_status == "complete_session",
-        "session_volume_complete": coverage_status == "complete_session",
-        "current_cumulative_volume_complete": expected_window_complete,
-        "gap_count": gap_count,
-        "gap_reason": gap_reason,
-        "coverage_semantics": "observed_regular_minute_window_with_expected_session_bounds",
-        "provider_session_total_volume_shares": None,
-        "provider_session_total_volume_semantics": "not_projected_from_raw_receipt",
-    }
+    else:
+        # Preserve legacy field names as a projection of the canonical snapshot.
+        # No local clock, fixed session length, or provider-specific coverage rule.
+        complete_window = (
+            coverage.expected_bucket_count > 0
+            and coverage.missing_bucket_count == 0
+        )
+        complete_session = coverage.session_completed and complete_window
+        opening_covered = bool(coverage.observed_bucket_count) and not any(
+            item.start_at == coverage.expected_from for item in coverage.missing_ranges
+        )
+        end_covered = bool(coverage.observed_bucket_count) and not any(
+            item.end_at == coverage.expected_to for item in coverage.missing_ranges
+        )
+        series_coverage = {
+            **coverage.model_dump(mode="json"),
+            "status": "complete_session" if complete_session else coverage.status.value,
+            "observed_bar_count": coverage.snapshot_bar_count,
+            "observed_regular_minute_count": coverage.observed_bucket_count,
+            "expected_point_count_approx": coverage.expected_bucket_count,
+            "expected_full_session_point_count_approx": (
+                coverage.expected_bucket_count if coverage.session_completed else None
+            ),
+            "first_bar_at": coverage.snapshot_available_from,
+            "last_bar_at": bars[-1].start_at if bars else None,
+            "observed_start": coverage.snapshot_available_from,
+            "observed_end": coverage.snapshot_available_to,
+            "expected_session_start": coverage.expected_from,
+            "expected_observed_end": coverage.expected_to,
+            "opening_covered": opening_covered,
+            "session_start_covered": opening_covered,
+            "session_end_covered": coverage.session_completed and end_covered,
+            "expected_window_end_covered": end_covered,
+            "current_window_complete": complete_window,
+            "continuous_session_covered": complete_session,
+            "session_volume_complete": complete_session,
+            "current_cumulative_volume_complete": complete_window,
+            "gap_count": coverage.missing_bucket_count,
+            "gap_reason": (
+                "provider_trailing_window" if coverage.status.value == "trailing_window"
+                else "missing_expected_minutes" if coverage.missing_bucket_count else None
+            ),
+            "coverage_semantics": coverage.contract_version,
+            "provider_session_total_volume_shares": None,
+            "provider_session_total_volume_semantics": "not_projected_from_raw_receipt",
+        }
     return points, {
         "provider": selected.lineage.provider if selected is not None else None,
         "source": selected.lineage.source if selected is not None else None,
         "source_interval": (
             next(iter(source_intervals))
             if len(source_intervals) == 1
-            else result.requirement.request.interval
+            else result.base_interval
         ),
         "calculation_versions": sorted(calculation_versions),
         "component_raw_result_ids": sorted(component_raw_ids),
-        "resolved_health": result.resolved.health.model_dump(mode="json"),
+        "resolved_health": {
+            "status": result.history.history_status.value,
+            "series_revision": result.identity.series_revision,
+            "lineage_digest": result.identity.lineage_digest,
+        },
         "candidate_rejections": [
-            item.model_dump(mode="json") for item in result.candidate_rejections
+            {"trade_date": item.trade_date, "rejections": item.rejected_candidate_reasons}
+            for item in result.session_resolution if item.rejected_candidate_reasons
         ],
         "limitations": list(result.limitations),
         "series_coverage": series_coverage,

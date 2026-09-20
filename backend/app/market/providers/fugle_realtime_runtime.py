@@ -253,11 +253,14 @@ class FugleCanonicalMaterializer:
                     interval="1m",
                     range_value="1d",
                     requested_at=bar_record.received_at,
+                    bypass_snapshot_cache=True,
                 )
                 results["bars"] = {
                     "status": "materialized",
                     "raw_result_ids": list(persistence.raw_result_ids),
-                    "selected_provider": reread.resolved.health.selected_provider,
+                    "selected_provider": (
+                        reread.bars[-1].lineage.provider if reread.bars else None
+                    ),
                 }
             except Exception:
                 self._release("candles", normalized_stock, bar_record.content_hash)

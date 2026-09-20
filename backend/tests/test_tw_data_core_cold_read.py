@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -147,6 +147,8 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
         Path(__file__).parents[1]
         / f".test-tw-data-core-cold-{uuid4().hex}.sqlite3"
     )
+    engine = None
+    restarted_engine = None
     try:
         database_url = f"sqlite:///{database_path.as_posix()}"
         engine = create_engine(database_url)
@@ -210,6 +212,8 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
                 db,
                 stock_id="2330",
                 policy=RealtimePolicy.PREFER_LIVE,
+                # Request begins in the supported session; the captured receipt
+                # arrives later and is visible only from its actual receipt time.
                 requested_at=datetime(2026, 8, 25, 13, 29, 55, tzinfo=TAIWAN_TZ),
                 acquisition=TaiwanPublicQuoteAcquisitionExecutor(
                     fetchers={
@@ -247,8 +251,14 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
             quote = read_taiwan_public_last_trade_quote(
                 restarted_db,
                 stock_id="2330",
-                requested_at=datetime(2026, 8, 25, 13, 29, 56, tzinfo=TAIWAN_TZ),
+                requested_at=received_at + timedelta(seconds=1),
             )
+            before_receipt = read_taiwan_public_last_trade_quote(
+                restarted_db,
+                stock_id="2330",
+                requested_at=received_at - timedelta(seconds=1),
+            )
+            assert before_receipt.resolved.quote is None
             chart = list_stock_ohlc_chart_data(
                 restarted_db,
                 stock_id="2330",
@@ -271,8 +281,11 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
                 requested_at=CACHE_REQUESTED_AT,
             )
 
-            for result in (daily, index, quote):
+            for result in (daily, index):
                 assert result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
+            # This real receipt arrived four minutes after the closing trade.
+            # Persistence survives restart without making that trade current.
+            assert quote.resolved.health.status is ResolvedEvidenceStatus.STALE
             assert daily.acquisition.external_calls == 0
             assert index.acquisition.external_calls == 0
             assert breadth.resolved.health.status is ResolvedEvidenceStatus.PARTIAL
@@ -299,6 +312,10 @@ def test_actual_data_survives_engine_restart_and_cold_platform_read() -> None:
             assert dashboard_item["breadth"]["limit_up_count"] == breadth.resolved.breadth.published_limits.up_count
         restarted_engine.dispose()
     finally:
+        if restarted_engine is not None:
+            restarted_engine.dispose()
+        if engine is not None:
+            engine.dispose()
         for path in (
             database_path,
             database_path.with_name(f"{database_path.name}-wal"),

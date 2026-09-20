@@ -20,10 +20,11 @@ from app.market.public_quote_platform import (
 )
 from app.market.taiwan_realtime_platform import (
     read_taiwan_auction,
+    read_taiwan_auction_history,
     read_taiwan_depth,
     refresh_taiwan_realtime_snapshot,
 )
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import TAIWAN_TZ, taiwan_presentation_session
 from app.market.tw_realtime_capabilities import (
     TW_AUCTION_CAPABILITY_ID,
     TW_ORDER_BOOK_CAPABILITY_ID,
@@ -76,6 +77,7 @@ class TaiwanQuoteEvidenceBundle:
     auction: MarketDataResultV1
     official_close: MarketDataResultV1
     acquisition_scope: TaiwanQuoteEvidenceAcquisitionScope | None = None
+    auction_history: dict[str, object] | None = None
 
     @property
     def component_results(self) -> dict[str, MarketDataResultV1]:
@@ -221,6 +223,15 @@ def read_taiwan_quote_evidence_bundle(
         depth=depth,
         auction=auction,
         official_close=official_close,
+        auction_history=(
+            read_taiwan_auction_history(
+                db, stock_id=stock_id,
+                trade_date=taiwan_presentation_session(now)["trade_date"],
+                as_of=now,
+            )
+            if quote.requirement.session in {MarketSession.POST_CLOSE, MarketSession.CLOSED}
+            else None
+        ),
     )
 
 
@@ -309,6 +320,12 @@ def acquire_taiwan_quote_evidence_bundle(
         acquisition_scope=_acquisition_scope(
             requested_capabilities=requested,
             results=realtime_results,
+        ),
+        auction_history=(
+            read_taiwan_auction_history(
+                db, stock_id=stock_id,
+                trade_date=taiwan_presentation_session(now)["trade_date"], as_of=now,
+            ) if quote.requirement.session in {MarketSession.POST_CLOSE, MarketSession.CLOSED} else None
         ),
     )
 

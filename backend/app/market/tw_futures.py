@@ -1751,6 +1751,18 @@ def list_taiwan_futures_intraday_bars(
     return filtered_rows[-limit:]
 
 
+def _futures_volume_metadata(*, provider: str, contract_month: str, semantics: str) -> dict[str, Any]:
+    # Only implemented TAIFEX parser contracts establish the persisted quantity unit.
+    expected_provider = TAIFEX_DAILY_PROVIDER if semantics == "trading_day_contracts" else TAIFEX_PROVIDER
+    qualified = provider == expected_provider and bool(contract_month)
+    return {
+        "instrument_type": "futures",
+        "volume_unit": "contracts" if qualified else None,
+        "volume_semantics": semantics if qualified else None,
+        "volume_contract_version": "tw.futures.volume.v1" if qualified else None,
+    }
+
+
 def taiwan_futures_quote_to_dict(
     row: TaiwanFuturesQuoteSnapshot,
     *,
@@ -1758,6 +1770,7 @@ def taiwan_futures_quote_to_dict(
     source_error: str | None = None,
 ) -> dict[str, Any]:
     return {
+        **_futures_volume_metadata(provider=row.provider, contract_month=row.contract_month, semantics="session_cumulative_contracts"),
         "id": row.id,
         "provider": row.provider,
         "market": row.market,
@@ -1804,6 +1817,7 @@ def taiwan_futures_quote_to_dict(
 
 def taiwan_futures_daily_bar_to_dict(row: TaiwanFuturesDailyBar) -> dict[str, Any]:
     return {
+        **_futures_volume_metadata(provider=row.provider, contract_month=row.contract_month, semantics="trading_day_contracts"),
         "id": row.id,
         "provider": row.provider,
         "market": row.market,
@@ -1838,6 +1852,7 @@ def taiwan_futures_daily_bar_to_dict(row: TaiwanFuturesDailyBar) -> dict[str, An
 
 def taiwan_futures_intraday_bar_to_dict(row: TaiwanFuturesIntradayBar) -> dict[str, Any]:
     return {
+        **_futures_volume_metadata(provider=row.provider, contract_month=row.contract_month, semantics="interval_contracts"),
         "id": row.id,
         "provider": row.provider,
         "market": row.market,

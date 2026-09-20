@@ -19,6 +19,7 @@ from app.db.models import (
     RawFetchResult,
     SourceRegistry,
     StockMaster,
+    TaiwanCurrentBreadthSnapshot,
     TaiwanStockQuoteSnapshot,
 )
 from app.market import intraday
@@ -45,6 +46,8 @@ from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_realtime_capabilities import TW_REALTIME_SOURCE_BINDINGS
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
 from app.market_data.contracts import (
+    AuthorityClass,
+    BreadthPriceState,
     DatasetHealthStatus,
     InstrumentKey,
     InstrumentType,
@@ -52,6 +55,7 @@ from app.market_data.contracts import (
     MarketSession,
     ObservationState,
     ResolvedEvidenceStatus,
+    SourceLineage,
     TradeObservationState,
 )
 from app.market_data.policies import RealtimePolicy
@@ -252,7 +256,7 @@ def test_actual_quote_acquires_persists_rereads_and_skips_second_prefer_live_cal
         db,
         stock_id="2330",
         policy=RealtimePolicy.PREFER_LIVE,
-        requested_at=datetime(2026, 8, 25, 13, 29, 56, tzinfo=TAIWAN_TZ),
+        requested_at=datetime(2026, 8, 25, 13, 30, 2, tzinfo=TAIWAN_TZ),
         acquisition=TaiwanPublicQuoteAcquisitionExecutor(
             fetchers={
                 TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.resource_id: forbidden_fetch
@@ -501,6 +505,104 @@ def test_session_close_reuses_receipt_and_quote_upsert_then_survives_cold_read(
     assert outward["data_core_components"]["quote.session_close"]["status"] == (
         "session_final"
     )
+
+
+def _persist_breadth_trade(db: Session, *, received_at: datetime) -> TaiwanCurrentBreadthSnapshot:
+    event_at = received_at.replace(hour=13, minute=30, second=0)
+    source = SourceRegistry(source_name="twse_mis_live_breadth", source_type="http",
+                            category="market_data", parser_type="test")
+    db.add(source)
+    db.flush()
+    raw = RawFetchResult(source_id=source.id, fetched_at=received_at.astimezone(timezone.utc),
+                         content_hash="breadth-trade", parser_version="test", raw_text="{}")
+    db.add(raw)
+    db.flush()
+    state = BreadthPriceState(
+        trade_date=event_at.date(), price=Decimal("178"), price_as_of=event_at,
+        lineage=SourceLineage(provider="twse_mis", source=source.source_name,
+                              authority=AuthorityClass.EXCHANGE, raw_contract_version="test",
+        event_at=event_at, received_at=received_at.astimezone(timezone.utc),
+        fetched_at=received_at.astimezone(timezone.utc),
+                              raw_receipt_id=f"raw_fetch_result:{raw.id}", content_hash=raw.content_hash),
+    )
+    row = TaiwanCurrentBreadthSnapshot(
+        source_id=source.id, raw_result_id=raw.id, provider="twse_mis", source=source.source_name,
+        authority="exchange", raw_contract_version="test", venue="TWSE", trade_date=event_at.date(),
+        event_at=event_at, received_at=received_at.astimezone(timezone.utc),
+        fetched_at=received_at.astimezone(timezone.utc),
+        session="closing_auction", scope="full_market", universe_source="test",
+        universe_count=1, advance_count=1, decline_count=0, unchanged_count=0,
+        observation_state="available", price_semantics="current_last_trade_vs_reference",
+        price_states_json=json.dumps({"2330": state.model_dump(mode="json")}),
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+@pytest.mark.parametrize("minute,second,final", [(32, 47, False), (33, 1, True)])
+def test_breadth_actual_trade_close_uses_persisted_confirmation(db: Session, minute, second, final) -> None:
+    received = datetime(2026, 8, 25, 13, minute, second, tzinfo=TAIWAN_TZ)
+    _persist_breadth_trade(db, received_at=received)
+    now = received.replace(hour=14, minute=0, second=0)
+    result = read_taiwan_session_close(db, stock_id="2330", requested_at=now)
+    projection = project_taiwan_session_close(result)
+    assert projection["available"] is final
+    assert (projection["status"] == "session_final") is final
+    assert result.acquisition.external_calls == 0
+    candidates = TaiwanPublicQuoteRepository(db).load_quote_candidates(
+        _instrument(_records()["2330"]), trade_date=now.date(), requested_at=now,
+        allowed_sessions=(MarketSession.CLOSING_AUCTION, MarketSession.POST_CLOSE),
+    )
+    assert candidates[0].observation.last_trade_price == Decimal("178")
+    assert candidates[0].confirmed_at == received
+
+
+def test_breadth_cannot_forge_confirmation_or_be_seen_before_receipt(db: Session) -> None:
+    received = datetime(2026, 8, 25, 13, 32, 47, tzinfo=TAIWAN_TZ)
+    row = _persist_breadth_trade(db, received_at=received)
+    from app.market.public_quote_repository import read_current_stock_price_states
+    assert read_current_stock_price_states(db, venue="TWSE", requested_at=received.replace(minute=31)) == {}
+    state = json.loads(row.price_states_json)
+    state["2330"]["lineage"]["fetched_at"] = received.replace(minute=34).isoformat()
+    row.price_states_json = json.dumps(state)
+    db.commit()
+    assert read_current_stock_price_states(db, venue="TWSE", requested_at=received.replace(hour=14)) == {}
+
+
+def test_today_breadth_survives_two_older_provider_candidates(db: Session) -> None:
+    record = _records()["2330"]
+    received = datetime.fromisoformat(record["received_at"])
+    acquire_taiwan_session_close(db, stock_id="2330", requested_at=received,
+                                acquisition=_executor(_raw(record), received))
+    original = db.query(TaiwanStockQuoteSnapshot).one()
+    values = {column.name: getattr(original, column.name)
+              for column in TaiwanStockQuoteSnapshot.__table__.columns if column.name != "id"}
+    for binding in TW_REALTIME_SOURCE_BINDINGS:
+        if binding.descriptor.capability_id != TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.capability_id or binding.descriptor.provider_key == "twse_mis":
+            continue
+        source = SourceRegistry(source_name=binding.source, source_type=binding.source_type,
+                                category="market_data", parser_type=binding.parser_version)
+        db.add(source)
+        db.flush()
+        raw = RawFetchResult(source_id=source.id, fetched_at=received.astimezone(timezone.utc),
+                             content_hash="old-provider", parser_version=binding.parser_version)
+        db.add(raw)
+        db.flush()
+        db.add(TaiwanStockQuoteSnapshot(**{**values, "source_id": source.id, "raw_result_id": raw.id,
+            "provider": binding.descriptor.provider_key, "source": binding.source,
+            "raw_contract_version": binding.parser_version}))
+    db.delete(original)
+    db.commit()
+    now = received.replace(day=26, hour=14, minute=0, second=0)
+    _persist_breadth_trade(db, received_at=now.replace(hour=13, minute=33))
+    candidates = TaiwanPublicQuoteRepository(db).load_quote_candidates(
+        _instrument(record), requested_at=now, max_candidates=2,
+    )
+    assert len(candidates) == 2
+    assert candidates[0].observation.trade_date == now.date()
+    result = read_taiwan_public_last_trade_quote(db, stock_id="2330", requested_at=now)
+    assert result.resolved.quote.last_trade_price == Decimal("178")
 
 
 def test_missing_z_retains_original_trade_across_many_receipts(db: Session) -> None:
@@ -1147,7 +1249,7 @@ def test_public_quote_get_route_handler_returns_persisted_actual_data_without_io
         lambda route_db, *, stock_id: original_read(
             route_db,
             stock_id=stock_id,
-            requested_at=datetime(2026, 8, 25, 13, 29, 56, tzinfo=TAIWAN_TZ),
+            requested_at=datetime(2026, 8, 25, 13, 30, 2, tzinfo=TAIWAN_TZ),
         ),
     )
 

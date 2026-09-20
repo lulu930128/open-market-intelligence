@@ -475,8 +475,18 @@ class AuctionBreadthObservation(CanonicalModel):
         return self
 
 
+class BreadthBatchFailure(CanonicalModel):
+    batch_ordinal: int = Field(ge=1)
+    reason: str = Field(max_length=64)
+    attempted: bool
+    http_status: int | None = None
+
+
 class BreadthAcquisitionDiagnostics(CanonicalModel):
     auction_error_code: str | None = Field(default=None, max_length=64)
+    attempted_batch_count: int | None = Field(default=None, ge=0)
+    skipped_batch_count: int = Field(default=0, ge=0)
+    batch_failures: tuple[BreadthBatchFailure, ...] = Field(default=(), max_length=128)
     failed_batch_count: int = Field(default=0, ge=0)
     received_count: int = Field(default=0, ge=0)
     acquisition_complete: bool = True
@@ -572,6 +582,8 @@ class MarketBreadthObservation(CanonicalModel):
     auction: AuctionBreadthObservation | None = None
     acquisition_diagnostics: BreadthAcquisitionDiagnostics | None = None
     trade_value: Decimal | None = Field(default=None, ge=0)
+    trade_value_semantics: str | None = None
+    trade_value_is_estimate: bool | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     state: ObservationState = ObservationState.AVAILABLE
     price_semantics: str = Field(min_length=1, max_length=64)
@@ -599,9 +611,12 @@ class MarketBreadthObservation(CanonicalModel):
             raise ValueError("limit companion must share breadth universe")
         if self.classification_diagnostics and (
             any(value < 0 for value in self.classification_diagnostics.values())
-            or sum(self.classification_diagnostics.values()) != self.coverage_reason_counts.get("mapping_error", 0)
+            or sum(self.classification_diagnostics.values()) != sum(
+                self.coverage_reason_counts.get(reason, 0)
+                for reason in ("mapping_error", "reference_price_unavailable", "actual_trade_unavailable")
+            )
         ):
-            raise ValueError("classification diagnostics must reconcile to mapping_error")
+            raise ValueError("classification diagnostics must reconcile to unclassified diagnostic partitions")
         if self.auction is not None and (
             self.auction.market != self.market or self.auction.venue != self.venue
             or self.auction.trade_date != self.trade_date
@@ -639,6 +654,8 @@ class MarketBreadthObservation(CanonicalModel):
                     "valid_no_trade",
                     "suspended_or_not_tradable",
                     "mapping_error",
+                    "reference_price_unavailable",
+                    "actual_trade_unavailable",
                     "unknown",
                 )
             )

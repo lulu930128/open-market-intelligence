@@ -305,7 +305,7 @@ def test_index_read_clamps_future_date_and_rejects_pre_release_receipt(
     db.flush()
     raw = RawFetchResult(
         source_id=source.id,
-        fetched_at=datetime(2026, 8, 25, 6, 30),
+        fetched_at=datetime(2026, 8, 25, 5, 34),
         method="GET",
         content_hash="premature-index",
         parser_version="test-index-v1",

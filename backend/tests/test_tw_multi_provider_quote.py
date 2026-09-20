@@ -387,11 +387,11 @@ def test_kgi_broker_quote_cannot_finalize_session_close(db: Session) -> None:
         .one()
     )
     row.quote_time = requested_at.replace(minute=30)
-    row.received_at = requested_at
-    row.fetched_at = requested_at
+    row.received_at = requested_at.astimezone(timezone.utc)
+    row.fetched_at = requested_at.astimezone(timezone.utc)
     row.market_session = MarketSession.CLOSE_RESOLUTION.value
     raw = db.query(RawFetchResult).filter(RawFetchResult.id == row.raw_result_id).one()
-    raw.fetched_at = requested_at
+    raw.fetched_at = requested_at.astimezone(timezone.utc)
     db.commit()
 
     result = read_taiwan_session_close(

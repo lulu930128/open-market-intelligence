@@ -19,6 +19,13 @@ from app.market.providers.tw_official_daily import (
     TW_DAILY_DATASET_ID,
     TW_FULL_MARKET_DAILY_DATASET_ID,
     TW_OFFICIAL_DAILY_DESCRIPTORS,
+    parse_twse_official_daily_payload,
+    parse_twse_rwd_official_daily_payload,
+    parse_tpex_official_daily_payload,
+    source_name_for_resource,
+    TWSE_DAILY_RESOURCE_ID,
+    TWSE_RWD_DAILY_RESOURCE_ID,
+    TPEX_DAILY_RESOURCE_ID,
 )
 from app.market.tw_universe import list_taiwan_stock_universe
 from app.market.tw_intraday_universe import (
@@ -818,7 +825,67 @@ def refresh_taiwan_official_daily_venue(
     }
 
 
+def qualify_taiwan_eod_universe(db: Session, *, trade_date: date) -> dict[str, object]:
+    """Batch eligibility port for shared coverage; no refresh or per-stock resolver."""
+    batch = TaiwanOfficialDailyBarRepository(db).load_market_universe(trade_date=trade_date)
+    reasons: dict[str, list[str]] = {}
+    for symbol, reason in batch.rejection_reasons:
+        reasons.setdefault(symbol, []).append(reason)
+    qualified = {bar.instrument.symbol for bar in batch.bars}
+    universe = list_taiwan_stock_universe(db)
+    unresolved = {item.stock_id for item in universe if item.stock_id not in qualified}
+    parser_by_source = {
+        source_name_for_resource(TWSE_DAILY_RESOURCE_ID): parse_twse_official_daily_payload,
+        source_name_for_resource(TWSE_RWD_DAILY_RESOURCE_ID): parse_twse_rwd_official_daily_payload,
+        source_name_for_resource(TPEX_DAILY_RESOURCE_ID): parse_tpex_official_daily_payload,
+    }
+    diagnostics = []
+    if unresolved:
+        receipts = TaiwanOfficialDailyBarRepository(db).load_official_daily_receipts(
+            trade_date=trade_date, as_of=datetime.now(TAIWAN_TZ),
+        )
+        for raw, source in receipts:
+            diagnostic = {"source": source.source_name, "raw_result_id": raw.id, "fetched_at": raw.fetched_at.isoformat(),
+                          "transport_status": "failed" if raw.error_message or raw.status_code is not None and raw.status_code >= 400 else "received"}
+            diagnostics.append(diagnostic)
+            parser = parser_by_source.get(source.source_name)
+            if diagnostic["transport_status"] == "failed":
+                continue
+            if not parser or not raw.raw_text or len(raw.raw_text) > 10_000_000:
+                diagnostic["payload_status"] = "unavailable_or_exceeds_bound"
+                continue
+            try:
+                parsed = parser(raw.raw_text)
+            except (TypeError, ValueError):
+                diagnostic["payload_status"] = "unparseable"
+                continue
+            dated_records = {record.symbol for record in parsed.records if record.trade_date == trade_date}
+            dated_rejections = {record.symbol: record.reason_code for record in parsed.rejected_rows if record.trade_date == trade_date}
+            if not dated_records and not dated_rejections:
+                diagnostic["payload_status"] = "expected_date_not_observed"
+                continue
+            diagnostic["payload_status"] = "expected_date_observed"
+            diagnostic["observed_symbol_count"] = len(dated_records | dated_rejections.keys())
+            diagnostic["symbol_reasons"] = {}
+            for member in universe:
+                if member.stock_id not in unresolved or member.market != parsed.venue:
+                    continue
+                reason = ("PROVIDER_" + dated_rejections[member.stock_id] if member.stock_id in dated_rejections
+                          else "PROVIDER_ROW_NOT_CANONICALLY_MATERIALIZED" if member.stock_id in dated_records
+                          else "SYMBOL_ABSENT_FROM_DATED_PROVIDER_PAYLOAD")
+                reasons.setdefault(member.stock_id, []).append(reason)
+                diagnostic["symbol_reasons"][member.stock_id] = reason
+    return {
+        "qualified_symbols": tuple(bar.instrument.symbol for bar in batch.bars),
+        "rejection_reasons": {symbol: tuple(dict.fromkeys(values)) for symbol, values in reasons.items()},
+        "rows_examined": batch.rows_examined, "rows_rejected": batch.rows_rejected,
+        "limitations": batch.limitations,
+        "provider_diagnostics": diagnostics,
+    }
+
+
 __all__ = [
+    "qualify_taiwan_eod_universe",
     "TaiwanCanonicalDailyRow",
     "TaiwanDailyPriceEvidence",
     "TaiwanDailyRefreshResult",

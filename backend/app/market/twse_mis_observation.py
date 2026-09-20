@@ -157,6 +157,8 @@ def resolve_twse_mis_observation(
     indicative_volume_lots: int | None,
     last_trade_price: float | None,
     cumulative_volume_lots: int | None,
+    confirmed_trade_occurred: bool = False,
+    confirmed_trade_price_available: bool = False,
 ) -> dict[str, Any]:
     """Classify one TWSE MIS observation without IO or persistence.
 
@@ -177,6 +179,7 @@ def resolve_twse_mis_observation(
     actual_trade_price_available = last_trade_price is not None
     actual_trade_occurred = bool(
         actual_trade_price_available or _positive(cumulative_volume_lots)
+        or confirmed_trade_occurred
     )
 
     if market_phase == "market_closed":
@@ -215,7 +218,7 @@ def resolve_twse_mis_observation(
         projected_legacy_phase = "regular_live"
         reason_code = (
             "ACTUAL_TRADE_PRICE_AVAILABLE"
-            if actual_trade_price_available
+            if actual_trade_price_available or confirmed_trade_price_available
             else "ACTUAL_TRADE_PRICE_MISSING"
             if actual_trade_occurred
             else "AWAITING_FIRST_TRADE"

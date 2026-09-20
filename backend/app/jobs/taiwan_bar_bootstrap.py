@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import JobRun
 from app.jobs import service as job_service
+from app.jobs.taiwan_intraday_demand import enqueue_consumer_demand
 from app.jobs.job_types import (
     TAIWAN_INDEX_DAILY_BOOTSTRAP_JOB_TYPE,
     TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE,
@@ -26,11 +27,6 @@ from app.market.trading_calendar import (
 from app.market.tw_bar_contracts import TaiwanCurrentSessionSnapshotPhase
 from app.market.tw_bar_service import TaiwanBarService
 from app.market.tw_intraday_platform import bootstrap_taiwan_intraday_bars
-
-
-# Collapse rapid switch-away/return commands without suppressing a later retry
-# when a completed job still left the canonical snapshot in WARMING.
-TAIWAN_VIEWER_WARMUP_SUCCESS_REUSE_SECONDS = 15
 
 
 def _normalize_symbols(symbols: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -131,15 +127,18 @@ def enqueue_taiwan_intraday_viewer_warmup(
     ).current_session_coverage
     if (
         coverage is None
-        or coverage.snapshot_phase is not TaiwanCurrentSessionSnapshotPhase.WARMING
+        or (
+            coverage.snapshot_phase is not TaiwanCurrentSessionSnapshotPhase.WARMING
+            and not (
+                coverage.snapshot_phase is TaiwanCurrentSessionSnapshotPhase.DEGRADED
+                and coverage.repair_recommended
+            )
+        )
     ):
         return None, False
 
-    return enqueue_taiwan_intraday_bar_bootstrap(
-        db,
-        symbols=[stock_id],
-        max_symbols=1,
-        reuse_success_within_seconds=TAIWAN_VIEWER_WARMUP_SUCCESS_REUSE_SECONDS,
+    return enqueue_consumer_demand(
+        db, stock_id=stock_id, requested_at=local_now, consumer="viewer",
     )
 
 

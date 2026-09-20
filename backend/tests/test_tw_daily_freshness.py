@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from app.market.daily_ohlcv_platform import qualify_taiwan_eod_universe
 
 from app.db.models import (
     Base,
@@ -37,6 +38,8 @@ def _session() -> Session:
 def _source(db: Session, name: str) -> SourceRegistry:
     source = SourceRegistry(
         source_name=name,
+        reliability_level="official",
+        parser_type="fixture.v1",
         source_type="test",
         category="market_daily_price",
     )
@@ -298,7 +301,7 @@ def test_all_market_freshness_uses_full_market_checkpoint_not_cross_venue_max() 
                 db,
                 market="TW",
                 expected_trade_date=date(2026, 8, 27),
-            ),
+            taiwan_daily_qualifier=qualify_taiwan_eod_universe),
         )
         checkpoint.checked_at = datetime(2026, 8, 27, 8, 0)
         db.commit()
