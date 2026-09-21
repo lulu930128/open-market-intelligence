@@ -5,9 +5,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.market.quote_depth import _apply_change_reference, _apply_headline_compatibility_aliases
+from app.market.quote_depth import _apply_change_reference, _apply_headline_compatibility_aliases, _project_change_reference
 from app.market.schemas import TaiwanChangeReferenceRead
 from app.market_data.contracts import AuthorityClass, SourceLineage
+from app.market_data.contracts import ObservationState
 
 TZ = ZoneInfo("Asia/Taipei")
 DAY = date(2026, 9, 8)
@@ -108,3 +109,46 @@ def test_reference_schema_rejects_same_day_as_prior_close():
     with pytest.raises(ValueError, match="precede"):
         TaiwanChangeReferenceRead(price=621, status="current", type="prior_regular_close",
                                  trade_date=DAY, applies_to_trade_date=DAY)
+
+
+@pytest.mark.parametrize("effective_reference", [621, 610, 590])
+def test_preopen_exchange_reference_preserves_adjusted_basis_without_claiming_prior_close(effective_reference):
+    bundle = NS(requested_at=datetime(2026, 9, 8, 8, 40, tzinfo=TZ),
+                official_close=result(), quote=result(), session_close=result())
+    bundle.official_close.resolved.bars = (bar(PRIOR, 621),)
+    bundle.quote.resolved.health.facts_usable = False
+    bundle.quote.resolved.health.research_usable = False
+    bundle.quote.resolved.quote = NS(
+        previous_close=Decimal(effective_reference), trade_date=DAY, state=ObservationState.INDICATIVE,
+        lineage=lineage().model_copy(update={"raw_receipt_id": "raw_fetch_result:reference"}),
+    )
+    reference = _project_change_reference({"session_phase": "preopen_auction"}, bundle)
+    assert reference["price"] == effective_reference
+    assert reference["source_field"] == "canonical.quote.previous_close"
+    assert not reference["research_usable"]
+    if effective_reference != 621:
+        # Ex-right / ex-dividend adjusted bases must not be relabelled prior close
+        # or used to infer which corporate action occurred.
+        assert reference["trade_date"] is None
+        assert reference["type"] == "provider_reference_price"
+
+
+@pytest.mark.parametrize("invalid", ["prior_close_only", "missing_receipt", "non_exchange", "future_event", "prior_session"])
+def test_preopen_unverified_reference_remains_fail_closed(invalid):
+    now = datetime(2026, 9, 8, 8, 40, tzinfo=TZ)
+    bundle = NS(requested_at=now, official_close=result(), quote=result(), session_close=result())
+    bundle.official_close.resolved.bars = (bar(PRIOR, 621),)
+    bundle.quote.resolved.health.facts_usable = False
+    evidence = lineage().model_copy(update={"raw_receipt_id": "raw_fetch_result:reference"})
+    if invalid == "missing_receipt":
+        evidence = evidence.model_copy(update={"raw_receipt_id": None})
+    elif invalid == "non_exchange":
+        evidence = evidence.model_copy(update={"authority": AuthorityClass.BROKER})
+    elif invalid == "future_event":
+        evidence = evidence.model_copy(update={"event_at": datetime(2026, 9, 8, 9, tzinfo=TZ)})
+    if invalid != "prior_close_only":
+        bundle.quote.resolved.quote = NS(previous_close=Decimal(610), state=ObservationState.INDICATIVE,
+                                         trade_date=PRIOR if invalid == "prior_session" else DAY, lineage=evidence)
+    reference = _project_change_reference({"session_phase": "preopen_auction"}, bundle)
+    assert reference["price"] is None and reference["status"] == "missing"
+    assert reference["reason_code"] == "TW_CHANGE_REFERENCE_CORPORATE_ACTION_UNVERIFIED"

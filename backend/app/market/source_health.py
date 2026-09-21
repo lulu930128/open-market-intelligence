@@ -12,6 +12,7 @@ from app.db.models import (
     JobRun,
     MarketChipDaily,
     MarketIntradayBar,
+    RawFetchResult,
     StockMaster,
     TaiwanMarketMinuteState,
     TaiwanStockQuoteSnapshot,
@@ -21,7 +22,9 @@ from app.market.indices import get_market_index_summary
 from app.market.market_chips import project_market_chip_freshness
 from app.market.quote_depth import TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS
 from app.market.public_quote_platform import (
+    project_taiwan_public_last_trade_quote,
     project_taiwan_session_close,
+    read_taiwan_quote_snapshot,
     read_taiwan_session_close,
 )
 from app.market.quote_contract_health import (
@@ -333,7 +336,13 @@ def _stock_quote_entry(
 ) -> TaiwanSourceHealthEntry:
     query = db.query(TaiwanStockQuoteSnapshot)
     if stock_id is not None:
-        query = query.filter(TaiwanStockQuoteSnapshot.stock_id == stock_id)
+        query = query.filter(
+            TaiwanStockQuoteSnapshot.stock_id == stock_id,
+            TaiwanStockQuoteSnapshot.quote_time <= current_time.replace(tzinfo=None),
+            TaiwanStockQuoteSnapshot.fetched_at <= current_time.astimezone(timezone.utc).replace(tzinfo=None),
+            func.coalesce(TaiwanStockQuoteSnapshot.received_at, TaiwanStockQuoteSnapshot.fetched_at)
+            <= current_time.astimezone(timezone.utc).replace(tzinfo=None),
+        )
         row_count = query.count()
         latest = _latest_or_none(
             query,
@@ -361,6 +370,9 @@ def _stock_quote_entry(
     request_live = {
         "version": "tw.quote.health.v1",
         "axis": "request_live",
+        "component": "provider_snapshot",
+        "inventory": "taiwan_stock_quote_snapshot",
+        "selection_cutoff": current_time.isoformat(),
         "status": status_value if stock_id else "not_requested",
         "target": stock_id,
         "provider": getattr(latest, "provider", None) if latest else None,
@@ -387,6 +399,74 @@ def _stock_quote_entry(
             else "No single-symbol live quote was requested."
         ),
     }
+    # Snapshot inventory can contain a recent partial/no-trade observation.
+    # Keep it diagnostic; actual quote health belongs to the same canonical
+    # selection as outward quote.snapshot, including its original event time.
+    inventory_health = {
+        **request_live,
+        "axis": "observation_inventory",
+        "inventory": "taiwan_stock_quote_snapshot",
+        "component": "provider_snapshot",
+        "selection_cutoff": current_time.isoformat(),
+        "observation_id": f"taiwan_stock_quote_snapshot:{latest.id}" if latest else None,
+        "raw_receipt_id": f"raw_fetch_result:{latest.raw_result_id}" if latest and latest.raw_result_id else None,
+        "received_at": _taiwan_now(latest.received_at or latest.fetched_at).isoformat() if latest else None,
+        "receipt_age_seconds": int((current_time - _taiwan_now(latest.received_at or latest.fetched_at)).total_seconds()) if latest else None,
+        "last_price": latest.last_price if latest else None,
+        "trade_state": latest.trade_state if latest else None,
+        "observation_state": latest.observation_state if latest else None,
+    }
+    raw_receipt = db.get(RawFetchResult, latest.raw_result_id) if latest and latest.raw_result_id else None
+    inventory_health["content_hash"] = raw_receipt.content_hash if raw_receipt else None
+    selected_provider = getattr(latest, "provider", None)
+    selected_source = getattr(latest, "source", None)
+    selected_received_at = getattr(latest, "fetched_at", None)
+    selected = None
+    if stock_id is not None and calendar_status.get("phase") == "regular":
+        try:
+            selected = read_taiwan_quote_snapshot(db, stock_id=stock_id, requested_at=current_time)
+        except TaiwanInstrumentResolutionError:
+            # Legacy inventory health can exist before instrument registration.
+            # Missing canonical identity must not replace its baseline status.
+            selected = None
+        if selected is not None:
+            projected = project_taiwan_public_last_trade_quote(selected)
+    if selected is not None and projected["actual_trade_occurred"] is True:
+        quote = selected.resolved.quote
+        resolved_health = selected.resolved.health
+        selected_freshness = projected["freshness"]["status"]
+        status_value = {"live": "current", "missing": "empty"}.get(
+            selected_freshness, selected_freshness,
+        )
+        ok = status_value == "current" and resolved_health.facts_usable
+        data_quality = "ok" if ok else status_value
+        reason = resolved_health.selection_reason
+        observed_at = quote.lineage.event_at if quote else None
+        latest_data_date = quote.trade_date if quote else None
+        age_seconds = projected["freshness"]["age_seconds"]
+        selected_provider = projected["provider"]
+        selected_source = projected["source"]
+        selected_received_at = quote.lineage.received_at if quote else None
+        request_live = {
+            **request_live,
+            "status": status_value,
+            "component": "quote.snapshot",
+            "inventory": "canonical_quote_candidates",
+            "dataset_id": selected.dataset_health.dataset_id if selected.dataset_health else None,
+            "instrument": selected.requirement.target.instrument.model_dump(mode="json"),
+            "selection_cutoff": current_time.isoformat(),
+            "provider": selected_provider,
+            "source": selected_source,
+            "row_count": 1 if quote else 0,
+            "latest_data_date": latest_data_date.isoformat() if latest_data_date else None,
+            "latest_observed_at": observed_at.isoformat() if observed_at else None,
+            "age_seconds": age_seconds,
+            "lineage": quote.lineage.model_dump(mode="json") if quote else None,
+            "resolved_health": resolved_health.model_dump(mode="json"),
+            "freshness": projected["freshness"],
+            "reason": reason,
+        }
+        row_count = 1 if quote else 0
     scheduler_contract = build_taiwan_quote_scheduler_contract(
         db,
         trade_date=expected_data_date,
@@ -455,13 +535,13 @@ def _stock_quote_entry(
                 "resolver; official daily EOD may still be pending."
             )
         else:
-            status_value = "partial" if row_count > 0 else "empty"
+            status_value = "partial" if inventory_health["row_count"] > 0 else "empty"
             ok = False
-            data_quality = "partial" if row_count > 0 else "empty"
+            data_quality = "partial" if inventory_health["row_count"] > 0 else "empty"
             reason = (
                 "A quote row exists, but the centralized resolver has not confirmed "
                 "a current-session close."
-                if row_count > 0
+                if inventory_health["row_count"] > 0
                 else "No current-session close evidence is available."
             )
     if stock_id is None:
@@ -503,13 +583,13 @@ def _stock_quote_entry(
         required=required,
         latest_data_date=latest_data_date,
         latest_data_key=observed_at.isoformat() if observed_at else None,
-        latest_updated_at=getattr(latest, "fetched_at", None) if latest else None,
+        latest_updated_at=selected_received_at,
         expected_data_date=expected_data_date,
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         data_quality=data_quality,
         reason=reason,
-        provider=getattr(latest, "provider", None) if latest else None,
-        source=getattr(latest, "source", None) if latest else None,
+        provider=selected_provider,
+        source=selected_source,
         latest_observed_at=observed_at,
         age_seconds=age_seconds,
         stale_after_seconds=TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS,
@@ -520,6 +600,7 @@ def _stock_quote_entry(
             "target_count": 1 if stock_id else scheduler_contract.get("target_count"),
             "full_market": False,
             "request_live": request_live,
+            "observation_inventory": inventory_health,
             "scheduler_contract": scheduler_contract,
             "public_quote_provider_availability": (
                 public_quote_provider_availability

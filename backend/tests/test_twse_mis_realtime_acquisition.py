@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 
+import pytest
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -204,6 +206,151 @@ def test_explicit_preopen_refresh_persists_trial_only_as_auction() -> None:
         assert projected["last_price"] is None
         assert projected["auction_indicative_available"] is True
         assert projected["indicative_match_price"] == 1178
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_preopen_refresh_rereads_the_acquired_auction_revision_not_prior_receipt() -> None:
+    started = datetime(2026, 8, 26, 8, 46, tzinfo=TAIPEI)
+    fetched = started + timedelta(seconds=4)
+    calls = []
+    db, engine = _db()
+    try:
+        refresh_taiwan_realtime_snapshot(
+            db, stock_id="2330", requested_at=started - timedelta(minutes=1),
+            acquisition=_adapter(_payload(trial=True), started - timedelta(minutes=1), calls),
+        )
+        refreshed = refresh_taiwan_realtime_snapshot(
+            db, stock_id="2330", requested_at=started,
+            acquisition=_adapter(_payload(trial=True, event_time="08:45:55"), fetched, calls),
+        )
+        depth = refreshed.depth.resolved.depth
+        auction = refreshed.auction.resolved.auction
+        assert len(calls) == 2
+        assert auction.instrument == depth.instrument
+        assert auction.lineage.provider == depth.lineage.provider == "twse_mis"
+        assert auction.lineage.source == depth.lineage.source
+        assert auction.lineage.event_at == started - timedelta(seconds=5)
+        assert auction.lineage.event_at == depth.lineage.event_at
+        assert auction.lineage.received_at == depth.lineage.received_at == fetched
+        assert auction.lineage.content_hash == depth.lineage.content_hash
+        # Separate canonical components retain separate persisted receipt ids.
+        assert auction.lineage.raw_receipt_id != depth.lineage.raw_receipt_id
+        assert auction.lineage.observation_id != depth.lineage.observation_id
+        assert auction.provisional and not refreshed.auction.resolved.health.research_usable
+        assert refreshed.auction.requirement.requested_at == started
+        # A subsequent cache-only read at the original cutoff must still exclude
+        # this receipt; explicit acquisition must not rewrite historical visibility.
+        historical = read_taiwan_quote_evidence_bundle(db, stock_id="2330", requested_at=started)
+        assert historical.auction.resolved.auction.lineage.received_at < fetched
+        assert historical.auction.resolved.auction.lineage.content_hash != auction.lineage.content_hash
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("force_selected_status", [False, True])
+def test_partial_snapshot_health_keeps_actual_trade_lineage_and_freshness(monkeypatch, force_selected_status):
+    from app.market import source_health
+    from app.market_data.contracts import ResolvedEvidenceStatus
+    now = datetime(2026, 9, 21, 9, 55, 49, tzinfo=TAIPEI)
+    old_event = now.replace(minute=40, second=5)
+    snapshot_event = now.replace(second=0)
+    received = now.replace(second=31)
+    db, engine = _db()
+    calls = []
+    try:
+        db.add(StockMaster(stock_id="2344", stock_name="華邦電", market="TWSE", instrument_type="stock"))
+        db.commit()
+        payload = json.loads(_payload())
+        message = payload["msgArray"][0]
+        message.update(c="2344", ch="tse_2344.tw", d="20260921", t="09:40:05", z="175.5")
+        old = refresh_taiwan_realtime_snapshot(
+            db, stock_id="2344", requested_at=old_event,
+            acquisition=_adapter(json.dumps(payload), old_event, calls),
+        ).quote.resolved.quote
+        message.update(t="09:55:00", z="-", tv="-")
+        refresh_taiwan_realtime_snapshot(
+            db, stock_id="2344", requested_at=received,
+            acquisition=_adapter(json.dumps(payload), received, calls),
+        )
+        newest = db.query(TaiwanStockQuoteSnapshot).filter_by(stock_id="2344").order_by(TaiwanStockQuoteSnapshot.id.desc()).first()
+        assert newest.last_price is None
+        assert newest.trade_state == "unknown"
+        assert newest.observation_state == "partial"
+        original_reader = source_health.read_taiwan_quote_snapshot
+        if force_selected_status:
+            def selected_status_reader(*args, **kwargs):
+                result = original_reader(*args, **kwargs)
+                return result.model_copy(update={"resolved": result.resolved.model_copy(update={
+                    "health": result.resolved.health.model_copy(update={"status": ResolvedEvidenceStatus.SELECTED}),
+                })})
+            monkeypatch.setattr(source_health, "read_taiwan_quote_snapshot", selected_status_reader)
+        def reject_acquisition(*args, **kwargs):
+            raise AssertionError("cache-only health/read must not acquire")
+        import requests
+        monkeypatch.setattr(requests.sessions.Session, "request", reject_acquisition)
+        db.connection().exec_driver_sql("PRAGMA query_only=ON")
+        health = source_health.build_taiwan_source_health(
+            db, stock_id="2344", dataset="taiwan_stock_quote_snapshot", now=now,
+        )["entries"][0]
+        outward = get_taiwan_stock_quote_depth(db=db, stock_id="2344", now=now)
+        assert outward["last_price"] == 175.5
+        assert health["status"] == "stale" and health["ok"] is False
+        assert health["latest_observed_at"] == old_event.isoformat()
+        assert health["age_seconds"] == int((now - old_event).total_seconds())
+        dimensions = health["health_dimensions"]
+        selected = dimensions["request_live"]
+        assert selected["component"] == "quote.snapshot"
+        assert selected["lineage"] == old.lineage.model_dump(mode="json")
+        assert selected["selection_cutoff"] == now.isoformat()
+        assert selected["instrument"]["symbol"] == "2344"
+        inventory = dimensions["observation_inventory"]
+        assert inventory["latest_observed_at"] == snapshot_event.isoformat()
+        assert inventory["age_seconds"] == 49
+        assert inventory["last_price"] is None
+        assert inventory["raw_receipt_id"] != selected["lineage"]["raw_receipt_id"]
+        assert inventory["content_hash"] != selected["lineage"]["content_hash"]
+        # Inventory receipt visibility cannot leak into an earlier read cutoff.
+        historical = source_health.build_taiwan_source_health(
+            db, stock_id="2344", dataset="taiwan_stock_quote_snapshot", now=received-timedelta(seconds=1),
+        )["entries"][0]
+        assert historical["health_dimensions"]["observation_inventory"]["latest_observed_at"] == old_event.isoformat()
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("reference", [1170, 1150, None])
+def test_preopen_reference_uses_persisted_exchange_quote_without_creating_trade(reference):
+    now = datetime(2026, 8, 26, 8, 45, tzinfo=TAIPEI)
+    calls = []
+    payload = json.loads(_payload(trial=True))
+    payload["msgArray"][0]["y"] = str(reference) if reference is not None else "-"
+    db, engine = _db()
+    try:
+        refresh_taiwan_realtime_snapshot(
+            db, stock_id="2330", requested_at=now,
+            acquisition=_adapter(json.dumps(payload), now, calls),
+        )
+        projected = get_taiwan_stock_quote_depth(db=db, stock_id="2330", now=now)
+        basis = projected["change_reference"]
+        assert len(calls) == 1
+        assert basis["price"] == reference
+        assert basis["research_usable"] is False
+        assert projected["actual_trade_occurred"] is False
+        assert projected["last_price"] is None
+        if reference is not None:
+            assert basis["source_field"] == "canonical.quote.previous_close"
+            assert basis["authority"] == "exchange"
+            assert basis["lineage"]["raw_receipt_id"]
+            assert basis["applies_to_trade_date"] == now.date()
+            assert basis["type"] == "provider_reference_price"
+            assert basis["trade_date"] is None
+        else:
+            assert basis["status"] == "missing"
+            assert basis["calculation_eligible"] is False
     finally:
         db.close()
         engine.dispose()

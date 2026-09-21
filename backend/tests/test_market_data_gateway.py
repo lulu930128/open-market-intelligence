@@ -1345,7 +1345,8 @@ def test_auction_cache_hit_remains_typed_and_indicative() -> None:
     assert result.acquisition.attempted is False
 
 
-def test_auction_acquisition_persists_then_mandatorily_rereads() -> None:
+@pytest.mark.parametrize("receipt_delay_seconds", [0, 40, 180])
+def test_auction_acquisition_persists_then_mandatorily_rereads(receipt_delay_seconds) -> None:
     events: list[str] = []
     observation = _auction()
     final_batch = AuctionCandidateBatch(
@@ -1358,12 +1359,21 @@ def test_auction_acquisition_persists_then_mandatorily_rereads() -> None:
             ),
         )
     )
-    reader = RereadAuctionReader([AuctionCandidateBatch(), final_batch], events)
+    class ReceiptVisibleReader(RereadAuctionReader):
+        def read_auction_candidates(self, requirement):
+            if self.calls:
+                # The canonical repository enforces receipt visibility, including
+                # receipts materialized after this explicit request began.
+                assert requirement.requested_at == receipt.fetched_at
+            return super().read_auction_candidates(requirement)
+
+    reader = ReceiptVisibleReader([AuctionCandidateBatch(), final_batch], events)
     receipt = _receipt().model_copy(
         update={
             "provider": "fixture_provider",
             "source": "fixture_provider.auction",
             "resource_id": "auction.fixture",
+            "fetched_at": NOW + timedelta(seconds=receipt_delay_seconds),
         }
     )
     acquisition = FakeAuctionAcquisition(
@@ -1404,6 +1414,11 @@ def test_auction_acquisition_persists_then_mandatorily_rereads() -> None:
     assert result.result_kind == "auction"
     assert result.resolved.auction is observation
     assert result.persistence.committed is True
+    assert result.resolved.auction.lineage.event_at == NOW
+    assert result.requirement.requested_at == NOW
+    assert not result.resolved.health.research_usable
+    if receipt_delay_seconds > 60:
+        assert result.resolved.health.status is ResolvedEvidenceStatus.STALE
 
 
 def test_auction_has_a_typed_resolved_contract() -> None:

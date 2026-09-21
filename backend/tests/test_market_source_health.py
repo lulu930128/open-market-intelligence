@@ -464,6 +464,10 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             "health_dimensions"
         ]
         self.assertEqual(quote_dimensions["request_live"]["status"], "current")
+        # A legacy inventory row with no canonical actual trade keeps the
+        # existing session-aware baseline; it is not an empty quote contract.
+        self.assertNotIn("lineage", quote_dimensions["request_live"])
+        self.assertEqual(quote_dimensions["observation_inventory"]["age_seconds"], 10)
         self.assertEqual(
             entries["taiwan_stock_quote_snapshot"]["provider"],
             "kgi_superpy",
@@ -751,6 +755,10 @@ class TaiwanSourceHealthTests(unittest.TestCase):
             after_entries["market_intraday_bar_1m"]["status"],
             "pending",
         )
+        for entries in (before_entries, after_entries):
+            dimensions = entries["taiwan_stock_quote_snapshot"]["health_dimensions"]
+            self.assertNotIn("lineage", dimensions["request_live"])
+            self.assertEqual(dimensions["observation_inventory"]["status"], dimensions["request_live"]["status"])
 
     def test_post_close_quote_row_is_not_healthy_without_session_close_confirmation(
         self,
@@ -807,6 +815,8 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         self.assertFalse(
             entry["health_dimensions"]["session_close"]["available"]
         )
+        self.assertNotIn("lineage", entry["health_dimensions"]["request_live"])
+        self.assertGreater(entry["health_dimensions"]["observation_inventory"]["row_count"], 0)
 
     def test_minute_state_health_is_partial_when_latest_minute_misses_tpex(self) -> None:
         minute_at = datetime(2026, 7, 22, 13, 30, tzinfo=ZoneInfo("Asia/Taipei"))
