@@ -1842,5 +1842,36 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertTrue(assessment["decision_usable"])
 
 
+def test_auction_and_depth_keep_independent_canonical_lineage_and_freshness():
+    from app.ai.market_context.taiwan_projection import _quote_components
+
+    depth_time = "2026-09-21T08:32:30+08:00"
+    for auction_time, status in (("2026-09-21T08:31:50+08:00", "stale"), (depth_time, "selected")):
+        def evidence(event_time, health_status, receipt, observation):
+            return {
+                "provider": "twse_mis", "source": "twse_mis_quote_depth",
+                "lineage": {"event_at": event_time, "raw_receipt_id": receipt,
+                            "observation_id": observation},
+                "resolved_health": {"status": health_status, "facts_usable": True,
+                                    "research_usable": False, "selected_event_at": event_time},
+                "freshness": {"is_current": health_status == "selected", "is_live": health_status == "selected"},
+            }
+        auction_evidence = evidence(auction_time, status, "raw_fetch_result:auction", "auction:1")
+        depth_evidence = evidence(depth_time, "selected", "raw_fetch_result:depth", "depth:1")
+        components = _quote_components({
+            "session_phase": "preopen_auction", "depth_available": True,
+            "snapshot_time": depth_time, "auction_book_time": depth_time,
+            "auction_book_available": True, "auction_indicative_available": True,
+            "indicative_match_available": True, "indicative_match_price": 2465,
+            "data_core_components": {"quote.auction": auction_evidence, "quote.order_book": depth_evidence},
+        })
+        auction = components["auction"]
+        assert auction["auction_time"] == auction_time
+        assert auction["freshness"]["latest"] == auction_time
+        assert auction["freshness"]["is_current"] is (status == "selected")
+        assert auction["lineage"] == auction_evidence["lineage"]
+        assert components["order_book"]["lineage"] == depth_evidence["lineage"]
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1381,12 +1381,80 @@ def build_market_breadth_consumer_answer(
     warnings: list[Any],
     summary_limit: int,
     response_preferences: dict[str, Any] | None,
+    auction_intent: bool = False,
 ) -> dict[str, Any]:
     breadth = (
         analysis_digest.get("breadth")
         if isinstance(analysis_digest.get("breadth"), dict)
         else {}
     )
+    if auction_intent:
+        # Select the canonical indicative lane without rewriting actual breadth.
+        auction = breadth.get("auction_breadth")
+        auction = auction if isinstance(auction, dict) else {}
+        english = response_is_english(response_preferences)
+        japanese = response_is_japanese(response_preferences)
+        unavailable = "unavailable" if english else "データなし" if japanese else "無資料"
+
+        def count(value: Any) -> str:
+            return str(value) if type(value) is int and value >= 0 else unavailable
+
+        disclaimer = (
+            "Provisional auction indications, not actual trades; decision_usable=false."
+            if english else "板寄せ参考値は暫定値であり、実約定ではありません。decision_usable=false。"
+            if japanese else "試搓為 provisional 暫定觀測，並非正式成交；decision_usable=false。"
+        )
+        summary = [disclaimer]
+        markets = auction.get("markets")
+        components = markets if isinstance(markets, dict) and markets else {"TW": auction}
+        for market, component in components.items():
+            if not isinstance(component, dict):
+                continue
+            status = str(component.get("status") or "missing")
+            usable_counts = status in {"provisional", "partial", "stale"}
+            values = [count(component.get(key)) if usable_counts else unavailable
+                      for key in ("advance_count", "decline_count", "unchanged_count")]
+            labels = ("advancers / decliners / unchanged" if english
+                      else "上昇 / 下落 / 変わらず" if japanese else "上漲 / 下跌 / 持平")
+            coverage_label = "coverage" if english else "取得範囲" if japanese else "覆蓋"
+            advance, decline = component.get("advance_count"), component.get("decline_count")
+            direction = ""
+            if (usable_counts and type(advance) is int and type(decline) is int
+                    and advance >= 0 and decline >= 0):
+                direction = (
+                    "more advancers" if advance > decline else "more decliners" if decline > advance else "balanced"
+                ) if english else (
+                    "上昇優勢" if advance > decline else "下落優勢" if decline > advance else "拮抗"
+                ) if japanese else (
+                    "上漲家數較多" if advance > decline else "下跌家數較多" if decline > advance else "漲跌家數相同"
+                )
+            summary.append(
+                f"{market} {labels}：{' / '.join(values)}；{coverage_label} "
+                f"{count(component.get('coverage_count'))} / {count(component.get('universe_count'))}；"
+                f"status={status}；as_of={component.get('as_of') or unavailable}；{direction}"
+            )
+        status = str(auction.get("status") or "missing")
+        missing_markets = auction.get("missing_markets")
+        coverage_limits = (
+            [f"auction_breadth.missing_markets={', '.join(str(market) for market in missing_markets)}"]
+            if isinstance(missing_markets, list) and missing_markets else []
+        )
+        headline = ("Auction breadth" if english else "板寄せの市場の広がり" if japanese else "台股試搓廣度")
+        answer = {
+            "kind": "consumer_market_answer", "style": "market_breadth_summary",
+            "source": "analysis_digest.breadth.auction_breadth",
+            "headline": f"{headline}（{status}）", "stance": "insufficient_data",
+            "stance_label": stance_label("insufficient_data", response_preferences),
+            "confidence": "low", "confidence_label": confidence_label("low", response_preferences),
+            "summary": summary[:summary_limit], "detail": "\n".join(summary),
+            "action_plan": [], "scenarios": [], "counter_evidence": [], "risks": [],
+            "data_limits": generic_data_limits(
+                missing=missing, warnings=[disclaimer, *warnings, f"auction_breadth.status={status}", *coverage_limits],
+                response_preferences=response_preferences,
+            ),
+        }
+        answer["text"] = consumer_text(answer, summary_limit=summary_limit, response_preferences=response_preferences)
+        return answer
     advance = breadth.get("advance_count")
     decline = breadth.get("decline_count")
     unchanged = breadth.get("unchanged_count")
@@ -1548,7 +1616,9 @@ def has_answer_content(answer: dict[str, Any]) -> bool:
 
 def build_intraday_evidence_gap_answer(
     *, target: dict[str, Any], background_date: str | None,
+    intraday_quality: dict[str, Any],
     response_preferences: dict[str, Any] | None,
+    intraday_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     english = response_is_english(response_preferences)
     japanese = response_is_japanese(response_preferences)
@@ -1558,11 +1628,52 @@ def build_intraday_evidence_gap_answer(
         else f"{label}：ザラ場の判断に必要なデータが不足" if japanese
         else f"{label}：盤中證據不足"
     )
-    summary = [
-        "Required intraday bars are missing or unusable; daily structure cannot establish the current intraday direction."
-        if english else "必要な分足が不足または利用不可です。日足の構造だけでは現在のザラ場の方向を判断できません。"
-        if japanese else "必要的分鐘 K 缺失或不可用，完成日線結構不足以判斷現在的盤中方向。"
-    ]
+    availability = intraday_quality.get("availability_status") or intraday_quality.get("availability")
+    freshness = intraday_quality.get("freshness_status") or intraday_quality.get("freshness")
+    coverage = intraday_quality.get("coverage_status") or intraday_quality.get("completeness")
+    evidence = intraday_evidence or {}
+    point_count = next((source[key] for source in (evidence, intraday_quality)
+                        for key in ("original_point_count", "point_count")
+                        if type(source.get(key)) is int and source[key] >= 0), None)
+    has_points = point_count is not None and point_count > 0
+    analysis_usable = intraday_quality.get("intraday_research_usable") is True
+    missing_bars = not has_points and (
+        availability in {"missing", "unavailable", "error"}
+        or (
+            intraday_quality.get("facts_usable") is False and not analysis_usable
+            and (coverage == "missing" or freshness in {"missing", "unavailable"})
+            and (point_count is None or point_count == 0)
+        )
+    )
+    if missing_bars:
+        description = ("Required intraday bars are missing or unavailable." if english
+                       else "必要な分足が不足または利用不可です。" if japanese
+                       else "必要的分鐘 K 缺失或不可用。")
+    elif availability == "available" or has_points:
+        description = ("Intraday bars are available, but insufficient for the requested analysis." if english
+                       else "分足は取得済みですが、要求された分析の条件を満たしていません。" if japanese
+                       else "分鐘 K 已取得，但尚不足以支持本次盤中分析。")
+        if analysis_usable:
+            description = ("Intraday bars support research, but trading decision requirements remain unmet." if english
+                           else "分足は分析に利用できますが、売買判断の条件は満たしていません。" if japanese
+                           else "分鐘 K 已取得，可供盤中研究，但尚未符合交易決策條件。")
+        if freshness in {"delayed", "stale"}:
+            description += (" Bars are delayed or stale." if english
+                            else "分足に遅延または古いデータが含まれます。" if japanese
+                            else "資料存在延遲或已過期。")
+        if coverage in {"partial", "sample_only", "insufficient_history"} or intraday_quality.get("usability_status") == "limited":
+            description += (" Coverage or usability is limited." if english
+                            else "取得範囲または利用条件に制限があります。" if japanese
+                            else "資料覆蓋或使用條件仍有限制。")
+    else:
+        description = ("Intraday bar availability is unconfirmed." if english
+                       else "分足の取得状態は未確認です。" if japanese
+                       else "分鐘 K 的可用狀態尚未確認。")
+    summary = [description, (
+        "Daily structure alone cannot establish the current intraday direction." if english
+        else "日足の構造だけでは現在のザラ場の方向を判断できません。" if japanese
+        else "完成日線結構不足以單獨判斷現在的盤中方向。"
+    )]
     if background_date:
         summary.append(
             f"Technical structure dated {background_date} is background only." if english
@@ -1576,7 +1687,8 @@ def build_intraday_evidence_gap_answer(
         "stance": "insufficient_data", "confidence": "low",
         "stance_label": stance_label("insufficient_data", response_preferences),
         "confidence_label": confidence_label("low", response_preferences),
-        "action_plan": [], "scenarios": [], "data_limits": summary[:1],
+        "action_plan": [], "scenarios": [],
+        "data_limits": [description],
     }
     answer["text"] = consumer_text(answer, response_preferences=response_preferences)
     return answer
@@ -1588,6 +1700,7 @@ def build_selected_market_consumer_answer(
     projected_data: dict[str, Any],
     quality: dict[str, Any],
     response_preferences: dict[str, Any] | None,
+    auction_intent: bool = False,
 ) -> dict[str, Any]:
     """Render the selected canonical snapshot without another read or aggregation."""
     english = response_is_english(response_preferences)
@@ -1596,16 +1709,17 @@ def build_selected_market_consumer_answer(
     limits: list[str] = []
     sources: list[str] = []
     breadth = projected_data.get("market.breadth")
-    if isinstance(breadth, dict) and any(
+    if isinstance(breadth, dict) and (auction_intent or any(
         breadth.get(key) is not None for key in ("advance_count", "decline_count", "unchanged_count")
-    ):
+    )):
         breadth_answer = build_market_breadth_consumer_answer(
             target=target, analysis_digest={"breadth": breadth}, missing=[], warnings=[],
             summary_limit=3, response_preferences=response_preferences,
+            auction_intent=auction_intent,
         )
         summary.extend(breadth_answer["summary"])
         limits.extend(breadth_answer["data_limits"])
-        observed_at = breadth.get("as_of") or breadth.get("trade_date")
+        observed_at = None if auction_intent else breadth.get("as_of") or breadth.get("trade_date")
         if observed_at:
             summary.append(f"as_of: {observed_at}")
         sources.append("market.breadth")
@@ -1648,6 +1762,39 @@ def build_selected_market_consumer_answer(
                 f"{row.get('stock_name') or ''}: {value if value is not None else '?'} {unit}"
             )
         sources.append("screening.intraday")
+    hot_groups = projected_data.get("market.hot_groups")
+    if isinstance(hot_groups, dict) and hot_groups:
+        title = "Sector strength" if english else "業種の強弱" if japanese else "族群強弱"
+        ranking_usable = hot_groups.get("facts_usable_for_ranking") is True
+        summary.append(f"{title}：" + (
+            ("Ranking is available within the covered sample." if english else "取得範囲内で順位を確認できます。" if japanese
+             else "可查看已覆蓋樣本的族群表現。") if ranking_usable else
+            ("Coverage or freshness is insufficient for sector ranking." if english else "鮮度または取得範囲が不足し、業種順位は利用できません。" if japanese
+             else "族群資料的新鮮度或覆蓋不足，暫不宜排名。")
+        ))
+        if not ranking_usable:
+            limits.append(
+                "Sector ranking is unavailable; see freshness and coverage limits for each group." if english
+                else "業種順位は利用不可です。各業種の鮮度・取得範囲の制限を確認してください。" if japanese
+                else "目前無法可靠排列族群強弱；各族群的新鮮度與覆蓋限制如下。"
+            )
+        for group in hot_groups.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            group_usable = ranking_usable and group.get("facts_usable_for_ranking") is True
+            coverage_label = "classified" if english else "分類済み" if japanese else "已分類"
+            detail = f"{group.get('group_name') or group.get('group_id') or '?'}：{coverage_label} {group.get('classified_count', '?')}/{group.get('member_count', '?')}"
+            recency = group.get("last_trade_recency") or hot_groups.get("last_trade_recency")
+            if recency in {"stale", "delayed"}:
+                detail += ("; trade data is delayed or stale" if english else "；約定データに遅延があります" if japanese else "；成交資料延遲或已過期")
+            if group_usable:
+                return_label = "mean return" if english else "平均騰落率" if japanese else "平均漲跌幅"
+                summary.append(f"{detail}；{return_label} {group.get('mean_return_pct', '?')}%")
+            else:
+                if "COVERAGE_BELOW_MINIMUM" in (group.get("ranking_ineligibility_reasons") or []):
+                    detail += ("; insufficient coverage" if english else "；取得範囲が不足" if japanese else "；覆蓋不足")
+                summary.append(detail)
+        sources.append("market.hot_groups")
     if not sources:
         return {}
     if quality.get("status") != "ready":

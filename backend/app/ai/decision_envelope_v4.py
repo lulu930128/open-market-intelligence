@@ -13,6 +13,7 @@ from app.ai import (
     data_quality_contract,
     decision_envelope,
     public_contract,
+    query_plan,
     realtime_contract,
 )
 
@@ -4159,6 +4160,7 @@ def build(
         factual_answer = answer_composer.build_selected_market_consumer_answer(
             target=_dict(canonical.get("target")), projected_data=projected_data,
             quality=quality, response_preferences=preferences,
+            auction_intent=query_plan.has_auction_intent(str(source_response.get("question") or "")),
         )
         if factual_answer:
             canonical["answer"] = factual_answer
@@ -4175,12 +4177,15 @@ def build(
         technical_quality = _dict(_dict(quality.get("capabilities")).get("technical.structure"))
         gap_answer = answer_composer.build_intraday_evidence_gap_answer(
             target=_dict(canonical.get("target")),
+            intraday_quality=intraday_quality,
+            intraday_evidence=_dict(projected_data.get("intraday.bars")),
             background_date=_dict(technical_quality.get("temporal")).get("latest_date"),
             response_preferences=preferences,
         )
         factual_answer = _dict(canonical.get("answer"))
         if factual_answer.get("style") == "selected_market_facts":
             gap_answer["summary"].extend(_list(factual_answer.get("summary")))
+            gap_answer["data_limits"].extend(_list(factual_answer.get("data_limits")))
             gap_answer["detail"] = "\n".join(gap_answer["summary"])
             gap_answer["text"] = answer_localization.consumer_text(
                 gap_answer, summary_limit=len(gap_answer["summary"]),

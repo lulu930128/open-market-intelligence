@@ -375,12 +375,12 @@ TW_SCREENING_ASCENDING_HINTS = (
 TW_SCREENING_WINDOW_VALUES = frozenset({1, 5, 10, 20})
 TW_INTRADAY_SCREENING_METRIC_HINTS = {
     "estimated_trade_value": (
-        "成交值排行",
-        "成交金額排行",
+        "成交值",
+        "成交金額",
         "turnover ranking",
     ),
     "cumulative_volume_lots": (
-        "成交量排行",
+        "成交量",
         "爆量排行",
         "volume ranking",
     ),
@@ -433,10 +433,14 @@ TW_INTRADAY_SCREENING_METRIC_HINTS = {
         "跌幅排行",
         "top gainers",
         "top losers",
+        "上漲",
+        "下跌",
     ),
 }
 TW_HOT_GROUP_HINTS = (
     "熱門族群",
+    "強弱族群",
+    "族群強弱",
     "強勢族群",
     "族群排行",
     "熱門題材",
@@ -548,6 +552,12 @@ def _selection_question(question: str, *, positive_only: bool = False) -> str:
                 continue
         selected.append(clause)
     return "，".join(selected)
+
+
+def has_auction_intent(question: str) -> bool:
+    """Share planning's positive auction vocabulary with answer selection."""
+    positive = _selection_question(question, positive_only=True)
+    return any(hint in positive for hint in CAPABILITY_HINTS["quote.auction"])
 
 
 def _hint_negation(question: str, hint: str) -> str | None:
@@ -883,12 +893,19 @@ def _infer_tw_intraday_screening_selection(
         ),
         None,
     )
-    intraday_ranking_requested = metric is not None and any(
+    limit_match = re.search(
+        r"(?:前|後)\s*(?P<limit>\d{1,3}|[零〇一二兩三四五六七八九十百]+)\s*(?:名|檔)?",
+        question,
+    ) or re.search(r"(?:top|bottom)\s*(?P<limit>\d{1,3})", question)
+    daily_ranking_requested = bool(
+        any(term in question for term in ("昨天", "昨日", "日線", "收盤", "上週", "上周"))
+        or re.search(r"(?:近|過去|最近)\s*(?:\d+|[一二兩三四五六七八九十百]+)\s*(?:個)?(?:交易)?[日天]", question)
+    )
+    intraday_ranking_requested = metric is not None and not daily_ranking_requested and (limit_match is not None or any(
         hint in question
         for hint in (
             "排行",
-            "前",
-            "後",
+            "排名",
             "最多",
             "最強",
             "最弱",
@@ -898,18 +915,14 @@ def _infer_tw_intraday_screening_selection(
             "top ",
             "bottom ",
         )
-    )
+    ))
     if not hot_groups_requested and not intraday_ranking_requested:
         return None
 
     limit = 20
-    limit_match = re.search(
-        r"(?:前|後)\s*(?P<limit>\d{1,3})\s*(?:名|檔)?",
-        question,
-    ) or re.search(r"(?:top|bottom)\s*(?P<limit>\d{1,3})", question)
     if limit_match:
-        limit = int(limit_match.group("limit"))
-        if not 1 <= limit <= 200:
+        limit = _parse_natural_number(limit_match.group("limit"))
+        if limit is None or not 1 <= limit <= 200:
             raise ValueError(
                 "Taiwan intraday screening result limit inferred from the "
                 "question must be between 1 and 200."
@@ -933,11 +946,13 @@ def _infer_tw_intraday_screening_selection(
                     hint in question
                     for hint in (
                         "跌幅",
+                        "下跌",
                         "跌最多",
                         "最弱",
                         "急殺",
                         "高點回落",
                         "bottom ",
+                        "top losers",
                     )
                 )
                 else "desc"
