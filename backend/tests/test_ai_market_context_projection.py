@@ -425,6 +425,15 @@ class AIMarketContextProjectionTests(unittest.TestCase):
                 },
             ],
         }
+        for item in summary["indices"]:
+            component = item["breadth"]
+            component["lineage"] = {
+                "provider": "twse" if component["market"] == "TWSE" else "tpex",
+                "source": component["source"],
+                "raw_receipt_id": f"fixture:{component['market']}:2026-07-22",
+                "content_hash": "a" * 64,
+                "event_at": component["snapshot_as_of"],
+            }
         refs: list[dict] = []
         breadth = taiwan_market._market_breadth_from_index_summary(
             db=SimpleNamespace(),

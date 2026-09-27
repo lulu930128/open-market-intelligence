@@ -94,14 +94,14 @@ def test_complete_supplemental_and_current_closed_keep_existing_satisfaction():
     assert contract._historical_intraday_fill_state(scope_type="us_stock", capability_id="intraday.bars", value={"is_partial": True}) is None
 
 
-def test_non_us_continuation_keeps_existing_action_identity():
+def test_undated_tw_continuation_keeps_identity_but_cannot_authorize_a_dated_fill():
     target = {"type": "stock", "id": "2330", "market": "TW"}
     selection = {"version": "test", "required": ["intraday.bars"]}
     action_id = contract.fill_action_id(capability_id="intraday.bars", target=target, selection_version="test")
     continuation = {"plan_id": contract.fill_plan_id(target=target, action_ids=[action_id]),
                     "plan_action_ids": [action_id], "selected_action_ids": [action_id]}
-    # Exercise identity compatibility independently of other markets' inventory.
-    resolution = contract.capability_resolution_for(scope_type="us_stock", capability_id="intraday.bars")
-    with patch.object(contract, "capability_resolution_for", return_value=resolution):
-        assert contract.selected_fill_capabilities(continuation=continuation, selection=selection,
-            target=target, scope_type="stock", market_data_params={"trade_date": "2026-09-04"}) == ("intraday.bars",)
+    assert contract.selected_fill_capabilities(continuation=continuation, selection=selection,
+        target=target, scope_type="stock") == ("intraday.bars",)
+    with pytest.raises(ValueError, match="unknown or non-executable"):
+        contract.selected_fill_capabilities(continuation=continuation, selection=selection,
+            target=target, scope_type="stock", market_data_params={"trade_date": "2026-09-04"})

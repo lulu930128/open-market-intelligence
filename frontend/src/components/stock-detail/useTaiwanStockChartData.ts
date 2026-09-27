@@ -10,7 +10,7 @@ import {
   type ProfessionalTimeframe,
   type Timeframe,
 } from "@/components/stock-detail/StockDetailDataViews";
-import { fetchJson, requestJson } from "@/lib/api";
+import { fetchJson } from "@/lib/api";
 import { useTechnicalSettingsRevision } from "@/lib/technicalSettingsRevision";
 import type { DataStatusLevel } from "@/lib/dataStatusEvents";
 import { getMarketCalendarStatusSnapshot } from "@/lib/marketCalendarStatus";
@@ -632,22 +632,6 @@ export function useTaiwanStockChartData({
     let pendingTechnicalBars: TaiwanRenderableBarSeries | null = null;
     let currentTodaySnapshot = cachedTodayState;
     let warmingRetryIndex = 0;
-    const warmupTradeDates = new Set<string>();
-
-    async function requestBaselineWarmup(tradeDate: string) {
-      if (warmupTradeDates.has(tradeDate) || isIndexProduct) return;
-      warmupTradeDates.add(tradeDate);
-      try {
-        await requestJson(`/api/market/intraday/${effectStockId}/history/refresh?range=1d&interval=1m`,
-          { method: "POST" }, undefined, { signal: controller.signal, timeoutMs: 20_000 });
-        if (!cancelled && activeStockIdRef.current === effectStockId) scheduleChartRequest(0, true);
-      } catch (error) {
-        if (cancelled) return;
-        publishDataStatus({ level: "warning", title: tRef.current("stockDetail.errors.dataLoad"),
-          message: error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad"),
-          source: "K 線預補" });
-      }
-    }
 
     function requestParams(fullSnapshot: boolean) {
       return {
@@ -834,10 +818,6 @@ export function useTaiwanStockChartData({
           series.current_session_coverage?.trade_date ?? null;
         if (effectiveTimeframe === "today" && !presentationTradeDate) {
           throw new Error("Taiwan Today chart response is missing current-session identity");
-        }
-        if (effectiveTimeframe === "today" && presentationTradeDate &&
-            series.current_session_coverage?.repair_recommended) {
-          void requestBaselineWarmup(presentationTradeDate);
         }
         if (
           requestedExactRevision &&

@@ -91,7 +91,7 @@ jobs:
       - name: Run backend unit tests
         env:
           PYTHONPATH: backend
-        run: python -m pytest -p no:cacheprovider backend\tests
+        run: python -m pytest -p no:cacheprovider --durations=20 backend\tests
 
   frontend:
     name: Frontend

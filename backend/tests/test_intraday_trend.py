@@ -59,6 +59,11 @@ class IntradayTrendTests(unittest.TestCase):
                 "_load_intraday_trend_uncached",
                 side_effect=load_cached_projection,
             ) as load_uncached,
+            patch.object(
+                intraday.TaiwanIntradayBarRepository,
+                "current_session_storage_revision",
+                return_value="fixture-session-revision",
+            ),
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(lambda _: load_trend(), range(2)))
@@ -73,10 +78,12 @@ class IntradayTrendTests(unittest.TestCase):
         with patch.object(
             intraday.monotonic_time,
             "monotonic",
-            side_effect=(100.0, 105.0, 113.0),
-        ):
+            return_value=100.0,
+        ) as clock:
             intraday._cache_set("TWSE:2330", payload)
+            clock.return_value = 105.0
             self.assertEqual(intraday._cache_get("TWSE:2330"), payload)
+            clock.return_value = 113.0
             self.assertIsNone(intraday._cache_get("TWSE:2330"))
 
     def test_canonical_previous_close_uses_session_before_latest_intraday_bar(self):

@@ -224,9 +224,14 @@ class AiAnswerComposerTests(unittest.TestCase):
 
         self.assertEqual(answer["stance"], "insufficient_data")
         self.assertEqual(answer["confidence"], "low")
-        self.assertIn("尚待正式開盤", answer["headline"])
+        self.assertEqual(answer["source"], "analysis_digest.breadth.auction_breadth")
+        self.assertIn("missing", answer["headline"])
+        self.assertIn("正式成交尚未開始", answer["text"])
+        self.assertIn("上漲 / 下跌 / 持平：無資料 / 無資料 / 無資料", answer["text"])
+        self.assertEqual(answer["action_plan"], [])
         self.assertTrue(answer["data_limits"])
-        self.assertIn("試撮參考價", answer["data_limits"][0])
+        self.assertIn("並非正式成交", answer["text"])
+        self.assertIn("auction_breadth.status=missing", answer["data_limits"])
 
     def test_market_breadth_answer_localizes_missing_counts_without_python_none(self) -> None:
         answer = answer_composer.build_consumer_human_answer(

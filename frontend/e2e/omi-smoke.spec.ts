@@ -6481,20 +6481,22 @@ test.describe("OMI dashboard smoke", () => {
         }
         intradayRequestCount += 1;
         if (intradayRequestCount === 1) {
-          return {
-            body: taiwanChartSeriesResponse("2330", interval, {
-              points: tailPoints,
-              snapshot: {
-                phase: "warming",
-                status: "trailing_window",
-                revision: "a".repeat(64),
-                barCount: tailPoints.length,
-                availableFrom: tailPoints[0].time,
-                availableTo: "2026-09-03T13:12:00+08:00",
-                reasonCodes: ["TW_CHART_SNAPSHOT_TRAILING_ONLY"],
-              },
-            }),
-          };
+          const body = taiwanChartSeriesResponse("2330", interval, {
+            points: tailPoints,
+            snapshot: {
+              phase: "warming",
+              status: "trailing_window",
+              revision: "a".repeat(64),
+              barCount: tailPoints.length,
+              availableFrom: tailPoints[0].time,
+              availableTo: "2026-09-03T13:12:00+08:00",
+              reasonCodes: ["TW_CHART_SNAPSHOT_TRAILING_ONLY"],
+            },
+          });
+          if (body.current_session_coverage) {
+            body.current_session_coverage.repair_recommended = true;
+          }
+          return { body };
         }
         if (url.searchParams.get("limit") === "8") {
           return {
@@ -6562,6 +6564,11 @@ test.describe("OMI dashboard smoke", () => {
         .map((request) => new URLSearchParams(request.search).get("limit"));
     expect(intradayLimits().slice(0, 3)).toEqual(["5000", "8", "5000"]);
     expect(intradayLimits()).toHaveLength(3);
+    expect(
+      apiRequests.filter((request) =>
+        request.path.endsWith("/market/intraday/2330/history/refresh")
+      )
+    ).toEqual([]);
   });
 
   test("Taiwan quote depth replays only persisted auction snapshots", async ({ page }) => {

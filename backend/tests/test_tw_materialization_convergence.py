@@ -23,7 +23,10 @@ INSTRUMENT = InstrumentKey(market=Market.TW, symbol="2330", venue="TWSE", instru
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'convergence.db'}")
-    Base.metadata.create_all(engine)
+    # SQLite's legacy transaction mode otherwise commits every schema statement.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     factory = sessionmaker(engine)
     with factory() as db:
         db.add_all([StockMaster(stock_id=symbol, stock_name=symbol, market="TWSE",

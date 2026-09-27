@@ -22,7 +22,10 @@ REAL_REREAD = demand._reread
 def env(tmp_path, monkeypatch):
     url = f"sqlite:///{(tmp_path / 'normal.db').as_posix()}"
     engine = create_engine(url)
-    Base.metadata.create_all(engine)
+    # SQLite's legacy transaction mode otherwise commits every schema statement.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     factory = sessionmaker(engine)
     ready, submitted = set(), []
     clock = [DAY]
