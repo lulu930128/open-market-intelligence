@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { usTruthResponse } from "./fixtures/usMarketTruth";
 
 function chartPoints() {
   return Array.from({ length: 72 }, (_, index) => {
@@ -3224,6 +3225,12 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (/\/us-market\/truth\/[^/]+$/.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
+      await fulfillJson(route, usTruthResponse(symbol));
+      return;
+    }
+
     if (/\/us-market\/quote\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
       if (await tryFulfillMarketTape(route, url, "us", "quote", symbol)) return;
@@ -4674,12 +4681,146 @@ test.describe("OMI dashboard smoke", () => {
     await expect(sp500).not.toContainText("+20");
   });
 
+  test("US default Daily entry uses finalized headline without loading Today", async ({ page }) => {
+    const requests: string[] = [];
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) => {
+        requests.push(path);
+        if (path.endsWith("/us-market/quote/MSFT")) {
+          const quote = usQuoteResponse("MSFT");
+          return { body: { ...quote, status: "stale", quote: { ...quote.quote, last_trade_price: "517.78" } } };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=MSFT", { waitUntil: "domcontentloaded" });
+    const detail = page.getByTestId("us-stock-kline-panel");
+    await expect(detail.getByRole("button", { name: "日K", exact: true })).toHaveClass(/omi-timeframe-tab-active/);
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("516.17");
+    await expect(page.getByTestId("us-stock-header-price")).toHaveAttribute("data-trade-date", "2026-09-25");
+    await expect(page.getByTestId("us-stock-header-change")).toContainText("18.24 / +3.66%");
+    await expect(page.getByTestId("us-stock-header-change")).toHaveAttribute("data-reference-price", "497.93");
+    await expect(page.getByTestId("us-stock-header-change")).toHaveAttribute("data-reference-trade-date", "2026-09-24");
+    expect(requests.some((path) => path.endsWith("/us-market/intraday/MSFT"))).toBe(false);
+    expect(requests.some((path) => path.endsWith("/us-market/quote/MSFT"))).toBe(false);
+    await detail.getByRole("button", { name: "今日", exact: true }).click();
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("516.17");
+    await detail.getByRole("button", { name: "日K", exact: true }).click();
+    await expect(page.getByTestId("us-stock-header-change")).toContainText("18.24 / +3.66%");
+  });
+
+  test("US Daily reloads same selection on canonical append and correction only", async ({ page }) => {
+    await page.clock.install();
+    let revision = 0;
+    let chartReads = 0;
+    let truthReads = 0;
+    const prices = [500.59, 516.17, 516.18];
+    const dates = ["2026-09-23", "2026-09-25", "2026-09-25"];
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/truth/MSFT")) {
+          truthReads += 1;
+          const truth = usTruthResponse("MSFT");
+          return { body: { ...truth,
+            component_revisions: { ...truth.component_revisions, daily_revision: String(revision).repeat(64) },
+          } };
+        }
+        if (path.endsWith("/us-market/ohlc/MSFT")) {
+          chartReads += 1;
+          return { body: { ...usOhlcResponse("MSFT"), point_count: 2, points: [
+            { time: "2026-09-22", open: 495, high: 500, low: 490, close: 498, volume: 1000 },
+            { time: dates[revision], open: 500, high: 520, low: 490, close: prices[revision], volume: 2000 },
+          ] } };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=MSFT", { waitUntil: "domcontentloaded" });
+    const detail = page.getByTestId("us-stock-kline-panel");
+    await expect(detail).toContainText("500.59");
+    await expect(detail).toContainText("2026-09-23");
+    // Both initial requests have settled before checking steady-state behavior.
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("516.17");
+    await page.clock.fastForward(30_000);
+    await expect.poll(() => truthReads).toBeGreaterThan(1);
+    const baseline = chartReads;
+    const previousTruthReads = truthReads;
+    await page.clock.fastForward(30_000);
+    await expect.poll(() => truthReads).toBeGreaterThan(previousTruthReads);
+    expect(chartReads).toBe(baseline);
+    revision = 1;
+    await page.clock.fastForward(30_000);
+    await expect.poll(() => chartReads).toBe(baseline + 1);
+    await expect(detail).toContainText("2026-09-25");
+    await expect(detail).not.toContainText("500.59");
+    revision = 2;
+    await page.clock.fastForward(30_000);
+    await expect.poll(() => chartReads).toBe(baseline + 2);
+    await expect(detail).toContainText("516.18");
+    await expect(detail.getByRole("button", { name: "日K", exact: true })).toHaveClass(/omi-timeframe-tab-active/);
+  });
+
+  test("US Daily rejects an older in-flight chart after a newer revision", async ({ page }) => {
+    let revision = 0;
+    let held = false;
+    let releaseOld = () => {};
+    const oldResponse = new Promise<void>((resolve) => { releaseOld = resolve; });
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: async ({ path }) => {
+        if (path.endsWith("/us-market/truth/MSFT")) {
+          const truth = usTruthResponse("MSFT");
+          return { body: { ...truth, component_revisions: {
+            ...truth.component_revisions, daily_revision: String(revision).repeat(64),
+          } } };
+        }
+        if (!path.endsWith("/us-market/ohlc/MSFT")) return null;
+        const requestedRevision = revision;
+        if (requestedRevision === 1) { held = true; await oldResponse; }
+        const price = [500.59, 516.17, 516.18][requestedRevision];
+        return { body: { ...usOhlcResponse("MSFT"), point_count: 1, points: [
+          { time: "2026-09-25", open: 500, high: 520, low: 490, close: price, volume: 2000 },
+        ] } };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=MSFT", { waitUntil: "domcontentloaded" });
+    const detail = page.getByTestId("us-stock-kline-panel");
+    await expect(detail).toContainText("500.59");
+    await expect(page.getByTestId("us-stock-header-price")).toHaveText("516.17");
+    revision = 1;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect.poll(() => held).toBe(true);
+    revision = 2;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(detail).toContainText("516.18");
+    const oldFinished = page.waitForResponse((response) => response.url().includes("/ohlc/MSFT"));
+    releaseOld();
+    await oldFinished;
+    await expect(detail).toContainText("516.18");
+    await expect(detail).not.toContainText("500.59");
+  });
+
   test("US Today Header and chart share the canonical D-1 reference", async ({ page }) => {
     await mockOmiApi(page, {
       usWatchlistTree: seededUsWatchlistTree(),
       usWatchlistItems: seededUsWatchlistItems(),
       usRankingRows: seededUsRankingRows(),
       apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/truth/AAPL")) {
+          const truth = usTruthResponse("AAPL");
+          return { body: {
+            ...truth,
+            headline_observation: { ...truth.headline_observation!, price: "200", kind: "quote", trade_date: "2026-09-04" },
+            comparison_references: [{ ...truth.comparison_references[0], price: "190", reference_trade_date: "2026-09-03" }],
+            change_metrics: [{ ...truth.change_metrics[0], absolute_change: "10", percent_change: "5.2631578947" }],
+          } };
+        }
         if (path.endsWith("/us-market/quote/AAPL")) {
           const quote = usQuoteResponse("AAPL");
           return {
@@ -4796,6 +4937,14 @@ test.describe("OMI dashboard smoke", () => {
       usWatchlistItems: seededUsWatchlistItems(),
       usRankingRows: seededUsRankingRows(),
       apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/truth/AAPL")) {
+          const truth = usTruthResponse("AAPL");
+          return { body: {
+            ...truth, headline_observation: null,
+            comparison_references: [{ ...truth.comparison_references[0], price: "417.52", reference_trade_date: "2026-08-28" }],
+            change_metrics: [],
+          } };
+        }
         if (path.endsWith("/us-market/quote/AAPL")) {
           const quote = usQuoteResponse("AAPL");
           return {
@@ -4891,6 +5040,15 @@ test.describe("OMI dashboard smoke", () => {
       usWatchlistItems: seededUsWatchlistItems(),
       usRankingRows: seededUsRankingRows(),
       apiResponder: ({ path, url }) => {
+        if (path.endsWith("/us-market/truth/AAPL")) {
+          const truth = usTruthResponse("AAPL");
+          return { body: {
+            ...truth,
+            headline_observation: { ...truth.headline_observation!, price: "416.74", kind: "quote", trade_date: "2026-08-31" },
+            comparison_references: [{ ...truth.comparison_references[0], price: "417.52", reference_trade_date: "2026-08-28" }],
+            change_metrics: [{ ...truth.change_metrics[0], absolute_change: "-0.78", percent_change: "-0.1868" }],
+          } };
+        }
         if (path.endsWith("/us-market/quote/AAPL")) {
           const quote = usQuoteResponse("AAPL");
           return {

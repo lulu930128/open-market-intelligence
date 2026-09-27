@@ -265,15 +265,15 @@ test("US detail chart, intraday, and supplemental resources have separate owners
   expect(contents).toContain("!chartMatchesSelection");
   expect(contents).not.toContain("void loadSupplementalData(selectedSymbol, generation)");
   expect(contents).toContain("setTodaySessionScope(intradaySessionScope)");
-  expect(contents).toContain('/api/us-market/quote/${encodeURIComponent(symbol)}');
+  expect(contents).toContain('/api/us-market/truth/${encodeURIComponent(symbol)}');
   expect(contents).toContain('if (!selectedSymbol || timeframe !== "today") return;');
-  expect(contents).toContain('if (!selectedSymbol || timeframe === "today") return;');
+  expect(contents).not.toContain('/api/us-market/quote/${encodeURIComponent(symbol)}');
   expect(contents).toContain("since_revision: sinceRevision");
   expect(contents).toContain('today.response_mode === "unchanged"');
   expect(contents).toContain("snapshots.set(snapshotKey");
   expect(contents).toContain("todayIntervalRef.current,");
   expect(contents).toContain("US_TODAY_SNAPSHOT_CACHE_LIMIT = 48");
-  expect(contents).toContain("applyHeadlineQuote(symbol, today.quote_snapshot, quoteGeneration)");
+  expect(contents).toContain("chart?.snapshotRevision === dailySnapshotRevision");
   expect(contents).toContain(
     'status.freshness_status === "provider_error" && status.has_usable_data'
   );

@@ -873,3 +873,82 @@ def test_truth_shadow_diff_is_diagnostic_and_bounded(monkeypatch) -> None:
     assert different.status == "different"
     assert different.compared_fields == 6
     assert "DIAGNOSTIC_ONLY_NO_CONSUMER_CUTOVER" in different.limitations
+
+
+def _weekend_detail_components():
+    quote, intraday, daily = _fake_components(intraday_available=False)
+    event_at = datetime(2026, 9, 25, 18, 46, 41, tzinfo=UTC)
+    quote = quote.model_copy(update={
+        "quote": quote.quote.model_copy(update={
+            "trade_date": date(2026, 9, 25),
+            "last_trade_price": Decimal("517.780029"),
+            "previous_close": Decimal("497.93"),
+            "lineage": _lineage("stale-intraday", event_at=event_at, source="yahoo.chart.1m"),
+        }),
+        "health": _health(source="yahoo.chart.1m", session=MarketSession.CONTINUOUS,
+                          event_at=event_at, status=ResolvedEvidenceStatus.STALE,
+                          research_usable=False),
+        "candidates": (_candidate(
+            source="yahoo.chart.1m", session=MarketSession.CONTINUOUS,
+            event_at=event_at,
+        ).model_copy(update={"freshness": EvidenceFreshness.STALE}),),
+    })
+    bars = tuple(_bar(
+        observation_id=f"daily-{day}", interval="1d",
+        start_at=datetime(2026, 9, day, 13, 30, tzinfo=UTC),
+        end_at=datetime(2026, 9, day, 20, 0, tzinfo=UTC), close=price,
+    ) for day, price in ((23, "500.59"), (24, "497.93"), (25, "516.17")))
+    daily = daily.model_copy(update={
+        "bars": bars,
+        "health": _health(source="yahoo.chart.1d", session=MarketSession.CLOSED,
+                          event_at=bars[-1].end_at),
+        "candidates": (_candidate(source="yahoo.chart.1d", session=MarketSession.CLOSED,
+                                  event_at=bars[-1].end_at),),
+    })
+    return quote, intraday, daily
+
+
+def test_closed_detail_headline_uses_final_daily_not_stale_intraday_quote(monkeypatch):
+    components = _weekend_detail_components()
+    _install_fake_components(monkeypatch, components)
+    snapshot = read_us_market_truth_snapshot(
+        object(), symbol="AAPL", evaluated_at=datetime(2026, 9, 27, 6, tzinfo=UTC),
+    )
+    assert snapshot.market_phase == "market_closed"
+    assert snapshot.quote_observation.price == Decimal("517.780029")
+    assert snapshot.quote_observation.freshness is EvidenceFreshness.STALE
+    assert snapshot.headline_observation.kind is USObservationKind.CLOSE
+    assert snapshot.headline_observation.price == Decimal("516.17")
+    assert snapshot.headline_observation.trade_date == date(2026, 9, 25)
+    reference = next(item for item in snapshot.comparison_references
+                     if item.purpose is USComparisonPurpose.HEADLINE_CHANGE)
+    metric = next(item for item in snapshot.change_metrics
+                  if item.purpose is USComparisonPurpose.HEADLINE_CHANGE)
+    assert reference.price == Decimal("497.93")
+    assert reference.reference_trade_date == date(2026, 9, 24)
+    assert metric.absolute_change == Decimal("18.24")
+    assert metric.observation_id == snapshot.headline_observation.observation_id
+    assert metric.reference_id == reference.reference_id
+
+
+def test_detail_daily_revision_tracks_append_correction_and_health_not_read_clock(monkeypatch):
+    quote, intraday, daily = _weekend_detail_components()
+    now = datetime(2026, 9, 27, 6, tzinfo=UTC)
+
+    def read(series, at=now):
+        _install_fake_components(monkeypatch, (quote, intraday, series))
+        return read_us_market_truth_snapshot(object(), symbol="AAPL", evaluated_at=at)
+
+    old = read(daily.model_copy(update={"bars": daily.bars[:1]}))
+    current = read(daily)
+    repeated = read(daily, now + timedelta(minutes=2))
+    assert old.component_revisions.daily_revision != current.component_revisions.daily_revision
+    assert repeated.component_revisions.daily_revision == current.component_revisions.daily_revision
+    corrected_bar = daily.bars[-1].model_copy(update={"close_price": Decimal("516.18"), "high_price": Decimal("516.18")})
+    corrected = read(daily.model_copy(update={"bars": (*daily.bars[:-1], corrected_bar)}))
+    assert corrected.component_revisions.daily_revision != current.component_revisions.daily_revision
+    assert corrected.headline_observation.price == Decimal("516.18")
+    degraded = read(daily.model_copy(update={"health": daily.health.model_copy(update={
+        "research_usable": False, "limitations": ("DAILY_COVERAGE_PARTIAL",),
+    })}))
+    assert degraded.component_revisions.daily_revision != current.component_revisions.daily_revision

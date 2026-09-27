@@ -3,129 +3,56 @@ import { expect, test } from "@playwright/test";
 import {
   projectUSCurrentSessionHeadline,
   projectUSIntradayIndicatorPoint,
-  selectMonotonicUSHeadlineQuote,
+  usDailySnapshotRevision,
 } from "../src/components/stock-detail/usStockDetailCanonicalProjection";
+import { usTruthResponse } from "./fixtures/usMarketTruth";
 import { projectUSMarketTapeSnapshot } from "../src/components/market-dashboard/tape/usMarketTapeCanonicalProjection";
 import type {
   IntradayTrendPoint,
   IntradayTrendResponse,
   USMarketIndexItemRead,
-  USResolvedQuoteSnapshot,
 } from "../src/types/market";
 
-function quote(symbol: string, eventAt: string, price: string): USResolvedQuoteSnapshot {
-  return {
-    kind: "resolved_quote",
-    schema_version: "omi.market.quote.snapshot.v1",
-    compatibility_schema_versions: [],
-    status: "current",
-    selected_provider: "test",
-    selected_source: "test.quote",
-    selected_session: "regular",
-    selected_event_at: eventAt,
-    fallback_used: false,
-    selection_reason: null,
-    facts_usable: true,
-    research_usable: true,
-    limitations: [],
-    candidates: [],
-    quote: {
-      market: "US",
-      symbol,
-      venue: null,
-      instrument_type: "stock",
-      trade_date: eventAt.slice(0, 10),
-      currency: "USD",
-      state: "trade",
-      trade_state: "trade_observed",
-      last_trade_price: price,
-      open_price: null,
-      high_price: null,
-      low_price: null,
-      previous_close: null,
-      event_at: eventAt,
-      received_at: eventAt,
-      fetched_at: eventAt,
-    },
-  };
-}
-
-test("headline quote accepts only same-symbol monotonic evidence", () => {
-  const newer = quote("TSM", "2026-09-04T14:31:00Z", "210.50");
-  const older = quote("TSM", "2026-09-04T14:30:00Z", "209.00");
-
-  expect(
-    selectMonotonicUSHeadlineQuote(newer, older, {
-      expectedSymbol: "TSM",
-      currentGeneration: 1,
-      candidateGeneration: 2,
-    }).snapshot
-  ).toBe(newer);
-  expect(
-    selectMonotonicUSHeadlineQuote(older, newer, {
-      expectedSymbol: "TSM",
-      currentGeneration: 2,
-      candidateGeneration: 1,
-    }).snapshot
-  ).toBe(newer);
-  expect(
-    selectMonotonicUSHeadlineQuote(newer, quote("MU", "2026-09-04T14:32:00Z", "120"), {
-      expectedSymbol: "TSM",
-      currentGeneration: 1,
-      candidateGeneration: 3,
-    }).snapshot
-  ).toBe(newer);
-
-  const missing = { ...newer, selected_event_at: null, quote: null };
-  expect(
-    selectMonotonicUSHeadlineQuote(newer, missing, {
-      expectedSymbol: "TSM",
-      currentGeneration: 2,
-      candidateGeneration: 3,
-    }).snapshot
-  ).toBe(missing);
-  expect(
-    selectMonotonicUSHeadlineQuote(newer, missing, {
-      expectedSymbol: "TSM",
-      currentGeneration: 3,
-      candidateGeneration: 2,
-    }).snapshot
-  ).toBe(newer);
-  expect(
-    selectMonotonicUSHeadlineQuote(missing, older, {
-      expectedSymbol: "TSM",
-      currentGeneration: 3,
-      candidateGeneration: 2,
-    }).snapshot
-  ).toBe(missing);
+test("US headline presents backend selected close and linked metrics without rebuilding price truth", () => {
+  const truth = usTruthResponse("MSFT");
+  expect(projectUSCurrentSessionHeadline(truth)).toMatchObject({
+    latestPrice: 516.17, referencePrice: 497.93,
+    tradeDate: "2026-09-25", referenceTradeDate: "2026-09-24",
+    change: 18.24, changePct: Number(truth.change_metrics[0].percent_change),
+  });
+  // Metric precision/rounding is owned by the backend, not local subtraction.
+  truth.change_metrics[0].absolute_change = "18.2401";
+  expect(projectUSCurrentSessionHeadline(truth).change).toBe(18.2401);
+  truth.change_metrics[0].observation_id = "unrelated-quote";
+  expect(projectUSCurrentSessionHeadline(truth).change).toBeNull();
 });
 
-test("US current-session headline uses only the canonical change reference", () => {
-  const projected = projectUSCurrentSessionHeadline({
-    currentObservationPrice: 200,
-    quotePrice: 201,
-    changeReferencePrice: 190,
-    changeReferenceTradeDate: "2026-09-03",
-    changeReferenceType: "headline_change",
-    changeReferenceStatus: "current",
-  });
+test("US headline keeps unavailable and malformed evidence unknown", () => {
+  const truth = usTruthResponse("MSFT");
+  truth.headline_observation!.display_usable = false;
+  expect(projectUSCurrentSessionHeadline(truth)).toMatchObject({ latestPrice: null, change: null });
+  truth.headline_observation!.display_usable = true;
+  truth.headline_observation!.price = "";
+  expect(projectUSCurrentSessionHeadline(truth).latestPrice).toBeNull();
+  truth.headline_observation!.price = "516.17";
+  truth.comparison_references[0].calculation_eligible = false;
+  expect(projectUSCurrentSessionHeadline(truth)).toMatchObject({ referencePrice: 497.93, change: null });
+  truth.comparison_references[0].reference_trade_date = null;
+  expect(projectUSCurrentSessionHeadline(truth).referencePrice).toBeNull();
+  expect(projectUSCurrentSessionHeadline(null)).toMatchObject({ latestPrice: null, referencePrice: null, change: null });
+});
 
-  expect(projected.latestPrice).toBe(200);
-  expect(projected.referencePrice).toBe(190);
-  expect(projected.referenceTradeDate).toBe("2026-09-03");
-  expect(projected.change).toBe(10);
-  expect(projected.changePct).toBeCloseTo(5.2631578947);
-
-  expect(
-    projectUSCurrentSessionHeadline({
-      currentObservationPrice: 200,
-      quotePrice: null,
-      changeReferencePrice: 180,
-      changeReferenceTradeDate: "2026-09-02",
-      changeReferenceType: "unavailable",
-      changeReferenceStatus: "missing",
-    })
-  ).toMatchObject({ referencePrice: null, change: null, changePct: null });
+test("Daily invalidation consumes backend daily and calendar revisions, not quote ticks", () => {
+  const truth = usTruthResponse("MSFT");
+  const revision = usDailySnapshotRevision(truth);
+  truth.truth_revision = "d".repeat(64);
+  truth.evaluated_at = "2026-09-27T06:01:00Z";
+  expect(usDailySnapshotRevision(truth)).toBe(revision);
+  truth.component_revisions.daily_revision = "e".repeat(64);
+  expect(usDailySnapshotRevision(truth)).not.toBe(revision);
+  const corrected = usDailySnapshotRevision(truth);
+  truth.component_revisions.calendar_revision = "f".repeat(64);
+  expect(usDailySnapshotRevision(truth)).not.toBe(corrected);
 });
 
 test("US market tape projects backend headline metrics instead of Daily D-2", () => {

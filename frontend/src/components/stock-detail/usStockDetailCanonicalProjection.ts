@@ -2,13 +2,8 @@ import type {
   IntradayTrendPoint,
   IntradayTrendResponse,
   StockIndicatorPoint,
-  USResolvedQuoteSnapshot,
 } from "@/types/market";
-
-export type MonotonicQuoteSelection = {
-  snapshot: USResolvedQuoteSnapshot | null;
-  acceptedGeneration: number;
-};
+import type { USMarketTruthRead } from "@/types/usMarketTruth";
 
 export type USCurrentSessionHeadline = {
   latestPrice: number | null;
@@ -17,174 +12,49 @@ export type USCurrentSessionHeadline = {
   referenceType: string | null;
   change: number | null;
   changePct: number | null;
+  tradeDate: string | null;
 };
 
-function symbolKey(value: string | null | undefined) {
-  return value?.trim().toUpperCase() ?? "";
-}
-
-function quoteEventTime(snapshot: USResolvedQuoteSnapshot) {
-  return snapshot.selected_event_at ?? snapshot.quote?.event_at ?? null;
-}
-
-function quoteFetchedTime(snapshot: USResolvedQuoteSnapshot) {
-  return snapshot.quote?.fetched_at ?? null;
-}
-
-function comparableTime(value: string | null) {
-  if (!value) return null;
-  const parsed = Date.parse(value);
+function finiteNumber(value: string | null | undefined) {
+  if (value == null || value.trim() === "") return null;
+  const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function finiteNumber(value: number | null | undefined) {
-  return value !== null && value !== undefined && Number.isFinite(value)
-    ? value
-    : null;
-}
-
-export function projectUSCurrentSessionHeadline({
-  currentObservationPrice,
-  quotePrice,
-  changeReferencePrice,
-  changeReferenceTradeDate,
-  changeReferenceType,
-  changeReferenceStatus,
-}: {
-  currentObservationPrice: number | null;
-  quotePrice: number | null;
-  changeReferencePrice: number | null;
-  changeReferenceTradeDate: string | null;
-  changeReferenceType: string | null;
-  changeReferenceStatus: string | null;
-}): USCurrentSessionHeadline {
-  const latestPrice =
-    finiteNumber(currentObservationPrice) ?? finiteNumber(quotePrice);
-  const referenceRejected =
-    changeReferenceStatus === "missing" ||
-    changeReferenceType === "unavailable" ||
-    !changeReferenceTradeDate;
-  const referencePrice = referenceRejected
-    ? null
-    : finiteNumber(changeReferencePrice);
-  const change =
-    latestPrice !== null && referencePrice !== null
-      ? latestPrice - referencePrice
-      : null;
-  const changePct =
-    change !== null && referencePrice !== null && referencePrice !== 0
-      ? (change / referencePrice) * 100
-      : null;
-
+export function projectUSCurrentSessionHeadline(
+  snapshot: USMarketTruthRead | null
+): USCurrentSessionHeadline {
+  const observation = snapshot?.headline_observation;
+  const reference = snapshot?.comparison_references.find(
+    (item) => item.purpose === "headline_change"
+  );
+  const metric = snapshot?.change_metrics.find(
+    (item) => item.purpose === "headline_change"
+      && item.observation_id === observation?.observation_id
+      && item.reference_id === reference?.reference_id
+      && item.display_usable
+  );
+  const latestPrice = observation?.display_usable
+    ? finiteNumber(observation.price) : null;
+  const referencePrice = reference?.display_usable && reference.reference_trade_date
+    ? finiteNumber(reference.price) : null;
+  const changeUsable = latestPrice !== null && referencePrice !== null
+    && reference?.calculation_eligible;
   return {
     latestPrice,
+    tradeDate: observation?.trade_date ?? null,
     referencePrice,
-    referenceTradeDate: referencePrice !== null ? changeReferenceTradeDate : null,
-    referenceType: referencePrice !== null ? changeReferenceType : null,
-    change,
-    changePct,
+    referenceTradeDate: referencePrice !== null ? reference?.reference_trade_date ?? null : null,
+    referenceType: referencePrice !== null ? reference?.purpose ?? null : null,
+    change: changeUsable ? finiteNumber(metric?.absolute_change) : null,
+    changePct: changeUsable ? finiteNumber(metric?.percent_change) : null,
   };
 }
 
-export function selectMonotonicUSHeadlineQuote(
-  current: USResolvedQuoteSnapshot | null,
-  candidate: USResolvedQuoteSnapshot | null,
-  options: {
-    expectedSymbol: string;
-    currentGeneration: number;
-    candidateGeneration: number;
-  }
-): MonotonicQuoteSelection {
-  const expectedSymbol = symbolKey(options.expectedSymbol);
-  const currentMatches = symbolKey(current?.quote?.symbol) === expectedSymbol;
-  const candidateMatches =
-    candidate !== null &&
-    (candidate.quote === null || symbolKey(candidate.quote.symbol) === expectedSymbol);
-
-  if (!candidate || !candidateMatches) {
-    return {
-      snapshot: currentMatches ? current : null,
-      acceptedGeneration: currentMatches ? options.currentGeneration : 0,
-    };
-  }
-  if (!current) {
-    return {
-      snapshot: candidate,
-      acceptedGeneration: options.candidateGeneration,
-    };
-  }
-  if (!currentMatches) {
-    if (
-      current.quote === null &&
-      options.candidateGeneration < options.currentGeneration
-    ) {
-      return { snapshot: current, acceptedGeneration: options.currentGeneration };
-    }
-    return {
-      snapshot: candidate,
-      acceptedGeneration: options.candidateGeneration,
-    };
-  }
-
-  const currentEventTime = comparableTime(quoteEventTime(current));
-  const candidateEventTime = comparableTime(quoteEventTime(candidate));
-  if (currentEventTime !== null && candidateEventTime === null) {
-    if (
-      candidate.quote === null &&
-      options.candidateGeneration > options.currentGeneration
-    ) {
-      return {
-        snapshot: candidate,
-        acceptedGeneration: options.candidateGeneration,
-      };
-    }
-    return { snapshot: current, acceptedGeneration: options.currentGeneration };
-  }
-  if (currentEventTime !== null && candidateEventTime !== null) {
-    if (candidateEventTime < currentEventTime) {
-      return { snapshot: current, acceptedGeneration: options.currentGeneration };
-    }
-    if (candidateEventTime > currentEventTime) {
-      return {
-        snapshot: candidate,
-        acceptedGeneration: options.candidateGeneration,
-      };
-    }
-  } else if (candidateEventTime !== null) {
-    return {
-      snapshot: candidate,
-      acceptedGeneration: options.candidateGeneration,
-    };
-  }
-
-  const currentFetchedTime = comparableTime(quoteFetchedTime(current));
-  const candidateFetchedTime = comparableTime(quoteFetchedTime(candidate));
-  if (currentFetchedTime !== null && candidateFetchedTime === null) {
-    return { snapshot: current, acceptedGeneration: options.currentGeneration };
-  }
-  if (currentFetchedTime !== null && candidateFetchedTime !== null) {
-    if (candidateFetchedTime < currentFetchedTime) {
-      return { snapshot: current, acceptedGeneration: options.currentGeneration };
-    }
-    if (candidateFetchedTime > currentFetchedTime) {
-      return {
-        snapshot: candidate,
-        acceptedGeneration: options.candidateGeneration,
-      };
-    }
-  } else if (candidateFetchedTime !== null) {
-    return {
-      snapshot: candidate,
-      acceptedGeneration: options.candidateGeneration,
-    };
-  }
-
-  return options.candidateGeneration >= options.currentGeneration
-    ? {
-        snapshot: candidate,
-        acceptedGeneration: options.candidateGeneration,
-      }
-    : { snapshot: current, acceptedGeneration: options.currentGeneration };
+/** Opaque backend revisions; the browser does not infer a trading date or freshness. */
+export function usDailySnapshotRevision(snapshot: USMarketTruthRead | null) {
+  if (!snapshot) return null;
+  return `${snapshot.component_revisions.daily_revision ?? "missing"}:${snapshot.component_revisions.calendar_revision}`;
 }
 
 export function projectUSIntradayIndicatorPoint(
