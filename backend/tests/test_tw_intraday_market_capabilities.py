@@ -47,7 +47,7 @@ class _FakeResponse:
 
 
 class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
-    def test_recent_observation_with_old_trade_is_excluded_from_ranking(self) -> None:
+    def test_recent_observation_with_old_trade_remains_factually_rankable(self) -> None:
         now = datetime(2026, 9, 8, 10, 5, tzinfo=TAIWAN_TZ)
         self.db.add(StockMaster(stock_id="2454", stock_name="MediaTek", market="TWSE",
                                 instrument_type="stock", industry="半導體業", is_active=True))
@@ -56,13 +56,13 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         row.update(price_as_of=now - timedelta(minutes=8), has_actual_trade=True, price_source="session_cache")
         persist_taiwan_intraday_stock_states(self.db, rows=[row], now=now)
         result = build_tw_intraday_screening_snapshot(self.db, generated_at=now)
-        self.assertEqual(result["rows"], [])
+        self.assertEqual([row["stock_id"] for row in result["rows"]], ["2454"])
         self.assertEqual(result["observation_received_freshness"], "current")
         self.assertEqual(result["last_trade_recency"], "delayed")
         self.assertTrue(result["facts_usable"])
-        self.assertFalse(result["facts_usable_for_ranking"])
+        self.assertTrue(result["facts_usable_for_ranking"])
         self.assertFalse(result["decision_usable"])
-        self.assertEqual(result["coverage"]["ranking_excluded_count"], 1)
+        self.assertEqual(result["coverage"]["ranking_excluded_count"], 0)
         tomorrow_preopen = now.replace(day=9, hour=8, minute=55)
         preopen = build_tw_intraday_screening_snapshot(self.db, generated_at=tomorrow_preopen)
         self.assertEqual(preopen["status"], "not_applicable")
@@ -857,11 +857,11 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             generated_at=checked_at,
         )
 
-        self.assertEqual(ranking["rows"], [])
+        self.assertEqual([row["stock_id"] for row in ranking["rows"]], ["2330"])
         self.assertEqual(ranking["freshness_status"], "delayed")
         self.assertTrue(ranking["facts_usable"])
         self.assertFalse(ranking["decision_usable"])
-        self.assertEqual(ranking["pagination"]["total_eligible_count"], 0)
+        self.assertEqual(ranking["pagination"]["total_eligible_count"], 1)
 
     def _persist_ranking_universe(self, prices: dict[str, float], now: datetime) -> None:
         self.db.add_all([
@@ -887,13 +887,15 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         with patch.object(self.db, "commit", side_effect=AssertionError("read wrote")):
             first = build_tw_intraday_screening_snapshot(self.db, parameters={"limit": 1}, generated_at=now)
             second = build_tw_intraday_screening_snapshot(self.db, parameters={"limit": 1, "offset": 1}, generated_at=now)
-        self.assertEqual(first["rows"][0]["stock_id"], "3711")
-        self.assertEqual(second["rows"][0]["stock_id"], "2303")
+        self.assertEqual(first["rows"][0]["stock_id"], "2330")
+        self.assertEqual(second["rows"][0]["stock_id"], "2454")
         self.assertEqual(second["rows"][0]["rank"], 2)
-        self.assertEqual(first["pagination"]["total_eligible_count"], 2)
-        self.assertEqual(first["coverage"]["ranking_excluded_count"], 2)
+        self.assertEqual(first["pagination"]["total_eligible_count"], 4)
+        self.assertEqual(first["coverage"]["ranking_excluded_count"], 0)
+        self.assertFalse(first["rows"][0]["decision_usable"])
+        self.assertFalse(second["rows"][0]["intraday_research_usable"])
 
-    def test_groups_exclude_stale_members_from_all_current_aggregates(self) -> None:
+    def test_groups_keep_stale_day_facts_but_exclude_stale_rolling_metrics(self) -> None:
         now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
         self._persist_ranking_universe({"2330": 190, "2454": 101, "3711": 102, "2303": 103}, now)
         stale = self.db.query(TaiwanIntradayStockState).filter_by(stock_id="2330").one()
@@ -906,13 +908,17 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         sector = result["sectors"]["items"][0]
         self.assertEqual(group["member_count"], 4)
         self.assertEqual(group["factual_count"], 4)
-        self.assertEqual(group["observed_count"], 3)
-        self.assertEqual(group["ranking_excluded_count"], 1)
+        self.assertEqual(group["observed_count"], 4)
+        self.assertEqual(group["ranking_excluded_count"], 0)
         self.assertTrue(group["ranking_eligible"])
-        self.assertAlmostEqual(group["mean_return_pct"], 2)
-        self.assertAlmostEqual(group["median_return_pct"], 2)
-        self.assertAlmostEqual(sector["change_pct"], 2)
-        self.assertEqual(group["estimated_trade_value"], 30_600_000)
+        self.assertAlmostEqual(group["mean_return_pct"], 24)
+        self.assertAlmostEqual(group["median_return_pct"], 2.5)
+        self.assertAlmostEqual(sector["change_pct"], 24)
+        self.assertEqual(group["estimated_trade_value"], 1_029_600_000)
+        self.assertEqual(group["stale_member_count"], 1)
+        self.assertEqual(group["observation_freshness"], "stale")
+        self.assertFalse(group["intraday_research_usable"])
+        self.assertFalse(group["decision_usable"])
         self.assertIsNone(group["median_five_minute_return"])
         self.assertIsNone(group["median_fifteen_minute_return"])
         stale.price_as_of = now

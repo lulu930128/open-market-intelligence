@@ -353,7 +353,17 @@ def _project_hot_groups_for_dashboard(
                 "median_change_pct": group.get("median_return_pct"),
                 "dispersion_pct": group.get("return_dispersion_pct"),
                 "as_of": event_time,
-                "provisional": session_phase in {"preopen", "closing_auction"},
+                "lane": group.get("lane", snapshot.get("lane", "actual")),
+                "price_semantics": group.get("price_semantics", snapshot.get("price_semantics")),
+                "provisional": bool(group.get("provisional")) or session_phase in {"preopen", "closing_auction"},
+                "observation_freshness": group.get("observation_freshness"),
+                "facts_usable_for_ranking": group.get("facts_usable_for_ranking") is True,
+                "intraday_research_usable": group.get("intraday_research_usable") is True,
+                "freshness_member_counts": group.get("freshness_member_counts") or {},
+                "delayed_member_count": group.get("delayed_member_count", 0),
+                "stale_member_count": group.get("stale_member_count", 0),
+                "lineage": group.get("lineage") or {},
+                "execution_grade_usable": group.get("execution_grade_usable") is True,
                 "decision_usable": group.get("decision_usable") is True,
             }
         )
@@ -939,7 +949,7 @@ def build_tw_market_dashboard(
     )
     warnings = [
         warning
-        for item in breadth.values()
+        for item in resolved_breadth.values()
         for warning in item["warnings"]
     ]
     warnings.extend(watchlist["warnings"])

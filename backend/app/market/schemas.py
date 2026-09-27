@@ -599,6 +599,8 @@ class MarketBreadthRead(BaseModel):
     trade_value_is_estimate: bool | None = None
     trade_value_semantics: str | None = None
     trade_value_confidence: str | None = None
+    official_flag: bool | None = None
+    lineage: dict[str, Any] | None = None
     auction_breadth: dict[str, Any] | None = None
     latest_completed_auctions: list[TaiwanCompletedAuctionBreadthRead] = Field(default_factory=list)
 
@@ -682,6 +684,16 @@ class TaiwanMarketVolumeBaselineRead(BaseModel):
     sample_days: int
     median_cumulative_trade_value: int | None = None
     pace_ratio: float | None = None
+    status: str = "warming_up"
+    sample_status: str = "empty"
+    authority_status: str = "unavailable"
+    decision_usable: bool = False
+    pace_ratio_status: str = "insufficient_history"
+    comparison_minute: str | None = None
+    comparison_trade_date: str | None = None
+    component_scope: dict[str, list[Any]] = Field(default_factory=dict)
+    comparison_identity: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    samples: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TaiwanMarketVolumeMarketRead(BaseModel):
@@ -703,6 +715,11 @@ class TaiwanMarketVolumeMarketRead(BaseModel):
     component_time_skew_seconds: int | None = None
     calculation_version: str | None = None
     lineage_complete: bool = False
+    scope: str | None = None
+    breadth_contract_version: str | None = None
+    trade_value_semantics: str | None = None
+    trade_value_is_estimate: bool | None = None
+    comparison_identity: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaiwanMarketVolumeStateRead(BaseModel):
@@ -715,6 +732,20 @@ class TaiwanMarketVolumeStateRead(BaseModel):
     comparison_minute: str | None = None
     calculation_basis: str | None = None
     current_cumulative_trade_value: int | None = None
+    available_cumulative_trade_value: int | None = None
+    estimated_cumulative_trade_value: int | None = None
+    official_cumulative_trade_value: int | None = None
+    trade_value_available: bool = False
+    trade_value_complete: bool = False
+    baseline_readiness_status: str = "warming_up"
+    field_status: dict[str, Any] = Field(default_factory=dict)
+    currency: str = "TWD"
+    trade_value_unit: str = "TWD"
+    trade_value_coverage_status: str = "missing"
+    trade_value_authority_status: str = "unavailable"
+    trade_value_status: str = "missing"
+    baseline_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    comparison_identity: dict[str, dict[str, Any]] = Field(default_factory=dict)
     previous_minute_cumulative_trade_value: int | None = None
     one_minute_trade_value_change: int | None = None
     same_time_baseline_5d: TaiwanMarketVolumeBaselineRead
@@ -1386,6 +1417,8 @@ class TaiwanChangeReferenceRead(BaseModel):
 
     depth_usable: bool = False
     auction_usable: bool = False
+    auction_change: float | None = Field(default=None, allow_inf_nan=False)
+    auction_change_pct: float | None = Field(default=None, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _validate_reference(self) -> "TaiwanChangeReferenceRead":
@@ -1759,6 +1792,8 @@ class MarketIntradayVolumeReconciliationRead(BaseModel):
 
 
 class MarketIntradayChartRead(BaseModel):
+    materialization_jobs: list[dict[str, Any]] = Field(default_factory=list)
+    repair_scope: dict[str, Any] | None = None
     stock_id: str
     symbol: str | None = None
     interval: str

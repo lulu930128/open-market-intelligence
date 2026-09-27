@@ -1,5 +1,35 @@
 # OMI Backend Architecture
 
+## Taiwan Base-1m materialization commands
+
+台股主動 fetch／repair 由 `app.jobs.taiwan_intraday_demand` 的單一股票、交易日 JobRun 擁有。Frontend refresh、viewer warmup、AI／MCP、Tier-A、close-tail 與盤後 audit 都提交此 owner；Fugle／KGI streaming 保留既有 lease／ingestion lifecycle，兩者仍共用 canonical transaction、repository 與 TaiwanBarService。
+
+Demand identity 沿用既有 target 格式。新請求先 canonical reread；terminal success 必須重新驗證 coverage，active goal 合併不擴張原 episode 的期限與外部呼叫預算，terminal write 以 request CAS 防止遺失後到的需求。Provider retry-after 與 evidence satisfaction 分開處理。Completed-session repair 使用實際 requested_at 與目標交易日 window；query span、dated-query ability、historical reach 由 executable descriptor 分別表達。
+
+同日收盤修補與跨日歷史修補的來源資格分開：descriptor 的 `supports_current_date_window` 僅允許 request window 起訖均為實際 requested_at 的當地日期，adapter 仍精確過濾日期與時間。這讓仍提供當日資料的 current-only source 可參與盤後 repair；翌日不得沿用此資格，必須有真正 dated query 與足夠 lookback。稀疏 session 的 missing ranges 可在既有 500 bucket 上限內完整表達，不截斷缺口或將空白視為無成交。
+
+歷史處置政策由目標日期 snapshot 或明示有效期間判定；缺少證據時保留 partial。當日官方 cache refresh 保留 bounded dated snapshots，避免翌日直接套用新名單。
+
+Completed-session 正常 ingestion 與 residual recovery 由 `jobs/taiwan_intraday_repair.py` 協調，同用 scheduler-state／coverage-obligation ledger。首次接手交易日會原子凍結 eligible Stock／ETF 的 symbol、venue、type 與 revision；之後 StockMaster 新增不改變 denominator。既有未嘗試 discovery rows 轉 normal lane，已嘗試／active recovery 保留。Migration 0090 只擴充既有 obligation metadata，不新增 bars、provider、cache 或 table truth。資格重用 canonical instrument resolver，包含大小寫與 alias。
+
+正常 lane 以 bounded batch audit canonical Base-1m，complete 直接 skip；missing／partial 每檔至多一次 normal admission，透過原 materialization demand 與 exact-date reread。失敗、partial、admission crash 或既有 backoff 將同一 obligation handoff repair。正常 admission 不扣 repair quota；repair 不再掃 StockMaster 或主動建立全市場 recovery obligations。Single-runtime-owner 下以 process lock 防止 coordinator overlap，JobRun partial unique index 與 dispatch CAS 保持跨 Session dedupe。當日 latest completed session 的 normal admission 優先，最舊未結束日期仍逐輪推進；regular／closing-auction 不進行全市場 normal acquisition。
+
+正常 lane 設定由 `taiwan_completed_materialization_concurrency`、`scheduler_taiwan_completed_materialization_batch_size` 與 `scheduler_taiwan_completed_materialization_interval_seconds` 擁有。Repair 仍使用 `scheduler_taiwan_intraday_repair_max_symbols_per_window`、`scheduler_taiwan_intraday_repair_window_seconds` 與 `scheduler_taiwan_intraday_repair_interval_seconds`；durable CAS reservation 包含 crash 不確定消耗，不因 Job 終止釋放。兩者 quota、cadence、counts 分離。
+
+Checkpoint 保留 frozen universe、eligible／scanned／complete／pending／queued／active／failed-retryable／terminal／remaining counts、normal submitted／succeeded／failed、repair retries 與 duration／throughput。`lifecycle_complete` 需要所有 frozen members 已 audit 且無 pending／queued／active；terminal unfillable 不視為 data complete。Job success 與 scan complete 均不等於 canonical coverage complete；read path 不更新 checkpoint、不 enqueue、不 acquisition。Quota 不代表外部 calls，normal failure 也不等同 provider outage。
+
+Active obligation 的 acquisition episode 結束後，先 canonical reread 並交回 pending；不得在 active 優先 reconciliation 的同一輪直接重送。後續 admission 按 pending attempt count、updated time 與 stock id 排序，保留 next-check／provider backoff，避免持續 partial 的少數標的壟斷名額、阻塞尚未嘗試的 universe。
+
+Canonical reread 期間禁止因 backlog ORM autoflush 持有 SQLite 寫鎖；每個 item 的 scan／lane progress 用短 transaction 保存，不跨下一檔的 coverage read 保留寫入交易。
+
+Migration 將舊 audit 日期轉入新 state 並從頭唯讀重掃，修復舊 cursor 遺漏與 uppercase ETF；保留 bars 與 Job 歷史。舊 checkpoint Job 明確重分類，後續 checkpoint 不再進 acquisition inventory。Generic Job retry 拒絕 checkpoint 與 single-demand，必須以指定交易日的 canonical command 重試，避免轉成當日 Tier-A fan-out。
+
+POST history refresh 保留 chart response、interval 與 range，最多處理 bounded reachable sessions，短暫等待後 canonical reread；未完成回 pending／partial、repair scope 與 Job 參照。GET 不提交 demand。Projection cache 綁定 storage revision；session rollover 不刪除已持久化 Base-1m，任何 retention／prune 必須另有明示 owner、policy 與 migration。
+
+Materialization dispatch 由既有 jobs service 管理有界 execution lanes：interactive 與 background 各一個 worker，分別最多 8／2 個 callback；completed lane 預設 3、上限 4 個 workers 且 callback 數不超過 workers，均納入既有 shutdown lifecycle。Global job worker concurrency 不變。Completed／repair 的 Retry-After 以既有 scheduler state 原子保存最大 UTC deadline，coordinator 與 worker 在 IO 前檢查，重啟不清空；這是保守的 lane throttle，provider selection／health 仍由既有 Gateway 與 adapter 擁有。同一股票需求仍共用原 JobRun，排隊耗時不重設 deadline。Quote-only primary reader 保持唯讀，但明示 refresh 的 intraday command 可進入同一 owner，且不擴張至其他 refresh domain；MCP continuation 綁定目標日期與 interval。
+
+`bootstrap_taiwan_intraday_bars` 是不提供預設 acquisition 的 private fixture／migration seam；production operator 透過 JobRun child fan-out，parent 不宣稱 child coverage 完成。移除此 seam 的 gate 是遷移其唯一 fixture caller；architecture guard 禁止 outward／scheduler 重新使用它。
+
 ## 盤後分批與個股優先需求
 
 Daily EOD 沿用既有 full-market coverage／checkpoint 與 market-owned acquisition。
@@ -700,3 +730,13 @@ Migration 20260908_0082 為 additive nullable companion 欄位。Current reposit
 Viewer retry 只由有效 heartbeat 觸發，caller deadline／external-call budget 不因背景執行而增加。Provider backoff 保存在 episode；實際 IO／寫入量與保守 budget reservation 分開，未知量為 null。Materialization outcome 必須重讀原 symbol/date 的 canonical Bar snapshot；partial coverage 不推導 live 或 decision readiness。Status GET 只做 redacted projection，continuation 使用原日期與 cache-only reader。
 
 此 slice 仍依賴 single-runtime-owner：既有 startup interrupted-job cleanup 不具跨 worker owner lease，不能以 admission index 宣稱多 worker lifecycle 支援。正式 schema／runtime／provider／consumer 採用另行驗證。
+
+### 台股盤中 factual ranking 與同時間量能 comparison
+
+`tw_intraday_state._ranking_eligibility` 是 screening 與 group day-return 的共同 owner。正常盤 `change_pct` 使用同交易日、實際成交、有效參考價、內部一致漲跌幅及完整 lineage 的觀測；事實可排名與 90 秒 decision freshness 分離。超時資料保留 event/receipt time、age、current/delayed/stale，不能提升為 research/decision/execution usable。Rolling 5m/15m 與其餘既有 metric 仍保留較嚴格 freshness/support gate；日漲跌幅放寬不擴及它們。族群 coverage 用同一 factual eligibility，保留 member freshness counts、oldest/latest event 與既有 minimum coverage/member 門檻。Dashboard 只投影這些結果。
+
+`taiwan_market_state` 擁有 `tw.market.volume_comparison.v1`：venue、universe class、trade-value semantic class、authority class 共同定義 same-minute comparability，獨立檢查 value/lineage/minute coherence。MIS `registered_universe` 與 `full_market_registered_stock_universe` 僅在來源與 breadth contract version 可證明 active StockMaster ordinary-stock universe 時共享 comparison class；`full_market` 與 official daily `active_ordinary_stock_universe` 不自動合併。Raw scope、semantics、authority 與 receipt lineage 不改寫。
+
+Current breadth 與 completed breadth projection 都保留 typed `trade_value_is_estimate`／semantics／canonical lineage。Current volume composer 僅合成同日期、同分鐘、同 scope／semantics／authority 的 TWSE＋TPEX components；authority 缺少、非 bool、混合或 receipt event minute 不一致皆 fail closed。兩個 estimated components 的 current／estimated value 可以完整，但 official value 保持 null；historical baseline readiness 獨立，沿用原 lineage／semantic／authority guards。Minute bucket 標為 13:30 不會抹除原始 component event 為 13:32 的不一致。
+
+量能 diagnostics 分別提供 raw/canonical scope、semantic、authority、value/lineage、日期、分鐘及市場缺口，附逐 session 排除原因。Legacy `scope_mismatch` 保留為 canonical scope/semantic/authority 任一不符的 session 聯集計數，並非 raw scope mismatch；細項可重疊，不能直接相加。唯有真正足夠的 5/20 個可比較樣本才產生 pace ratio；consumer 不補算、不改標 history。

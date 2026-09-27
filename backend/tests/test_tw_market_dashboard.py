@@ -302,7 +302,7 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(payload["hot_groups"], [])
         self.assertTrue(
             any(
-                "none are classifiable for ranking" in warning
+                "none are eligible for ranking" in warning
                 for warning in payload["warnings"]
             )
         )
@@ -451,6 +451,9 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         self.assertEqual(parsed.headline_breadth_field, "resolved_breadth")
         legacy_breadth = parsed.breadth["TWSE"]
         self.assertTrue(legacy_breadth.deprecated)
+        self.assertTrue(any("No classified" in warning for warning in legacy_breadth.warnings))
+        self.assertFalse(any("No classified" in warning for warning in parsed.warnings))
+        self.assertIn("One MIS batch failed.", parsed.warnings)
         self.assertEqual(
             legacy_breadth.canonical_ref,
             "resolved_breadth.TWSE",

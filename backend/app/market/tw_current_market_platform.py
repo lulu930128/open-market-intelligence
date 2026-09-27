@@ -759,6 +759,7 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "trade_value_semantics": observation.trade_value_semantics,
         "trade_value_is_estimate": observation.trade_value_is_estimate,
         "official_flag": observation.official and observation.trade_value_is_estimate is False,
+        "lineage": observation.lineage.model_dump(mode="json"),
         "limits": observation.limits.model_dump(mode="json") if observation.limits else None,
         "limit_up_count": observation.limits.up.observed_count if observation.limits and observation.universe_count and observation.limits.up.unknown_count == 0 else None,
         "limit_down_count": observation.limits.down.observed_count if observation.limits and observation.universe_count and observation.limits.down.unknown_count == 0 else None,

@@ -73,6 +73,8 @@ def test_post_close_breadth_keeps_finality_separate_from_coverage(
             "universe_count": 2 + unknown, "advance_count": 1, "decline_count": 1,
             "unchanged_count": 0, "received_unclassified_count": unknown,
             "not_received_count": 0, "trade_value": 1000,
+            "trade_value_is_estimate": True,
+            "trade_value_semantics": "estimated_latest_price_x_cumulative_volume_lots",
             "closing_match_coverage_count": confirmed_count,
         }, [], "mis-breadth"), clock=lambda: received_at,
     )
@@ -85,6 +87,10 @@ def test_post_close_breadth_keeps_finality_separate_from_coverage(
         )
         projected = project_taiwan_current_breadth(read_taiwan_current_breadth(db, venue="TWSE", requested_at=read_at))
         assert projected["market_session"] == "post_close"
+        assert projected["trade_value_is_estimate"] is True
+        assert projected["official_flag"] is False
+        assert projected["lineage"]["raw_receipt_id"]
+        assert projected["lineage"]["content_hash"]
         assert projected["observation_market_session"] == "closing_auction"
         assert projected["session_semantics"] == "latest_completed_session"
         assert projected["classified_count"] == 2

@@ -492,6 +492,11 @@
             "title": "Decision Usable",
             "type": "boolean"
           },
+          "delayed_member_count": {
+            "default": 0,
+            "title": "Delayed Member Count",
+            "type": "integer"
+          },
           "dispersion_pct": {
             "anyOf": [
               {
@@ -503,6 +508,23 @@
             ],
             "default": null,
             "title": "Dispersion Pct"
+          },
+          "execution_grade_usable": {
+            "default": false,
+            "title": "Execution Grade Usable",
+            "type": "boolean"
+          },
+          "facts_usable_for_ranking": {
+            "default": false,
+            "title": "Facts Usable For Ranking",
+            "type": "boolean"
+          },
+          "freshness_member_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Freshness Member Counts",
+            "type": "object"
           },
           "group_id": {
             "title": "Group Id",
@@ -520,9 +542,28 @@
             "default": null,
             "title": "Group Key"
           },
+          "intraday_research_usable": {
+            "default": false,
+            "title": "Intraday Research Usable",
+            "type": "boolean"
+          },
           "label": {
             "title": "Label",
             "type": "string"
+          },
+          "lane": {
+            "default": "actual",
+            "enum": [
+              "actual",
+              "indicative"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
+          "lineage": {
+            "additionalProperties": true,
+            "title": "Lineage",
+            "type": "object"
           },
           "market": {
             "title": "Market",
@@ -552,9 +593,38 @@
             "default": null,
             "title": "Median Change Pct"
           },
+          "observation_freshness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observation Freshness"
+          },
+          "price_semantics": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Price Semantics"
+          },
           "provisional": {
             "title": "Provisional",
             "type": "boolean"
+          },
+          "stale_member_count": {
+            "default": 0,
+            "title": "Stale Member Count",
+            "type": "integer"
           },
           "status": {
             "title": "Status",
@@ -1493,7 +1563,7 @@
     "title": "TaiwanMarketDashboardRead",
     "type": "object"
   },
-  "digest": "4da0c6967c4aaf83a43850285c8f3b6643279f2c27ddc8c8ec2100bc2981b27d",
+  "digest": "2ee475182f2fbf919835090539c36df179129197eeaf530fb7189fec46c51e03",
   "schema_version": "omi.mcp.tw_market_dashboard_snapshot.v1",
   "stock_detail_contract_version": "omi.tw_stock_dashboard_detail.v2",
   "stock_detail_output_schema": {
@@ -2117,6 +2187,18 @@
             "title": "Data",
             "type": "object"
           },
+          "decision_usable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Decision Usable"
+          },
           "generated_at": {
             "format": "date-time",
             "title": "Generated At",
@@ -2145,8 +2227,15 @@
             "type": "array"
           },
           "score": {
-            "title": "Score",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
           },
           "source_refs": {
             "items": {
@@ -2157,6 +2246,18 @@
             },
             "title": "Source Refs",
             "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
           },
           "stock_id": {
             "title": "Stock Id",

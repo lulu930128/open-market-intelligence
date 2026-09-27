@@ -134,6 +134,21 @@ def test_projection_preserves_completed_component_time_lineage_and_unknowns() ->
     assert official_breadth["decision_usable"] is False
 
 
+def test_completed_breadth_projection_preserves_explicit_trade_value_authority() -> None:
+    for estimate in (True, False, None):
+        index_result, breadth_result = _results()
+        observation = breadth_result.resolved.breadth.model_copy(update={
+            "trade_value": Decimal("1000"), "trade_value_is_estimate": estimate,
+            "trade_value_semantics": "fixture_semantic",
+        })
+        breadth_result.resolved = breadth_result.resolved.model_copy(update={"breadth": observation})
+        projected = project_taiwan_completed_dashboard_evidence(
+            index_result=index_result, breadth_result=breadth_result)["official_breadth"]["observation"]
+        assert projected["trade_value_is_estimate"] is estimate
+        assert projected["official_flag"] is (estimate is False)
+        assert projected["trade_value_semantics"] == "fixture_semantic"
+
+
 def test_dashboard_completed_components_cut_over_to_resolved_data_core() -> None:
     index_result, breadth_result = _results()
     payload = {

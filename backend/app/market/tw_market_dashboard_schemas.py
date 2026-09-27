@@ -187,6 +187,16 @@ class TaiwanDashboardGroupRead(BaseModel):
     median_change_pct: float | None = None
     dispersion_pct: float | None = None
     as_of: datetime | None = None
+    lane: Literal["actual", "indicative"] = "actual"
+    price_semantics: str | None = None
+    observation_freshness: str | None = None
+    facts_usable_for_ranking: bool = False
+    intraday_research_usable: bool = False
+    freshness_member_counts: dict[str, int] = Field(default_factory=dict)
+    delayed_member_count: int = 0
+    stale_member_count: int = 0
+    lineage: dict[str, Any] = Field(default_factory=dict)
+    execution_grade_usable: bool = False
     provisional: bool
     decision_usable: bool
 

@@ -2109,6 +2109,14 @@ def _apply_change_reference(response: dict[str, Any], bundle: TaiwanQuoteEvidenc
             and event_at.astimezone(TAIWAN_TZ).date() == reference["applies_to_trade_date"]
         )
     response["change_reference"] = reference
+    auction_price = _as_float(response.get("indicative_match_price"))
+    auction_reference = reference["price"] if reference["auction_usable"] and reference["calculation_eligible"] else None
+    reference["auction_change"] = (
+        auction_price - auction_reference
+        if response.get("indicative_match_available") and auction_price is not None and auction_reference is not None
+        else None
+    )
+    reference["auction_change_pct"] = _percent_change(reference["auction_change"], auction_reference)
     headline_date = response.get("headline_trade_date")
     if isinstance(headline_date, str):
         headline_date = date.fromisoformat(headline_date)

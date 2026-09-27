@@ -250,6 +250,12 @@ def acquire_taiwan_quote_evidence_bundle(
         raise ValueError("Taiwan quote evidence acquisition requires a live policy")
     now = requested_at or datetime.now(TAIWAN_TZ)
     requested = _normalize_requested_capabilities(requested_capabilities)
+    # Auction comparisons need the exchange reference carried by the quote
+    # observation from the same bounded provider snapshot. Keep this dependency
+    # inside the canonical bundle owner, independent of intraday bars.
+    acquisition_capabilities = tuple(dict.fromkeys((
+        *requested, *(("quote.snapshot",) if "quote.auction" in requested else ()),
+    )))
     refreshed = refresh_taiwan_realtime_snapshot(
         db,
         stock_id=stock_id,
@@ -261,12 +267,18 @@ def acquire_taiwan_quote_evidence_bundle(
                 if capability == "quote.snapshot"
                 else capability
             )
-            for capability in requested
+            for capability in acquisition_capabilities
             if capability
             not in {"quote.official_close", "quote.session_close"}
         ),
         acquisition=acquisition,
     )
+    if "quote.auction" in requested and refreshed.auction is not None:
+        observation = refreshed.auction.resolved.auction
+        if observation is not None and observation.lineage.fetched_at is not None:
+            # As in the gateway, advance only the post-acquisition read cutoff
+            # to this request's selected receipt; preserve event/receipt lineage.
+            now = max(now, observation.lineage.fetched_at)
     session_close = (
         acquire_taiwan_session_close(
             db,
@@ -283,10 +295,10 @@ def acquire_taiwan_quote_evidence_bundle(
     )
     quote = (
         read_taiwan_quote_snapshot(db, stock_id=stock_id, requested_at=now)
-        if "quote.session_close" in requested
+        if {"quote.session_close", "quote.auction"}.intersection(requested)
         else refreshed.quote
     )
-    if "quote.session_close" in requested:
+    if {"quote.session_close", "quote.auction"}.intersection(requested):
         quote = quote.model_copy(update={
             "acquisition": refreshed.quote.acquisition,
             "persistence": refreshed.quote.persistence,
