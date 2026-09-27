@@ -789,6 +789,14 @@
               "market.hot_groups": {
                 "additionalProperties": false,
                 "properties": {
+                  "lane": {
+                    "description": "Indicative auction observations are provisional and never decision or execution usable. Omitted group lane follows the backend market session; omitted screening lane is actual.",
+                    "enum": [
+                      "actual",
+                      "indicative"
+                    ],
+                    "type": "string"
+                  },
                   "limit": {
                     "default": 20,
                     "maximum": 100,
@@ -838,6 +846,14 @@
               "screening.intraday": {
                 "additionalProperties": false,
                 "properties": {
+                  "lane": {
+                    "description": "Indicative auction observations are provisional and never decision or execution usable. Omitted group lane follows the backend market session; omitted screening lane is actual.",
+                    "enum": [
+                      "actual",
+                      "indicative"
+                    ],
+                    "type": "string"
+                  },
                   "limit": {
                     "default": 20,
                     "maximum": 200,
@@ -2256,6 +2272,7 @@
           "session_scope",
           "requested_trade_date",
           "session_coverage",
+          "series_coverage",
           "is_partial",
           "trade_date",
           "expected_trade_date",
@@ -2430,6 +2447,7 @@
           "session_scope",
           "requested_trade_date",
           "session_coverage",
+          "series_coverage",
           "is_partial",
           "trade_date",
           "expected_trade_date",
@@ -6672,13 +6690,16 @@
         "capability_id": "screening.intraday",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "lane",
+          "provisional",
+          "price_semantics",
+          "decision_usable",
           "facts_usable_for_ranking",
           "observation_received_freshness",
           "last_trade_recency",
           "intraday_research_usable",
           "execution_grade_usable",
           "expected_trade_date",
-          "price_semantics",
           "applicability_status",
           "reason_code",
           "status",
@@ -6704,13 +6725,16 @@
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "lane",
+          "provisional",
+          "price_semantics",
+          "decision_usable",
           "facts_usable_for_ranking",
           "observation_received_freshness",
           "last_trade_recency",
           "intraday_research_usable",
           "execution_grade_usable",
           "expected_trade_date",
-          "price_semantics",
           "applicability_status",
           "reason_code",
           "kind",
@@ -6742,6 +6766,14 @@
         "parameter_schema": {
           "additionalProperties": false,
           "properties": {
+            "lane": {
+              "description": "Indicative auction observations are provisional and never decision or execution usable. Omitted group lane follows the backend market session; omitted screening lane is actual.",
+              "enum": [
+                "actual",
+                "indicative"
+              ],
+              "type": "string"
+            },
             "limit": {
               "default": 20,
               "maximum": 200,
@@ -6827,6 +6859,10 @@
         "capability_id": "market.hot_groups",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "lane",
+          "provisional",
+          "price_semantics",
+          "decision_usable",
           "facts_usable_for_ranking",
           "observation_received_freshness",
           "last_trade_recency",
@@ -6851,7 +6887,6 @@
           "session_semantics",
           "freshness_status",
           "facts_usable",
-          "decision_usable",
           "current_for_requested_session",
           "is_complete",
           "ranking_scope",
@@ -6867,6 +6902,10 @@
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "lane",
+          "provisional",
+          "price_semantics",
+          "decision_usable",
           "facts_usable_for_ranking",
           "observation_received_freshness",
           "last_trade_recency",
@@ -6893,7 +6932,6 @@
           "session_semantics",
           "freshness_status",
           "facts_usable",
-          "decision_usable",
           "current_for_requested_session",
           "is_complete",
           "ranking_scope",
@@ -6912,6 +6950,14 @@
         "parameter_schema": {
           "additionalProperties": false,
           "properties": {
+            "lane": {
+              "description": "Indicative auction observations are provisional and never decision or execution usable. Omitted group lane follows the backend market session; omitted screening lane is actual.",
+              "enum": [
+                "actual",
+                "indicative"
+              ],
+              "type": "string"
+            },
             "limit": {
               "default": 20,
               "maximum": 100,
@@ -6965,6 +7011,7 @@
           "field_status",
           "same_time_baseline_5d",
           "same_time_baseline_20d",
+          "comparison_identity",
           "baseline_readiness_status",
           "available_sample_days",
           "baseline_diagnostics",
@@ -7000,11 +7047,14 @@
           "trade_value_estimate",
           "trade_value_estimate_method",
           "current_value_source",
+          "trade_value_coverage_status",
+          "trade_value_authority_status",
           "previous_minute_cumulative_trade_value",
           "one_minute_trade_value_change",
           "field_status",
           "same_time_baseline_5d",
           "same_time_baseline_20d",
+          "comparison_identity",
           "baseline_readiness_status",
           "available_sample_days",
           "baseline_diagnostics",
@@ -8122,10 +8172,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "d5345183954a92029487d74ca9b5272eddb80e6617879c92d718ad842073ceb9",
+    "x-omi-capability-registry-digest": "7ca3092eb76580d7fbdd898baba420202d353c26e865c624c7744536cefe6562",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "d5345183954a92029487d74ca9b5272eddb80e6617879c92d718ad842073ceb9",
+    "x-omi-public-contract-digest": "7ca3092eb76580d7fbdd898baba420202d353c26e865c624c7744536cefe6562",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -8468,7 +8518,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "d5345183954a92029487d74ca9b5272eddb80e6617879c92d718ad842073ceb9",
+  "digest": "7ca3092eb76580d7fbdd898baba420202d353c26e865c624c7744536cefe6562",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

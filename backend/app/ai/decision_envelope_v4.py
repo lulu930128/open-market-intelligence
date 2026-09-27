@@ -4156,6 +4156,13 @@ def build(
     preferences = _dict(_dict(canonical.get("execution")).get("policy")).get(
         "response_preferences"
     )
+    if scope_type == "stock" and "quote.auction" in projected_data and selection.get("output") != "evidence_only":
+        canonical["answer"] = answer_composer.build_quote_consumer_answer(
+            target=_dict(canonical.get("target")),
+            analysis_digest={"compact_evidence": {"auction": projected_data["quote.auction"]}},
+            missing=_list(limitations.get("missing")), warnings=_list(limitations.get("warnings")),
+            summary_limit=3, response_preferences=preferences,
+        )
     if scope_type == "market" and selection.get("output") != "evidence_only":
         factual_answer = answer_composer.build_selected_market_consumer_answer(
             target=_dict(canonical.get("target")), projected_data=projected_data,

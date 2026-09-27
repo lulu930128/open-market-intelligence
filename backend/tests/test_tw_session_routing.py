@@ -18,6 +18,48 @@ def plan(question, *, market=True, selection=None):
     )
 
 
+@pytest.mark.parametrize("symbol,word", [("2330", "試搓"), ("2344", "試搓"), ("2330", "試撮"), ("2330", "indicative auction")])
+@pytest.mark.parametrize("mixed,explicit", [(False, False), (False, True), (True, False)])
+def test_selected_auction_reaches_production_acquisition(db, monkeypatch, symbol, word, mixed, explicit):
+    from app.ai import tools as ai_tools
+    from app.db.models import StockMaster
+
+    if symbol == "2344":
+        db.add(StockMaster(stock_id=symbol, stock_name="華邦電", market="TWSE", instrument_type="stock"))
+        db.commit()
+    monkeypatch.setattr(settings, "omi_atlas_shadow_enabled", False)
+
+    class Acquired(BaseException):
+        pass
+
+    def acquire(**kwargs):
+        assert kwargs["stock_id"] == symbol
+        assert "quote.auction" in kwargs["requested_capabilities"]
+        raise Acquired
+
+    monkeypatch.setattr(ai_tools, "acquire_taiwan_quote_evidence_projection", acquire)
+    with pytest.raises(Acquired):
+        ai_ask.ask(db=db, server_policy=ai_ask.AiAskServerPolicy(can_external_fetch=True), payload=AiAskRequest(
+            contract_version="omi.decision.v4",
+            question=f"{symbol} 現在{word}多少？相對昨收漲跌多少？這是不是正式成交？" + ("＋順便看技術面" if mixed else ""),
+            target={"type": "tw_stock", "id": symbol},
+            selection={"required": ["quote.auction"]} if explicit else {},
+            mode="data_only", output="evidence_only", realtime_policy="prefer_live", allow_external_fetch=True,
+        ))
+
+
+def test_natural_mixed_quote_preserves_technical_evidence():
+    result = plan("2330 試搓狀況＋順便看技術面", market=False)
+    assert result.reader_profile == "standard"
+    assert {"quote.auction", "technical.structure", "daily.ohlcv"} <= set(result.selected_capabilities)
+
+
+def test_natural_quote_is_bounded_without_explicit_selection():
+    result = plan("台積電 2330 現在試搓多少？相對昨收漲跌多少？這是不是正式成交？", market=False)
+    assert result.reader_profile == "quote_only"
+    assert set(result.selected_capabilities) == {"target.identity", "data.freshness", "quote.auction"}
+
+
 @pytest.mark.parametrize("question,required,excluded", [
     ("現在台股大盤、漲跌家數、量能、熱門族群", {"market.indices", "market.breadth", "market.volume_state", "market.hot_groups"}, {"screening.ranking", "market.institutional_flow"}),
     ("掃描全市場接近支撐／壓力的股票", {"screening.price_map"}, {"screening.ranking"}),
@@ -141,7 +183,12 @@ def test_ask_request_pipeline_routes_before_evidence_io(db, monkeypatch, questio
     assert not {"screening.ranking", "market.institutional_flow"} & set(result.selected_capabilities)
     if market:
         assert set(result.selected_capabilities) == required | {"target.identity", "data.freshness"}
-    assert ("news.events" in result.optional_selected_capabilities) is atlas_enabled
+    pure_quote = not market and required <= {"quote.auction", "quote.snapshot"}
+    if pure_quote:
+        assert result.reader_profile == "quote_only"
+        assert "news.events" not in result.optional_selected_capabilities
+    else:
+        assert ("news.events" in result.optional_selected_capabilities) is atlas_enabled
     if "screening.intraday" in required:
         assert result.selection["parameters"]["screening.intraday"] == {
             "metric": "estimated_trade_value" if "成交值" in question else "change_pct",

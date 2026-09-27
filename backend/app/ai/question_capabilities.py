@@ -1,6 +1,42 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
+
+
+TW_HOT_GROUP_HINTS = (
+    "熱門族群",
+    "強弱族群",
+    "族群強弱",
+    "強勢族群",
+    "族群排行",
+    "熱門題材",
+    "hot groups",
+    "hot sectors",
+    "sector strength",
+)
+
+
+def has_market_hot_group_intent(question: str) -> bool:
+    """Shared market-group semantics; target/watchlist identity wins upstream."""
+    lowered = question.casefold()
+    if _has_hint(lowered, TW_HOT_GROUP_HINTS):
+        return True
+    if _has_hint(lowered, ("族群", "產業", "題材", "群組")):
+        return _has_hint(lowered, (
+            "最強", "最弱", "強弱", "偏強", "偏弱", "強勢", "弱勢",
+            "排行", "熱門", "盤中", "表現", "試撮", "試搓", "盤前",
+        ))
+    return bool(
+        re.search(r"\b(?:groups?|sectors?|industries)\b", lowered)
+        and re.search(r"\b(?:market|hot|strongest|weakest|strong|weak|strength|performance|ranking|intraday)\b", lowered)
+    )
+
+
+def has_explicit_watchlist_intent(question: str) -> bool:
+    return _has_hint(question, ("自選", "watchlist")) or bool(
+        re.search(r"\b(?:my|our)\s+(?:groups?|sectors?)\b", question, re.IGNORECASE)
+    )
 
 
 US_INTRADAY_HINTS = (

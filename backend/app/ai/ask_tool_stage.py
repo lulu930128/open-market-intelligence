@@ -218,6 +218,17 @@ def execute_tool_stages(
         warnings.extend(tool_session.get("warnings") or [])
         current_freshness = tool_session.get("freshness") or current_freshness
 
+    # The quote-only reader forbids external IO, but an explicitly authorized
+    # Base-1m command still needs its bounded materialization owner. Keep other
+    # domains out of this exception; the primary reader stays cache-only.
+    tw_refresh_capabilities = selected_v4_capabilities
+    bounded_tw_intraday_command = (
+        scope_type == "stock"
+        and query_plan.get("reader_profile") == "quote_only"
+        and "intraday.bars" in (selected_v4_capabilities or ())
+    )
+    if not query_plan.get("external_refresh_allowed", True) and bounded_tw_intraday_command:
+        tw_refresh_capabilities = ("intraday.bars",)
     if (
         scope_type == "stock"
         and refresh_before_answer_enabled(payload)
@@ -229,7 +240,7 @@ def execute_tool_stages(
             or continuation_selected
             or "intraday.bars" in (selected_v4_capabilities or ())
         )
-        and query_plan.get("external_refresh_allowed", True)
+        and (query_plan.get("external_refresh_allowed", True) or bounded_tw_intraday_command)
     ):
         tool_session = progress.run_tool_session(
             scope_type=scope_type,
@@ -240,7 +251,7 @@ def execute_tool_stages(
                 policy=policy,
                 raw_budget=payload.tool_budget,
                 existing_freshness=current_freshness,
-                requested_capabilities=selected_v4_capabilities,
+                requested_capabilities=tw_refresh_capabilities,
                 force_selected_capabilities=continuation_selected,
                 progress_callback=progress_callback,
                 **({"trade_date": str(regional_params["trade_date"])} if regional_params.get("trade_date") else {}),

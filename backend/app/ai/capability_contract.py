@@ -1068,6 +1068,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "session_scope",
             "requested_trade_date",
             "session_coverage",
+            "series_coverage",
             "is_partial",
             "trade_date",
             "expected_trade_date",
@@ -1246,6 +1247,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "session_scope",
             "requested_trade_date",
             "session_coverage",
+            "series_coverage",
             "is_partial",
             "trade_date",
             "expected_trade_date",
@@ -4215,13 +4217,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "data.screening.intraday",
         ),
         fields=(
+            "lane",
+            "provisional",
+            "price_semantics",
+            "decision_usable",
             "facts_usable_for_ranking",
             "observation_received_freshness",
             "last_trade_recency",
             "intraday_research_usable",
             "execution_grade_usable",
             "expected_trade_date",
-            "price_semantics",
             "applicability_status",
             "reason_code",
             "kind",
@@ -4246,13 +4251,16 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_fields=(
+            "lane",
+            "provisional",
+            "price_semantics",
+            "decision_usable",
             "facts_usable_for_ranking",
             "observation_received_freshness",
             "last_trade_recency",
             "intraday_research_usable",
             "execution_grade_usable",
             "expected_trade_date",
-            "price_semantics",
             "applicability_status",
             "reason_code",
             "status",
@@ -4285,6 +4293,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
+                "lane": {"type": "string", "enum": ["actual", "indicative"],
+                    "description": "Indicative auction observations are provisional and never decision or execution usable. Omitted group lane follows the backend market session; omitted screening lane is actual."},
                 "metric": {
                     "type": "string",
                     "enum": [
@@ -4360,6 +4370,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "data.screening.hot_groups",
         ),
         fields=(
+            "lane",
+            "provisional",
+            "price_semantics",
+            "decision_usable",
             "facts_usable_for_ranking",
             "observation_received_freshness",
             "last_trade_recency",
@@ -4386,7 +4400,6 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "session_semantics",
             "freshness_status",
             "facts_usable",
-            "decision_usable",
             "current_for_requested_session",
             "is_complete",
             "ranking_scope",
@@ -4398,6 +4411,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_fields=(
+            "lane",
+            "provisional",
+            "price_semantics",
+            "decision_usable",
             "facts_usable_for_ranking",
             "observation_received_freshness",
             "last_trade_recency",
@@ -4422,7 +4439,6 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "session_semantics",
             "freshness_status",
             "facts_usable",
-            "decision_usable",
             "current_for_requested_session",
             "is_complete",
             "ranking_scope",
@@ -4443,6 +4459,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
+                "lane": {"type": "string", "enum": ["actual", "indicative"],
+                    "description": "Indicative auction observations are provisional and never decision or execution usable. Omitted group lane follows the backend market session; omitted screening lane is actual."},
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -4483,11 +4501,14 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "trade_value_estimate",
             "trade_value_estimate_method",
             "current_value_source",
+            "trade_value_coverage_status",
+            "trade_value_authority_status",
             "previous_minute_cumulative_trade_value",
             "one_minute_trade_value_change",
             "field_status",
             "same_time_baseline_5d",
             "same_time_baseline_20d",
+            "comparison_identity",
             "baseline_readiness_status",
             "available_sample_days",
             "baseline_diagnostics",
@@ -4524,6 +4545,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "field_status",
             "same_time_baseline_5d",
             "same_time_baseline_20d",
+            "comparison_identity",
             "baseline_readiness_status",
             "available_sample_days",
             "baseline_diagnostics",
@@ -6877,7 +6899,31 @@ def _canonical_available_count(value: Any, *, included: bool) -> int | None:
 
 def _historical_intraday_fill_state(
     *, scope_type: str, capability_id: str, value: Any,
+    realtime_policy: str = "prefer_live",
 ) -> dict[str, Any] | None:
+    if scope_type in {"stock", "tw_stock"} and capability_id == "intraday.bars" and isinstance(value, dict):
+        from app.market.tw_intraday_platform import completed_taiwan_intraday_repair_eligibility
+        target_date = value.get("requested_trade_date") or value.get("expected_trade_date")
+        if not target_date:
+            return None
+        try:
+            eligibility = completed_taiwan_intraday_repair_eligibility(str(target_date), now=datetime.now(timezone.utc))
+        except (TypeError, ValueError):
+            return None
+        if not eligibility["completed"]:
+            return None
+        coverage = value.get("series_coverage") or {}
+        freshness = value.get("freshness") or {}
+        complete = value.get("is_partial") is False and (
+            coverage.get("requested_coverage_satisfied") is True
+            or freshness.get("snapshot_phase") == "ready"
+        )
+        return {"satisfied": complete, "refresh_required": not complete,
+            "refresh_possible_now": not complete and eligibility["eligible"] and realtime_policy != "require_live",
+            "reason_code": ("TW_COMPLETED_SESSION_NOT_LIVE" if realtime_policy == "require_live"
+                else "TW_COMPLETED_SESSION_COVERAGE_READY" if complete else eligibility["reason_code"]),
+            "market_data_params": {"trade_date": target_date, "intraday_interval": value.get("requested_interval") or "1m"},
+            "coverage_status": "complete" if complete else value.get("coverage_status", "missing")}
     if scope_type != "us_stock" or capability_id != "intraday.bars" or not isinstance(value, dict):
         return None
     requested_date = value.get("requested_trade_date")
@@ -7171,6 +7217,7 @@ def build_manifest(
         )
         fill_state = _historical_intraday_fill_state(
             scope_type=scope_type, capability_id=capability_id, value=projected_value,
+            realtime_policy=str(selection.get("realtime_policy") or "prefer_live"),
         )
         if fill_state is not None:
             capabilities[-1].update(
@@ -8240,7 +8287,7 @@ def fill_action_id(
             **({"historical_window": {
                 "trade_date": market_data_params["trade_date"],
                 "session_scope": market_data_params.get("session_scope") or "regular",
-                "interval": market_data_params.get("interval") or "1m",
+                "interval": market_data_params.get("intraday_interval") or market_data_params.get("interval") or "1m",
             }} if capability_id == "intraday.bars" and market_data_params and market_data_params.get("trade_date") else {}),
         },
         ensure_ascii=False,
@@ -8271,8 +8318,8 @@ def selected_fill_capabilities(
     scope_type: str,
     market_data_params: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    # Historical window binding is owned by the US historical fill contract.
-    if scope_type != "us_stock":
+    # Bind completed-session continuations to their exact market-owned window.
+    if scope_type not in {"us_stock", "stock", "tw_stock"}:
         market_data_params = None
     selected_action_ids = {
         str(value).strip()

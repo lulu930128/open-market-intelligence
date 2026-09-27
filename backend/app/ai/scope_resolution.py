@@ -7,6 +7,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai import decision_core, public_contract
+from app.ai.question_capabilities import (
+    has_explicit_watchlist_intent,
+    has_market_hot_group_intent,
+)
 from app.ai.schemas import AiAskRequest
 from app.crypto_market.assets import crypto_asset_codes, get_crypto_asset
 from app.db.models import JPStockMaster, KRStockMaster, StockMaster, USStockMaster, WatchlistGroup
@@ -2228,14 +2232,27 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 ),
             )
 
-        group_resolution = _resolve_watchlist_group_name_from_db(db, question)
-        if group_resolution is not None:
-            return group_resolution
+    # Persisted names (including names without generic group words) and explicit
+    # watchlist wording take precedence over market-sector disambiguation.
+    group_resolution = _resolve_watchlist_group_name_from_db(db, question)
+    if group_resolution is not None:
+        return group_resolution
 
+    hot_groups_requested = has_market_hot_group_intent(question)
+    if _contains_hint(question, WATCHLIST_HINTS) and (
+        has_explicit_watchlist_intent(question) or not hot_groups_requested
+    ):
         return _clarify_scope(
             "watchlist",
             question,
             "Question looks like a watchlist request but no group id or group name was resolved.",
+        )
+
+    if hot_groups_requested:
+        return _default_market_context_resolution(
+            target_market or "TW",
+            source="market_hot_group_intent",
+            confidence="medium",
         )
 
     tw_stock_resolution = _resolve_tw_stock_from_question(db, question)

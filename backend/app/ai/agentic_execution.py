@@ -1135,6 +1135,7 @@ def execute_tool_plan(
                     db, stock_id=str(args.get("stock_id") or ""), consumer="ai",
                     requested_at=agentic_common._now(),
                     trade_date=args.get("trade_date"),
+                    policy=args.get("policy", "prefer_live"),
                     timeout_seconds=budget["max_total_seconds"] - (perf_counter() - started),
                     max_external_calls=calls,
                 )

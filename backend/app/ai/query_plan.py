@@ -6,6 +6,7 @@ from typing import Any
 
 from app.ai import capability_contract
 from app.ai.market_payload_contract import PAYLOAD_LEVELS
+from app.ai.question_capabilities import has_market_hot_group_intent
 from app.ai.schemas import AiAskRequest
 
 
@@ -437,16 +438,6 @@ TW_INTRADAY_SCREENING_METRIC_HINTS = {
         "下跌",
     ),
 }
-TW_HOT_GROUP_HINTS = (
-    "熱門族群",
-    "強弱族群",
-    "族群強弱",
-    "強勢族群",
-    "族群排行",
-    "熱門題材",
-    "hot groups",
-    "hot sectors",
-)
 _CHINESE_DIGITS = {
     "零": 0,
     "〇": 0,
@@ -882,8 +873,8 @@ def _infer_tw_intraday_screening_selection(
         return None
 
     question = _selection_question(payload.question, positive_only=True)
-    hot_groups_requested = any(
-        hint.casefold() in question for hint in TW_HOT_GROUP_HINTS
+    hot_groups_requested = has_market_hot_group_intent(question) or (
+        has_auction_intent(payload.question) and "族群" in question
     )
     metric = next(
         (
@@ -916,6 +907,10 @@ def _infer_tw_intraday_screening_selection(
             "bottom ",
         )
     ))
+    auction_ranking = has_auction_intent(payload.question) and not daily_ranking_requested and any(
+        hint in question for hint in ("強勢", "偏強", "偏弱", "漲幅", "跌幅", "漲停", "跌停", "strong", "ranking")
+    )
+    intraday_ranking_requested = intraday_ranking_requested or (auction_ranking and not hot_groups_requested) or (auction_ranking and "股票" in question)
     if not hot_groups_requested and not intraday_ranking_requested:
         return None
 
@@ -960,6 +955,8 @@ def _infer_tw_intraday_screening_selection(
             "limit": limit,
             "offset": 0,
         }
+        if has_auction_intent(payload.question):
+            intraday_parameters["lane"] = "indicative"
         explicit_parameters = raw_parameters.get("screening.intraday")
         if isinstance(explicit_parameters, dict):
             intraday_parameters.update(explicit_parameters)
@@ -967,6 +964,8 @@ def _infer_tw_intraday_screening_selection(
     if hot_groups_requested:
         include.append("market.hot_groups")
         hot_group_parameters = {"limit": min(limit, 100)}
+        if has_auction_intent(payload.question):
+            hot_group_parameters["lane"] = "indicative"
         explicit_parameters = raw_parameters.get("market.hot_groups")
         if isinstance(explicit_parameters, dict):
             hot_group_parameters.update(explicit_parameters)
@@ -1025,6 +1024,7 @@ def build_query_plan(
         scope_type=scope_type,
     )
     raw_selection = payload.selection if isinstance(payload.selection, dict) else {}
+    pure_quote_request = False
     # Automatic supplements (for example Atlas optional evidence) must retain
     # NLP planning, matching normalize_selection's explicit-selection lock.
     has_explicit_capability_selection = raw_selection.get("auto_planning") is not True and any(
@@ -1091,12 +1091,20 @@ def build_query_plan(
             target_market=target_market,
         )
         normalized_question = payload.question.casefold()
+        pure_quote_request = bool(
+            scope_type == "stock"
+            and any(capability.startswith("quote.") for capability in requested_capabilities)
+            and all(capability.startswith("quote.") or capability in {
+                "target.identity", "data.freshness", "intraday.bars",
+            } for capability in requested_capabilities)
+            and not (set(requested_domains) - {"quote", "intraday", "freshness"})
+        )
         restrictive = bool(
             requested_capabilities
-            and any(
+            and (any(
                 term.casefold() in normalized_question
                 for term in RESTRICTIVE_CAPABILITY_TERMS
-            )
+            ) or pure_quote_request)
             and not any(
                 term.casefold() in normalized_question
                 for term in NEGATED_RESTRICTIVE_TERMS
@@ -1138,6 +1146,12 @@ def build_query_plan(
                 *(raw_selection.get("exclude") or []), *excluded_selection_capabilities,
             ])),
         }
+        if pure_quote_request and raw_selection.get("auto_planning") is True:
+            # Automatic supplements must not widen a bounded factual quote
+            # question. Explicit caller selections and mixed requests retain
+            # their capabilities through the normal selection path.
+            selection_input["optional"] = [capability for capability in raw_selection.get("optional", [])
+                                           if capability in requested_capabilities]
     elif inferred_screening_selection is not None:
         selection_input = {
             **raw_selection,
@@ -1162,6 +1176,11 @@ def build_query_plan(
         excluded_capabilities=excluded_selection_capabilities,
     )
     selection["capability_selection_mode"] = capability_selection_mode
+    if not has_explicit_capability_selection:
+        for capability in requested_capabilities:
+            origin = selection.get("capability_origins", {}).get(capability)
+            if origin is not None and capability in selection["required"]:
+                origin.update(origin="nlp_inferred", requested_as="required")
     selected_capabilities = {
         *list(selection.get("required") or []),
         *list(selection.get("optional") or []),
@@ -1290,7 +1309,6 @@ def build_query_plan(
     )
     quote_intraday_only_selection = bool(
         scope_type == "stock"
-        and has_explicit_capability_selection
         and selected_capability_set
         & {
             "quote.snapshot",

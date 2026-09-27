@@ -91,6 +91,13 @@ def _market_data_params(
     params["external_fetch_allowed"] = bool(
         can_external_fetch and realtime_policy != "cache_only"
     )
+    plan = policy.get("query_plan", {}) if isinstance(policy, dict) else {}
+    if plan:
+        origins = (plan.get("selection") or {}).get("capability_origins") or {}
+        params["quote_acquisition_requested"] = any(
+            capability.startswith("quote.") and origin.get("origin") != "auto_planned"
+            for capability, origin in origins.items()
+        ) or plan.get("reader_profile") == "quote_only"
     refresh_policy = (
         policy.get("refresh_policy")
         if isinstance(policy, dict)

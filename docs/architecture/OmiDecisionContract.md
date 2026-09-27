@@ -8,6 +8,8 @@ US 指定歷史日期的 `quote.snapshot` 與 `intraday.bars` 可同時選取：
 
 US historical intraday 的 `fill_state` 由 capability contract 依 canonical coverage、completed-session eligibility 與 resolution registry 建立。Fill partition 與 refresh reconciliation 共用此滿足條件；`latest_completed_session` 不代表分鐘資料完整。Quality projection 保留 historical fill requirement，且不得抬高來源的 `decision_usable=false`。Historical continuation 保留並綁定 trade_date、session_scope 與 interval；cache-only 可展示補洞動作，但不執行 provider I/O。完整歷史資料可 satisfied，同時仍維持非即時與非交易決策證據。
 
+TW Base-1m 亦由 market owner 判定 completed-session repair eligibility，透過同一 capability manifest／fill plan 提供指定日期的有界補資料。`series_coverage` 保留 canonical 缺口與 snapshot 狀態；TW continuation 綁定 trade_date 與 intraday_interval。Quote-only reader 的禁止外部 IO 不阻止明示授權的 intraday materialization command，但 command 不擴張至其他資料域；cache-only 不 dispatch。`require_live` 不能用 completed-session repair 滿足，稀疏分鐘資料不得因 acquisition 成功改標完整。
+
 ## 架構原則
 
 Canonical read selection 不以 external acquisition／fallback permission 為條件；明確排除的能力仍不讀取。`require_live` 可讀取本機 evidence，但必須獨立通過既有 realtime policy，不能把 cache 存在視為即時成功。
@@ -518,7 +520,15 @@ Market chips projection 與 Source Health 共用 calendar release window 的 exp
 
 台股 `quote.snapshot` 的頂層 price／OHLC／event time 保留 snapshot evidence；其中 `current_price` 是獨立 resolved current-price 物件，帶有來源、時間、freshness 與 fallback reason。它可以取用 canonical 1m fallback，但不可讓 snapshot quality 因此升級。既有內部 display／decision consumers 使用 `current_price`，HTTP/SSE/MCP 均由同一 capability projection 傳遞；不新增 price alias 或 consumer-side fallback。
 
-`market.breadth.auction_breadth` 來自 canonical indicative companion，各市場有自己的 lineage、時間、coverage 與 freshness。Actual-trade screening 盤前明示 not_applicable；此 checkpoint 不宣稱已實作 auction screening／auction group ranking。Screening/Hot Groups 的 ranking-facts 軸不取代原本 decision gate。Legacy dashboard breadth 仍須等待正式 session acceptance 後才移除。
+`market.breadth.auction_breadth` 來自 canonical indicative companion，各市場有自己的 lineage、時間、coverage 與 freshness。盤前 generic overview 將正式成交尚未開始與試搓廣度分開呈現，不將 indicative counts 寫入 actual fields。
+
+`screening.intraday` 與 `market.hot_groups` 的 additive `lane` parameter 由 executable registry 擁有。兩者沿用 `TaiwanIntradayStockState`，在 market owner 內共用 indicative observation normalization、eligibility 與原有 coverage/freshness 門檻；不新增 provider、cache 或 ranking service。Screening 未指定 lane 時仍為 actual，盤前 actual screening 明示 not_applicable；Hot Groups 未指定 lane 時由 market owner 在盤前選 indicative，正常盤及完成交易日維持 actual。明示試搓的自然問句選 indicative；正常盤不把舊 auction 當目前行情。
+
+Indicative return 取已留存的 indicative match price 與同筆 canonical state 的 provider reference，保留交易日、event/receipt time、provider/source 與 raw receipt lineage。Rows/groups 明示 provisional、price semantics、coverage/exclusions，decision/execution usability 固定 false；成交量、成交值與 5/15 分鐘報酬等 actual-only metrics 保持 unavailable。族群 membership 沿既有交易所產業及 user-curated watchlist，不由 AI 猜測。漲跌停相關問句只能呈現試搓變化，不能據此宣稱正式漲跌停。Screening/Hot Groups 的 ranking-facts 軸不取代 decision gate。Legacy dashboard breadth 仍須等待正式 session acceptance 後才移除。
+
+Dashboard hot-group projection 同樣保留 canonical lane、price semantics、observation freshness、lineage 與 execution usability；不自行重算排名資格。存在試搓價格但未通過 lineage/freshness gate 的觀測保留 coverage/exclusion，不進入排名。Public ask 與 dashboard snapshots 分別由既有 generator 從 executable registry／typed contract 產生。
+
+台股 quote component 的明示／NLP selection 驅動相同 bounded canonical quote evidence path。純 quote 問句不擴張成無關日線分析；混合技術需求保留 wider reader，selected quote component 獨立於 `intraday.bars`／`include_intraday` 執行。僅由一般分析自動附帶的 snapshot 不新增 provider acquisition，cache-only 全程純讀。Auction comparison 所需 exchange reference 是既有 quote bundle owner 的同次 snapshot dependency：同一 bounded adapter fetch 後 canonical reread，保留原 event/receipt lineage，且不把未驗證日期的 provider reference 標成昨收。Backend answer composer 呈現 canonical auction 與 market-owned 計算結果，HTTP/SSE/MCP 不各自推導。
 
 台股五檔／試撮的自然語言選擇沿用 bounded quote reader，explicit selection 仍優先於 NLP。
 Backend 自動加入的 optional evidence（例如 Atlas 的 `auto_planning` selection）不構成使用者 explicit selection。Planner 先完成自然語言選取，再消耗 automatic planning hint，避免 normalization 將已限定的 Price Map／Hot Groups／intraday ranking 擴張成整個 legacy screening domain；保留 caller exclusions、optional evidence 與 typed parameters。正向需求、否定與替代限制共用中文／英文句界，包含全形問號、驚嘆號與換行。
@@ -543,3 +553,5 @@ KR intraday bar close 是 market-owned price reference，不能宣稱是獨立 l
 - Consumer：Frontend lint/typecheck、MCP tests，以及外部 consumer contract tests。
 - Runtime：launcher selected PID/port、`/api/ai/tools`、TW/US/crypto bounded calls、
   payload bytes/latency；付費 LLM 只做一次明確有 cost bound 的 smoke。
+
+TW 純自然 quote/auction 問句的 bounded selection 不被自動 optional 補充（如 Atlas shadow）擴成 standard reader。使用者明確選取的 optional 能力與 mixed quote+technical 維持正常 wider path，selected quote 仍進入同一 canonical quote owner。`market.volume_state` 的 `comparison_identity`、baseline diagnostics/sample dates 與 authority 由 executable capability field registry 投影到 v4 evidence；HTTP typed volume schema 同樣保留，不由 MCP/AI/Frontend 另做 normalization。

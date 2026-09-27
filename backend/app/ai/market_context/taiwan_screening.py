@@ -165,6 +165,7 @@ def read_tw_screening_context(
             else 20,
             generated_at=generated_at,
             include_watchlist_groups=hot_groups_requested,
+            lane=(capability_parameters.get("market.hot_groups") or {}).get("lane"),
         )
         if hot_groups_requested
         or sectors_requested and intraday_sector_session
@@ -249,7 +250,7 @@ def read_tw_screening_context(
         screening["hot_groups"] = deepcopy(hot_groups_snapshot)
         freshness_by_capability["market.hot_groups"] = {
             "status": hot_groups_snapshot["status"],
-            "is_current": hot_groups_snapshot.get("last_trade_recency") == "current" and hot_groups_snapshot.get("current_for_requested_session", hot_groups_snapshot.get("session_semantics") == "current_session"),
+            "is_current": (hot_groups_snapshot.get("freshness_status") if hot_groups_snapshot.get("lane") == "indicative" else hot_groups_snapshot.get("last_trade_recency")) == "current" and hot_groups_snapshot.get("current_for_requested_session", hot_groups_snapshot.get("session_semantics") == "current_session"),
             "facts_usable": bool(hot_groups_snapshot.get("facts_usable")),
             "facts_usable_for_ranking": bool(hot_groups_snapshot.get("facts_usable_for_ranking")),
             "intraday_research_usable": bool(hot_groups_snapshot.get("intraday_research_usable")),
@@ -270,7 +271,7 @@ def read_tw_screening_context(
         market["sectors"] = deepcopy(sector_snapshot)
         freshness_by_capability["market.sectors"] = {
             "status": sector_snapshot["status"],
-            "is_current": sector_snapshot.get("last_trade_recency") == "current" and sector_snapshot.get("current_for_requested_session", sector_snapshot.get("session_semantics") == "current_session"),
+            "is_current": (sector_snapshot.get("freshness_status") if sector_snapshot.get("lane") == "indicative" else sector_snapshot.get("last_trade_recency")) == "current" and sector_snapshot.get("current_for_requested_session", sector_snapshot.get("session_semantics") == "current_session"),
             "facts_usable": bool(sector_snapshot.get("facts_usable")),
             "facts_usable_for_ranking": bool(sector_snapshot.get("facts_usable_for_ranking")),
             "intraday_research_usable": bool(sector_snapshot.get("intraday_research_usable")),

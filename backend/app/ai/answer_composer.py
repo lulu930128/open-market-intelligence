@@ -937,6 +937,31 @@ def build_quote_consumer_answer(
     english = response_is_english(response_preferences)
     japanese = response_is_japanese(response_preferences)
     price_text = _quote_price_text(price, market=market, english=english, japanese=japanese)
+    auction = compact.get("auction")
+    if isinstance(auction, dict):
+        price = auction.get("indicative_match_price") if auction.get("indicative_match_available") else None
+        price_text = _quote_price_text(price, market=market, english=english, japanese=japanese)
+        reference = auction.get("change_reference") or {}
+        reference_label = ("prior close" if english else "前日終値" if japanese else "昨收") if reference.get("type") == "prior_regular_close" else ("exchange/provider reference" if english else "取引所・配信元の基準値" if japanese else "交易所／來源參考價（未確認為昨收）")
+        title = "Indicative auction" if english else "板寄せ参考値" if japanese else "試搓參考"
+        disclaimer = ("Provisional indication, not an actual trade; not usable for trading decisions or execution." if english
+                      else "暫定参考値であり実約定ではありません。売買判断・執行には利用できません。" if japanese
+                      else "試搓是暫定參考，並非正式成交；不可用於交易決策或執行。")
+        basis = _quote_price_text(reference.get("price"), market=market, english=english, japanese=japanese)
+        change = reference.get("auction_change")
+        pct = reference.get("auction_change_pct")
+        comparison = f"{reference_label}: {basis}; " + (
+            f"{change:+.2f} ({pct:+.2f}%)" if isinstance(change, (int, float)) and isinstance(pct, (int, float))
+            else "unavailable" if english else "比較不可" if japanese else "漲跌比較無可用證據"
+        )
+        lines = [disclaimer, comparison,
+                 f"as_of: {auction.get('auction_time') or 'unknown'}; status: {auction.get('status') or 'missing'}; source: {auction.get('provider') or 'unknown'}/{auction.get('source') or 'unknown'}"]
+        answer = {"kind": "consumer_market_answer", "style": "quote_auction_summary", "source": "quote.auction",
+                  "headline": f"{label} {title}: {price_text}", "summary": lines, "detail": "\n".join(lines),
+                  "data_limits": [disclaimer, *generic_data_limits(missing=missing, warnings=warnings, response_preferences=response_preferences)],
+                  "confidence": "low", "stance": None, "action_plan": [], "scenarios": [], "risks": [], "counter_evidence": []}
+        answer["text"] = consumer_text(answer, summary_limit=summary_limit, response_preferences=response_preferences)
+        return answer
     us_time_text = (
         _us_quote_time_text(
             quote.get("quote_time"),
@@ -1388,7 +1413,9 @@ def build_market_breadth_consumer_answer(
         if isinstance(analysis_digest.get("breadth"), dict)
         else {}
     )
-    if auction_intent:
+    session = breadth.get("session_phase") or breadth.get("market_session")
+    preopen = session in {"preopen", "preopen_pending", "pre_open", "opening_auction"} or (not session and breadth.get("status") == "pending")
+    if auction_intent or preopen:
         # Select the canonical indicative lane without rewriting actual breadth.
         auction = breadth.get("auction_breadth")
         auction = auction if isinstance(auction, dict) else {}
@@ -1405,6 +1432,8 @@ def build_market_breadth_consumer_answer(
             if japanese else "試搓為 provisional 暫定觀測，並非正式成交；decision_usable=false。"
         )
         summary = [disclaimer]
+        if preopen:
+            summary[0] = ("Formal trading has not started. " if english else "通常取引はまだ始まっていません。" if japanese else "正式成交尚未開始，實際成交漲跌家數尚不適用。") + disclaimer
         markets = auction.get("markets")
         components = markets if isinstance(markets, dict) and markets else {"TW": auction}
         for market, component in components.items():
@@ -1709,7 +1738,7 @@ def build_selected_market_consumer_answer(
     limits: list[str] = []
     sources: list[str] = []
     breadth = projected_data.get("market.breadth")
-    if isinstance(breadth, dict) and (auction_intent or any(
+    if isinstance(breadth, dict) and (auction_intent or breadth.get("status") == "pending" or any(
         breadth.get(key) is not None for key in ("advance_count", "decline_count", "unchanged_count")
     )):
         breadth_answer = build_market_breadth_consumer_answer(
@@ -1795,6 +1824,13 @@ def build_selected_market_consumer_answer(
                     detail += ("; insufficient coverage" if english else "；取得範囲が不足" if japanese else "；覆蓋不足")
                 summary.append(detail)
         sources.append("market.hot_groups")
+    if any(isinstance(projected_data.get(capability), dict) and projected_data[capability].get("lane") == "indicative"
+           for capability in ("screening.intraday", "market.hot_groups")):
+        disclaimer = ("Provisional auction indications, not actual trades or official limit-up/down; not usable for trading decisions or execution."
+                      if english else "板寄せ参考値は暫定値です。実約定・正式な値幅制限到達・売買判断を示しません。" if japanese
+                      else "以下為試搓暫定觀測，並非正式成交或正式漲跌停；不可用於交易決策或執行。")
+        summary.insert(0, disclaimer)
+        limits.append(disclaimer)
     if not sources:
         return {}
     if quality.get("status") != "ready":

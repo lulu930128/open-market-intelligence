@@ -2428,7 +2428,10 @@ def read_stock_context(
 
     quote_depth: dict[str, Any] | None = None
     quote_error: str | None = None
-    if include_intraday:
+    quote_requested = include_intraday or bool(
+        _requested_quote_evidence_capabilities(market_data_params or {})
+    )
+    if quote_requested:
         try:
             context_params = (
                 market_data_params
@@ -2438,13 +2441,14 @@ def read_stock_context(
             quote_reader = (
                 dependencies.acquire_taiwan_quote_evidence
                 if context_params.get("external_fetch_allowed") is True
+                and (include_intraday or context_params.get("quote_acquisition_requested") is not False)
                 else dependencies.read_taiwan_quote_evidence
             )
             quote_kwargs: dict[str, Any] = {
                 "db": db,
                 "stock_id": normalized_stock_id,
             }
-            if context_params.get("external_fetch_allowed") is True:
+            if quote_reader is dependencies.acquire_taiwan_quote_evidence:
                 quote_kwargs["requested_capabilities"] = (
                     _requested_quote_evidence_capabilities(context_params)
                 )
@@ -2461,7 +2465,7 @@ def read_stock_context(
         source_health,
         quote_depth=quote_depth,
         quote_error=quote_error,
-        requested=include_intraday,
+        requested=quote_requested,
         checked_at=dependencies.now(),
     )
 
@@ -2472,7 +2476,7 @@ def read_stock_context(
         session_phase=market_calendar_status.get("phase"),
         current_session_date=market_calendar_status.get("date"),
         is_trading_day=market_calendar_status.get("is_trading_day"),
-        live_quote_requested=include_intraday,
+        live_quote_requested=quote_requested,
     )
     quote["market_status"] = market_status_from_session(market_calendar_status)
     quote["timezone"] = market_calendar_status.get("timezone") or "Asia/Taipei"

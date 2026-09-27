@@ -918,6 +918,11 @@ def run_tw_stock_tool_session(
         force_selected_capabilities=force_selected_capabilities,
         trade_date=trade_date,
     )
+    for step in plan.get("tool_plan") or []:
+        if step.get("tool") == "tw.refresh_intraday_bars":
+            step.setdefault("args", {})["policy"] = (
+                (policy.get("query_plan") or {}).get("realtime_policy") or "prefer_live"
+            )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(
         db=db,
