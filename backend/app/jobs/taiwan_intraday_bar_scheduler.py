@@ -1,409 +1,132 @@
+"""Selection and cadence only; canonical JobRun owns every fetch/repair."""
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 import logging
-from threading import Lock
 from typing import Any, Callable
 
 from app.config import settings
+from app.db.models import JobRun
 from app.db.session import SessionLocal
-from app.market.trading_calendar import (
-    TAIWAN_TZ,
-    is_taiwan_trading_day,
-    taiwan_market_session_phase,
+from app.jobs.taiwan_intraday_demand import (
+    JOB_TYPE, PREFIX, _reread, dispatch_due_materializations,
+    enqueue_intraday_materialization_demand, materialization_request,
 )
-from app.market.tw_intraday_capabilities import (
-    NSTOCK_INTRADAY_DESCRIPTOR,
-    YAHOO_INTRADAY_DESCRIPTOR,
-)
-from app.market.tw_intraday_universe import (
-    resolve_taiwan_intraday_target_universe,
-    resolve_taiwan_tier_a_target_plan,
-)
-from app.market.tw_intraday_platform import (
-    project_taiwan_intraday_bars,
-    read_taiwan_intraday_bars,
-    refresh_taiwan_intraday_bars,
-)
-
+from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day, taiwan_market_session_phase
+from app.market.tw_intraday_universe import resolve_taiwan_intraday_target_universe, resolve_taiwan_tier_a_target_plan
+from app.jobs.taiwan_intraday_repair import audit_completed_sessions, checkpoint, save_checkpoint
 
 logger = logging.getLogger(__name__)
-
 TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES = (25, 30, 33)
 TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND = 5
 TAIWAN_INTRADAY_CLOSE_TAIL_COOLDOWN_SECONDS = 120
-TAIWAN_INTRADAY_CLOSE_TAIL_DESCRIPTORS = (
-    NSTOCK_INTRADAY_DESCRIPTOR,
-    YAHOO_INTRADAY_DESCRIPTOR,
-)
-_close_tail_attempts: dict[tuple[str, str], datetime] = {}
-_close_tail_attempts_lock = Lock()
+BACKGROUND_ORIGINS = {"scheduler", "close_tail", "completed_session_repair"}
 
 
-def _inside_close_tail_window(local_now: datetime) -> bool:
-    clock = local_now.timetz().replace(tzinfo=None)
-    return time(13, 25) <= clock < time(13, 35)
+def _background_slots(db) -> int:
+    active = db.query(JobRun).filter(JobRun.job_type == JOB_TYPE,
+        JobRun.target.like(PREFIX + "%"), JobRun.status.in_(("queued", "running"))).all()
+    count = sum((materialization_request(job) or {}).get("consumer") in BACKGROUND_ORIGINS for job in active)
+    return max(0, min(2, max(1, settings.job_worker_max_concurrency - 1)) - count)
 
 
-def _claim_close_tail_attempt(
-    *,
-    stock_id: str,
-    local_now: datetime,
-    attempt_registry: dict[tuple[str, str], datetime] | None = None,
-) -> tuple[bool, datetime | None]:
-    registry = attempt_registry if attempt_registry is not None else _close_tail_attempts
-    key = (local_now.date().isoformat(), stock_id)
-
-    def claim() -> tuple[bool, datetime | None]:
-        for stale_key in tuple(registry):
-            if stale_key[0] != key[0]:
-                registry.pop(stale_key, None)
-        last_attempt = registry.get(key)
-        retry_at = (
-            last_attempt + timedelta(seconds=TAIWAN_INTRADAY_CLOSE_TAIL_COOLDOWN_SECONDS)
-            if last_attempt is not None
-            else None
-        )
-        if retry_at is not None and local_now < retry_at:
-            return False, retry_at
-        registry[key] = local_now
-        return True, None
-
-    if attempt_registry is not None:
-        return claim()
-    with _close_tail_attempts_lock:
-        return claim()
+def _checkpoint(db, target):
+    return checkpoint(db, target)
 
 
-def _close_tail_postcondition(
-    db: Any,
-    result: Any,
-    *,
-    projector: Callable[..., Any],
-) -> dict[str, Any]:
-    points, metadata = projector(db, result)
-    coverage = dict(metadata.get("series_coverage") or {})
-    complete = bool(
-        coverage.get("status") == "complete_session"
-        and coverage.get("continuous_session_covered") is True
-        and int(coverage.get("gap_count") or 0) == 0
-    )
-    return {
-        "complete": complete,
-        "coverage_status": coverage.get("status") or "missing",
-        "gap_count": int(coverage.get("gap_count") or 0),
-        "observed_bar_count": int(coverage.get("observed_bar_count") or len(points)),
-        "first_bar_at": coverage.get("first_bar_at"),
-        "last_bar_at": coverage.get("last_bar_at"),
-        "provider": metadata.get("provider"),
-        "source": metadata.get("source"),
-        "limitations": list(metadata.get("limitations") or []),
-    }
+def _submit_batch(db, symbols, *, now, origin, enqueuer):
+    results = []
+    slots = _background_slots(db)
+    row, state = _checkpoint(db, f"tw-cadence:{origin}:{now.date()}")
+    cursor = int(state.get("cursor", 0)) % max(len(symbols), 1)
+    for symbol in symbols[cursor:] + symbols[:cursor]:
+        if slots <= 0:
+            break
+        try:
+            job, created = enqueuer(db, stock_id=symbol, requested_at=now,
+                trade_date=now.date().isoformat(), consumer=origin,
+                timeout_seconds=120, max_external_calls=2)
+            if job is not None:
+                results.append({"stock_id": symbol, "job_id": job.id, "status": job.status, "created": created})
+                if job.status in {"queued", "running"}:
+                    slots -= 1
+        except (ValueError, RuntimeError) as exc:
+            db.rollback()
+            logger.warning("Taiwan admission failed %s: %s", symbol, type(exc).__name__)
+            results.append({"stock_id": symbol, "status": "failed", "reason": str(exc)})
+        cursor += 1
+    state["cursor"] = cursor % max(len(symbols), 1)
+    save_checkpoint(db, row, state, now)
+    return results
 
 
-def collect_taiwan_intraday_bars(
-    *,
-    now: datetime | None = None,
-    session_factory: Callable[[], Any] = SessionLocal,
-    universe_resolver: Callable[[Any], dict[str, Any]] = (
-        resolve_taiwan_intraday_target_universe
-    ),
-    refresher: Callable[..., Any] = refresh_taiwan_intraday_bars,
-) -> dict[str, Any]:
-    """Materialize bounded Tier-A Taiwan intraday bars outside read paths."""
-
-    local_now = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
-    phase = taiwan_market_session_phase(local_now)
-    if not is_taiwan_trading_day(local_now.date()) or phase not in {
-        "regular",
-        "closing_auction",
-    }:
-        return {
-            "status": "skipped",
-            "reason": "outside_taiwan_intraday_acquisition_window",
-            "phase": phase,
-            "requested_count": 0,
-            "refreshed_count": 0,
-            "failed_count": 0,
-            "results": [],
-        }
-
-    db = session_factory()
-    try:
+def collect_taiwan_intraday_bars(*, now: datetime | None = None,
+    session_factory: Callable = SessionLocal,
+    universe_resolver: Callable = resolve_taiwan_intraday_target_universe,
+    enqueuer: Callable = enqueue_intraday_materialization_demand) -> dict:
+    local = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
+    phase = taiwan_market_session_phase(local)
+    if not is_taiwan_trading_day(local.date()) or phase not in {"regular", "closing_auction"}:
+        return {"status": "skipped", "reason": "outside_taiwan_intraday_acquisition_window",
+                "phase": phase, "requested_count": 0, "refreshed_count": 0, "results": []}
+    with session_factory() as db:
+        dispatch_due_materializations(db, requested_at=local)
         universe = universe_resolver(db)
-        symbols = [
-            str(symbol).strip().upper()
-            for symbol in universe.get("symbols") or []
-            if str(symbol).strip()
-        ]
-        results: list[dict[str, Any]] = []
-        for symbol in symbols:
-            try:
-                resolved = refresher(
-                    db,
-                    stock_id=symbol,
-                    interval="1m",
-                    range_value="1d",
-                    requested_at=local_now,
-                )
-                results.append(
-                    {
-                        "stock_id": symbol,
-                        "status": "success",
-                        "resolved_status": resolved.resolved.health.status.value,
-                        "bar_count": len(resolved.resolved.bars),
-                    }
-                )
-            except Exception as exc:
-                db.rollback()
-                logger.warning(
-                    "Taiwan intraday bar refresh failed stock_id=%s: %s",
-                    symbol,
-                    exc,
-                )
-                results.append(
-                    {
-                        "stock_id": symbol,
-                        "status": "failed",
-                        "error_type": type(exc).__name__,
-                    }
-                )
-        refreshed_count = sum(item["status"] == "success" for item in results)
-        failed_count = len(results) - refreshed_count
-        return {
-            "status": (
-                "success"
-                if results and failed_count == 0
-                else "partial"
-                if results
-                else "skipped"
-            ),
-            "reason": None if results else "no_tier_a_symbols",
-            "phase": phase,
-            "requested_count": len(symbols),
-            "eligible_count": int(universe.get("eligible_count") or 0),
-            "selected_count": int(universe.get("selected_count") or len(symbols)),
-            "skipped_count": int(universe.get("skipped_count") or 0),
-            "refreshed_count": refreshed_count,
-            "failed_count": failed_count,
-            "universe": universe,
-            "results": results,
-        }
-    finally:
-        db.close()
+        symbols = list(dict.fromkeys(universe.get("symbols") or []))[:settings.scheduler_taiwan_intraday_bar_max_symbols]
+        results = _submit_batch(db, symbols, now=local, origin="scheduler", enqueuer=enqueuer)
+        return {"status": "pending" if results else "skipped", "phase": phase,
+                "requested_count": len(symbols), "submitted_count": len(results),
+                "refreshed_count": 0, "universe": universe, "results": results}
 
 
-def reconcile_taiwan_intraday_close_tails(
-    *,
-    now: datetime | None = None,
-    session_factory: Callable[[], Any] = SessionLocal,
-    universe_resolver: Callable[..., dict[str, Any]] | None = None,
-    reader: Callable[..., Any] = read_taiwan_intraday_bars,
-    refresher: Callable[..., Any] = refresh_taiwan_intraday_bars,
-    projector: Callable[..., Any] = project_taiwan_intraday_bars,
-    attempt_registry: dict[tuple[str, str], datetime] | None = None,
-) -> dict[str, Any]:
-    """Reconcile a bounded Tier-A regular-session tail outside every GET path."""
+def reconcile_taiwan_intraday_close_tails(*, now: datetime | None = None,
+    session_factory: Callable = SessionLocal, universe_resolver: Callable | None = None,
+    enqueuer: Callable = enqueue_intraday_materialization_demand) -> dict:
+    local = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
+    if not is_taiwan_trading_day(local.date()) or not time(13, 25) <= local.time().replace(tzinfo=None) < time(13, 35):
+        return {"status": "skipped", "reason": "outside_taiwan_intraday_close_tail_window", "results": []}
+    with session_factory() as db:
+        dispatch_due_materializations(db, requested_at=local)
+        resolver = universe_resolver or resolve_taiwan_tier_a_target_plan
+        universe = resolver(db, max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
+            **({"operation_profile": "production_session_close"} if universe_resolver is None else {}))
+        symbols = list(dict.fromkeys(universe.get("symbols") or []))[:settings.scheduler_taiwan_intraday_close_tail_max_symbols]
+        results = _submit_batch(db, symbols, now=local, origin="close_tail", enqueuer=enqueuer)
+        return {"status": "pending" if results else "skipped", "trade_date": local.date().isoformat(),
+                "requested_count": len(symbols), "submitted_count": len(results), "results": results}
 
-    local_now = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
-    if not is_taiwan_trading_day(local_now.date()) or not _inside_close_tail_window(
-        local_now
-    ):
-        return {
-            "status": "skipped",
-            "reason": "outside_taiwan_intraday_close_tail_window",
-            "trade_date": local_now.date().isoformat(),
-            "requested_count": 0,
-            "complete_count": 0,
-            "partial_count": 0,
-            "failed_count": 0,
-            "cooldown_count": 0,
-            "refresh_attempt_count": 0,
-            "results": [],
-        }
 
-    db = session_factory()
-    try:
-        if universe_resolver is None:
-            universe = resolve_taiwan_tier_a_target_plan(
-                db,
-                operation_profile="production_session_close",
-                max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
-            )
-        else:
-            universe = universe_resolver(
-                db,
-                max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
-            )
-        symbols = list(
-            dict.fromkeys(
-                str(symbol).strip().upper()
-                for symbol in universe.get("symbols") or []
-                if str(symbol).strip()
-            )
-        )[: settings.scheduler_taiwan_intraday_bar_max_symbols]
-        results: list[dict[str, Any]] = []
-        for stock_id in symbols:
-            try:
-                cached = reader(
-                    db,
-                    stock_id=stock_id,
-                    interval="1m",
-                    range_value="1d",
-                    requested_at=local_now,
-                )
-                before = _close_tail_postcondition(
-                    db,
-                    cached,
-                    projector=projector,
-                )
-                if before["complete"]:
-                    results.append(
-                        {
-                            "stock_id": stock_id,
-                            "status": "already_complete",
-                            "refresh_attempted": False,
-                            "before": before,
-                            "after": before,
-                        }
-                    )
-                    continue
+def audit_completed_taiwan_intraday_coverage(*, now: datetime | None = None,
+    session_factory: Callable = SessionLocal,
+    enqueuer: Callable = enqueue_intraday_materialization_demand) -> dict:
+    """Freeze/audit normal ingestion, then resume only residual recovery."""
+    local = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
+    with session_factory() as db:
+        dispatch_due_materializations(db, requested_at=local)
+        return audit_completed_sessions(db, now=local, reread=_reread,
+            enqueuer=enqueuer, background_slots=_background_slots)
 
-                claimed, retry_at = _claim_close_tail_attempt(
-                    stock_id=stock_id,
-                    local_now=local_now,
-                    attempt_registry=attempt_registry,
-                )
-                if not claimed:
-                    results.append(
-                        {
-                            "stock_id": stock_id,
-                            "status": "cooldown",
-                            "refresh_attempted": False,
-                            "retry_at": retry_at,
-                            "before": before,
-                            "after": before,
-                        }
-                    )
-                    continue
 
-                refresher(
-                    db,
-                    stock_id=stock_id,
-                    interval="1m",
-                    range_value="1d",
-                    requested_at=local_now,
-                    descriptors=TAIWAN_INTRADAY_CLOSE_TAIL_DESCRIPTORS,
-                )
-                refreshed = reader(
-                    db,
-                    stock_id=stock_id,
-                    interval="1m",
-                    range_value="1d",
-                    requested_at=local_now,
-                    bypass_snapshot_cache=True,
-                )
-                after = _close_tail_postcondition(
-                    db,
-                    refreshed,
-                    projector=projector,
-                )
-                results.append(
-                    {
-                        "stock_id": stock_id,
-                        "status": "reconciled" if after["complete"] else "partial",
-                        "refresh_attempted": True,
-                        "before": before,
-                        "after": after,
-                    }
-                )
-            except Exception as exc:
-                db.rollback()
-                logger.warning(
-                    "Taiwan intraday close-tail reconciliation failed stock_id=%s: %s",
-                    stock_id,
-                    exc,
-                )
-                results.append(
-                    {
-                        "stock_id": stock_id,
-                        "status": "failed",
-                        "refresh_attempted": False,
-                        "error_type": type(exc).__name__,
-                    }
-                )
-
-        complete_count = sum(
-            item["status"] in {"already_complete", "reconciled"}
-            for item in results
-        )
-        partial_count = sum(item["status"] == "partial" for item in results)
-        failed_count = sum(item["status"] == "failed" for item in results)
-        cooldown_count = sum(item["status"] == "cooldown" for item in results)
-        refresh_attempt_count = sum(
-            item.get("refresh_attempted") is True for item in results
-        )
-        return {
-            "status": (
-                "success"
-                if results and complete_count == len(results)
-                else "partial"
-                if results
-                else "skipped"
-            ),
-            "reason": None if results else "no_tier_a_symbols",
-            "trade_date": local_now.date().isoformat(),
-            "requested_count": len(symbols),
-            "complete_count": complete_count,
-            "partial_count": partial_count,
-            "failed_count": failed_count,
-            "cooldown_count": cooldown_count,
-            "refresh_attempt_count": refresh_attempt_count,
-            "universe": universe,
-            "results": results,
-        }
-    finally:
-        db.close()
+def resume_taiwan_materializations() -> None:
+    with SessionLocal() as db:
+        dispatch_due_materializations(db, requested_at=datetime.now(TAIWAN_TZ))
 
 
 def add_taiwan_intraday_bar_jobs(scheduler: Any) -> bool:
     if not settings.enable_taiwan_intraday_bar_scheduler:
         return False
-    interval_seconds = max(
-        int(settings.scheduler_taiwan_intraday_bar_interval_seconds),
-        60,
-    )
-    scheduler.add_job(
-        collect_taiwan_intraday_bars,
-        trigger="interval",
-        seconds=interval_seconds,
-        id="taiwan_intraday_bar_materialization",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-        next_run_time=datetime.now(TAIWAN_TZ) + timedelta(seconds=10),
-    )
+    interval = max(int(settings.scheduler_taiwan_intraday_bar_interval_seconds), 60)
+    for function, job_id, seconds in (
+        (collect_taiwan_intraday_bars, "taiwan_intraday_bar_materialization", interval),
+        (audit_completed_taiwan_intraday_coverage, "taiwan_intraday_completed_coverage",
+         settings.scheduler_taiwan_completed_materialization_interval_seconds),
+        (resume_taiwan_materializations, "taiwan_intraday_materialization_retry", 15),
+    ):
+        scheduler.add_job(function, trigger="interval", seconds=seconds, id=job_id,
+            replace_existing=True, coalesce=True, max_instances=1,
+            next_run_time=datetime.now(TAIWAN_TZ) + timedelta(seconds=10))
     for minute in TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES:
-        scheduler.add_job(
-            reconcile_taiwan_intraday_close_tails,
-            trigger="cron",
-            day_of_week="mon-fri",
-            hour=13,
-            minute=minute,
-            second=TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND,
-            id=f"taiwan_intraday_close_tail_13{minute:02d}",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
+        scheduler.add_job(reconcile_taiwan_intraday_close_tails, trigger="cron", day_of_week="mon-fri",
+            hour=13, minute=minute, second=TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND,
+            id=f"taiwan_intraday_close_tail_13{minute:02d}", replace_existing=True, coalesce=True, max_instances=1)
     return True
-
-
-__all__ = [
-    "TAIWAN_INTRADAY_CLOSE_TAIL_COOLDOWN_SECONDS",
-    "TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES",
-    "TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND",
-    "add_taiwan_intraday_bar_jobs",
-    "collect_taiwan_intraday_bars",
-    "reconcile_taiwan_intraday_close_tails",
-]

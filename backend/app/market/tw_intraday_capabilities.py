@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.market_data.contracts import AuthorityClass, InstrumentType, Market
+from app.market_data.contracts import AuthorityClass, InstrumentType, Market, MarketSession
 from app.market_data.provider_catalog import (
     AcquisitionMode,
     DescriptorTargetKind,
@@ -51,6 +51,8 @@ NSTOCK_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     market=Market.TW,
     capability_id=TW_INTRADAY_BARS_CAPABILITY_ID,
     resource_id=NSTOCK_INTRADAY_RESOURCE_ID,
+    supported_sessions=(MarketSession.CONTINUOUS, MarketSession.CLOSING_AUCTION,
+                        MarketSession.CLOSE_RESOLUTION, MarketSession.POST_CLOSE, MarketSession.CLOSED),
     authority=AuthorityClass.VENDOR,
     target_kinds=(DescriptorTargetKind.INSTRUMENT,),
     venue_scope=("TWSE", "TPEX"),
@@ -64,6 +66,9 @@ NSTOCK_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     max_external_calls_per_attempt=1,
     max_symbols_per_call=1,
     max_range_days=1,
+    # The date-stamped current-day response remains usable after the close.
+    # This is not arbitrary-date history; the catalog rejects every older date.
+    supports_current_date_window=True,
     health_ttl_seconds=60,
     allow_unknown_health=True,
     limitations=("CURRENT_SESSION_ONLY", "VENDOR_BEST_EFFORT"),
@@ -148,6 +153,9 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     max_external_calls_per_attempt=1,
     max_symbols_per_call=1,
     max_range_days=5,
+    supports_dated_queries=True,
+    # Deliberately bounded operational reach; never a vendor retention SLA.
+    max_lookback_days=5,
     health_ttl_seconds=300,
     allow_unknown_health=True,
     limitations=(

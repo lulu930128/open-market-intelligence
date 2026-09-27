@@ -316,12 +316,12 @@ DATASET_REGISTRY = DatasetRegistry(
             refreshable=True,
             refresh_operation="tw.refresh_intraday_bars",
             refresh_bounds=RefreshBounds(
-                max_calls=2,
-                timeout_seconds=40,
+                max_calls=6,
+                timeout_seconds=120,
                 max_symbols=1,
-                max_range_days=93,
+                max_range_days=1,
             ),
-            postcondition="Persist canonical bar receipts, reread, and return bounded resolved bars or a truthful unavailable/partial state.",
+            postcondition="Materialize through the single-stock/date JobRun, then validate exact-date canonical coverage; return truthful partial, pending or unavailable when the goal is not satisfied.",
             repairable=True,
         ),
         DatasetSpec(

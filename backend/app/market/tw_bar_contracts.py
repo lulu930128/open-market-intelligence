@@ -207,7 +207,9 @@ class TaiwanCurrentSessionCoverage(CanonicalModel):
     observed_bucket_count: int = Field(ge=0, le=500)
     missing_bucket_count: int = Field(ge=0, le=500)
     missing_ranges: tuple[TaiwanMissingBarRange, ...] = Field(
-        default=(), max_length=32
+        # A thinly traded session can alternate observed and missing buckets.
+        # Keep every gap representable within the existing 500-bucket bound.
+        default=(), max_length=500
     )
     repair_recommended: bool = False
     repair_operation_id: str | None = Field(default=None, max_length=128)

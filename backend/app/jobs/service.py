@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 import json
 import logging
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Any
 
 from sqlalchemy import inspect as sa_inspect
@@ -80,6 +80,12 @@ FAILED_RESULT_ITEM_LIMIT = 4
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = Lock()
+_materialization_executors: dict[str, ThreadPoolExecutor] = {}
+_materialization_slots = {
+    "market_interactive": BoundedSemaphore(8),
+    "market_background": BoundedSemaphore(2),
+    "market_completed": BoundedSemaphore(settings.taiwan_completed_materialization_concurrency),
+}
 _enqueue_lock = Lock()
 
 
@@ -508,8 +514,30 @@ def _log_unhandled_task_exception(future) -> None:
         )
 
 
-def submit_job_task(task: JobTask, job_id: int, *task_args: Any) -> None:
-    future = _get_executor().submit(task, job_id, *task_args)
+def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
+                    execution_lane: str = "default") -> None:
+    if execution_lane == "default":
+        future = _get_executor().submit(task, job_id, *task_args)
+    else:
+        # Reserve one worker for interactive materialization and one for its
+        # bounded background producer. Long general jobs cannot starve either.
+        slots = _materialization_slots.get(execution_lane)
+        if slots is None:
+            raise ValueError("Unknown job execution lane")
+        if not slots.acquire(blocking=False):
+            raise RuntimeError("MARKET_MATERIALIZATION_QUEUE_FULL")
+        try:
+            with _executor_lock:
+                executor = _materialization_executors.get(execution_lane)
+                if executor is None:
+                    workers = settings.taiwan_completed_materialization_concurrency if execution_lane == "market_completed" else 1
+                    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"omi-{execution_lane}")
+                    _materialization_executors[execution_lane] = executor
+            future = executor.submit(task, job_id, *task_args)
+        except Exception:
+            slots.release()
+            raise
+        future.add_done_callback(lambda completed: slots.release())
     future.add_done_callback(_log_unhandled_task_exception)
 
 
@@ -575,9 +603,13 @@ def shutdown_job_executor(wait: bool = False) -> None:
     with _executor_lock:
         executor = _executor
         _executor = None
+        materialization_executors = list(_materialization_executors.values())
+        _materialization_executors.clear()
 
     if executor is not None:
         executor.shutdown(wait=wait, cancel_futures=not wait)
+    for materialization_executor in materialization_executors:
+        materialization_executor.shutdown(wait=wait, cancel_futures=not wait)
 
 
 def mark_interrupted_jobs(db: Session) -> int:

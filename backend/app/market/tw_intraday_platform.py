@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.models import StockMaster
 from app.market.intraday_repository import TaiwanIntradayBarRepository
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
-from app.market.trading_calendar import taiwan_presentation_session
+from app.market.trading_calendar import taiwan_presentation_session, is_taiwan_trading_day, taiwan_market_session
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead
 from app.market.tw_instrument import (
     normalize_taiwan_instrument_id,
@@ -35,8 +35,10 @@ from app.market_data.contracts import (
 from app.market_data.gateway import MarketDataGateway
 from app.market_data.integration_contracts import (
     BarCapabilityRequest,
+    BarCoverageRequirement,
     DataRequirementV2,
     FreshnessRequirement,
+    FreshnessBasis,
     InstrumentTarget,
     MarketDataResultV1,
     QualityRequirement,
@@ -78,6 +80,11 @@ class TaiwanIntradayBootstrapSymbolResult(CanonicalModel):
     raw_result_ids: tuple[int, ...] = ()
     warnings: tuple[str, ...] = ()
     failure_reason: str | None = None
+    target_trade_date: date | None = None
+    canonical_reread_trade_date: date | None = None
+    coverage_status: str = "missing"
+    series_revision: str | None = None
+    postcondition_met: bool = False
 
 
 class TaiwanIntradayBootstrapResult(CanonicalModel):
@@ -137,7 +144,12 @@ def bootstrap_taiwan_intraday_bars(
         configured_symbols=(requested_symbols if requested_symbols else None),
     )
     planned_symbols = tuple(str(value) for value in plan.get("symbols") or ())
-    effective_refresher = refresher or refresh_taiwan_intraday_bars
+    # Private fixture/migration seam. Production commands must use the JobRun
+    # owner; this helper cannot start a second untracked acquisition path.
+    if refresher is None:
+        raise ValueError("TW_INTRADAY_MATERIALIZATION_COMMAND_REQUIRED")
+    effective_refresher = refresher
+    target_date = taiwan_presentation_session(now)["trade_date"]
     results: list[TaiwanIntradayBootstrapSymbolResult] = []
     rejected_count = 0
     observed_dates: set[date] = set()
@@ -148,8 +160,9 @@ def bootstrap_taiwan_intraday_bars(
                 db,
                 stock_id=symbol,
                 interval="1m",
-                range_value="5d",
+                range_value="1d",
                 requested_at=now,
+                target_trade_date=target_date,
             )
             persistence = result.persistence
             rejected_count += len(result.candidate_rejections)
@@ -170,9 +183,15 @@ def bootstrap_taiwan_intraday_bars(
                     )
                 )
             )
+            from app.market.tw_bar_service import TaiwanBarService
+            canonical = TaiwanBarService(db).read_bars(instrument_id=symbol, interval="1m",
+                from_time=datetime.combine(target_date, time(9), tzinfo=TAIPEI_TZ),
+                to_time=datetime.combine(target_date, time(13, 30), tzinfo=TAIPEI_TZ), requested_at=now)
+            manifest = next((item for item in canonical.session_resolution if item.trade_date == target_date), None)
+            postcondition_met = bool(manifest and canonical.bars and manifest.coverage_status.value == "ready")
             status: Literal["success", "partial", "failed", "skipped"] = (
                 "success"
-                if bars and not result.candidate_rejections
+                if postcondition_met
                 else "partial"
                 if bars or persistence.committed
                 else "failed"
@@ -181,6 +200,11 @@ def bootstrap_taiwan_intraday_bars(
                 TaiwanIntradayBootstrapSymbolResult(
                     symbol=symbol,
                     status=status,
+                    target_trade_date=target_date,
+                    canonical_reread_trade_date=manifest.trade_date if manifest else None,
+                    coverage_status=manifest.coverage_status.value if manifest else "missing",
+                    series_revision=canonical.identity.series_revision,
+                    postcondition_met=postcondition_met,
                     requested_from=result.requirement.request.start_at,
                     requested_to=result.requirement.request.end_at,
                     bar_count=len(bars),
@@ -275,13 +299,31 @@ def build_taiwan_intraday_requirement(
     policy: RealtimePolicy,
     requested_at: datetime,
     acquiring: bool,
+    target_trade_date: date | None = None,
+    desired_coverage_end_at: datetime | None = None,
 ) -> DataRequirementV2:
     if requested_at.tzinfo is None or requested_at.utcoffset() is None:
         raise ValueError("requested_at must be timezone-aware")
     config = intraday_history_config(interval, range_value)
     days = int(config["days"])
     local_requested_at = requested_at.astimezone(TAIPEI_TZ)
-    if days == 1:
+    completed = False
+    if target_trade_date is not None:
+        if not is_taiwan_trading_day(target_trade_date) or target_trade_date > local_requested_at.date():
+            raise ValueError("TW_INTRADAY_INVALID_TRADE_DATE")
+        start_at = datetime.combine(target_trade_date, time(9), tzinfo=TAIPEI_TZ)
+        session_end = datetime.combine(target_trade_date, time(13, 30), tzinfo=TAIPEI_TZ)
+        completed = local_requested_at >= session_end
+        end_at = min(session_end, local_requested_at.replace(second=0, microsecond=0))
+        if desired_coverage_end_at is not None:
+            if desired_coverage_end_at.tzinfo is None:
+                raise ValueError("coverage end must be timezone-aware")
+            end_at = min(end_at, desired_coverage_end_at.astimezone(TAIPEI_TZ))
+        if end_at <= start_at:
+            raise ValueError("TW_INTRADAY_NO_COMPLETED_MINUTE")
+        if completed and policy is RealtimePolicy.REQUIRE_LIVE:
+            raise ValueError("TW_INTRADAY_COMPLETED_SESSION_NOT_LIVE")
+    elif days == 1:
         presentation_trade_date = taiwan_presentation_session(
             local_requested_at
         )["trade_date"]
@@ -294,6 +336,8 @@ def build_taiwan_intraday_requirement(
         )
     else:
         start_at = local_requested_at - timedelta(days=days)
+    if target_trade_date is None:
+        end_at = local_requested_at
     if start_at >= local_requested_at:
         start_at = local_requested_at - timedelta(days=1)
     bounds = RequestBounds(
@@ -310,16 +354,20 @@ def build_taiwan_intraday_requirement(
             capability_id=TW_INTRADAY_BARS_CAPABILITY_ID,
             interval=interval,
             start_at=start_at,
-            end_at=local_requested_at,
+            end_at=end_at,
             max_bars=5000,
-            completed_only=False,
+            completed_only=completed,
+            acquisition_window="dated" if completed else "relative",
             price_basis="provider_default",
         ),
         purpose=DataPurpose.REPAIR if acquiring else DataPurpose.VIEWER,
         realtime_policy=policy,
-        session=MarketSession.UNKNOWN,
+        session=MarketSession.CLOSED if completed else taiwan_market_session(requested_at),
         requested_at=requested_at,
-        freshness=FreshnessRequirement(max_age_seconds=300 if not acquiring else 1),
+        freshness=FreshnessRequirement(
+            max_age_seconds=2_678_400 if completed else 300 if not acquiring else 1,
+            basis=FreshnessBasis.COMPLETED_SESSION_DATE if completed else FreshnessBasis.WALL_CLOCK,
+        ),
         quality=QualityRequirement(
             require_canonical_lineage=True,
             allow_partial=False,
@@ -370,6 +418,8 @@ def refresh_taiwan_intraday_bars(
     descriptors: Iterable[ProviderCapabilityDescriptorV2] = TW_INTRADAY_DESCRIPTORS,
     acquisition: TaiwanIntradayAcquisitionExecutor | None = None,
     acquisition_bounds: RequestBounds | None = None,
+    target_trade_date: date | None = None,
+    desired_coverage_end_at: datetime | None = None,
 ) -> MarketDataResultV1:
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("intraday refresh requires prefer_live or require_live")
@@ -382,8 +432,22 @@ def refresh_taiwan_intraday_bars(
         policy=policy,
         requested_at=now,
         acquiring=True,
+        target_trade_date=target_trade_date,
+        desired_coverage_end_at=desired_coverage_end_at,
     )
     catalog = tuple(descriptors)
+    if target_trade_date is not None:
+        from app.market.tw_bar_aggregation import continuous_session_coverage
+        from app.market.tw_disposition import get_taiwan_disposition_status
+        from app.market.tw_instrument_trading_policy import TAIWAN_TRADING_POLICY_VERSION, resolve_taiwan_instrument_trading_policy
+        trading_policy = resolve_taiwan_instrument_trading_policy(get_taiwan_disposition_status(
+            instrument.symbol, market=instrument.venue, now=now, trade_date=target_trade_date))
+        expected = continuous_session_coverage((), trade_date=target_trade_date,
+            trading_policy_version=TAIWAN_TRADING_POLICY_VERSION, trading_policy=trading_policy, as_of=now)
+        minimum = max(1, sum(item.expected_by_trading_policy and item.bucket_end <= requirement.request.end_at
+                             for item in expected))
+        requirement = requirement.model_copy(update={"request": requirement.request.model_copy(update={
+            "coverage": BarCoverageRequirement(minimum_bar_count=minimum)})})
     if acquisition_bounds is not None:
         if (
             acquisition_bounds.max_subscriptions != 0
@@ -404,6 +468,18 @@ def refresh_taiwan_intraday_bars(
         transaction_port=TaiwanIntradayBarTransaction(db),
         route_resolution_gate=True,
     )
+
+
+def completed_taiwan_intraday_repair_eligibility(trade_date: str, *, now: datetime) -> dict[str, object]:
+    """Market-owned repair reach, independent of live quote availability."""
+    target = date.fromisoformat(trade_date)
+    local = now.astimezone(TAIPEI_TZ)
+    completed = local >= datetime.combine(target, time(13, 30), tzinfo=TAIPEI_TZ)
+    reach = max((item.max_lookback_days or 0 for item in TW_INTRADAY_DESCRIPTORS
+                 if item.supports_dated_queries), default=0)
+    eligible = completed and is_taiwan_trading_day(target) and 0 <= (local.date() - target).days <= reach
+    return {"completed": completed, "eligible": eligible,
+            "reason_code": "TW_COMPLETED_SESSION_REPAIR_ELIGIBLE" if eligible else "TW_COMPLETED_SESSION_REPAIR_UNAVAILABLE"}
 
 
 def _quantity_shares(bar: BarObservation) -> int | None:

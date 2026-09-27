@@ -418,9 +418,10 @@ def test_explicit_intraday_bootstrap_is_bounded_and_idempotent() -> None:
             refresher=refresher,
         )
 
-        assert first.status == "success"
+        assert first.status == "partial"
+        assert first.per_symbol[0].postcondition_met is False
         assert first.planned_symbols == ("2330",)
-        assert first.receipts_written == first.per_symbol[0].receipts_written == 1
+        assert first.receipts_written == first.per_symbol[0].receipts_written == 2
         assert first.bars_written > 0
         assert second.bars_written == 0
         assert second.bars_unchanged > 0

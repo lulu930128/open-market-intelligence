@@ -348,6 +348,10 @@ def intraday_materialization_policy() -> dict[str, object]:
         "read_policy": "cache_only",
         "live_guaranteed": False,
         "live_eligibility_basis": "canonical_current_session_coverage",
+        "completed_session_audit_scope": "active_stock_and_etf_universe",
+        "completed_session_repair_max_symbols_per_window": settings.scheduler_taiwan_intraday_repair_max_symbols_per_window,
+        "completed_session_repair_window_seconds": settings.scheduler_taiwan_intraday_repair_window_seconds,
+        "completed_session_audit_interval_seconds": settings.scheduler_taiwan_intraday_repair_interval_seconds,
     }
 
 

@@ -101,6 +101,10 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return run_stock_master_bootstrap_job, (True,), request
 
     if job_type == TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE:
+        if str(job.target or "").startswith(("tw-demand:", "tw-cadence:",
+                "tw-coverage-audit:", "tw-coverage-repair-cursor")):
+            raise ValueError("Taiwan materialization/state jobs cannot use generic retry; "
+                             "submit an explicit exact-date materialization command.")
         symbols = tuple(_parse_string_list(request.get("symbols")))
         return (
             run_taiwan_intraday_bar_bootstrap_job,

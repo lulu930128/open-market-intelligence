@@ -203,6 +203,15 @@ class Settings(BaseSettings):
     scheduler_taiwan_quote_contract_symbols: str = "2330"
     scheduler_taiwan_quote_contract_max_symbols: int = 3
     enable_taiwan_intraday_bar_scheduler: bool = True
+    taiwan_completed_materialization_concurrency: int = Field(default=3, ge=1, le=4)
+    scheduler_taiwan_completed_materialization_batch_size: int = Field(default=16, ge=1, le=64)
+    scheduler_taiwan_completed_materialization_interval_seconds: int = Field(default=15, ge=15)
+    scheduler_taiwan_intraday_repair_max_symbols_per_window: int = Field(
+        default=10, ge=0, le=100,
+        description="Maximum residual repair admissions per time window, across target dates and restarts.",
+    )
+    scheduler_taiwan_intraday_repair_window_seconds: int = Field(default=300, ge=60)
+    scheduler_taiwan_intraday_repair_interval_seconds: int = Field(default=60, ge=60)
     scheduler_taiwan_intraday_bar_interval_seconds: int = 300
     scheduler_taiwan_intraday_bar_max_symbols: int = Field(
         default=32,

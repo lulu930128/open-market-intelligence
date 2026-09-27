@@ -85,6 +85,9 @@ class ProviderCapabilityDescriptorV2(CanonicalModel):
     max_subscriptions_per_attempt: int = Field(default=0, ge=0, le=8)
     max_symbols_per_call: int = Field(default=1, ge=1, le=5_000)
     max_range_days: int = Field(default=1, ge=1, le=3650)
+    supports_dated_queries: bool = False
+    supports_current_date_window: bool = False
+    max_lookback_days: int | None = Field(default=None, ge=0, le=3650)
     health_ttl_seconds: int = Field(default=300, ge=1, le=86_400)
     allow_unknown_health: bool = False
     allow_disconnected_connect: bool = False
@@ -405,6 +408,21 @@ def _descriptor_skip_reason(
         if isinstance(requirement.request, BarCapabilityRequest):
             if descriptor.intervals and requirement.request.interval not in descriptor.intervals:
                 return "INTERVAL_NOT_SUPPORTED_BY_RESOURCE"
+            if requirement.request.acquisition_window == "dated":
+                start = requirement.request.start_at
+                today = requirement.requested_at.astimezone(start.tzinfo).date()
+                same_day_window = (descriptor.supports_current_date_window
+                    and start.date() == today
+                    and requirement.request.end_at.astimezone(start.tzinfo).date() == today)
+                if AcquisitionMode.FETCH not in descriptor.acquisition_modes:
+                    return "DATED_ACQUISITION_NOT_SUPPORTED"
+                if not descriptor.supports_dated_queries and not same_day_window:
+                    return "DATED_ACQUISITION_NOT_SUPPORTED"
+                if not same_day_window and descriptor.max_lookback_days is None:
+                    return "HISTORICAL_REACH_UNKNOWN"
+                age = (today - start.date()).days
+                if age < 0 or (not same_day_window and age > descriptor.max_lookback_days):
+                    return "OUT_OF_REPAIR_HORIZON"
         if (
             requirement.realtime_policy is RealtimePolicy.REQUIRE_LIVE
             and not descriptor.can_produce_live

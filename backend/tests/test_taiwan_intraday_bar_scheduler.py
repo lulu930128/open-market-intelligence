@@ -66,209 +66,109 @@ def test_intraday_bar_scheduler_skips_outside_market_window() -> None:
     assert session_opened is False
 
 
-def test_intraday_bar_scheduler_materializes_bounded_tier_a_universe() -> None:
-    db = _FakeDb()
-    refreshed: list[str] = []
-
-    def refresher(_db, *, stock_id: str, **_kwargs):
-        refreshed.append(stock_id)
-        if stock_id == "3711":
-            raise RuntimeError("provider unavailable")
-        return SimpleNamespace(
-            resolved=SimpleNamespace(
-                health=SimpleNamespace(status=SimpleNamespace(value="selected")),
-                bars=(object(), object()),
-            )
-        )
-
-    result = collect_taiwan_intraday_bars(
-        now=datetime(2026, 8, 28, 10, 0, tzinfo=TAIWAN_TZ),
-        session_factory=lambda: db,
-        universe_resolver=lambda _db: {
-            "symbols": ["2330", "3711"],
-            "target": "configured_and_watchlist",
-        },
-        refresher=refresher,
-    )
-
-    assert refreshed == ["2330", "3711"]
-    assert result["status"] == "partial"
-    assert result["requested_count"] == 2
-    assert result["refreshed_count"] == 1
-    assert result["failed_count"] == 1
-    assert db.rollback_count == 1
-    assert db.closed is True
+def _scheduler_db():
+    from sqlalchemy.orm import sessionmaker
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return engine, sessionmaker(engine)
 
 
-def test_intraday_bar_scheduler_registers_one_coalesced_owner_job() -> None:
+def test_scheduler_submits_canonical_jobs_without_claiming_completed_evidence(monkeypatch):
+    from app.jobs import taiwan_intraday_bar_scheduler as subject
+    monkeypatch.setattr(subject.settings, "job_worker_max_concurrency", 3)
+    engine, factory = _scheduler_db()
+    seen = []
+    def enqueuer(db, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(id=len(seen), status="running"), True
+    try:
+        result = subject.collect_taiwan_intraday_bars(
+            now=datetime(2026, 9, 21, 10, 0, tzinfo=TAIWAN_TZ),
+            session_factory=factory,
+            universe_resolver=lambda db: {"symbols": ["2330", "0050", "2317"]},
+            enqueuer=enqueuer)
+        assert [item["stock_id"] for item in seen] == ["2330", "0050"]
+        assert all(item["consumer"] == "scheduler" and item["max_external_calls"] == 2 for item in seen)
+        assert result["status"] == "pending" and result["refreshed_count"] == 0
+        seen.clear()
+        subject.collect_taiwan_intraday_bars(
+            now=datetime(2026, 9, 21, 10, 5, tzinfo=TAIWAN_TZ),
+            session_factory=factory,
+            universe_resolver=lambda db: {"symbols": ["2330", "0050", "2317"]},
+            enqueuer=enqueuer)
+        assert seen[0]["stock_id"] == "2317"
+    finally:
+        engine.dispose()
+
+
+def test_intraday_bar_scheduler_registers_coalesced_command_owners():
     scheduler = _FakeScheduler()
-
-    assert add_taiwan_intraday_bar_jobs(scheduler) is True
-    assert len(scheduler.jobs) == 1 + len(TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES)
-    job = next(
-        item
-        for item in scheduler.jobs
-        if item["id"] == "taiwan_intraday_bar_materialization"
-    )
-    assert job["id"] == "taiwan_intraday_bar_materialization"
-    assert job["max_instances"] == 1
-    assert job["coalesce"] is True
-    close_tail_jobs = [
-        item
-        for item in scheduler.jobs
-        if item["id"].startswith("taiwan_intraday_close_tail_")
-    ]
-    assert [item["minute"] for item in close_tail_jobs] == list(
-        TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES
-    )
-    assert {item["second"] for item in close_tail_jobs} == {
-        TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND
-    }
-    assert all(item["coalesce"] is True for item in close_tail_jobs)
-    assert all(item["max_instances"] == 1 for item in close_tail_jobs)
+    assert add_taiwan_intraday_bar_jobs(scheduler)
+    by_id = {item["id"]: item for item in scheduler.jobs}
+    assert {"taiwan_intraday_bar_materialization", "taiwan_intraday_completed_coverage",
+            "taiwan_intraday_materialization_retry"} <= by_id.keys()
+    from app.config import settings
+    assert by_id["taiwan_intraday_bar_materialization"]["seconds"] == settings.scheduler_taiwan_intraday_bar_interval_seconds
+    assert by_id["taiwan_intraday_completed_coverage"]["seconds"] == settings.scheduler_taiwan_completed_materialization_interval_seconds
+    tails = [item for item in scheduler.jobs if item["id"].startswith("taiwan_intraday_close_tail_")]
+    assert [item["minute"] for item in tails] == list(TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES)
+    assert {item["second"] for item in tails} == {TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND}
+    assert all(item["coalesce"] and item["max_instances"] == 1 for item in scheduler.jobs)
 
 
-def _tail_projection(_db, result):
-    coverage = result["coverage"]
-    return [object()] * int(coverage.get("observed_bar_count") or 0), {
-        "series_coverage": coverage,
-        "provider": result.get("provider"),
-        "source": result.get("source"),
-        "limitations": result.get("limitations", []),
-    }
+def test_close_tail_commands_cover_post_1330_resolution_window():
+    engine, factory = _scheduler_db()
+    seen = []
+    try:
+        for minute in (25, 30, 33):
+            result = reconcile_taiwan_intraday_close_tails(
+                now=datetime(2026, 9, 21, 13, minute, 5, tzinfo=TAIWAN_TZ),
+                session_factory=factory, universe_resolver=lambda db, **kw: {"symbols": ["2330"]},
+                enqueuer=lambda db, **kw: (seen.append(kw) or SimpleNamespace(id=1, status="running"), False))
+            assert result["status"] == "pending"
+        assert len(seen) == 3
+        assert all(item["consumer"] == "close_tail" for item in seen)
+        assert all(item["trade_date"] == "2026-09-21" for item in seen)
+    finally:
+        engine.dispose()
 
 
-def test_close_tail_reconciliation_is_bounded_fetch_only_and_truthful() -> None:
-    db = _FakeDb()
-    refreshed: list[str] = []
-    seen_max_symbols: list[int] = []
-    persisted = {}
-    rereads = []
-
-    def universe_resolver(_db, *, max_symbols: int):
-        seen_max_symbols.append(max_symbols)
-        return {"symbols": ["2330", "2330", "3711"]}
-
-    def reader(_db, *, stock_id: str, **_kwargs):
-        if _kwargs.get("bypass_snapshot_cache"):
-            rereads.append(stock_id)
-            return persisted[stock_id]
-        return {
-            "coverage": {
-                "status": "partial_prefix",
-                "gap_count": 12,
-                "observed_bar_count": 252,
-                "continuous_session_covered": False,
-            }
-        }
-
-    def refresher(_db, *, stock_id: str, descriptors, **_kwargs):
-        refreshed.append(stock_id)
-        assert [item.provider_key for item in descriptors] == ["nstock", "yahoo_finance_chart"]
-        complete = stock_id == "2330"
-        persisted[stock_id] = {
-            "provider": "nstock",
-            "source": "nstock_minute_stock_data",
-            "coverage": {
-                "status": "complete_session" if complete else "sparse",
-                "gap_count": 0 if complete else 2,
-                "observed_bar_count": 265 if complete else 263,
-                "continuous_session_covered": complete,
-                "last_bar_at": "2026-08-28T13:24:00+08:00",
-            },
-        }
-        # Acquisition's transport result is deliberately not coverage evidence.
-        return {"status": "success"}
-
-    result = reconcile_taiwan_intraday_close_tails(
-        now=datetime(2026, 8, 28, 13, 25, 5, tzinfo=TAIWAN_TZ),
-        session_factory=lambda: db,
-        universe_resolver=universe_resolver,
-        reader=reader,
-        refresher=refresher,
-        projector=_tail_projection,
-        attempt_registry={},
-    )
-
-    assert seen_max_symbols == [3]
-    assert refreshed == ["2330", "3711"]
-    assert rereads == refreshed
-    assert result["status"] == "partial"
-    assert result["requested_count"] == 2
-    assert result["complete_count"] == 1
-    assert result["partial_count"] == 1
-    assert result["refresh_attempt_count"] == 2
-    assert result["results"][1]["after"]["gap_count"] == 2
-    assert db.closed is True
+def test_completed_audit_uses_normal_lane_without_repair_budget(monkeypatch):
+    from app.jobs import taiwan_intraday_bar_scheduler as subject
+    from app.jobs import taiwan_intraday_demand as demand
+    engine, factory = _scheduler_db()
+    seen = []
+    with factory() as db:
+        db.add_all([StockMaster(stock_id=str(2000+i), stock_name="fixture", market="TWSE",
+                   instrument_type="stock", is_active=True) for i in range(70)])
+        db.commit()
+    reread = lambda db, request, now: {"reread_ready": False,
+        "reread_trade_date": request["trade_date"], "current_session_bar_count": 0}
+    monkeypatch.setattr(subject, "_reread", reread)
+    monkeypatch.setattr(demand, "_reread", reread)
+    monkeypatch.setattr(demand.jobs, "submit_job_task", lambda task, job_id, **kw: seen.append(kw))
+    monkeypatch.setattr(subject.settings, "scheduler_taiwan_intraday_repair_max_symbols_per_window", 0)
+    try:
+        for _ in range(5):
+            result = subject.audit_completed_taiwan_intraday_coverage(
+                now=datetime(2026, 9, 21, 15, 0, tzinfo=TAIWAN_TZ), session_factory=factory)
+        assert result["coverage_scan_complete"] and result["audited_count"] == 70
+        assert result["pending_count"] == 67 and result["active_count"] == 3
+        assert result["pending_repair_count"] == result["active_repair_count"] == 0
+        assert result["admissions_reserved"] == 0
+        assert not result["lifecycle_complete"]
+        assert len(seen) == 3 and all(c["execution_lane"] == "market_completed" for c in seen)
+    finally:
+        engine.dispose()
 
 
-def test_close_tail_reconciliation_short_circuits_complete_and_cools_down() -> None:
-    registry: dict[tuple[str, str], datetime] = {}
-    refreshed: list[str] = []
-
-    def reader(_db, *, stock_id: str, **_kwargs):
-        complete = stock_id == "2330"
-        return {
-            "coverage": {
-                "status": "complete_session" if complete else "partial_prefix",
-                "gap_count": 0 if complete else 3,
-                "observed_bar_count": 265 if complete else 262,
-                "continuous_session_covered": complete,
-            }
-        }
-
-    def refresher(_db, *, stock_id: str, **_kwargs):
-        refreshed.append(stock_id)
-        return reader(_db, stock_id=stock_id)
-
-    common = {
-        "session_factory": _FakeDb,
-        "universe_resolver": lambda _db, **_kwargs: {
-            "symbols": ["2330", "3711"]
-        },
-        "reader": reader,
-        "refresher": refresher,
-        "projector": _tail_projection,
-        "attempt_registry": registry,
-    }
-    first = reconcile_taiwan_intraday_close_tails(
-        now=datetime(2026, 8, 28, 13, 30, 5, tzinfo=TAIWAN_TZ),
-        **common,
-    )
-    repeated = reconcile_taiwan_intraday_close_tails(
-        now=datetime(2026, 8, 28, 13, 31, 0, tzinfo=TAIWAN_TZ),
-        **common,
-    )
-
-    assert refreshed == ["3711"]
-    assert [item["status"] for item in first["results"]] == [
-        "already_complete",
-        "partial",
-    ]
-    assert [item["status"] for item in repeated["results"]] == [
-        "already_complete",
-        "cooldown",
-    ]
-    assert repeated["cooldown_count"] == 1
-    assert repeated["refresh_attempt_count"] == 0
-
-
-def test_close_tail_reconciliation_skips_outside_window_without_opening_db() -> None:
-    opened = False
-
-    def session_factory():
-        nonlocal opened
-        opened = True
-        return _FakeDb()
-
+def test_close_tail_reconciliation_skips_outside_window_without_opening_db():
+    def forbidden():
+        raise AssertionError("out-of-window command cannot open a DB")
     result = reconcile_taiwan_intraday_close_tails(
         now=datetime(2026, 8, 28, 13, 24, 59, tzinfo=TAIWAN_TZ),
-        session_factory=session_factory,
-    )
-
+        session_factory=forbidden)
     assert result["status"] == "skipped"
-    assert result["reason"] == "outside_taiwan_intraday_close_tail_window"
-    assert opened is False
 
 
 def test_intraday_target_universe_merges_tier_a_sources_and_keeps_etf() -> None:

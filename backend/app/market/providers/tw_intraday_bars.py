@@ -67,7 +67,8 @@ class IntradayProviderPayload:
 
 Clock = Callable[[], datetime]
 NStockReader = Callable[[str, int], IntradayProviderPayload]
-YahooReader = Callable[[str, str | None, str, str, int], IntradayProviderPayload]
+YahooWindow = str | tuple[int, int]
+YahooReader = Callable[[str, str | None, YahooWindow, str, int], IntradayProviderPayload]
 
 
 def _aware_clock(clock: Clock) -> datetime:
@@ -388,6 +389,8 @@ class NStockIntradayAdapter:
                     )
                     if start_at is None or prices is None:
                         continue
+                    if not requirement.request.start_at <= start_at <= requirement.request.end_at:
+                        continue
                     if not _is_regular_session(start_at):
                         continue
                     points.append(
@@ -464,7 +467,7 @@ def _yahoo_symbol(symbol: str, venue: str | None) -> str:
 def _default_yahoo_reader(
     symbol: str,
     venue: str | None,
-    range_value: str,
+    range_value: YahooWindow,
     interval: str,
     timeout_seconds: int,
 ) -> IntradayProviderPayload:
@@ -473,7 +476,8 @@ def _default_yahoo_reader(
     response = http_get(
         url,
         params={
-            "range": range_value,
+            **({"period1": range_value[0], "period2": range_value[1]}
+               if isinstance(range_value, tuple) else {"range": range_value}),
             "interval": interval,
             "includePrePost": "false",
         },
@@ -497,7 +501,7 @@ def _default_yahoo_reader(
     )
 
 
-def _provider_query(requirement: DataRequirementV2) -> tuple[str, str, int]:
+def _provider_query(requirement: DataRequirementV2) -> tuple[YahooWindow, str, int]:
     assert isinstance(requirement.request, BarCapabilityRequest)
     requested_interval = requirement.request.interval
     if requested_interval != "1m":
@@ -511,7 +515,11 @@ def _provider_query(requirement: DataRequirementV2) -> tuple[str, str, int]:
         ).days
         + 1,
     )
-    range_value = "1d" if days <= 1 else "5d"
+    range_value: YahooWindow = (
+        (int(requirement.request.start_at.timestamp()), int(requirement.request.end_at.timestamp()))
+        if requirement.request.acquisition_window == "dated"
+        else "1d" if days <= 1 else "5d"
+    )
     return range_value, fetch_interval, days
 
 

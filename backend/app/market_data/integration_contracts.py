@@ -106,6 +106,7 @@ class BarCoverageRequirement(CanonicalModel):
 
 
 class BarCapabilityRequest(CanonicalModel):
+    acquisition_window: Literal["relative", "dated"] = "relative"
     kind: Literal["bars"] = "bars"
     capability_id: str = Field(min_length=1, max_length=128)
     interval: str = Field(min_length=1, max_length=16)

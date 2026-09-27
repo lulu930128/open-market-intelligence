@@ -32,7 +32,7 @@ def env(tmp_path, monkeypatch):
     dispatches = []
     clock = [NOW]
     monkeypatch.setattr(subject.jobs, "SessionLocal", factory)
-    monkeypatch.setattr(subject.jobs, "submit_job_task", lambda task, job_id: dispatches.append(job_id))
+    monkeypatch.setattr(subject.jobs, "submit_job_task", lambda task, job_id, **kw: dispatches.append(job_id))
     monkeypatch.setattr(subject, "_now", lambda: clock[0])
     yield SimpleNamespace(engine=engine, factory=factory, dispatches=dispatches, clock=clock)
     engine.dispose()
@@ -46,7 +46,7 @@ def reread_stub(monkeypatch, *, ready=False, count=0, trade_date=None):
     calls = []
     def read(**kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(current_session_coverage=SimpleNamespace(
+        return SimpleNamespace(history=SimpleNamespace(requested_coverage_satisfied=ready), current_session_coverage=SimpleNamespace(
             trade_date=trade_date or NOW.date(), snapshot_bar_count=count,
             snapshot_phase=SimpleNamespace(value="ready" if ready else "warming"), snapshot_revision="a" * 64,
         ))
@@ -91,12 +91,14 @@ def test_invalid_or_nonordinary_symbol_never_enqueues(env, code):
     assert not env.dispatches
 
 
-def test_closed_session_and_wrong_date_do_not_dispatch(env):
+def test_premarket_current_date_skips_but_completed_date_can_repair(env):
     with env.factory() as db:
         assert subject.enqueue_consumer_demand(db, stock_id="2330", requested_at=NOW.replace(hour=8), consumer="ai") == (None, False)
-        with pytest.raises(ValueError, match="current trading session"):
-            enqueue(db, trade_date="2026-09-15")
-    assert not env.dispatches
+        job, created = enqueue(db, trade_date="2026-09-15")
+        assert created and subject.materialization_request(job)["mode"] == "completed_session_repair"
+        with pytest.raises(ValueError, match="INVALID_TRADE_DATE"):
+            enqueue(db, trade_date="2026-09-17")
+    assert len(env.dispatches) == 1
 
 
 def test_same_job_three_heartbeat_attempts_and_cooldown(env, monkeypatch):
@@ -130,7 +132,7 @@ def test_same_job_three_heartbeat_attempts_and_cooldown(env, monkeypatch):
         assert same.id == job_id and not created
         assert db.query(JobRun).count() == 1
     assert len(acquired) == len(env.dispatches) == 3
-    assert len(reads) == 6
+    assert len(reads) == 12  # admission, each worker pre/post read, and heartbeat revalidation
     assert all(call["bypass_snapshot_cache"] for call in reads)
 
 
@@ -165,7 +167,7 @@ def test_mcp_expired_queue_never_acquires(env, monkeypatch):
 
 
 def test_submit_failure_is_terminal_not_orphaned(env, monkeypatch):
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("private failure")
     monkeypatch.setattr(subject.jobs, "submit_job_task", fail)
     with env.factory() as db:
@@ -286,7 +288,7 @@ def test_final_reread_is_mandatory_after_provider_and_persistence(env, monkeypat
     state = {"materialized": False, "reads": 0}
     def read(**kwargs):
         state["reads"] += 1
-        return SimpleNamespace(current_session_coverage=SimpleNamespace(
+        return SimpleNamespace(history=SimpleNamespace(requested_coverage_satisfied=state["materialized"]), current_session_coverage=SimpleNamespace(
             trade_date=NOW.date(), snapshot_bar_count=20 if state["materialized"] else 0,
             snapshot_phase=SimpleNamespace(value="ready" if state["materialized"] else "warming"), snapshot_revision="a" * 64,
         ))
@@ -303,7 +305,7 @@ def test_final_reread_is_mandatory_after_provider_and_persistence(env, monkeypat
         job = db.get(JobRun, job_id)
         assert job.status == "success"
         assert json.loads(job.result_json)["attempt_count"] == 1
-    assert state["reads"] == 2
+    assert state["reads"] == 3
 
 
 @pytest.mark.parametrize("failure", ["timeout", "reject"])
@@ -374,7 +376,8 @@ def test_two_connections_cannot_dispatch_same_retry(env, monkeypatch):
     assert env.dispatches == [job_id, job_id]
 
 
-def test_fast_terminal_race_preserves_episode_cooldown(env, monkeypatch):
+def test_fast_terminal_race_revalidates_evidence(env, monkeypatch):
+    reread_stub(monkeypatch, ready=True, count=50)
     original = subject.jobs.create_job_record
     def create(db, job_type, **kwargs):
         with env.factory() as other:
@@ -480,7 +483,7 @@ def test_real_canonical_persistence_and_reread_keep_partial_truth(env, monkeypat
         assert db.query(MarketIntradayBar).count() == 2
         assert db.query(MarketIntradayBarLineage).count() == 2
         assert result["current_session_bar_count"] == 2
-        assert result["reread_count"] == 2
+        assert result["reread_count"] == 3
         assert result["bars_written_count"] == 2
         assert result["external_call_count"] in {1, 2}
         assert result["snapshot_revision"]

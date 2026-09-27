@@ -118,3 +118,16 @@ def test_legacy_intraday_is_a_bar_adapter_without_independent_resolution() -> No
     outcome = _source("backend/app/watchlists/radar_outcome_service.py")
     assert "read_taiwan_intraday_bars" not in outcome
     assert "TaiwanBarService" in outcome
+
+
+def test_completed_coordinator_uses_same_obligation_and_command_owner() -> None:
+    source = _source("backend/app/jobs/taiwan_intraday_repair.py")
+    assert "TaiwanIntradayRepairItem" in source
+    assert "materialization_request" in source
+    assert "refresh_taiwan_intraday_bars" not in source
+    assert "MarketIntradayBar" not in source
+    assert "app.market.providers" not in source
+    functions = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef)}
+    assert "StockMaster" not in functions["_process_backlog"]
+    assert "_reserve" not in functions["_normal_materialization"]

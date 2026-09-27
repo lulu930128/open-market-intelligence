@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from sqlalchemy.orm import Session
 
 from app.db.models import JobRun
 from app.jobs import service as job_service
-from app.jobs.taiwan_intraday_demand import enqueue_consumer_demand
+from app.jobs.taiwan_intraday_demand import enqueue_consumer_demand, enqueue_intraday_materialization_demand
 from app.jobs.job_types import (
     TAIWAN_INDEX_DAILY_BOOTSTRAP_JOB_TYPE,
     TAIWAN_INTRADAY_BAR_BOOTSTRAP_JOB_TYPE,
@@ -23,10 +23,11 @@ from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
     taiwan_market_session_phase,
+    taiwan_presentation_session,
 )
 from app.market.tw_bar_contracts import TaiwanCurrentSessionSnapshotPhase
 from app.market.tw_bar_service import TaiwanBarService
-from app.market.tw_intraday_platform import bootstrap_taiwan_intraday_bars
+from app.market.tw_intraday_universe import resolve_taiwan_tier_a_target_plan
 
 
 def _normalize_symbols(symbols: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -46,18 +47,25 @@ def run_taiwan_intraday_bar_bootstrap_job(
 ) -> None:
     def worker(db: Session, progress: job_service.ProgressCallback):
         progress(0, max_symbols, "Running bounded Taiwan Base-1m bootstrap.")
-        result = bootstrap_taiwan_intraday_bars(
-            db,
-            symbols=symbols,
-            max_symbols=max_symbols,
-        )
-        payload = result.model_dump(mode="json")
+        plan = resolve_taiwan_tier_a_target_plan(db, operation_profile="production_intraday",
+            max_symbols=max_symbols, configured_symbols=symbols or None)
+        results = []
+        for symbol in plan.get("symbols") or []:
+            child, created = enqueue_intraday_materialization_demand(db, stock_id=symbol,
+                requested_at=datetime.now(TAIWAN_TZ), consumer="operator", max_external_calls=2)
+            results.append({"symbol": symbol, "job_id": child.id if child else None,
+                "status": child.status if child else "skipped", "created": created})
+        # The compatibility parent records fan-out, never claims child coverage.
+        payload = {"status": "pending", "results": results, "target_plan": plan,
+                   "postcondition_met": bool(results) and all(item["status"] == "success" for item in results)}
+        if payload["postcondition_met"]:
+            payload["status"] = "success"
         progress(
-            len(result.per_symbol),
+            len(results),
             max_symbols,
             "Taiwan Base-1m bootstrap finished.",
         )
-        if result.status in {"failed", "skipped"}:
+        if not payload["postcondition_met"]:
             raise job_service.JobExecutionError(
                 "Taiwan Base-1m bootstrap did not satisfy its postcondition.",
                 result=payload,
@@ -114,11 +122,9 @@ def enqueue_taiwan_intraday_viewer_warmup(
     if requested_at.tzinfo is None or requested_at.utcoffset() is None:
         raise ValueError("Taiwan viewer warmup requested_at must be timezone-aware")
     local_now = requested_at.astimezone(TAIWAN_TZ)
-    if not is_taiwan_trading_day(local_now.date()) or taiwan_market_session_phase(
-        local_now
-    ) not in {"regular", "closing_auction"}:
+    target_date = taiwan_presentation_session(local_now)["trade_date"]
+    if target_date == local_now.date() and local_now < datetime.combine(target_date, time(9), tzinfo=TAIWAN_TZ):
         return None, False
-
     coverage = TaiwanBarService(db).read_current_session_bars(
         instrument_id=stock_id,
         interval="1m",

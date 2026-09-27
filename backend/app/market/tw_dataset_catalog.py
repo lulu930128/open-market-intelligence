@@ -214,13 +214,14 @@ TW_DATASET_OPERATIONS = (
     ),
     TaiwanDatasetOperationSpec(
         operation_id="tw.refresh_intraday_bars",
-        callable_path="app.market.tw_intraday_platform.refresh_taiwan_intraday_bars",
+        callable_path="app.jobs.taiwan_intraday_demand.enqueue_intraday_materialization_demand",
         external_io=True,
         writes_storage=True,
-        bounds=_bounds(2, 40, 1, 93),
+        bounds=_bounds(6, 120, 1, 1),
         limitations=(
             "VENDOR_BEST_EFFORT_NO_SLA",
             "ACTIVE_SESSION_DATA_NOT_REPAIRABLE_AFTER_PROVIDER_RETENTION",
+            "EXACT_TRADE_DATE_CANONICAL_POSTCONDITION_REQUIRED",
         ),
     ),
     TaiwanDatasetOperationSpec(
@@ -531,7 +532,7 @@ TW_DATASET_CONTRACTS = (
         dataset_id="tw.intraday.bars",
         family="price",
         payload="omi.market.bar.v1",
-        scope="listed_stock",
+        scope="listed_stock_or_etf",
         capabilities=("intraday.bars",),
         tables=(
             "source_registry",
@@ -545,9 +546,9 @@ TW_DATASET_CONTRACTS = (
         expected=TaiwanExpectedStatePolicy.CURRENT_SESSION,
         eligibility="listed_instrument_and_trading_day",
         refresh_operation="tw.refresh_intraday_bars",
-        refresh_bounds=_bounds(2, 40, 1, 93),
+        refresh_bounds=_bounds(6, 120, 1, 1),
         repairable=True,
-        postcondition="Provider observations and raw receipts commit atomically, then TaiwanBarService rereads the full canonical snapshot; coverage is independent of response limits and a quote snapshot is never a bar.",
+        postcondition="The single-stock/date JobRun owns bounded acquisition; observations and receipts commit atomically, then TaiwanBarService validates exact-date coverage with target-date trading policy. Terminal success requires a fresh canonical reread; quote evidence is never a bar.",
         lineage=TaiwanDatasetLineageStatus.DERIVED_COMPONENT_LINEAGE,
         lineage_fields=(
             *_CANONICAL_LINEAGE,

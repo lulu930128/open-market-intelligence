@@ -179,6 +179,39 @@ class JobRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class TaiwanIntradaySchedulerState(Base):
+    """Durable scheduler checkpoints; never acquisition jobs."""
+
+    __tablename__ = "tw_intraday_scheduler_state"
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    state_json: Mapped[str] = mapped_column(Text, default="{}")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TaiwanIntradayRepairItem(Base):
+    """One coverage obligation; normal ingestion hands this same row to recovery."""
+
+    __tablename__ = "tw_intraday_repair_item"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending','active','complete','unfillable','not_applicable')",
+                        name="ck_tw_intraday_repair_status"),
+        Index("ix_tw_intraday_repair_due", "trade_date", "status", "next_check_at"),
+    )
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    stock_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    acquisition_lane: Mapped[str] = mapped_column(String(16), default="repair", server_default="repair")
+    scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    normal_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_reason: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    coverage_json: Mapped[str] = mapped_column(Text, default="{}")
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class DispatchRecipientGroup(Base):
     __tablename__ = "dispatch_recipient_group"
 

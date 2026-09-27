@@ -41,7 +41,7 @@ from app.market.institutional_holding_ratio_cache import (
 )
 from app.market.institutional_holding_ratios import InstitutionalHoldingRatioFetchError
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
-from app.market.tw_intraday_platform import refresh_taiwan_intraday_bars
+from app.jobs.taiwan_intraday_commands import refresh_intraday_history_command
 from app.market.index_contract_snapshot import (
     get_taiwan_index_contract_replay,
 )
@@ -1176,21 +1176,8 @@ def refresh_stock_intraday_history(
     db: Session = Depends(get_db),
 ):
     try:
-        refresh_taiwan_intraday_bars(
-            db,
-            stock_id=stock_id,
-            interval="1m",
-            range_value=range_value,
-            policy=RealtimePolicy(policy),
-        )
-        return get_market_intraday_history(
-            db=db,
-            stock_id=stock_id,
-            interval=interval,
-            range_value=range_value,
-            refresh=False,
-            bypass_snapshot_cache=True,
-        )
+        return refresh_intraday_history_command(db=db, stock_id=stock_id,
+            interval=interval, range_value=range_value, policy=policy)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

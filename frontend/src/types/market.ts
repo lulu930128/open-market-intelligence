@@ -2518,6 +2518,8 @@ export type IntradayHistoryResponse = {
   refreshed_count: number;
   read_policy?: "cache_only" | string;
   acquisition_status?: string | null;
+  materialization_jobs?: Array<{ job_id: number; status: string; poll_url: string }>;
+  repair_scope?: { requested_trade_dates: string[]; attempted_trade_dates: string[]; unattempted_trade_dates: string[]; max_external_calls: number } | null;
   resolved_health?: Record<string, unknown> | null;
   candidate_rejections?: Array<Record<string, unknown>>;
   limitations?: string[];

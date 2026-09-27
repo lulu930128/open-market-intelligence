@@ -1063,6 +1063,14 @@ class TaiwanBarService:
         covered_sessions = 0
         current_coverage: TaiwanCurrentSessionCoverage | None = None
         for trade_date in trade_dates:
+            session_trading_policy = trading_policy
+            if trade_date != now.date() and instrument.instrument_type is not InstrumentType.INDEX:
+                session_trading_policy = resolve_taiwan_instrument_trading_policy(
+                    get_taiwan_disposition_status(instrument.symbol,
+                        market=str(instrument.venue or ""), now=now, trade_date=trade_date)
+                )
+                if not session_trading_policy.market_semantics_usable:
+                    limitations.extend(session_trading_policy.reason_codes)
             current_session = bool(
                 trade_date == presentation_date
                 and (
@@ -1097,7 +1105,7 @@ class TaiwanBarService:
                 session_bars,
                 trade_date=trade_date,
                 trading_policy_version=TAIWAN_TRADING_POLICY_VERSION,
-                trading_policy=trading_policy,
+                trading_policy=session_trading_policy,
                 as_of=now,
             )
             base_coverage.extend(session_coverage)
@@ -1130,7 +1138,7 @@ class TaiwanBarService:
                 TaiwanHistoryStatus.MISSING
                 if not session_bars
                 else TaiwanHistoryStatus.PARTIAL
-                if missing_count or not trading_policy.market_semantics_usable
+                if missing_count or not session_trading_policy.market_semantics_usable
                 else TaiwanHistoryStatus.READY
             )
             rejected_candidate_reasons: dict[str, list[str]] = {}

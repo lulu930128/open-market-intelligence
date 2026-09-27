@@ -178,10 +178,16 @@ def _write_refresh(
             invalidate_taiwan_disposition_cache()
             payload = read_taiwan_disposition_cache(path=cache_path)
             providers = dict(payload.get("providers") or {})
+            history = dict(payload.get("daily_snapshots") or {})
             attempted_text = attempted_at.astimezone(timezone.utc).isoformat()
 
             for provider_key, entries in updates.items():
                 config = PROVIDER_CONFIG[provider_key]
+                previous = providers.get(provider_key)
+                previous_at = _parse_datetime(previous.get("fetched_at")) if isinstance(previous, dict) else None
+                if previous_at is not None and not previous.get("last_error"):
+                    day = previous_at.astimezone(TAIWAN_TZ).date().isoformat()
+                    history[day] = {**history.get(day, {}), provider_key: previous}
                 providers[provider_key] = {
                     **config,
                     "fetched_at": attempted_text,
@@ -189,6 +195,8 @@ def _write_refresh(
                     "last_error": None,
                     "entries": [_json_entry(entry) for entry in entries],
                 }
+                day = attempted_at.astimezone(TAIWAN_TZ).date().isoformat()
+                history[day] = {**history.get(day, {}), provider_key: providers[provider_key]}
 
             for provider_key, error_message in errors.items():
                 previous = providers.get(provider_key)
@@ -205,6 +213,7 @@ def _write_refresh(
                 "schema_version": CACHE_SCHEMA_VERSION,
                 "updated_at": attempted_text,
                 "providers": providers,
+                "daily_snapshots": {key: history[key] for key in sorted(history)[-120:]},
             }
             _atomic_write(cache_path, written)
             invalidate_taiwan_disposition_cache()
@@ -329,12 +338,30 @@ def get_taiwan_disposition_status(
     market: str | None = None,
     now: datetime | None = None,
     cache_path: Path | None = None,
+    trade_date: date | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = str(stock_id or "").strip()
     local_now = _local_now(now)
-    as_of = local_now.date()
+    as_of = trade_date or local_now.date()
     cache = read_taiwan_disposition_cache(path=cache_path)
     providers = cache.get("providers") or {}
+    historical_snapshot = False
+    if as_of != local_now.date():
+        snapshots = dict((cache.get("daily_snapshots") or {}).get(as_of.isoformat()) or {})
+        # Upgrade compatibility: a retained full list fetched on the target day
+        # is itself a dated snapshot, even before snapshot archival was enabled.
+        for key, entry in providers.items():
+            fetched = _parse_datetime(entry.get("fetched_at")) if isinstance(entry, dict) else None
+            if fetched and fetched.astimezone(TAIWAN_TZ).date() == as_of:
+                snapshots.setdefault(key, entry)
+        selected_keys = [_provider_key_for_market(market)] if _provider_key_for_market(market) else list(PROVIDER_CONFIG)
+        historical_snapshot = all(
+            isinstance(snapshots.get(key), dict)
+            and not snapshots[key].get("last_error")
+            and (fetched := _parse_datetime(snapshots[key].get("fetched_at"))) is not None
+            and fetched <= local_now for key in selected_keys)
+        if historical_snapshot:
+            providers = snapshots
     provider_key = _provider_key_for_market(market)
     provider_keys = [provider_key] if provider_key else list(PROVIDER_CONFIG)
     candidates: list[dict[str, Any]] = []
@@ -385,6 +412,19 @@ def get_taiwan_disposition_status(
     }
     if selected:
         base.update(selected)
+    if as_of != local_now.date():
+        # Current lists cannot prove the absence of a historical disposition.
+        # An explicit published interval can prove a positive historical policy.
+        historical_active = next((item for item in candidates if item.get("status") == "active"), None)
+        visible = metadata.get("fetched_at") is not None and metadata["fetched_at"] <= local_now
+        if historical_snapshot:
+            base.update(cache_status="current", warning=None)
+        elif historical_active is not None and visible:
+            base.update(historical_active, cache_status="current")
+        else:
+            base.update(is_active=None, cache_status="historical_unknown",
+                        warning="缺少目標交易日的完整處置政策證據。")
+        base["policy_trade_date"] = as_of
     base.update(resolve_taiwan_instrument_trading_policy(base).projection())
     return base
 

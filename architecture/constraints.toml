@@ -1,6 +1,15 @@
 schema_version = 1
 
 [[rules]]
+id = "tw_materialization_single_command_owner"
+kind = "python_forbidden_import_names"
+description = "Taiwan fetch/repair entry points must use the canonical materialization JobRun, not acquisition primitives. Streaming ingestion keeps its own lifecycle."
+roots = ["backend/app/routers", "backend/app/ai", "backend/app/jobs/taiwan_intraday_bar_scheduler.py", "backend/app/jobs/taiwan_bar_bootstrap.py", "backend/app/jobs/taiwan_intraday_repair.py"]
+extensions = [".py"]
+modules = ["app.market.tw_intraday_platform"]
+forbidden_names = ["refresh_taiwan_intraday_bars", "bootstrap_taiwan_intraday_bars"]
+
+[[rules]]
 id = "shared_market_data_reverse_dependency"
 kind = "python_forbidden_import"
 description = "Shared Market Data Foundation cannot depend on market-specific service namespaces."

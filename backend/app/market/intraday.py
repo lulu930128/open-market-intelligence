@@ -13,6 +13,8 @@ from app.market.public_quote_platform import (
     read_taiwan_session_close,
 )
 from app.market.tw_disposition import get_taiwan_disposition_status
+from app.market.intraday_repository import TaiwanIntradayBarRepository
+from app.market.trading_calendar import taiwan_presentation_session
 from app.market.tw_instrument_trading_policy import (
     TaiwanInstrumentTradingMode,
     resolve_taiwan_instrument_trading_policy,
@@ -61,6 +63,9 @@ def _cache_get(cache_key: str) -> dict | None:
 
 def _cache_set(cache_key: str, payload: dict) -> dict:
     with _INTRADAY_CACHE_LOCK:
+        cutoff = monotonic_time.monotonic() - INTRADAY_CACHE_TTL_SECONDS
+        for key in [key for key, (stored_at, _) in _INTRADAY_CACHE.items() if stored_at < cutoff]:
+            _INTRADAY_CACHE.pop(key, None)
         _INTRADAY_CACHE[cache_key] = (
             monotonic_time.monotonic(),
             deepcopy(payload),
@@ -1375,6 +1380,16 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
     stock = _get_stock(db=db, stock_id=stock_id)
     market = stock.market.upper() if stock else None
     cache_key = f"{market or 'UNKNOWN'}:{stock_id}"
+    if market in {"TWSE", "TPEX", "OTC"}:
+        now = datetime.now(TAIPEI_TZ)
+        trade_date = taiwan_presentation_session(now)["trade_date"]
+        revision = TaiwanIntradayBarRepository(db).current_session_storage_revision(
+            instrument_id=stock_id,
+            from_time=datetime.combine(trade_date, time.min, tzinfo=TAIPEI_TZ),
+            to_time=datetime.combine(trade_date, time(13, 30), tzinfo=TAIPEI_TZ),
+        )
+        # Invalid/oversized revisions bypass the projection cache entirely.
+        cache_key += f":{trade_date}:{revision or monotonic_time.monotonic()}"
     cached = _cache_get(cache_key)
 
     if cached is not None:
