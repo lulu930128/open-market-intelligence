@@ -303,6 +303,7 @@ class Settings(BaseSettings):
     )
     enable_us_priority_ohlc_scheduler: bool = True
     scheduler_us_priority_ohlc_interval_minutes: int = 30
+    scheduler_us_priority_ohlc_continuation_interval_seconds: int = Field(default=60, ge=60)
     scheduler_us_priority_ohlc_startup_delay_seconds: int = 0
     scheduler_us_priority_ohlc_max_runtime_seconds: int = 600
     scheduler_us_priority_ohlc_max_symbols: int = Field(default=20, ge=1, le=100)

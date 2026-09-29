@@ -217,6 +217,80 @@ def test_empty_master_does_not_freeze_a_false_complete_universe(env):
     assert h.run()["eligible_count"] == 1
 
 
+def test_restart_audits_terminal_legacy_repair_rows_and_releases_oldest_session(env):
+    h = env
+    h.add("2330")
+    h.ready.add("2330")
+    oldest = DAY.date() - timedelta(days=1)
+    with h.factory() as db:
+        db.add(Item(trade_date=oldest, stock_id="2330", acquisition_lane="repair",
+                    status="complete", attempt_count=1, scanned_at=None))
+        coordinator.checkpoint(db, f"{coordinator.AUDIT_PREFIX}{oldest}")
+    h.engine.dispose()  # A new Session must recover the persisted metadata gap.
+    result = h.run()
+    old = next(s for s in result["sessions"] if s["trade_date"] == oldest.isoformat())
+    assert old["scanned_count"] == 1 and old["lifecycle_complete"]
+    assert old["data_complete"] and not h.submitted
+    assert len(h.run()["sessions"]) == 1
+
+
+def test_unscanned_repair_audit_preserves_future_backoff(env):
+    h = env
+    h.add("2330")
+    retry = DAY + timedelta(hours=2)
+    with h.factory() as db:
+        db.add(Item(trade_date=DAY.date(), stock_id="2330", acquisition_lane="repair",
+                    status="pending", attempt_count=2, next_check_at=retry,
+                    last_reason="EXISTING_PROVIDER_BACKOFF"))
+        db.commit()
+    result = h.run()
+    with h.factory() as db:
+        item = db.get(Item, (DAY.date(), "2330"))
+        assert item.scanned_at is not None
+        assert item.next_check_at == retry.replace(tzinfo=None)
+        assert item.attempt_count == 2 and item.acquisition_lane == "repair"
+    assert result["admissions_reserved"] == 0 and not h.submitted
+
+
+def test_holiday_restart_keeps_september_24_as_completed_session(env):
+    h = env
+    for symbol in ("2330", "2344"):
+        h.add(symbol)
+        h.ready.add(symbol)
+    h.clock[0] = datetime(2026, 9, 29, 8, 35, tzinfo=TAIWAN_TZ)
+    result = h.run()
+    assert result["trade_date"] == "2026-09-24"
+    assert result["complete_count"] == 2 and result["data_complete"]
+    assert not h.submitted
+    with h.factory() as db:
+        assert db.get(State, "tw-coverage-audit:2026-09-28") is None
+
+
+def test_september_24_sparse_backlog_terminalizes_after_horizon_across_restart(env):
+    h = env
+    h.add("1101")
+    h.clock[0] = datetime(2026, 9, 30, 8, 35, tzinfo=TAIWAN_TZ)
+    old = DAY.date() - timedelta(days=1)
+    target = DAY.date() + timedelta(days=2)  # 2026-09-24
+    with h.factory() as db:
+        # The old terminal row used to pin the historical slot forever.
+        db.add(Item(trade_date=old, stock_id="1101", acquisition_lane="repair",
+                    status="complete", attempt_count=1))
+        coordinator.checkpoint(db, f"{coordinator.AUDIT_PREFIX}{old}")
+        db.add(Item(trade_date=target, stock_id="1101", acquisition_lane="repair",
+                    status="pending", attempt_count=3, scanned_at=DAY,
+                    last_reason="CANONICAL_COVERAGE_INCOMPLETE"))
+        coordinator.checkpoint(db, f"{coordinator.AUDIT_PREFIX}{target}")
+        demand._record_completed_backoff(db, h.clock[0] + timedelta(hours=1))
+    h.run()
+    h.engine.dispose()
+    result = h.run()
+    completed = next(s for s in result["sessions"] if s["trade_date"] == target.isoformat())
+    assert completed["lifecycle_complete"] and not completed["data_complete"]
+    assert completed["unfillable_count"] == 1 and completed["remaining_count"] == 0
+    assert completed["repair_retry_count"] == 3 and not h.submitted
+
+
 def test_cache_only_reread_cannot_mutate_or_dispatch_normal_lane(env, monkeypatch):
     from sqlalchemy import event
     h = env

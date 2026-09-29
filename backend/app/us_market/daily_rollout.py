@@ -132,6 +132,8 @@ def us_daily_rollout_snapshot() -> dict[str, Any]:
             "acquisition_rollout_mode": effective_mode,
             "acquisition_enabled": False,
             "acquisition_scope": "none",
+            "full_market_acquisition_enabled": False,
+            "full_market_acquisition_reason": "US_DAILY_ACQUISITION_CONFIGURATION_INVALID",
             "canary_target_count": configured_count,
             "configuration_status": "invalid",
             "limitations": [str(exc)],
@@ -149,6 +151,10 @@ def us_daily_rollout_snapshot() -> dict[str, Any]:
             else "none"
         ),
         "canary_target_count": len(state.canary_targets),
+        "full_market_acquisition_enabled": state.mode is CapabilityRolloutMode.ON,
+        "full_market_acquisition_reason": (
+            None if state.mode is CapabilityRolloutMode.ON else "US_DAILY_FULL_MARKET_REQUIRES_ON"
+        ),
         "configuration_status": "valid",
         "limitations": [],
     }

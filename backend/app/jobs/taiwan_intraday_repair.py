@@ -216,12 +216,19 @@ def _normal_materialization(db, target, now, reread, enqueuer, frozen):
     query = db.query(TaiwanIntradayRepairItem).filter(TaiwanIntradayRepairItem.trade_date == target,
         TaiwanIntradayRepairItem.stock_id.in_(list(frozen)))
     # Scan every frozen member, including legacy recovery rows, in bounded pages.
-    for item in query.filter(TaiwanIntradayRepairItem.acquisition_lane == "normal",
-            TaiwanIntradayRepairItem.scanned_at.is_(None)).order_by(
+    for item in query.filter(TaiwanIntradayRepairItem.scanned_at.is_(None)).order_by(
             TaiwanIntradayRepairItem.stock_id).limit(batch).all():
+        previous_status, previous_due = item.status, item.next_check_at
+        _observe(db, item, now, reread, frozen)
         if item.acquisition_lane == "normal":
-            _observe(db, item, now, reread, frozen)
             item.next_check_at = now
+        else:
+            # Metadata catch-up includes terminal legacy recovery rows. It must
+            # not admit repair, shorten backoff, or take over a live episode.
+            if previous_status == "active" and item.status not in {"complete", "not_applicable"}:
+                item.status = "active"
+            if previous_due is not None:
+                item.next_check_at = max(_aware(previous_due), _aware(item.next_check_at))
         item.scanned_at = now
         db.commit()
     # Reconcile before admitting more; never infer coverage from Job success.

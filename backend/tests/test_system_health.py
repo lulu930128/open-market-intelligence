@@ -54,6 +54,7 @@ class SystemHealthTests(unittest.TestCase):
             and (expected_us_mode == "on" or expected_us_canary_count > 0),
         )
         self.assertEqual(runtime["us_daily_read_binding_mode"], "canonical")
+        self.assertEqual(runtime["us_daily_full_market_acquisition_enabled"], expected_us_mode == "on")
         self.assertEqual(
             runtime["us_daily_acquisition_rollout_mode"],
             expected_us_mode,
@@ -100,6 +101,8 @@ class SystemHealthTests(unittest.TestCase):
             "invalid",
         )
         self.assertFalse(runtime["us_daily_acquisition_enabled"])
+        self.assertFalse(runtime["us_daily_full_market_acquisition_enabled"])
+        self.assertEqual(runtime["us_daily_full_market_acquisition_reason"], "US_DAILY_ACQUISITION_CONFIGURATION_INVALID")
         self.assertEqual(runtime["us_daily_acquisition_scope"], "none")
         self.assertIn("exceeds max_symbols=2", runtime["us_daily_acquisition_limitations"][0])
 

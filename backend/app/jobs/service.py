@@ -81,9 +81,10 @@ FAILED_RESULT_ITEM_LIMIT = 4
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = Lock()
 _materialization_executors: dict[str, ThreadPoolExecutor] = {}
+MARKET_BACKGROUND_MAX_IN_FLIGHT = 2
 _materialization_slots = {
     "market_interactive": BoundedSemaphore(8),
-    "market_background": BoundedSemaphore(2),
+    "market_background": BoundedSemaphore(MARKET_BACKGROUND_MAX_IN_FLIGHT),
     "market_completed": BoundedSemaphore(settings.taiwan_completed_materialization_concurrency),
 }
 _enqueue_lock = Lock()

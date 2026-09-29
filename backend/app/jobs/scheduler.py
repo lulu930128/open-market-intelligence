@@ -2546,24 +2546,65 @@ def _add_market_eod_coverage_reconcile_job(scheduler: Any) -> bool:
     return True
 
 
-def enqueue_us_priority_ohlc_reconcile() -> None:
+def enqueue_us_priority_ohlc_reconcile(*, now: datetime | None = None) -> None:
+    from app.us_market.daily_market_state import expected_us_completed_daily_state
+
+    decision_time = now or datetime.now(_timezone())
+    expected_date = expected_us_completed_daily_state(now=decision_time).expected_trade_date.isoformat()
     db = SessionLocal()
     try:
         latest_completed = (
             db.query(JobRun)
             .filter(JobRun.job_type == US_PRIORITY_OHLC_RECONCILE_JOB_TYPE)
-            .filter(JobRun.status == "success")
+            .filter(JobRun.status.in_(("success", "error")))
             .order_by(JobRun.ended_at.desc(), JobRun.id.desc())
             .first()
         )
         cursor_symbol = None
-        if latest_completed is not None and latest_completed.result_json:
+        previous_result = {}
+        remaining = None
+        progress_json = latest_completed.result_json if latest_completed is not None else None
+        if (latest_completed is not None and latest_completed.status == "error"
+                and isinstance(latest_completed.request_json, str)):
+            # Interrupted workers have no completed receipt. Retry the saved
+            # shard after the normal backoff without losing its pass position.
+            progress_json = latest_completed.request_json
+        if isinstance(progress_json, str):
             try:
-                previous_result = json.loads(latest_completed.result_json)
+                previous_result = json.loads(progress_json)
             except (TypeError, json.JSONDecodeError):
                 previous_result = None
             if isinstance(previous_result, dict):
                 cursor_symbol = previous_result.get("cursor_symbol")
+            else:
+                previous_result = {}
+        same_session = previous_result.get("expected_trade_date") == expected_date
+        continuation = bool(
+            same_session and latest_completed is not None and latest_completed.status == "success"
+            and previous_result.get("continuation_required") is True
+            and isinstance(previous_result.get("continuation_remaining_count"), int)
+            and previous_result["continuation_remaining_count"] > 0
+            and previous_result.get("error_count") == 0
+        )
+        if latest_completed is not None and isinstance(latest_completed.ended_at, datetime):
+            # SQLite returns naive UTC. Restart uses the durable JobRun receipt,
+            # never an in-memory timer or a new provider/acquisition owner.
+            ended = latest_completed.ended_at
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=ZoneInfo("UTC"))
+            delay = (
+                settings.scheduler_us_priority_ohlc_continuation_interval_seconds
+                if continuation else max(settings.scheduler_us_priority_ohlc_interval_minutes, 5) * 60
+            )
+            if (same_session or latest_completed.status == "error") and decision_time < ended + timedelta(seconds=delay):
+                return
+        if not same_session:
+            cursor_symbol = None
+        if continuation or (same_session and latest_completed is not None
+                and latest_completed.status == "error"
+                and isinstance(previous_result.get("continuation_remaining_count"), int)
+                and previous_result["continuation_remaining_count"] > 0):
+            remaining = previous_result["continuation_remaining_count"]
         required_symbols = list(
             list_active_cross_market_us_requirement_symbols(db)
         )
@@ -2578,6 +2619,8 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
             ),
             "cursor_symbol": cursor_symbol,
             "required_symbols": required_symbols,
+            "continuation_remaining_count": remaining,
+            "expected_trade_date": expected_date,
         }
         job, created = job_service.enqueue_job(
             db=db,
@@ -2585,7 +2628,7 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
             target="priority-research",
             request=request,
             progress_total=1,
-            message="Queued by cache-only priority US OHLC continuity audit scheduler.",
+            message="Queued by bounded priority US OHLC continuity scheduler.",
             task=backfill_tasks.run_us_priority_ohlc_reconcile_job,
             task_args=(
                 request["max_runtime_seconds"],
@@ -2594,6 +2637,8 @@ def enqueue_us_priority_ohlc_reconcile() -> None:
                 request["max_external_calls"],
                 request["max_provider_attempts"],
                 request["required_symbols"],
+                request["continuation_remaining_count"],
+                request["expected_trade_date"],
             ),
         )
         logger.info(
@@ -2613,7 +2658,8 @@ def _add_us_priority_ohlc_reconcile_job(scheduler: Any) -> bool:
     scheduler.add_job(
         enqueue_us_priority_ohlc_reconcile,
         trigger="interval",
-        minutes=max(int(settings.scheduler_us_priority_ohlc_interval_minutes), 5),
+        seconds=min(settings.scheduler_us_priority_ohlc_continuation_interval_seconds,
+                    max(int(settings.scheduler_us_priority_ohlc_interval_minutes), 5) * 60),
         id="us_priority_ohlc_reconcile",
         replace_existing=True,
         coalesce=True,

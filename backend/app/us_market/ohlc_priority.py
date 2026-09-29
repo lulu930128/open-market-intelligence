@@ -5,13 +5,16 @@ from datetime import date, datetime, timezone
 from time import monotonic
 from typing import Callable, Iterable
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import PortfolioHolding, USWatchlistGroup, USWatchlistItem
 from app.db.session import SessionLocal
 from app.market_data.rollout import CapabilityRolloutMode
+from app.portfolio.service import normalize_market
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.daily_rollout import build_us_daily_acquisition_rollout_state
+from app.us_market.daily_market_state import expected_us_completed_daily_state
 from app.us_market.symbols import normalize_us_symbol
 
 
@@ -41,22 +44,7 @@ PlatformFactory = Callable[[Session], USDailyOhlcvPlatform]
 
 
 def list_us_priority_ohlc_symbols(db: Session) -> tuple[str, ...]:
-    ordered: dict[str, None] = {}
-
-    for symbol in PRIORITY_US_INDEX_SYMBOLS:
-        ordered[normalize_us_symbol(symbol)] = None
-
-    holding_rows = (
-        db.query(PortfolioHolding.symbol)
-        .filter(PortfolioHolding.market == "US")
-        .filter(PortfolioHolding.is_active.is_(True))
-        .order_by(PortfolioHolding.symbol.asc())
-        .all()
-    )
-    for row in holding_rows:
-        symbol = normalize_us_symbol(row.symbol)
-        if symbol:
-            ordered[symbol] = None
+    ordered: dict[str, None] = dict.fromkeys(list_us_priority_ohlc_critical_symbols(db))
 
     watchlist_rows = (
         db.query(USWatchlistItem.symbol)
@@ -85,7 +73,7 @@ def list_us_priority_ohlc_critical_symbols(db: Session) -> tuple[str, ...]:
     }
     holding_rows = (
         db.query(PortfolioHolding.symbol)
-        .filter(PortfolioHolding.market == "US")
+        .filter(func.lower(func.trim(PortfolioHolding.market)) == normalize_market("US"))
         .filter(PortfolioHolding.is_active.is_(True))
         .order_by(PortfolioHolding.symbol.asc())
         .all()
@@ -111,6 +99,7 @@ def reconcile_us_priority_ohlc(
     platform_factory: PlatformFactory | None = None,
     repair: bool = True,
     required_symbols: Iterable[str] | None = None,
+    continuation_remaining_count: int | None = None,
 ) -> dict:
     """Run a bounded priority read and optional explicit Shared-platform repair."""
 
@@ -122,6 +111,11 @@ def reconcile_us_priority_ohlc(
         raise ValueError("max_external_calls must be greater than 0.")
     if max_provider_attempts <= 0 or max_provider_attempts > 2:
         raise ValueError("max_provider_attempts must be between 1 and 2.")
+    if continuation_remaining_count is not None and continuation_remaining_count < 1:
+        raise ValueError("continuation_remaining_count must be positive.")
+
+    decision_time = requested_at or datetime.now(timezone.utc)
+    expected_date = to_date or expected_us_completed_daily_state(now=decision_time).expected_trade_date
 
     resolved_session_factory = session_factory or SessionLocal
     resolved_platform_factory = platform_factory or USDailyOhlcvPlatform
@@ -151,6 +145,12 @@ def reconcile_us_priority_ohlc(
     rotatable_symbols = tuple(
         symbol for symbol in universe_symbols if symbol not in critical_symbols
     )
+    # When the critical prefix fills the entire bound, a durable cursor must
+    # also rotate that prefix; otherwise later critical/watchlist targets starve.
+    pinned_symbols = critical_symbols
+    if len(critical_symbols) >= max_symbols:
+        pinned_symbols = ()
+        rotatable_symbols = critical_symbols + rotatable_symbols
     normalized_cursor = normalize_us_symbol(cursor_symbol)
     if normalized_cursor and normalized_cursor in rotatable_symbols:
         cursor_index = rotatable_symbols.index(normalized_cursor)
@@ -160,7 +160,9 @@ def reconcile_us_priority_ohlc(
         )
     else:
         rotated_symbols = rotatable_symbols
-    symbols = critical_symbols + rotated_symbols
+    remaining = min(continuation_remaining_count or len(rotatable_symbols), len(rotatable_symbols))
+    rotated_symbols = rotated_symbols[:remaining]
+    symbols = pinned_symbols + rotated_symbols
     run_symbols = symbols[:max_symbols]
     operation_rollout = (
         build_us_daily_acquisition_rollout_state(
@@ -189,6 +191,7 @@ def reconcile_us_priority_ohlc(
     errors: list[dict] = []
     stopped_reason = "complete_scan"
     last_processed_symbol = normalized_cursor or None
+    rotated_checked = 0
 
     for index, symbol in enumerate(run_symbols, start=1):
         if monotonic() - started >= max_runtime_seconds:
@@ -249,7 +252,9 @@ def reconcile_us_priority_ohlc(
                 }
             )
             checked_count += 1
-            last_processed_symbol = symbol
+            if symbol in rotatable_symbols:
+                last_processed_symbol = symbol
+                rotated_checked += 1
             stopped_reason = "per_symbol_failure"
             continue
         finally:
@@ -272,7 +277,9 @@ def reconcile_us_priority_ohlc(
                 }
             )
             stopped_reason = "shared_core_postcondition_unsatisfied"
-        last_processed_symbol = symbol
+        if symbol in rotatable_symbols:
+            last_processed_symbol = symbol
+            rotated_checked += 1
 
         if progress_callback is not None:
             progress_callback(
@@ -288,7 +295,7 @@ def reconcile_us_priority_ohlc(
         stopped_reason = "symbol_budget_exhausted"
     status = (
         "completed"
-        if checked_count == len(symbols) and not unresolved and not errors
+        if checked_count == len(universe_symbols) and not unresolved and not errors
         else "partial"
     )
     return {
@@ -310,7 +317,8 @@ def reconcile_us_priority_ohlc(
                 "minimum remain partial with explicit coverage limitations"
             ),
         },
-        "universe_count": len(symbols),
+        "universe_count": len(universe_symbols),
+        "expected_trade_date": expected_date.isoformat(),
         "run_target_count": len(run_symbols),
         "checked_count": checked_count,
         "satisfied_count": satisfied_count,
@@ -319,8 +327,13 @@ def reconcile_us_priority_ohlc(
         "repaired_count": repaired_count,
         "external_call_count": provider_call_count,
         "provider_call_count": provider_call_count,
-        "unresolved_count": max(len(symbols) - satisfied_count, 0),
-        "unscanned_count": max(len(symbols) - checked_count, 0),
+        "unresolved_count": max(len(universe_symbols) - satisfied_count, 0),
+        "unscanned_count": max(len(universe_symbols) - checked_count, 0),
+        "continuation_remaining_count": max(remaining - rotated_checked, 0),
+        "continuation_required": bool(
+            repair and rotated_checked > 0 and remaining > rotated_checked
+            and not errors and not unresolved and satisfied_count == checked_count
+        ),
         "unresolved_sample": unresolved[:20],
         "error_count": len(errors),
         "errors": errors[:10],

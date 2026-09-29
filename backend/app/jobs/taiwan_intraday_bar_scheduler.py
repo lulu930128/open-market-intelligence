@@ -8,6 +8,7 @@ from typing import Any, Callable
 from app.config import settings
 from app.db.models import JobRun
 from app.db.session import SessionLocal
+from app.jobs.service import MARKET_BACKGROUND_MAX_IN_FLIGHT
 from app.jobs.taiwan_intraday_demand import (
     JOB_TYPE, PREFIX, _reread, dispatch_due_materializations,
     enqueue_intraday_materialization_demand, materialization_request,
@@ -21,13 +22,14 @@ TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES = (25, 30, 33)
 TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND = 5
 TAIWAN_INTRADAY_CLOSE_TAIL_COOLDOWN_SECONDS = 120
 BACKGROUND_ORIGINS = {"scheduler", "close_tail", "completed_session_repair"}
+TAIWAN_INTRADAY_ADMISSION_POLL_SECONDS = 15
 
 
 def _background_slots(db) -> int:
     active = db.query(JobRun).filter(JobRun.job_type == JOB_TYPE,
         JobRun.target.like(PREFIX + "%"), JobRun.status.in_(("queued", "running"))).all()
     count = sum((materialization_request(job) or {}).get("consumer") in BACKGROUND_ORIGINS for job in active)
-    return max(0, min(2, max(1, settings.job_worker_max_concurrency - 1)) - count)
+    return max(0, MARKET_BACKGROUND_MAX_IN_FLIGHT - count)
 
 
 def _checkpoint(db, target):
@@ -39,7 +41,26 @@ def _submit_batch(db, symbols, *, now, origin, enqueuer):
     slots = _background_slots(db)
     row, state = _checkpoint(db, f"tw-cadence:{origin}:{now.date()}")
     cursor = int(state.get("cursor", 0)) % max(len(symbols), 1)
-    for symbol in symbols[cursor:] + symbols[:cursor]:
+    ordered = symbols[cursor:] + symbols[:cursor]
+    if origin == "scheduler":
+        # The configured interval is a per-target revisit period, not a delay
+        # between tiny batches. Persist deadlines in the existing daily ledger;
+        # earliest due wins, with the canonical source order breaking ties.
+        # Initial deadlines intentionally ignore the legacy round-robin cursor.
+        deadlines = state.get("next_due_at", {})
+        deadlines = {symbol: deadlines.get(symbol, now.isoformat()) for symbol in symbols}
+        active = db.query(JobRun).filter(JobRun.job_type == JOB_TYPE,
+            JobRun.target.like(PREFIX + "%"), JobRun.status.in_(("queued", "running"))).all()
+        active_symbols = {
+            request["stock_id"] for job in active
+            if (request := materialization_request(job))
+            and request["trade_date"] == now.date().isoformat()
+        }
+        ordered = sorted((symbol for symbol in symbols if symbol not in active_symbols
+            and datetime.fromisoformat(deadlines[symbol]) <= now),
+            key=lambda symbol: datetime.fromisoformat(deadlines[symbol]))
+        state["next_due_at"] = deadlines
+    for symbol in ordered:
         if slots <= 0:
             break
         try:
@@ -54,6 +75,11 @@ def _submit_batch(db, symbols, *, now, origin, enqueuer):
             db.rollback()
             logger.warning("Taiwan admission failed %s: %s", symbol, type(exc).__name__)
             results.append({"stock_id": symbol, "status": "failed", "reason": str(exc)})
+        if origin == "scheduler":
+            # Failed/backed-off/reused episodes also consume this consideration
+            # period. Demand remains the sole owner of retries and provider IO.
+            deadlines[symbol] = (now + timedelta(seconds=max(
+                60, int(settings.scheduler_taiwan_intraday_bar_interval_seconds)))).isoformat()
         cursor += 1
     state["cursor"] = cursor % max(len(symbols), 1)
     save_checkpoint(db, row, state, now)
@@ -115,9 +141,8 @@ def resume_taiwan_materializations() -> None:
 def add_taiwan_intraday_bar_jobs(scheduler: Any) -> bool:
     if not settings.enable_taiwan_intraday_bar_scheduler:
         return False
-    interval = max(int(settings.scheduler_taiwan_intraday_bar_interval_seconds), 60)
     for function, job_id, seconds in (
-        (collect_taiwan_intraday_bars, "taiwan_intraday_bar_materialization", interval),
+        (collect_taiwan_intraday_bars, "taiwan_intraday_bar_materialization", TAIWAN_INTRADAY_ADMISSION_POLL_SECONDS),
         (audit_completed_taiwan_intraday_coverage, "taiwan_intraday_completed_coverage",
          settings.scheduler_taiwan_completed_materialization_interval_seconds),
         (resume_taiwan_materializations, "taiwan_intraday_materialization_retry", 15),

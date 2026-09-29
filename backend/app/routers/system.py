@@ -88,6 +88,8 @@ def health_check():
                 "configuration_status"
             ],
             "us_daily_acquisition_limitations": us_daily_rollout["limitations"],
+            "us_daily_full_market_acquisition_enabled": us_daily_rollout["full_market_acquisition_enabled"],
+            "us_daily_full_market_acquisition_reason": us_daily_rollout["full_market_acquisition_reason"],
             "us_intraday_materializer": {
                 "enabled": settings.enable_us_intraday_materializer,
                 "configured_symbols": [

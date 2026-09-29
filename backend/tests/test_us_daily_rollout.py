@@ -17,6 +17,8 @@ from app.us_market.daily_rollout import (
     build_us_daily_acquisition_rollout_state,
     require_us_daily_acquisition_enabled,
     us_daily_target_key,
+    us_daily_full_market_acquisition_enabled,
+    us_daily_rollout_snapshot,
 )
 from app.us_market.errors import USMarketConfigurationError
 from app.us_market.market_data.descriptors import (
@@ -24,6 +26,7 @@ from app.us_market.market_data.descriptors import (
     YAHOO_DAILY_RESOURCE_ID,
 )
 from test_us_daily_ohlcv_acquisition import NOW, _yahoo_payload
+from app.config import settings
 
 
 def _session() -> Session:
@@ -75,6 +78,18 @@ def test_read_binding_is_canonical_independent_of_acquisition_rollout() -> None:
 
     assert US_DAILY_READ_BINDING_MODE == "canonical"
     assert off.production_enabled_for(us_daily_target_key("AAPL")) is False
+
+
+@pytest.mark.parametrize("mode,enabled", [("off", False), ("canary", False), ("on", True)])
+def test_full_market_gate_is_observable_without_widening_rollout(monkeypatch, mode, enabled):
+    monkeypatch.setattr(settings, "us_canonical_market_data_mode", mode)
+    monkeypatch.setattr(settings, "us_canonical_shadow_symbols", "AAPL,MSFT")
+    monkeypatch.setattr(settings, "us_canonical_canary_max_symbols", 2)
+    snapshot = us_daily_rollout_snapshot()
+    assert snapshot["read_binding_mode"] == "canonical"
+    assert snapshot["full_market_acquisition_enabled"] is enabled
+    assert us_daily_full_market_acquisition_enabled() is enabled
+    assert snapshot["full_market_acquisition_reason"] == (None if enabled else "US_DAILY_FULL_MARKET_REQUIRES_ON")
 
 
 def test_platform_blocks_non_canary_target_before_provider_io() -> None:

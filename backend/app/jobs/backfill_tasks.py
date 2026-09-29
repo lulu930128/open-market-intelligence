@@ -860,6 +860,8 @@ def run_us_priority_ohlc_reconcile_job(
     max_external_calls: int = 20,
     max_provider_attempts: int = 2,
     required_symbols: list[str] | None = None,
+    continuation_remaining_count: int | None = None,
+    expected_trade_date: str | None = None,
 ) -> None:
     def worker(_db: Session, progress: ProgressCallback):
         return reconcile_us_priority_ohlc(
@@ -869,6 +871,8 @@ def run_us_priority_ohlc_reconcile_job(
             max_external_calls=max_external_calls,
             max_provider_attempts=max_provider_attempts,
             required_symbols=required_symbols,
+            continuation_remaining_count=continuation_remaining_count,
+            to_date=date.fromisoformat(expected_trade_date) if expected_trade_date else None,
             progress_callback=progress,
         )
 

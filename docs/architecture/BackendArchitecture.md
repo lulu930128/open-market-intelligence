@@ -6,6 +6,8 @@
 
 Demand identity 沿用既有 target 格式。新請求先 canonical reread；terminal success 必須重新驗證 coverage，active goal 合併不擴張原 episode 的期限與外部呼叫預算，terminal write 以 request CAS 防止遺失後到的需求。Provider retry-after 與 evidence satisfaction 分開處理。Completed-session repair 使用實際 requested_at 與目標交易日 window；query span、dated-query ability、historical reach 由 executable descriptor 分別表達。
 
+Tier-A current-session scheduler 的設定 interval 是每檔重訪週期；同一 scheduler 以短週期補入到期目標，admission 上限重用 Job service 的 `market_background` capacity，扣除 active background materialization，不依賴 general worker 數。每檔 deadline 保存在既有每日 checkpoint，最早到期優先，同 deadline 沿用 configured／holding／active lease／watchlist 順序；legacy cursor 不延後首次到期評估。忙碌 lane 保留 overdue 目標，failed／backoff／reused episode 仍受每檔 cadence 限制。健康且 capacity 足夠時按設定週期重訪；provider 延遲、backoff 或持續飽和時不得宣稱 freshness SLO 已達成。Hard cap、canonical demand、provider budget、lease 與 completed-session boundary 不變。
+
 同日收盤修補與跨日歷史修補的來源資格分開：descriptor 的 `supports_current_date_window` 僅允許 request window 起訖均為實際 requested_at 的當地日期，adapter 仍精確過濾日期與時間。這讓仍提供當日資料的 current-only source 可參與盤後 repair；翌日不得沿用此資格，必須有真正 dated query 與足夠 lookback。稀疏 session 的 missing ranges 可在既有 500 bucket 上限內完整表達，不截斷缺口或將空白視為無成交。
 
 歷史處置政策由目標日期 snapshot 或明示有效期間判定；缺少證據時保留 partial。當日官方 cache refresh 保留 bounded dated snapshots，避免翌日直接套用新名單。
@@ -21,6 +23,8 @@ Checkpoint 保留 frozen universe、eligible／scanned／complete／pending／qu
 Active obligation 的 acquisition episode 結束後，先 canonical reread 並交回 pending；不得在 active 優先 reconciliation 的同一輪直接重送。後續 admission 按 pending attempt count、updated time 與 stock id 排序，保留 next-check／provider backoff，避免持續 partial 的少數標的壟斷名額、阻塞尚未嘗試的 universe。
 
 Canonical reread 期間禁止因 backlog ORM autoflush 持有 SQLite 寫鎖；每個 item 的 scan／lane progress 用短 transaction 保存，不跨下一檔的 coverage read 保留寫入交易。
+
+Frozen universe 的 bounded audit 包含尚未 scanned 的所有 lane／status，包含 migration 留下的 terminal repair rows；否則 scan completion 可永久阻塞最舊日期與後續 backlog。Repair metadata catch-up 必須 exact-date canonical reread，保留既有 episode ownership、future backoff 與 attempt count，不轉成新的 normal admission。稀疏 bars 不推定無成交；provider operational lookback 到期後可 terminalize 為 unfillable，但不宣稱 data complete。
 
 Migration 將舊 audit 日期轉入新 state 並從頭唯讀重掃，修復舊 cursor 遺漏與 uppercase ETF；保留 bars 與 Job 歷史。舊 checkpoint Job 明確重分類，後續 checkpoint 不再進 acquisition inventory。Generic Job retry 拒絕 checkpoint 與 single-demand，必須以指定交易日的 canonical command 重試，避免轉成當日 Tier-A fan-out。
 
@@ -47,6 +51,10 @@ Priority 不繞過 release／provider backoff／bounds，也不強殺執行中�
 
 此入口目前僅對接 Daily EOD；完整跨 dataset queue、全市場分鐘線、全域共享配額與
 多程序 worker lease 的收斂仍屬 active exec plan，不因本需求表存在而宣稱已完成。
+
+US priority Daily 的既有 JobRun 同時保存 expected trade date、cursor 與本輪剩餘數。成功但尚未走完的 bounded shard 可在 continuation cadence 接續，restart 由 durable receipt 計算下一次 due；完整一輪、無進展、partial evidence 或錯誤回到一般 cadence，不能把 Job success 當成全 universe coverage。每個 shard 仍受原 symbol／external-call／runtime bounds 與 Gateway provider rules 約束。跨 completed session 重新建立該日 pass；critical prefix 若已佔滿 shard，將同一 universe 納入 cursor rotation，避免後續 targets 永遠無法接手。
+
+US full-market EOD acquisition 仍僅允許 rollout=on。Canonical reads 與 bounded priority operation 的既有 scoped rollout 不改變此 gate；runtime health 分別公開 full-market acquisition 是否允許及阻擋原因，canary 不自動擴為 on。
 
 本文件描述 Open Market Intelligence backend 的長期穩定責任邊界。
 

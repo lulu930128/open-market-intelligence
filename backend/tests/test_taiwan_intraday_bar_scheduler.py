@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Base,
+    JobRun,
     PortfolioHolding,
     StockMaster,
     WatchlistGroup,
@@ -16,6 +18,7 @@ from app.db.models import (
 from app.jobs.taiwan_intraday_bar_scheduler import (
     TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES,
     TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND,
+    TAIWAN_INTRADAY_ADMISSION_POLL_SECONDS,
     add_taiwan_intraday_bar_jobs,
     collect_taiwan_intraday_bars,
     reconcile_taiwan_intraday_close_tails,
@@ -108,12 +111,117 @@ def test_intraday_bar_scheduler_registers_coalesced_command_owners():
     assert {"taiwan_intraday_bar_materialization", "taiwan_intraday_completed_coverage",
             "taiwan_intraday_materialization_retry"} <= by_id.keys()
     from app.config import settings
-    assert by_id["taiwan_intraday_bar_materialization"]["seconds"] == settings.scheduler_taiwan_intraday_bar_interval_seconds
+    assert by_id["taiwan_intraday_bar_materialization"]["seconds"] == TAIWAN_INTRADAY_ADMISSION_POLL_SECONDS
     assert by_id["taiwan_intraday_completed_coverage"]["seconds"] == settings.scheduler_taiwan_completed_materialization_interval_seconds
     tails = [item for item in scheduler.jobs if item["id"].startswith("taiwan_intraday_close_tail_")]
     assert [item["minute"] for item in tails] == list(TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES)
     assert {item["second"] for item in tails} == {TAIWAN_INTRADAY_CLOSE_TAIL_TRIGGER_SECOND}
     assert all(item["coalesce"] and item["max_instances"] == 1 for item in scheduler.jobs)
+
+
+def test_production_tier_a_revisits_all_32_targets_every_300_seconds(monkeypatch):
+    from app.jobs import taiwan_intraday_bar_scheduler as subject
+    from app.jobs import taiwan_intraday_demand as demand
+    monkeypatch.setattr(subject.settings, "job_worker_max_concurrency", 1)
+    monkeypatch.setattr(subject.settings, "scheduler_taiwan_intraday_bar_interval_seconds", 300)
+    monkeypatch.setattr(subject.settings, "scheduler_taiwan_intraday_bar_max_symbols", 32)
+    engine, factory = _scheduler_db()
+    symbols = ["2330", *[str(2000 + i) for i in range(31)]]
+    start = datetime(2026, 9, 29, 10, 0, tzinfo=TAIWAN_TZ)
+    clock = [start]
+    admissions = {symbol: [] for symbol in symbols}
+    pending = []
+    monkeypatch.setattr(demand, "_now", lambda: clock[0])
+    monkeypatch.setattr(demand, "_reread", lambda db, request, now: {
+        "reread_ready": False, "current_session_bar_count": 3,
+        "reread_trade_date": request["trade_date"]})
+
+    def submit(task, job_id, **kwargs):
+        assert kwargs["execution_lane"] == "market_background"
+        # One existing worker, five seconds per bounded provider episode.
+        finish = max([clock[0], *[item[1] for item in pending]]) + timedelta(seconds=5)
+        pending.append((job_id, finish))
+        assert len(pending) <= subject.MARKET_BACKGROUND_MAX_IN_FLIGHT
+        with factory() as db:
+            request = demand.materialization_request(db.get(JobRun, job_id))
+            assert request["max_external_calls"] == 2
+            assert request["mode"] == "current_session"
+            admissions[request["stock_id"]].append(clock[0])
+
+    monkeypatch.setattr(demand.jobs, "submit_job_task", submit)
+    try:
+        with factory() as db:
+            db.add_all([StockMaster(stock_id=symbol, market="TWSE", instrument_type="stock",
+                is_active=True) for symbol in [*symbols, "2344"]])
+            # Upgrade with an old cursor must not postpone stale configured 2330.
+            row, state = subject._checkpoint(db, f"tw-cadence:scheduler:{start.date()}")
+            state["cursor"] = 1
+            subject.save_checkpoint(db, row, state, start)
+        for elapsed in range(0, 901, TAIWAN_INTRADAY_ADMISSION_POLL_SECONDS):
+            clock[0] = start + timedelta(seconds=elapsed)
+            with factory() as db:
+                for job_id, finish in list(pending):
+                    if finish <= clock[0]:
+                        job = db.get(JobRun, job_id)
+                        job.status = "success"
+                        job.ended_at = finish
+                        pending.remove((job_id, finish))
+                db.commit()
+            result = subject.collect_taiwan_intraday_bars(now=clock[0], session_factory=factory,
+                universe_resolver=lambda db: {"symbols": [*symbols, "2344"]})
+            assert result["requested_count"] == 32
+            assert result["submitted_count"] <= subject.MARKET_BACKGROUND_MAX_IN_FLIGHT
+        assert admissions["2330"][:2] == [start, start + timedelta(seconds=300)]
+        for visits in admissions.values():
+            assert len(visits) >= 3
+            assert all((later - earlier).total_seconds() == 300
+                for earlier, later in zip(visits, visits[1:]))
+        with factory() as db:
+            assert not db.query(JobRun).filter(JobRun.target.like("%:2344:%")).count()
+    finally:
+        engine.dispose()
+
+
+def test_admission_respects_active_dedupe_lane_saturation_and_provider_backoff(monkeypatch):
+    from app.jobs import taiwan_intraday_bar_scheduler as subject
+    from app.jobs import taiwan_intraday_demand as demand
+    monkeypatch.setattr(subject.settings, "job_worker_max_concurrency", 1)
+    engine, factory = _scheduler_db()
+    now = datetime(2026, 9, 29, 10, 0, tzinfo=TAIWAN_TZ)
+    clock = [now]
+    dispatched = []
+    monkeypatch.setattr(demand, "_now", lambda: clock[0])
+    monkeypatch.setattr(demand, "_reread", lambda *args: {"reread_ready": False,
+        "current_session_bar_count": 3})
+    monkeypatch.setattr(demand.jobs, "submit_job_task", lambda task, job_id, **kw: dispatched.append(job_id))
+    try:
+        with factory() as db:
+            db.add_all([StockMaster(stock_id=symbol, market="TWSE", instrument_type="stock",
+                is_active=True) for symbol in ("2330", "0050", "0051")])
+            db.commit()
+            active, _ = demand.enqueue_intraday_materialization_demand(db, stock_id="2330",
+                requested_at=now, consumer="close_tail", max_external_calls=2)
+            active_id = active.id
+            assert subject._background_slots(db) == 1
+        resolver = lambda db: {"symbols": ["2330", "0050", "0051"]}
+        result = subject.collect_taiwan_intraday_bars(now=now, session_factory=factory, universe_resolver=resolver)
+        assert [item["stock_id"] for item in result["results"]] == ["0050"]
+        result = subject.collect_taiwan_intraday_bars(now=now, session_factory=factory, universe_resolver=resolver)
+        assert not result["results"] and len(dispatched) == 2
+        with factory() as db:
+            active = db.get(JobRun, active_id)
+            active.status = "error"
+            active.result_json = json.dumps({"retry_not_before_at": (now + timedelta(minutes=10)).isoformat()})
+            db.commit()
+        clock[0] += timedelta(seconds=15)
+        result = subject.collect_taiwan_intraday_bars(now=clock[0], session_factory=factory, universe_resolver=resolver)
+        assert [item["stock_id"] for item in result["results"]] == ["2330", "0051"]
+        assert len(dispatched) == 3  # 2330 reuses its backed-off episode without IO.
+        with factory() as db:
+            assert db.query(JobRun).filter(JobRun.target.like("%:2330:%")).count() == 1
+            assert subject._background_slots(db) == 0
+    finally:
+        engine.dispose()
 
 
 def test_close_tail_commands_cover_post_1330_resolution_window():

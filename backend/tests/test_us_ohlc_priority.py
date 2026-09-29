@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
+from datetime import date
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -123,6 +124,36 @@ def test_priority_research_contract_is_daily_with_technical_history_depth() -> N
     assert PRIORITY_DAILY_RESEARCH_CONTRACT.minimum_bar_count == 260
 
 
+def test_lowercase_holdings_share_critical_prefix_with_legacy_market_case():
+    db = _session()
+    try:
+        active = USWatchlistGroup(group_name="active", is_active=True)
+        inactive = USWatchlistGroup(group_name="inactive", is_active=False)
+        db.add_all([active, inactive])
+        db.flush()
+        db.add_all([PortfolioHolding(market=market, symbol=symbol, quantity=1,
+            currency="USD", is_active=enabled) for market, symbol, enabled in (
+                ("us", "AAPL", True), ("us", "MSFT", True), ("US", "MSFT", True),
+                (" Us ", "TSM", True), ("us", "INACTIVE", False), ("tw", "2330", True))])
+        db.add_all([USWatchlistItem(group_id=group, symbol=symbol, enabled=enabled, priority=priority)
+            for group, symbol, enabled, priority in (
+                (active.id, "WATCH", True, 1), (active.id, "MSFT", True, 2),
+                (active.id, "DISABLED", False, 3), (inactive.id, "INACTIVE_GROUP", True, 1))])
+        db.commit()
+        critical = (*PRIORITY_US_INDEX_SYMBOLS, "AAPL", "MSFT", "TSM")
+        assert list_us_priority_ohlc_critical_symbols(db) == critical
+        assert list_us_priority_ohlc_symbols(db) == (*critical, "WATCH")
+        platform = Mock()
+        platform.read.return_value = _platform_result(satisfied=True)
+        result = reconcile_us_priority_ohlc(max_symbols=10, cursor_symbol="WATCH", repair=False,
+            session_factory=lambda: Session(db.get_bind()), platform_factory=lambda _: platform)
+        assert [call.kwargs["symbol"] for call in platform.read.call_args_list] == [*critical, "WATCH"]
+        assert result["critical_symbol_count"] == len(critical)
+        platform.ensure_history_coverage.assert_not_called()
+    finally:
+        db.close()
+
+
 def test_priority_reconcile_can_audit_without_provider_io_or_false_completion() -> None:
     db = _session()
     try:
@@ -229,6 +260,58 @@ def test_priority_reconcile_never_rotates_critical_targets_behind_watchlist() ->
         db.close()
 
 
+def test_successful_shards_continue_one_finite_pass_without_false_full_coverage():
+    db = _session()
+    platform = Mock()
+    platform.read.return_value = _platform_result(satisfied=True)
+    try:
+        with (
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+                  return_value=("^GSPC", "AAPL", "MSFT", "TSM")),
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols",
+                  return_value=("^GSPC",)),
+        ):
+            cursor, remaining, checked = None, None, []
+            for _ in range(3):
+                platform.reset_mock()
+                result = reconcile_us_priority_ohlc(max_symbols=2, cursor_symbol=cursor,
+                    continuation_remaining_count=remaining, to_date=date(2026, 9, 28),
+                    session_factory=lambda: Session(db.get_bind()), platform_factory=lambda _: platform)
+                checked.extend(c.kwargs["symbol"] for c in platform.read.call_args_list
+                               if c.kwargs["symbol"] != "^GSPC")
+                assert result["status"] == "partial" and result["universe_count"] == 4
+                assert result["expected_trade_date"] == "2026-09-28"
+                cursor, remaining = result["cursor_symbol"], result["continuation_remaining_count"]
+            assert checked == ["AAPL", "MSFT", "TSM"]
+            assert remaining == 0 and not result["continuation_required"]
+            platform.ensure_history_coverage.assert_not_called()
+    finally:
+        db.close()
+
+
+def test_critical_overflow_rotates_instead_of_starving_later_targets():
+    db = _session()
+    platform = Mock()
+    platform.read.return_value = _platform_result(satisfied=True)
+    try:
+        with (
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+                  return_value=("^GSPC", "TSM", "AAPL", "MSFT")),
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols",
+                  return_value=("^GSPC", "TSM", "AAPL")),
+        ):
+            first = reconcile_us_priority_ohlc(max_symbols=2,
+                session_factory=lambda: Session(db.get_bind()), platform_factory=lambda _: platform)
+            assert first["continuation_required"]
+            second = reconcile_us_priority_ohlc(max_symbols=2, cursor_symbol=first["cursor_symbol"],
+                continuation_remaining_count=first["continuation_remaining_count"],
+                session_factory=lambda: Session(db.get_bind()), platform_factory=lambda _: platform)
+            assert [c.kwargs["symbol"] for c in platform.read.call_args_list] == ["^GSPC", "TSM", "AAPL", "MSFT"]
+            assert not second["continuation_required"]
+    finally:
+        db.close()
+
+
 def test_priority_reconcile_promotes_required_consumer_symbols() -> None:
     db = _session()
     try:
@@ -330,6 +413,7 @@ def test_priority_reconcile_enforces_symbol_and_external_call_budgets() -> None:
         assert result["checked_count"] == 2
         assert result["external_call_count"] == 1
         assert result["unscanned_count"] == 1
+        assert not result["continuation_required"]
         platform.ensure_history_coverage.assert_called_once_with(
             symbol="^GSPC",
             bars=260,
@@ -363,6 +447,7 @@ def test_priority_reconcile_isolates_one_symbol_failure() -> None:
         assert result["checked_count"] == 2
         assert result["satisfied_count"] == 1
         assert result["error_count"] == 1
+        assert not result["continuation_required"]
         assert result["errors"][0]["symbol"] == "^GSPC"
         assert result["errors"][0]["error_type"] == "RuntimeError"
         healthy.read.assert_called_once()

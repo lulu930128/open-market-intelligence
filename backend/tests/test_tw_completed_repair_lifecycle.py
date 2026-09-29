@@ -14,7 +14,7 @@ from app.db.models import Base, JobRun, StockMaster, TaiwanIntradayRepairItem as
 from app.jobs import taiwan_intraday_bar_scheduler as scheduler
 from app.jobs import taiwan_intraday_repair as repair
 from app.jobs import taiwan_intraday_demand as demand
-from app.jobs.service import mark_interrupted_jobs
+from app.jobs.service import MARKET_BACKGROUND_MAX_IN_FLIGHT, mark_interrupted_jobs
 from app.market.trading_calendar import TAIWAN_TZ
 
 DAY = datetime(2026, 9, 21, 15, tzinfo=TAIWAN_TZ)
@@ -142,8 +142,8 @@ def test_persistently_partial_active_items_do_not_starve_unattempted_universe(ha
         h.add(symbol)
     for cycle in range(75):
         result = h.run(DAY + timedelta(minutes=cycle * 6))
-        assert result["active_repair_count"] <= 1
-        assert result["admissions_reserved"] <= 1
+        assert result["active_repair_count"] <= MARKET_BACKGROUND_MAX_IN_FLIGHT
+        assert result["admissions_reserved"] <= MARKET_BACKGROUND_MAX_IN_FLIGHT
         with h.factory() as db:
             for job in db.query(JobRun).filter(JobRun.status.in_(("queued", "running"))):
                 # Acquisition remains partial across every asynchronous episode.
