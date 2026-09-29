@@ -99,6 +99,21 @@ def _percent_change(value: float | None, base: float | None) -> float | None:
     return ((value - float(base)) / float(base)) * 100
 
 
+def _state_received_at(state: TaiwanIntradayStockState) -> datetime | None:
+    """Receipt clock is separate from the unchanged provider snapshot/event clocks."""
+    try:
+        components = json.loads(state.component_sources_json or "[]")
+    except (TypeError, ValueError):
+        components = []
+    if not isinstance(components, list):
+        components = []
+    receipts = [parsed for component in components if isinstance(component, dict)
+                and (parsed := _aware_taipei(component.get("received_at"))) is not None]
+    # Legacy states lack receipt metadata; natural refresh replaces them without
+    # rewriting provider event time or claiming a new receipt on a cache-only read.
+    return max(receipts) if receipts else _aware_taipei(state.snapshot_as_of) or _aware_taipei(state.event_time)
+
+
 def _distance_below_high_pct(
     current_price: float | None,
     high_price: float | None,
@@ -315,10 +330,12 @@ def _ranking_eligibility(
     live_session = phase in {"preopen", "preopen_pending", "regular", "closing_auction", "close_resolution"}
     expected = generated.date() if live_session else latest_completed_taiwan_session_date(generated)
     price_at = _aware_taipei(state.price_as_of)
-    received_at = _aware_taipei(state.snapshot_as_of) or _aware_taipei(state.event_time)
+    received_at = _state_received_at(state)
     age = _observation_age_seconds(price_at, now=generated) if price_at else None
     recency = _freshness_status(price_at, now=generated) if price_at else "missing"
     received_freshness = _freshness_status(received_at, now=generated) if received_at else "missing"
+    if state.trade_date != expected:
+        received_freshness = "stale"
     price, reference = _number(state.current_price), _number(state.previous_close)
     change = _number(state.change_pct)
     valid_change = bool(
@@ -345,6 +362,24 @@ def _ranking_eligibility(
         and recency == "current" and received_freshness == "current"
         and age is not None and age <= allowed_age
     )
+    no_trade = bool(
+        lane == "actual" and not state.has_actual_trade
+        and _number(state.cumulative_volume_lots) == 0 and reference is not None and reference > 0
+        and state.session_phase in {"regular", "closing_auction", "close_resolution", "post_close"}
+    )
+    coverage_reason = (
+        ("advance" if change > 0 else "decline" if change < 0 else "unchanged") if facts and change is not None
+        else "valid_no_trade" if no_trade
+        else "reference_price_unavailable" if reference is None or reference <= 0
+        else "actual_trade_unavailable" if not state.has_actual_trade and (_number(state.cumulative_volume_lots) or 0) > 0
+        else "unknown"
+    )
+    breadth_usable = bool(
+        lane == "actual" and received_freshness == "current"
+        and state.trade_date == expected and state.lineage_complete
+        and (current_session_facts or no_trade)
+        and received_at is not None and received_at <= generated
+    )
     if lane == "indicative":
         current = bool(
             phase in {"preopen", "preopen_pending"} and state.session_phase in {"preopen", "preopen_pending", "opening_auction"}
@@ -361,9 +396,15 @@ def _ranking_eligibility(
         "intraday_research_usable": current and lane == "actual",
         "completed_session_final": completed,
         "request_session_phase": phase,
+        # Screening's existing field describes the ranked price. Receipt freshness
+        # is separate; a new receipt cannot relabel an old trade as current.
         "freshness_status": "latest_completed_session" if completed else recency,
-        "last_trade_recency": "not_applicable" if lane == "indicative" else recency,
+        "last_trade_recency": "not_applicable" if lane == "indicative" or no_trade else recency,
         "observation_received_freshness": received_freshness,
+        "observation_received_at": received_at,
+        "coverage_reason": coverage_reason,
+        "trade_state": "trade_observed" if state.has_actual_trade else "awaiting_first_trade" if no_trade else "unknown",
+        "breadth_usable": breadth_usable,
         "observation_age_seconds": age,
         "allowed_age_seconds": allowed_age,
     }
@@ -399,6 +440,9 @@ def _component_lineage(raw: dict[str, Any], *, event_time: datetime) -> dict[str
         component_time = _aware_taipei(component.get("event_at"))
         if component_time is not None:
             component["event_at"] = component_time.isoformat()
+        received_time = _aware_taipei(component.get("received_at"))
+        if received_time is not None:
+            component["received_at"] = received_time.isoformat()
     event_times: list[datetime] = []
     for component in components:
         component_time = _aware_taipei(component.get("event_at"))
@@ -466,6 +510,7 @@ def attach_current_market_lineage_to_stock_rows(
             event_at = breadth.get("as_of") or breadth.get("snapshot_as_of")
             raw_result_id = breadth.get("raw_result_id")
             next_row["raw_result_id"] = raw_result_id
+            next_row["observation_received_at"] = breadth.get("observation_received_at") or (breadth.get("lineage") or {}).get("received_at")
             next_row["component_raw_result_ids"] = [raw_result_id]
             next_row["component_event_times"] = [event_at] if event_at else []
             next_row["component_sources"] = [
@@ -475,6 +520,7 @@ def attach_current_market_lineage_to_stock_rows(
                     "source": breadth.get("source"),
                     "raw_result_id": raw_result_id,
                     "event_at": event_at,
+                    "received_at": next_row["observation_received_at"],
                 }
             ]
         enriched.append(next_row)
@@ -559,6 +605,7 @@ def persist_taiwan_intraday_stock_states(
             or raw.get("session_phase")
             or taiwan_market_session_phase(event_time)
         )
+        received_at = _aware_taipei(raw.get("observation_received_at")) or event_time
         observation_time = price_as_of or event_time
         observation_age_seconds = _observation_age_seconds(
             observation_time,
@@ -566,7 +613,7 @@ def persist_taiwan_intraday_stock_states(
         )
         allowed_age_seconds = _allowed_decision_age_seconds(session_phase)
         freshness_status = _freshness_status(
-            observation_time,
+            received_at,
             now=checked_at,
         )
         decision_usable = bool(
@@ -576,6 +623,7 @@ def persist_taiwan_intraday_stock_states(
             and session_phase in {"regular", "closing_auction", "post_close"}
             and component_lineage["lineage_complete"]
             and freshness_status == "current"
+            and _freshness_status(observation_time, now=checked_at) == "current"
             and observation_age_seconds <= allowed_age_seconds
         )
         minute_time = event_time.replace(second=0, microsecond=0)
@@ -644,6 +692,7 @@ def persist_taiwan_intraday_stock_states(
             and existing.decision_usable == decision_usable
             and existing.freshness_status == freshness_status
             and existing.cumulative_volume_lots == cumulative_volume_lots
+            and _state_received_at(existing) == received_at
             and existing.high_price == high_price
             and existing.low_price == low_price
             and existing.component_raw_result_ids_json
@@ -662,6 +711,7 @@ def persist_taiwan_intraday_stock_states(
             if has_actual_trade
             else "pending"
             if session_phase == "preopen"
+            else "valid_no_trade" if cumulative_volume_lots == 0 and previous_close is not None
             else "missing"
         )
         values = {
@@ -1076,7 +1126,7 @@ def build_tw_intraday_screening_snapshot(
         row["finalization"] == "session_final" for row in rows
     )
     quality_rows = rows or list(eligibility_by_id.values())
-    selected_freshness = {row["freshness_status"] for row in quality_rows}
+    selected_freshness = {"latest_completed_session" if row.get("completed_session_final") or row.get("finalization") == "session_final" else row["last_trade_recency"] for row in quality_rows}
     received_statuses = {row["observation_received_freshness"] for row in quality_rows}
     received_freshness_status = (
         "not_applicable" if actual_lane_not_applicable
@@ -1219,7 +1269,7 @@ def _group_metrics(
     classified_count = len(returns)
     coverage_ratio = classified_count / member_count if member_count else 0.0
     fresh_snapshot_count = sum(
-        (received_at := (_aware_taipei(state.snapshot_as_of) or _aware_taipei(state.event_time))) is not None
+        (received_at := _state_received_at(state)) is not None
         and received_at <= generated_at
         and _freshness_status(received_at, now=generated_at) == "current"
         for state in received_states
@@ -1232,11 +1282,18 @@ def _group_metrics(
         for state in classified_states
     )
     freshness_counts = {
-        status: sum(eligibility_by_id[state.id]["freshness_status"] == status for state in classified_states)
+        status: sum(("latest_completed_session" if eligibility_by_id[state.id]["completed_session_final"] else eligibility_by_id[state.id]["last_trade_recency"]) == status for state in classified_states)
         for status in ("current", "delayed", "stale", "latest_completed_session")
     }
     group_freshness = next((status for status in ("stale", "delayed", "current", "latest_completed_session")
                             if freshness_counts[status]), "missing")
+    reason_counts: dict[str, int] = {"provider_missing": member_count - received_count}
+    for state in received_states:
+        reason = eligibility_by_id[state.id]["coverage_reason"]
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    no_trade_count = reason_counts.get("valid_no_trade", 0)
+    received_statuses = {eligibility_by_id[state.id]["observation_received_freshness"] for state in received_states}
+    received_freshness = next((status for status in ("stale", "delayed", "missing", "current") if status in received_statuses), "missing")
     ranking_ineligibility_reasons = []
     if member_count < GROUP_RANKING_MIN_MEMBER_COUNT:
         ranking_ineligibility_reasons.append("MEMBERSHIP_BELOW_MINIMUM")
@@ -1267,7 +1324,19 @@ def _group_metrics(
         "freshness_member_counts": freshness_counts,
         "delayed_member_count": freshness_counts["delayed"],
         "stale_member_count": freshness_counts["stale"],
-        "observation_freshness": group_freshness,
+        "observation_freshness": received_freshness,
+        "observation_received_freshness": received_freshness,
+        "last_trade_recency": group_freshness if classified_states else "not_applicable" if no_trade_count == member_count else "missing",
+        "coverage_reason_counts": reason_counts,
+        "valid_no_trade_count": no_trade_count,
+        "observation_coverage_count": received_count,
+        "observation_coverage_ratio": received_count / member_count if member_count else 0.0,
+        "directional_coverage_count": classified_count,
+        "directional_coverage_ratio": coverage_ratio,
+        "directional_unavailable_count": member_count - classified_count - no_trade_count,
+        "breadth_usable": bool(received_count == member_count and member_count and all(
+            eligibility_by_id[state.id]["breadth_usable"] for state in received_states
+        )),
         "intraday_research_usable": bool(classified_states) and all(
             eligibility_by_id[state.id]["intraday_research_usable"] for state in classified_states
         ),
@@ -1426,7 +1495,7 @@ def build_tw_intraday_group_snapshots(
     }
     eligibility_by_id = {
         state.id: _ranking_eligibility(db, state, generated=generated, lane=lane)
-        for state in states_by_stock.values()
+        for state in received_by_stock.values()
     }
     industry_members: dict[str, set[str]] = defaultdict(set)
     industry_markets: dict[str, set[str]] = defaultdict(set)
@@ -1596,7 +1665,7 @@ def build_tw_intraday_group_snapshots(
         len(received_by_stock)
         if session_semantics == "latest_completed_session"
         else sum(
-            (received_at := (_aware_taipei(state.snapshot_as_of) or _aware_taipei(state.event_time))) is not None
+            (received_at := _state_received_at(state)) is not None
             and received_at <= generated
             and _freshness_status(received_at, now=generated) == "current"
             for state in received_by_stock.values()
@@ -1607,25 +1676,31 @@ def build_tw_intraday_group_snapshots(
     current_ratio = (
         current_count / len(received_by_stock) if received_by_stock else 0.0
     )
+    coverage_reasons: dict[str, int] = {"provider_missing": universe_count - len(received_by_stock)}
+    for quality in eligibility_by_id.values():
+        reason = quality["coverage_reason"]
+        coverage_reasons[reason] = coverage_reasons.get(reason, 0) + 1
+    valid_no_trade_count = coverage_reasons.get("valid_no_trade", 0)
     snapshot_status = (
         "ready"
         if exchange_groups
-        and coverage_count > 0
-        and coverage_ratio >= 0.95
-        and ranking_eligible_count / universe_count >= 0.95
+        and coverage_count + valid_no_trade_count > 0
+        and (coverage_count + valid_no_trade_count) / universe_count >= 0.95
+        and (ranking_eligible_count + valid_no_trade_count) / universe_count >= 0.95
         and current_ratio >= 0.95
         else "partial"
         if exchange_groups and coverage_count > 0
         else "missing"
     )
-    snapshot_facts_usable = any(group.get("ranking_eligible") for group in groups)
+    snapshot_facts_usable = any(group.get("ranking_eligible") or group["breadth_usable"] for group in groups)
     trade_freshness_values = {
         _freshness_status(_aware_taipei(state.price_as_of), now=generated)
         if _aware_taipei(state.price_as_of) is not None else "missing"
         for state in states_by_stock.values()
     }
     last_trade_recency = (
-        "missing" if not trade_freshness_values or "missing" in trade_freshness_values
+        "not_applicable" if valid_no_trade_count == universe_count and universe_count
+        else "missing" if not trade_freshness_values or "missing" in trade_freshness_values
         else "stale" if "stale" in trade_freshness_values or not observed_matches_expected_session
         else "delayed" if "delayed" in trade_freshness_values else "current"
     )
@@ -1636,11 +1711,15 @@ def build_tw_intraday_group_snapshots(
         else "current" if current_count == len(received_by_stock)
         else "partial" if current_count else "stale"
     )
-    snapshot_decision_usable = bool(
+    snapshot_breadth_usable = bool(
         lane == "actual" and snapshot_status == "ready" and session_semantics == "current_session"
-        and last_trade_recency == "current"
-        and all(state.decision_usable and state.lineage_complete for state in states_by_stock.values())
+        and len(received_by_stock) == universe_count
+        and all(item["breadth_usable"] for item in eligibility_by_id.values())
     )
+    short_horizon_usable = bool(snapshot_breadth_usable and states_by_stock and all(
+        eligibility_by_id[state.id]["intraday_research_usable"] for state in states_by_stock.values()
+    ))
+    snapshot_decision_usable = short_horizon_usable
     for group in groups:
         member_count = int(group.get("member_count") or 0)
         observed_count = int(group.get("observed_count") or 0)
@@ -1652,7 +1731,7 @@ def build_tw_intraday_group_snapshots(
                 "provisional": lane == "indicative",
                 "status": (
                     "ready"
-                    if group_coverage_ratio >= 0.95
+                    if (observed_count + group["valid_no_trade_count"]) / member_count >= 0.95
                     else "partial"
                     if observed_count
                     else "missing"
@@ -1661,12 +1740,11 @@ def build_tw_intraday_group_snapshots(
                 "facts_usable_for_ranking": bool(
                     observed_matches_expected_session and group.get("ranking_eligible")
                 ),
-                "observation_received_freshness": observation_received_freshness,
-                "last_trade_recency": "not_applicable" if lane == "indicative" else group["observation_freshness"],
+                "last_trade_recency": "not_applicable" if lane == "indicative" else group["last_trade_recency"],
                 "execution_grade_usable": False,
                 "decision_usable": bool(
-                    snapshot_decision_usable
-                    and group_coverage_ratio >= 0.95
+                    lane == "actual" and group["breadth_usable"]
+                    and group["intraday_research_usable"]
                     and group.get("ranking_eligible") is True
                 ),
             }
@@ -1685,6 +1763,13 @@ def build_tw_intraday_group_snapshots(
         "markets": list(SUPPORTED_MARKETS),
         "universe_count": universe_count,
         "received_count": len(received_by_stock),
+        "observation_coverage_count": len(received_by_stock),
+        "observation_coverage_ratio": len(received_by_stock) / universe_count if universe_count else 0.0,
+        "directional_coverage_count": coverage_count,
+        "directional_coverage_ratio": coverage_ratio,
+        "valid_no_trade_count": valid_no_trade_count,
+        "directional_unavailable_count": universe_count - coverage_count - valid_no_trade_count,
+        "coverage_reason_counts": coverage_reasons,
         "classified_count": coverage_count,
         "coverage_count": coverage_count,
         "ranking_eligible_count": ranking_eligible_count,
@@ -1714,7 +1799,7 @@ def build_tw_intraday_group_snapshots(
         if snapshot_facts_usable
         and session_semantics == "latest_completed_session"
         else []
-        if snapshot_decision_usable
+        if snapshot_breadth_usable
         else [
             "Hot Groups observations are stale for the expected Taiwan "
             "session; completed-session evidence is not promoted to live."
@@ -1755,7 +1840,8 @@ def build_tw_intraday_group_snapshots(
         "facts_usable_for_ranking": any(group.get("facts_usable_for_ranking") for group in groups),
         "observation_received_freshness": observation_received_freshness,
         "last_trade_recency": "not_applicable" if lane == "indicative" else last_trade_recency,
-        "intraday_research_usable": snapshot_decision_usable,
+        "intraday_research_usable": short_horizon_usable,
+        "breadth_usable": snapshot_breadth_usable,
         "execution_grade_usable": False,
         "decision_usable": snapshot_decision_usable,
         "current_for_requested_session": observed_matches_expected_session,
@@ -1822,6 +1908,9 @@ def build_tw_intraday_group_snapshots(
                 "lane", "price_semantics", "provisional", "decision_usable", "lineage",
                 "member_count",
                 "received_count",
+                "observation_coverage_count", "observation_coverage_ratio",
+                "directional_coverage_count", "directional_coverage_ratio",
+                "directional_unavailable_count", "valid_no_trade_count", "coverage_reason_counts", "breadth_usable",
                 "classified_count",
                 "factual_count",
                 "ranking_excluded_count",
@@ -1882,7 +1971,8 @@ def build_tw_intraday_group_snapshots(
         "facts_usable_for_ranking": any(group.get("facts_usable_for_ranking") for group in groups),
         "observation_received_freshness": observation_received_freshness,
         "last_trade_recency": "not_applicable" if lane == "indicative" else last_trade_recency,
-        "intraday_research_usable": snapshot_decision_usable,
+        "intraday_research_usable": short_horizon_usable,
+        "breadth_usable": snapshot_breadth_usable,
         "execution_grade_usable": False,
         "decision_usable": snapshot_decision_usable,
         "as_of": latest_event,

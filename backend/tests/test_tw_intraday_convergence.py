@@ -61,6 +61,8 @@ def test_production_actual_trade_is_factual_regardless_of_execution_age(db, age,
     row = ranking["rows"][0]
     assert row["facts_usable_for_ranking"] and row["value"] == pytest.approx(10)
     assert row["freshness_status"] == freshness
+    assert row["last_trade_recency"] == freshness
+    assert row["observation_received_freshness"] == "current"
     assert row["observation_age_seconds"] == age
     assert row["intraday_research_usable"] is (age <= 90)
     assert row["decision_usable"] is (age <= 90)

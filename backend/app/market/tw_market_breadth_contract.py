@@ -98,6 +98,7 @@ def resolve_twse_mis_breadth_price_state(
 
     cached_price = None
     cached_price_as_of = None
+    cache_rejection_reason = None
     if (
         market_session in ACTUAL_TRADE_SESSIONS
         and actual_trade["trade_date_matches"]
@@ -109,8 +110,16 @@ def resolve_twse_mis_breadth_price_state(
         and snapshot_as_of is not None
         and _aware_datetime(cached_state.get("price_as_of")) <= snapshot_as_of
     ):
-        cached_price = _positive_number(cached_state.get("price"))
-        cached_price_as_of = _aware_datetime(cached_state.get("price_as_of"))
+        confirmed_volume = _nonnegative_int(cached_state.get("cumulative_volume_lots"))
+        if parsed_volume is None or confirmed_volume is None:
+            cache_rejection_reason = "SESSION_CACHE_VOLUME_UNVERIFIED"
+        elif parsed_volume > confirmed_volume:
+            cache_rejection_reason = "SESSION_CACHE_VOLUME_INCREASED"
+        elif parsed_volume < confirmed_volume:
+            cache_rejection_reason = "SESSION_CACHE_VOLUME_DECREASED"
+        else:
+            cached_price = _positive_number(cached_state.get("price"))
+            cached_price_as_of = _aware_datetime(cached_state.get("price_as_of"))
 
     if has_fresh_actual_trade:
         current_price = parsed_last_trade
@@ -122,6 +131,7 @@ def resolve_twse_mis_breadth_price_state(
             "price": current_price,
             "price_as_of": price_as_of,
             "has_actual_trade": True,
+            "cumulative_volume_lots": parsed_volume,
             "state_contract_version": TW_MARKET_BREADTH_STOCK_STATE_VERSION,
         }
     elif cached_price is not None and cached_price_as_of is not None:
@@ -155,6 +165,7 @@ def resolve_twse_mis_breadth_price_state(
         "price_source": price_source,
         "has_actual_trade": has_actual_trade,
         "actual_trade_reason_code": actual_trade["reason_code"],
+        "cache_rejection_reason": cache_rejection_reason,
         "cumulative_volume_lots": parsed_volume,
         "indicative_match_available": indicative_match_available,
         "indicative_match_price": (

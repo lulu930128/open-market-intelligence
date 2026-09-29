@@ -55,7 +55,7 @@ def test_trial_snapshot_keeps_previous_actual_trade_time_without_relabeling_it()
         last_trade_price=144, cumulative_volume_lots=100,
         indicative_price=144, indicative_volume_lots=1, indicative_status="1",
         cached_state={"trade_date": date(2026, 9, 7), "has_actual_trade": True,
-                      "price": 143, "price_as_of": at(13, 24)},
+                      "price": 143, "price_as_of": at(13, 24), "cumulative_volume_lots": 100},
     )
     assert result["current_price"] == 143
     assert result["price_as_of"] == at(13, 24)

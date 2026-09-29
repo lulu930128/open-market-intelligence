@@ -485,6 +485,87 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertEqual(breadth["markets"]["TPEX"]["total_count"], 866)
         self.assertEqual(refs, [{"type": "derived", "name": "app.market.indices.summary"}])
 
+    def test_combined_taiwan_breadth_coverage_survives_capability_projection(self) -> None:
+        from app.market.tw_breadth_projection import project_breadth_coverage
+
+        indices = []
+        for index_id, market, directions, no_trade, unavailable, missing, trade_value in (
+            ("TAIEX", "TWSE", (3, 2, 2), 1, 1, 1, 1_000),
+            ("TPEX", "TPEX", (5, 4, 3), 3, 3, 2, 2_000),
+        ):
+            advance, decline, unchanged = directions
+            component = {
+                "market": market,
+                "advance_count": advance,
+                "decline_count": decline,
+                "unchanged_count": unchanged,
+                "total_count": sum(directions) + no_trade + unavailable + missing,
+                "received_unclassified_count": no_trade + unavailable,
+                "missing_count": missing,
+                "coverage_reason_counts": {
+                    "advance": advance, "decline": decline, "unchanged": unchanged,
+                    "valid_no_trade": no_trade, "actual_trade_unavailable": unavailable,
+                    "provider_missing": missing,
+                },
+                "trade_value": trade_value,
+            }
+            component.update(project_breadth_coverage(component))
+            indices.append({"index_id": index_id, "breadth": component,
+                            "breadth_status": {"status": "partial"}})
+
+        breadth = taiwan_market._market_breadth_from_index_summary(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: {"indices": indices}
+            ),
+            warnings=[],
+            source_refs=[],
+        )
+        expected = {
+            "observation_coverage_count": 27,
+            "observation_coverage_ratio": 27 / 30,
+            "observation_coverage_status": "partial",
+            "directional_coverage_count": 19,
+            "directional_coverage_ratio": 19 / 30,
+            "directional_coverage_status": "partial",
+            "directional_unavailable_count": 7,
+            "valid_no_trade_count": 4,
+            "trade_state_resolution_status": "partial",
+        }
+        self.assertEqual({key: breadth[key] for key in expected}, expected)
+        for key in ("observation_coverage_count", "directional_coverage_count",
+                    "directional_unavailable_count", "valid_no_trade_count"):
+            self.assertEqual(breadth[key], sum(item[key] for item in breadth["markets"].values()))
+        self.assertEqual(breadth["total_count"], 30)
+        self.assertEqual(breadth["unchanged_count"], 5)
+        self.assertEqual(breadth["coverage_reason_counts"]["actual_trade_unavailable"], 4)
+        self.assertEqual(breadth["status"], "partial")
+        self.assertEqual(breadth["reconciliation_status"], "balanced")
+        self.assertEqual(breadth["partition_total"], 30)
+        self.assertEqual(breadth["close_reconciliation"]["status"], "partial")
+        self.assertEqual(breadth["trade_value"], 3_000)
+        self.assertFalse(breadth["trade_value_complete"])
+
+        for payload_level in ("compact", "full"):
+            with self.subTest(payload_level=payload_level):
+                selection = capability_contract.normalize_selection(
+                    selection={"required": ["market.breadth"]},
+                    output="evidence_only", realtime_policy="cache_only",
+                    payload_level=payload_level, scope_type="market",
+                    question_intent="market_breadth",
+                )
+                projected, unavailable = capability_contract.project_selected_data(
+                    response={"mode": "data_only", "target": {"type": "market", "market": "TW"},
+                              "result": {"data": {"breadth": breadth}}},
+                    selection=selection,
+                )
+                self.assertNotIn("market.breadth", unavailable)
+                result = projected["market.breadth"]
+                self.assertEqual({key: result[key] for key in expected}, expected)
+                self.assertEqual(result["unchanged_count"], 5)
+                self.assertEqual(result["reconciliation_status"], "balanced")
+                self.assertEqual(result["trade_value"], 3_000)
+
     def test_taiwan_market_breadth_keeps_preopen_auction_separate(self) -> None:
         def component(index_id: str, market: str) -> dict:
             return {

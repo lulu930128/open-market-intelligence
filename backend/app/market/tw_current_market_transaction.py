@@ -242,8 +242,7 @@ class TaiwanCurrentMarketTransaction:
                 return True
         decision_usable = (
             observation.state.value == "available"
-            and observation.unknown_count == 0
-            and observation.missing_count == 0
+            and observation.directional_unavailable_count == 0
         )
         values = {
             "source_id": source.id,
@@ -299,7 +298,7 @@ class TaiwanCurrentMarketTransaction:
                 [
                     code
                     for condition, code in (
-                        (observation.unknown_count > 0, "RECEIVED_UNCLASSIFIED"),
+                        (observation.unknown_count > observation.valid_no_trade_count, "RECEIVED_UNCLASSIFIED"),
                         (observation.missing_count > 0, "UNIVERSE_NOT_RECEIVED"),
                         (observation.trade_value is None, "TRADE_VALUE_UNAVAILABLE"),
                     )

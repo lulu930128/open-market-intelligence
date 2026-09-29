@@ -54,6 +54,18 @@ class TaiwanDashboardBreadthRead(BaseModel):
     received_count: int | None = Field(default=None, ge=0)
     received_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
     classified_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    observation_coverage_count: int | None = Field(default=None, ge=0)
+    observation_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    observation_coverage_status: str = "unknown"
+    directional_coverage_count: int | None = Field(default=None, ge=0)
+    directional_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    directional_coverage_status: str = "unknown"
+    directional_unavailable_count: int | None = Field(default=None, ge=0)
+    valid_no_trade_count: int | None = Field(default=None, ge=0)
+    trade_state_resolution_status: str = "unknown"
+    observation_received_at: datetime | None = None
+    observation_received_freshness: str | None = None
+    last_trade_recency: str | None = None
     classification_summary: dict[str, int | None] = Field(default_factory=dict)
     classification_reason_counts: dict[str, int] = Field(default_factory=dict)
     coverage_reason_counts: dict[str, int | None] = Field(default_factory=dict)
@@ -190,6 +202,16 @@ class TaiwanDashboardGroupRead(BaseModel):
     lane: Literal["actual", "indicative"] = "actual"
     price_semantics: str | None = None
     observation_freshness: str | None = None
+    observation_received_freshness: str | None = None
+    last_trade_recency: str | None = None
+    breadth_usable: bool | None = None
+    observation_coverage_count: int | None = Field(default=None, ge=0)
+    observation_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    directional_coverage_count: int | None = Field(default=None, ge=0)
+    directional_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    directional_unavailable_count: int | None = Field(default=None, ge=0)
+    valid_no_trade_count: int | None = Field(default=None, ge=0)
+    coverage_reason_counts: dict[str, int] | None = None
     facts_usable_for_ranking: bool = False
     intraday_research_usable: bool = False
     freshness_member_counts: dict[str, int] = Field(default_factory=dict)

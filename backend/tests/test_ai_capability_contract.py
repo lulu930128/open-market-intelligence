@@ -2321,6 +2321,54 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertNotIn("market.breadth", unavailable)
         self.assertNotIn("intraday.bars", unavailable)
 
+    def test_data_only_breadth_preserves_observation_and_directional_coverage(self) -> None:
+        from app.market.tw_breadth_projection import project_breadth_coverage
+
+        breadth = {
+            "status": "ready", "advance_count": 2, "decline_count": 3,
+            "unchanged_count": 2, "universe_count": 10, "missing_count": 0,
+            "received_unclassified_count": 3,
+            "coverage_reason_counts": {
+                "advance": 2, "decline": 3, "unchanged": 2,
+                "valid_no_trade": 3, "provider_missing": 0,
+            },
+        }
+        breadth.update(project_breadth_coverage(breadth))
+        fields = (
+            "observation_coverage_count", "observation_coverage_ratio", "observation_coverage_status",
+            "directional_coverage_count", "directional_coverage_ratio", "directional_coverage_status",
+            "directional_unavailable_count", "valid_no_trade_count", "trade_state_resolution_status",
+        )
+        for payload_level in ("compact", "full"):
+            for explicit_fields in (False, True):
+                with self.subTest(payload_level=payload_level, explicit_fields=explicit_fields):
+                    selection = {"required": ["market.breadth"]}
+                    if explicit_fields:
+                        selection["fields"] = {"market.breadth": list(fields)}
+                    payload = AiAskRequest(
+                        question="台股廣度資料", contract_version="omi.decision.v4",
+                        target={"type": "market", "market": "TW"}, mode="data_only",
+                        output="evidence_only", realtime_policy="cache_only",
+                        payload_level=payload_level, selection=selection,
+                    )
+                    plan = query_plan.build_query_plan(
+                        payload=payload, scope_type="market", target_market="TW",
+                        question_intent="market_breadth", effective_mode="data_only",
+                    )
+                    projected, unavailable = capability_contract.project_selected_data(
+                        response={"mode": "data_only", "target": payload.target,
+                                  "result": {"data": {"breadth": breadth}}},
+                        selection=plan.selection,
+                    )
+                    self.assertNotIn("market.breadth", unavailable)
+                    result = projected["market.breadth"]
+                    self.assertEqual({key: result[key] for key in fields},
+                                     {key: breadth[key] for key in fields})
+                    self.assertEqual(result["valid_no_trade_count"], 3)
+                    self.assertEqual(result["directional_unavailable_count"], 0)
+                    if not explicit_fields:
+                        self.assertEqual(result["unchanged_count"], 2)
+
     def test_defaults_preserve_existing_non_stock_context_surfaces(self) -> None:
         expected_by_scope = {
             "market": {

@@ -31,6 +31,7 @@ from app.market.taiwan_industries import (
 from app.market.trading_calendar import (
     taiwan_market_session_phase,
 )
+from app.market.tw_breadth_projection import project_breadth_coverage
 from app.market.tw_market_breadth_contract import (
     TW_MARKET_BREADTH_STOCK_STATE_VERSION,
     TW_MARKET_BREADTH_VERSION,
@@ -1073,6 +1074,11 @@ def _market_breadth_from_index_summary(
             ],
         },
     }
+    try:
+        breadth.update(project_breadth_coverage(breadth))
+    except ValueError as exc:
+        # Preserve existing reconciliation for incomplete legacy partitions.
+        warnings.append(f"Taiwan combined breadth coverage projection unavailable: {exc}")
     _append_source_ref_once(
         source_refs,
         {"type": "derived", "name": "app.market.indices.summary"},

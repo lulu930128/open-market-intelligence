@@ -436,6 +436,7 @@ class CurrentBreadthAdapter:
             raise ValueError("current breadth adapter requires dataset target")
         fetched_at = _aware(self._clock(), label="current breadth adapter clock")
         payload = self._reader(requirement.target.scope_key, route.timeout_seconds)
+        fetched_at = _aware(self._clock(), label="current breadth receipt clock")
         if payload.payload and not payload.payload.get("acquisition_fallback"):
             # Keep the original observation receipt when last-good data is reused.
             payload.payload.setdefault("observation_received_at", fetched_at.isoformat())
@@ -471,10 +472,17 @@ class CurrentBreadthAdapter:
                     classified + received_unclassified + not_received
                 )
             trade_value = _decimal(raw.get("trade_value"), non_negative=True)
+            coverage_reasons = _breadth_coverage_reason_counts(
+                raw, advance=int(advance), decline=int(decline), unchanged=int(unchanged),
+                received_unclassified=received_unclassified, not_received=not_received,
+            )
+            valid_no_trade = coverage_reasons.get("valid_no_trade", 0)
             incomplete = (
-                received_unclassified > 0
+                received_unclassified > valid_no_trade
                 or not_received > 0
-                or trade_value is None
+                or (trade_value is None and not (universe > 0 and valid_no_trade == universe))
+                or bool(raw.get("failed_batch_count") or raw.get("skipped_batch_count")
+                        or raw.get("acquisition_fallback"))
             )
             trade_date = _date(raw.get("trade_date"))
             trade_date = trade_date or event_at.astimezone(TAIPEI_TZ).date()
@@ -530,14 +538,7 @@ class CurrentBreadthAdapter:
                 unchanged_count=int(unchanged),
                 unknown_count=received_unclassified,
                 missing_count=not_received,
-                coverage_reason_counts=_breadth_coverage_reason_counts(
-                    raw,
-                    advance=int(advance),
-                    decline=int(decline),
-                    unchanged=int(unchanged),
-                    received_unclassified=received_unclassified,
-                    not_received=not_received,
-                ),
+                coverage_reason_counts=coverage_reasons,
                 price_states={
                     code: {
                         **state,
@@ -552,6 +553,7 @@ class CurrentBreadthAdapter:
                 classification_diagnostics=raw.get("classification_diagnostics") or {},
                 auction=auction,
                 acquisition_diagnostics=BreadthAcquisitionDiagnostics(
+                    missing_z_rescue=raw.get("missing_z_rescue"),
                     auction_error_code=auction_error_code,
                     attempted_batch_count=attempt_diagnostics.get("attempted_batch_count"),
                     skipped_batch_count=attempt_diagnostics.get("skipped_batch_count", 0),

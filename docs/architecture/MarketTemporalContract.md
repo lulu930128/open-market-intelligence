@@ -11,6 +11,12 @@
 
 ## Independent axes
 
+台股 current breadth 的 receipt freshness、trade-state resolution 與 last-trade recency 分開投影。`valid_no_trade` 是獨立且有效的 state，不合併 `unchanged`，也不算 provider missing；`unknown_count` 仍保留非方向 partition 以完成 reconciliation。Observation coverage 使用 received/universe，directional coverage 僅使用 classified/universe；含未成交標的時，後者仍是 partial，即使 trade-state resolution 已 complete。
+
+Same-session last-trade cache 必須有原始 event／receipt lineage 與 confirmed cumulative volume。只有當前 volume 與 confirmed volume 相等才可沿用；增加、倒退或缺乏基準皆不沿用。Full-market current-breadth refresh 後的 missing-z rescue 沿用現有 TWSE MIS batch、guard 與 canonical receipt transaction，受 symbol／batch／timeout／backoff 限制，cache-only read 不會觸發。Rescue 只接受同日、時間與累計量未倒退的正式 actual-trade evidence。
+
+Stock-state 的 `event_time`／`snapshot_as_of` 保持 provider event 語意；receipt time 從 component lineage 獨立投影。Group／sector 可保留近期 receipt 內較舊成交的當日方向事實；`breadth_usable` 不豁免 decision、execution 或短期 rolling metric 的 recency gate。
+
 ### 1. Market Session
 
 `MarketSession` 回答「市場現在或 observation 所屬的交易階段」。目前 shared values 是：

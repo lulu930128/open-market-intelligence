@@ -746,6 +746,25 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "trade_date": observation.trade_date,
         "as_of": observation.lineage.event_at,
         "snapshot_as_of": observation.lineage.event_at,
+        "observation_received_at": observation.lineage.received_at,
+        "observation_received_freshness": (
+            "latest_completed_session" if completed_session
+            else "stale" if observation.state.value == "stale"
+            or observation.trade_date != result.requirement.requested_at.astimezone(TAIWAN_TZ).date()
+            else "missing" if observation.lineage.received_at is None
+            else "current" if 0 <= (result.requirement.requested_at - observation.lineage.received_at).total_seconds() <= 90
+            else "delayed" if 0 <= (result.requirement.requested_at - observation.lineage.received_at).total_seconds() <= 600
+            else "stale"
+        ),
+        "last_trade_recency": (
+            "not_applicable" if observation.valid_no_trade_count == observation.universe_count and observation.universe_count
+            else "missing" if not observation.price_states
+            else "current" if max((result.requirement.requested_at - state.price_as_of).total_seconds()
+                                  for state in observation.price_states.values()) <= 90
+            else "delayed" if max((result.requirement.requested_at - state.price_as_of).total_seconds()
+                                  for state in observation.price_states.values()) <= 600
+            else "stale"
+        ),
         "advance_count": observation.advance_count,
         "decline_count": observation.decline_count,
         "unchanged_count": observation.unchanged_count,
@@ -789,7 +808,7 @@ def project_taiwan_current_breadth(result: MarketDataResultV1) -> dict[str, obje
         "is_provisional": observation.provisional,
         "provisional": observation.provisional,
         "decision_usable": (
-            session_final and aggregate_unknown_count == 0
+            session_final and observation.directional_unavailable_count == 0
             if completed_session else result.resolved.health.research_usable
         ),
         "resolved_health": result.resolved.health.model_dump(mode="json"),

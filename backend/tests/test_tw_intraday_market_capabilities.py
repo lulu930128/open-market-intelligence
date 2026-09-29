@@ -916,9 +916,15 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertAlmostEqual(sector["change_pct"], 24)
         self.assertEqual(group["estimated_trade_value"], 1_029_600_000)
         self.assertEqual(group["stale_member_count"], 1)
-        self.assertEqual(group["observation_freshness"], "stale")
+        self.assertEqual(group["observation_freshness"], "current")
+        self.assertEqual(group["observation_received_freshness"], "current")
+        self.assertEqual(group["last_trade_recency"], "stale")
         self.assertFalse(group["intraday_research_usable"])
+        # Current day-direction evidence does not require a recent trade;
+        # short-horizon metrics and execution retain their independent gates.
+        self.assertTrue(group["breadth_usable"])
         self.assertFalse(group["decision_usable"])
+        self.assertFalse(group["execution_grade_usable"])
         self.assertIsNone(group["median_five_minute_return"])
         self.assertIsNone(group["median_fifteen_minute_return"])
         stale.price_as_of = now
@@ -1047,6 +1053,104 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertEqual(build_tw_intraday_screening_snapshot(self.db, generated_at=now)["rows"], [])
         group = build_tw_intraday_group_snapshots(self.db, generated_at=now)["hot_groups"]["groups"][0]
         self.assertEqual(group["observed_count"], 0)
+
+    def test_group_receipt_freshness_is_separate_from_old_trade_and_valid_no_trade(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        event_at = now - timedelta(hours=1)
+        codes = ("2330", "2454", "3711", "2303")
+        for code in codes:
+            self.db.add(StockMaster(stock_id=code, stock_name=code, market="TWSE",
+                instrument_type="stock", industry="半導體業", is_active=True))
+        self.db.commit()
+        rows = []
+        for code in codes:
+            row = self._stock_state_row(code, "TWSE", 110, 100, event_at)
+            row.update(price_as_of=event_at, has_actual_trade=True, observation_received_at=now)
+            row["component_sources"][0]["received_at"] = now.isoformat()
+            if code == "2303":
+                row.update(current_price=None, price_as_of=None, has_actual_trade=False,
+                    cumulative_volume_lots=0, estimated_trade_value=None)
+            rows.append(row)
+        persist_taiwan_intraday_stock_states(self.db, rows=rows, now=now)
+        for state in self.db.query(TaiwanIntradayStockState).all():
+            self.assertEqual(state.snapshot_as_of.replace(tzinfo=TAIWAN_TZ), event_at)
+            self.assertEqual(state.event_time.replace(tzinfo=TAIWAN_TZ), event_at)
+        result = build_tw_intraday_group_snapshots(self.db, generated_at=now)
+        from app.market.tw_market_dashboard import _project_hot_groups_for_dashboard
+        from app.market.tw_market_dashboard_schemas import TaiwanDashboardGroupRead
+        projected_groups = _project_hot_groups_for_dashboard(result["hot_groups"], session_phase="regular")
+        outward_group = TaiwanDashboardGroupRead.model_validate(projected_groups[0]).model_dump()
+        self.assertEqual(outward_group["observation_received_freshness"], "current")
+        self.assertEqual(outward_group["last_trade_recency"], "stale")
+        self.assertTrue(outward_group["breadth_usable"])
+        for item in (result["hot_groups"]["groups"][0], result["sectors"]["items"][0]):
+            self.assertEqual(item["observation_received_freshness"], "current")
+            self.assertEqual(item["last_trade_recency"], "stale")
+            self.assertEqual(item["valid_no_trade_count"], 1)
+            self.assertEqual(item["observation_coverage_ratio"], 1)
+            self.assertEqual(item["directional_coverage_ratio"], 0.75)
+            self.assertEqual(item["coverage_reason_counts"]["valid_no_trade"], 1)
+            self.assertEqual(item["unchanged_count"], 0)
+            self.assertTrue(item["facts_usable_for_ranking"])
+            self.assertTrue(item["breadth_usable"])
+            self.assertFalse(item["decision_usable"])
+            self.assertFalse(item["intraday_research_usable"])
+            self.assertFalse(item["execution_grade_usable"])
+            self.assertIsNone(item["median_five_minute_return"])
+            self.assertIsNone(item["median_fifteen_minute_return"])
+        from app.market.tw_intraday_state import _ranking_eligibility
+        no_trade = self.db.query(TaiwanIntradayStockState).filter_by(stock_id="2303").one()
+        quality = _ranking_eligibility(self.db, no_trade, generated=now)
+        self.assertEqual(quality["last_trade_recency"], "not_applicable")
+        self.assertEqual(quality["trade_state"], "awaiting_first_trade")
+        self.assertEqual(quality["observation_received_at"], now)
+        self.assertEqual(quality["observation_received_freshness"], "current")
+
+    def test_all_valid_no_trade_sector_has_fresh_observation_without_traded_directions(self) -> None:
+        now = datetime(2026, 9, 15, 10, 14, tzinfo=TAIWAN_TZ)
+        event_at = now - timedelta(hours=1)
+        codes = ("2330", "2454", "3711")
+        for code in codes:
+            self.db.add(StockMaster(stock_id=code, stock_name=code, market="TWSE",
+                instrument_type="stock", industry="半導體業", is_active=True))
+        self.db.commit()
+        rows = []
+        for code in codes:
+            row = self._stock_state_row(code, "TWSE", 110, 100, event_at)
+            row.update(current_price=None, price_as_of=None, has_actual_trade=False,
+                cumulative_volume_lots=0, estimated_trade_value=None, observation_received_at=now)
+            row["component_sources"][0]["received_at"] = now.isoformat()
+            rows.append(row)
+        persist_taiwan_intraday_stock_states(self.db, rows=rows, now=now)
+
+        result = build_tw_intraday_group_snapshots(self.db, generated_at=now)
+        for snapshot in (result["hot_groups"], result["sectors"]):
+            self.assertEqual(snapshot["status"], "ready")
+            self.assertEqual(snapshot["observation_received_freshness"], "current")
+            self.assertEqual(snapshot["last_trade_recency"], "not_applicable")
+            self.assertEqual(snapshot["coverage"]["valid_no_trade_count"], len(codes))
+            self.assertEqual(snapshot["coverage"]["observation_coverage_ratio"], 1)
+            self.assertEqual(snapshot["coverage"]["directional_coverage_ratio"], 0)
+            self.assertTrue(snapshot["breadth_usable"])
+            self.assertTrue(snapshot["facts_usable"])
+            self.assertFalse(snapshot["facts_usable_for_ranking"])
+            self.assertFalse(snapshot["decision_usable"])
+            self.assertFalse(snapshot["intraday_research_usable"])
+            self.assertFalse(snapshot["execution_grade_usable"])
+        self.assertEqual(result["hot_groups"]["groups"][0]["status"], "ready")
+        for item in (result["hot_groups"]["groups"][0], result["sectors"]["items"][0]):
+            self.assertEqual(item["observation_freshness"], "current")
+            self.assertEqual(item["observation_received_freshness"], "current")
+            self.assertEqual(item["last_trade_recency"], "not_applicable")
+            self.assertEqual(item["valid_no_trade_count"], len(codes))
+            self.assertEqual(item["coverage_reason_counts"]["valid_no_trade"], len(codes))
+            self.assertEqual(item["coverage_reason_counts"]["provider_missing"], 0)
+            self.assertEqual(item["directional_unavailable_count"], 0)
+            self.assertEqual(item["unchanged_count"], 0)
+            self.assertEqual(item["advance_count"] + item["decline_count"], 0)
+            self.assertEqual(item["stale_member_count"], 0)
+            self.assertIsNone(item["mean_return_pct"])
+            self.assertIsNone(item["estimated_trade_value"])
 
     @staticmethod
     def _stock_state_row(

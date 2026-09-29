@@ -1,7 +1,7 @@
 """Gateway, persisted reread, lineage, revisions and history coherence proof."""
 
 from datetime import date, datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -307,6 +307,9 @@ def test_canonical_consumer_and_public_ask_parity_preserve_lineage_and_limits(db
     from app.ai import agentic_tools
     monkeypatch.setattr(settings, "kr_canonical_daily_enabled", True)
     monkeypatch.setattr(agentic_tools, "_now", lambda: NOW)
+    daily_clock = Mock(wraps=datetime)
+    daily_clock.now.return_value = NOW
+    monkeypatch.setattr("app.kr_market.daily_ohlcv_platform.datetime", daily_clock)
     def fetch(route, requirement):
         if route.provider_key == "krx_data":
             raise OSError("no KRX fixture")

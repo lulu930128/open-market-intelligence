@@ -419,6 +419,9 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
                         "source": "twse_mis_live_breadth_partial",
                         "trade_date": "2026-08-14",
                         "snapshot_as_of": "2026-08-14T09:59:59+08:00",
+                        "observation_received_at": "2026-08-14T10:00:00+08:00",
+                        "observation_received_freshness": "current",
+                        "last_trade_recency": "stale",
                         "advance_count": 50,
                         "decline_count": 35,
                         "unchanged_count": 5,
@@ -426,6 +429,10 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
                         "total_count": 100,
                         "unknown_count": 4,
                         "received_unclassified_count": 4,
+                        "coverage_reason_counts": {
+                            "advance": 50, "decline": 35, "unchanged": 5,
+                            "valid_no_trade": 3, "actual_trade_unavailable": 1, "provider_missing": 6,
+                        },
                         "not_received_count": 6,
                         "missing_count": 6,
                         "failed_batch_count": 1,
@@ -449,6 +456,23 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
         parsed = TaiwanMarketDashboardRead.model_validate(payload)
         self.assertEqual(parsed.headline_index_field, "resolved_indices")
         self.assertEqual(parsed.headline_breadth_field, "resolved_breadth")
+        breadth = parsed.resolved_breadth["TWSE"]
+        self.assertEqual(breadth.coverage, 90)
+        self.assertEqual(breadth.coverage_ratio, 0.9)
+        self.assertEqual(breadth.observation_coverage_count, 94)
+        self.assertEqual(breadth.observation_coverage_ratio, 0.94)
+        self.assertEqual(breadth.observation_coverage_status, "partial")
+        self.assertEqual(breadth.directional_coverage_count, 90)
+        self.assertEqual(breadth.directional_coverage_ratio, 0.9)
+        self.assertEqual(breadth.directional_coverage_status, "partial")
+        self.assertEqual(breadth.directional_unavailable_count, 7)
+        self.assertEqual(breadth.valid_no_trade_count, 3)
+        self.assertEqual(breadth.trade_state_resolution_status, "partial")
+        self.assertEqual(breadth.observation_received_freshness, "current")
+        self.assertEqual(breadth.last_trade_recency, "stale")
+        self.assertEqual(breadth.observation_received_at.isoformat(), "2026-08-14T10:00:00+08:00")
+        self.assertEqual(breadth.unknown, 10)
+        self.assertEqual(sum(breadth.classification_reason_counts.values()), 100)
         legacy_breadth = parsed.breadth["TWSE"]
         self.assertTrue(legacy_breadth.deprecated)
         self.assertTrue(any("No classified" in warning for warning in legacy_breadth.warnings))

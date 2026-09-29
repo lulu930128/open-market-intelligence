@@ -338,7 +338,11 @@ TWSE_MIS_PROVIDER_GUARD = TwseMisProviderGuard()
 def response_failure_metadata(response: object) -> tuple[int | None, Mapping[str, object]]:
     """Extract HTTP status/headers from requests responses or HTTP exceptions."""
 
-    candidate = getattr(response, "response", None) or response
+    candidate = getattr(response, "response", None)
+    # requests.Response is false for HTTP errors, including the very 429/503
+    # responses whose Retry-After must reach the shared provider guard.
+    if candidate is None:
+        candidate = response
     status = getattr(candidate, "status_code", None)
     headers = getattr(candidate, "headers", None)
     return (

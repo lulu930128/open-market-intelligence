@@ -482,6 +482,32 @@ class BreadthBatchFailure(CanonicalModel):
     http_status: int | None = None
 
 
+class BreadthRescueDiagnostics(CanonicalModel):
+    """Bounded same-provider actual-trade reacquisition, independent of coverage."""
+
+    status: Literal["not_needed", "backoff", "skipped", "complete", "partial", "blocked"]
+    candidate_count: int = Field(ge=0)
+    selected_count: int = Field(default=0, ge=0)
+    resolved_count: int = Field(default=0, ge=0)
+    unresolved_count: int = Field(default=0, ge=0)
+    attempted_batch_count: int = Field(default=0, ge=0)
+    failed_batch_count: int = Field(default=0, ge=0)
+    skipped_batch_count: int = Field(default=0, ge=0)
+    max_symbols: int = Field(gt=0)
+    max_batches: int = Field(gt=0)
+    timeout_seconds: int = Field(gt=0)
+    backoff_seconds: int = Field(gt=0)
+    batch_failures: tuple[BreadthBatchFailure, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_budget(self) -> BreadthRescueDiagnostics:
+        if (self.selected_count > min(self.max_symbols, self.candidate_count)
+            or self.resolved_count + self.unresolved_count != self.selected_count
+            or self.attempted_batch_count > self.max_batches):
+            raise ValueError("breadth rescue must reconcile within its budget")
+        return self
+
+
 class BreadthAcquisitionDiagnostics(CanonicalModel):
     auction_error_code: str | None = Field(default=None, max_length=64)
     attempted_batch_count: int | None = Field(default=None, ge=0)
@@ -493,6 +519,7 @@ class BreadthAcquisitionDiagnostics(CanonicalModel):
     fallback_used: bool = False
     latest_attempt_status: Literal["complete", "partial", "failed", "blocked"] = "complete"
     latest_attempt_failed_batch_count: int | None = Field(default=None, ge=0)
+    missing_z_rescue: BreadthRescueDiagnostics | None = None
 
 
 class BreadthLimitSide(CanonicalModel):
@@ -594,6 +621,15 @@ class MarketBreadthObservation(CanonicalModel):
     def classified_count(self) -> int:
         return self.advance_count + self.decline_count + self.unchanged_count
 
+    @property
+    def valid_no_trade_count(self) -> int:
+        return self.coverage_reason_counts.get("valid_no_trade", 0)
+
+    @property
+    def directional_unavailable_count(self) -> int:
+        # Keep unknown_count as the reconciled non-directional partition.
+        return self.unknown_count - self.valid_no_trade_count + self.missing_count
+
     @model_validator(mode="after")
     def _validate_partition(self) -> MarketBreadthObservation:
         if self.published_limits is not None:
@@ -664,13 +700,14 @@ class MarketBreadthObservation(CanonicalModel):
                     "breadth non-directional reason counts are inconsistent"
                 )
         incomplete = (
-            self.unknown_count > 0
-            or self.missing_count > 0
-            or self.trade_value is None
+            self.directional_unavailable_count > 0
+            or (self.trade_value is None and not (self.universe_count > 0 and self.valid_no_trade_count == self.universe_count))
+            or (self.acquisition_diagnostics is not None
+                and not self.acquisition_diagnostics.acquisition_complete)
         )
         if incomplete and self.state is ObservationState.AVAILABLE:
             raise ValueError("incomplete breadth must be partial or stale")
-        if not incomplete and self.state is ObservationState.PARTIAL:
+        if not incomplete and self.state is ObservationState.PARTIAL and not self.valid_no_trade_count:
             raise ValueError("complete breadth cannot be partial")
         if (self.trade_value is None) != (self.currency is None):
             raise ValueError("breadth trade_value and currency must be paired")

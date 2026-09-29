@@ -33,6 +33,11 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 _CACHE_TTL_SECONDS = 30
 _BATCH_SIZE = 100
 _MAX_CODES = 2_000
+_RESCUE_MAX_SYMBOLS = 32
+_RESCUE_MAX_BATCHES = 1
+_RESCUE_TIMEOUT_SECONDS = 4
+_RESCUE_BACKOFF_SECONDS = 60
+_RESCUE_FAILURE_BACKOFF_SECONDS = 300
 
 UniverseReader = Callable[[str], list[str]]
 
@@ -250,6 +255,7 @@ def _label(market: str) -> str:
 
 def _cache(market: str, payload: dict[str, object] | None) -> None:
     _CACHE[market] = {
+        **_CACHE.get(market, {}),
         "expires_at": monotonic() + _CACHE_TTL_SECONDS,
         "payload": payload,
     }
@@ -326,6 +332,7 @@ def _build_payload(
         rows,
         universe_count=universe,
     )
+    directional_unavailable = aggregate_unknown - coverage_reason_counts["valid_no_trade"]
     event_times = [row["as_of"] for row in rows if isinstance(row.get("as_of"), datetime)]
     price_times = [
         row["price_as_of"]
@@ -337,7 +344,7 @@ def _build_payload(
     session = next(iter(sessions)) if len(sessions) == 1 else "mixed"
     pending = session == "preopen" and classified == 0
     warnings: list[str] = []
-    if aggregate_unknown > 0:
+    if directional_unavailable > 0:
         warnings.append(
             f"Some {market} MIS quotes did not expose a confirmed current-session actual trade."
         )
@@ -385,7 +392,11 @@ def _build_payload(
         "version": TW_MARKET_BREADTH_VERSION,
         "state_contract_version": TW_MARKET_BREADTH_STOCK_STATE_VERSION,
         "price_states": {
-            **{code: state for code, state in prior_states.items() if code in code_set and state.get("trade_date") == max(trade_dates, default=None)},
+            # A received newer volume observation invalidates an old companion.
+            # An absent/out-of-order receipt does not erase historical evidence.
+            **{code: state for code, state in prior_states.items()
+               if code in code_set and code not in received_codes
+               and state.get("trade_date") == max(trade_dates, default=None)},
             **{
                 str(row["code"]): {
                     "trade_date": row["trade_date"], "price": row["current_price"],
@@ -407,7 +418,7 @@ def _build_payload(
             "pending_regular_session"
             if pending
             else "ready"
-            if aggregate_unknown == 0 and failed_batches == 0
+            if directional_unavailable == 0 and failed_batches == 0
             else "partial"
         ),
         "market_session": session,
@@ -415,7 +426,7 @@ def _build_payload(
         "decision_usable": (
             not pending
             and classified > 0
-            and aggregate_unknown == 0
+            and directional_unavailable == 0
             and failed_batches == 0
         ),
         "is_provisional": session in {"preopen", "regular", "closing_auction"},
@@ -452,7 +463,7 @@ def _build_payload(
         "trade_value_confidence": "medium" if trade_value is not None else None,
         "source": (
             source_prefix
-            if aggregate_unknown == 0 and failed_batches == 0
+            if directional_unavailable == 0 and failed_batches == 0
             else f"{source_prefix}_partial"
         ),
         "as_of": max(event_times) if event_times else datetime.now(TAIPEI_TZ),
@@ -501,6 +512,91 @@ def _build_payload(
     }
 
 
+def _rescue_missing_z(
+    market: str, codes: list[str], messages: list[dict[str, object]],
+    payload: dict[str, object], *, prior_states: dict[str, dict] | None,
+    remaining_seconds: float,
+) -> tuple[dict[str, object], int]:
+    """Bounded second pass within the existing refresh, using the same guard/receipt."""
+    today = datetime.now(TAIPEI_TZ).date()
+    candidates = {
+        str(row["code"]): row for row in payload["component_stock_rows"]
+        if row.get("trade_date") == today
+        and (as_int(row.get("cumulative_volume_lots")) or 0) > 0
+        and not row.get("has_actual_trade")
+        and row.get("market_session") in {"regular", "closing_auction", "close_resolution"}
+    }
+    diagnostics = dict(
+        status="not_needed", candidate_count=len(candidates), selected_count=0,
+        resolved_count=0, unresolved_count=0, attempted_batch_count=0,
+        failed_batch_count=0, skipped_batch_count=0, batch_failures=[],
+        max_symbols=_RESCUE_MAX_SYMBOLS, max_batches=_RESCUE_MAX_BATCHES,
+        timeout_seconds=_RESCUE_TIMEOUT_SECONDS, backoff_seconds=_RESCUE_BACKOFF_SECONDS,
+    )
+    payload["missing_z_rescue"] = diagnostics
+    if not candidates:
+        return payload, 0
+    state = _CACHE.setdefault(market, {})
+    if monotonic() < float(state.get("rescue_next_at", 0)):
+        diagnostics["status"] = "backoff"
+        return payload, 0
+    budget = min(_RESCUE_TIMEOUT_SECONDS, math.floor(remaining_seconds))
+    if payload.get("failed_batch_count") or payload.get("skipped_batch_count") or budget < 1:
+        diagnostics["status"] = "skipped"
+        return payload, 0
+    # Rotate over current candidates; persistent missing-z symbols cannot starve
+    # the rest of the universe. This is cadence metadata, not another price store.
+    cursor = str(state.get("rescue_cursor") or "")
+    ordered = sorted(candidates)
+    ordered = [code for code in ordered if code > cursor] + [code for code in ordered if code <= cursor]
+    selected = ordered[:min(_RESCUE_MAX_SYMBOLS, _BATCH_SIZE * _RESCUE_MAX_BATCHES)]
+    state.update(rescue_next_at=monotonic() + _RESCUE_BACKOFF_SECONDS, rescue_cursor=selected[-1])
+    batch_diagnostics: dict[str, object] = {}
+    rescued_messages, failed, calls = _fetch_messages(
+        selected, market, budget, diagnostics=batch_diagnostics,
+    )
+    accepted = {}
+    for message in rescued_messages:
+        code = str(message.get("c") or "")
+        if code not in selected:
+            continue
+        row = _classify_message(message, market)  # Only new actual z; no inferred/cache price.
+        original = candidates[code]
+        if (row is None or row.get("trade_date") != today or row.get("price_source") != "z"
+            or not row.get("has_actual_trade") or row["as_of"] < original["as_of"]
+            or (as_int(row.get("cumulative_volume_lots")) or 0) < original["cumulative_volume_lots"]):
+            continue
+        previous = accepted.get(code)
+        if previous is None or _snapshot_time(message) >= _snapshot_time(previous):
+            accepted[code] = message
+    blocked = bool(failed or batch_diagnostics.get("skipped_batch_count"))
+    if blocked:
+        state["rescue_next_at"] = monotonic() + _RESCUE_FAILURE_BACKOFF_SECONDS
+        diagnostics["backoff_seconds"] = _RESCUE_FAILURE_BACKOFF_SECONDS
+    diagnostics.update(
+        status="blocked" if blocked else "complete" if len(accepted) == len(selected) else "partial",
+        selected_count=len(selected), resolved_count=len(accepted),
+        unresolved_count=len(selected) - len(accepted),
+        attempted_batch_count=calls, failed_batch_count=failed,
+        skipped_batch_count=batch_diagnostics.get("skipped_batch_count", 0),
+        batch_failures=batch_diagnostics.get("batch_failures", []),
+    )
+    if accepted:
+        refreshed = _build_payload(
+            market, codes,
+            [message for message in messages if str(message.get("c") or "") not in accepted]
+            + list(accepted.values()), 0, prior_states=prior_states,
+        )
+        if refreshed is not None:
+            # Full acquisition diagnostics stay independent of the rescue pass.
+            for key in ("attempted_batch_count", "failed_batch_count", "skipped_batch_count", "batch_failures", "elapsed_ms"):
+                if key in payload:
+                    refreshed[key] = payload[key]
+            payload = refreshed
+    payload["missing_z_rescue"] = diagnostics
+    return payload, calls
+
+
 def read_twse_mis_current_breadth(
     scope: str,
     timeout_seconds: int,
@@ -518,7 +614,7 @@ def read_twse_mis_current_breadth(
             external_calls=0,
         )
     cached = _CACHE.get(market)
-    if cached and monotonic() < float(cached["expires_at"]):
+    if cached and monotonic() < float(cached.get("expires_at", 0)):
         payload = cached.get("payload")
         return CurrentMarketProviderPayload(
             payload=payload if isinstance(payload, dict) else None,
@@ -528,7 +624,7 @@ def read_twse_mis_current_breadth(
         )
     with _REFRESH_LOCK:
         cached = _CACHE.get(market)
-        if cached and monotonic() < float(cached["expires_at"]):
+        if cached and monotonic() < float(cached.get("expires_at", 0)):
             payload = cached.get("payload")
             return CurrentMarketProviderPayload(
                 payload=payload if isinstance(payload, dict) else None,
@@ -561,6 +657,7 @@ def read_twse_mis_current_breadth(
         external_calls = 0
         provider_io_started = False
         batch_diagnostics: dict[str, object] = {}
+        started_at = monotonic()
         try:
             codes = list(dict.fromkeys(universe_reader(market)))
             minimum = 500 if market == "TWSE" else 250
@@ -584,6 +681,11 @@ def read_twse_mis_current_breadth(
             if payload is None:
                 raise ValueError("TWSE MIS breadth returned no canonical candidate")
             payload.update(batch_diagnostics, failed_batch_count=failed_batches)
+            payload, rescue_calls = _rescue_missing_z(
+                market, codes, messages, payload, prior_states=prior_states,
+                remaining_seconds=timeout_seconds - (monotonic() - started_at),
+            )
+            external_calls += rescue_calls
             _cache(market, payload)
             guard = TWSE_MIS_PROVIDER_GUARD.snapshot()
             return CurrentMarketProviderPayload(

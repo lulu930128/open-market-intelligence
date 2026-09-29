@@ -35,6 +35,23 @@ def project_breadth_coverage(raw: Mapping[str, Any]) -> dict[str, Any]:
         if missing is not None and details.get("provider_missing", 0) != missing:
             raise ValueError("breadth reasons must reconcile to missing")
     return {
+        # Receipt coverage and directional classification have different denominators
+        # and must never turn legitimate no-trade into missing provider evidence.
+        "observation_coverage_count": universe - missing if missing is not None else None,
+        "observation_coverage_ratio": (universe - missing) / universe if universe and missing is not None else None,
+        "observation_coverage_status": "complete" if missing == 0 and universe else "partial" if missing is not None and universe else "unknown",
+        "directional_coverage_count": classified,
+        "directional_coverage_ratio": classified / universe if universe else None,
+        "valid_no_trade_count": details.get("valid_no_trade", 0) if details else None,
+        "directional_unavailable_count": universe - classified - details.get("valid_no_trade", 0),
+        "directional_coverage_status": (
+            "complete" if universe and classified == universe
+            else "partial" if universe else "unknown"
+        ),
+        "trade_state_resolution_status": (
+            "complete" if universe and classified + details.get("valid_no_trade", 0) == universe
+            else "partial" if universe else "unknown"
+        ),
         "classification_summary": summary,
         "classification_reason_counts": details,
         "received_count": universe - missing if missing is not None else None,

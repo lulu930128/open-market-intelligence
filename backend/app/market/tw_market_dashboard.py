@@ -357,6 +357,12 @@ def _project_hot_groups_for_dashboard(
                 "price_semantics": group.get("price_semantics", snapshot.get("price_semantics")),
                 "provisional": bool(group.get("provisional")) or session_phase in {"preopen", "closing_auction"},
                 "observation_freshness": group.get("observation_freshness"),
+                **{key: group.get(key) for key in (
+                    "observation_received_freshness", "last_trade_recency", "breadth_usable",
+                    "observation_coverage_count", "observation_coverage_ratio",
+                    "directional_coverage_count", "directional_coverage_ratio",
+                    "directional_unavailable_count", "valid_no_trade_count", "coverage_reason_counts",
+                )},
                 "facts_usable_for_ranking": group.get("facts_usable_for_ranking") is True,
                 "intraday_research_usable": group.get("intraday_research_usable") is True,
                 "freshness_member_counts": group.get("freshness_member_counts") or {},
@@ -793,6 +799,9 @@ def _build_resolved_indices(
             "classification_diagnostics": raw_breadth.get("classification_diagnostics") or {},
             "auction_breadth": raw_breadth.get("auction_breadth"),
             "acquisition_diagnostics": raw_breadth.get("acquisition_diagnostics"),
+            "observation_received_at": raw_breadth.get("observation_received_at"),
+            "observation_received_freshness": raw_breadth.get("observation_received_freshness"),
+            "last_trade_recency": raw_breadth.get("last_trade_recency"),
             "market": market,
             "status": str(raw_breadth.get("status") or "missing"),
             "session_phase": str(

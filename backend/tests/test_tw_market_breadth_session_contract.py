@@ -85,7 +85,7 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
         )
         cached = twse_mis_current_breadth._classify_message(
             self._message(t="09:01:00", z="-", pz="-", ts="0", v="5"),
-            "TWSE", cached_state={"trade_date": first["trade_date"], "price": first["current_price"], "price_as_of": first["price_as_of"], "has_actual_trade": True},
+            "TWSE", cached_state={"trade_date": first["trade_date"], "price": first["current_price"], "price_as_of": first["price_as_of"], "has_actual_trade": True, "cumulative_volume_lots": 5},
         )
 
         self.assertIsNotNone(first)
