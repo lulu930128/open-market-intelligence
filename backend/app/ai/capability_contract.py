@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from app.ai import capability_resolution_registry, public_contract
+from app.ai.projection_temporal import series_point_sort_key, series_point_time
 
 
 OUTPUT_MODES = {"evidence_only", "decision", "decision_with_evidence"}
@@ -6388,43 +6389,13 @@ def _bounded_value(value: Any, *, limit: int, depth: int = 0) -> Any:
     return value
 
 
-def _series_point_sort_key(point: Any) -> datetime:
-    if not isinstance(point, dict):
-        return datetime.min.replace(tzinfo=timezone.utc)
-    for key in (
-        "bar_time",
-        "event_at",
-        "event_time",
-        "end_at",
-        "start_at",
-        "time",
-        "date",
-        "trade_date",
-    ):
-        raw_value = point.get(key)
-        if isinstance(raw_value, datetime):
-            parsed = raw_value
-        else:
-            text = str(raw_value or "").strip()
-            if not text:
-                continue
-            try:
-                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    return datetime.min.replace(tzinfo=timezone.utc)
-
-
 def _normalize_intraday_order(value: dict[str, Any]) -> dict[str, Any]:
     output = dict(value)
     for key in ("points", "bars"):
         rows = output.get(key)
         if not isinstance(rows, list):
             continue
-        output[key] = sorted(rows, key=_series_point_sort_key)
+        output[key] = sorted(rows, key=series_point_sort_key)
         output["sort_order"] = "asc"
     rows = (
         output.get("points")
@@ -6436,12 +6407,7 @@ def _normalize_intraday_order(value: dict[str, Any]) -> dict[str, Any]:
     if rows and isinstance(rows[-1], dict):
         output["latest_point"] = rows[-1]
         output["event_time"] = (
-            rows[-1].get("event_time")
-            or rows[-1].get("event_at")
-            or rows[-1].get("bar_time")
-            or rows[-1].get("end_at")
-            or rows[-1].get("start_at")
-            or rows[-1].get("time")
+            series_point_time(rows[-1])
             or output.get("event_time")
             or output.get("selected_event_at")
         )
@@ -6623,9 +6589,7 @@ def _canonical_intraday_value(value: Any) -> Any:
     if latest_point is not None:
         output["latest_point"] = latest_point
         output["event_time"] = (
-            latest_point.get("event_time")
-            or latest_point.get("bar_time")
-            or latest_point.get("time")
+            series_point_time(latest_point)
             or output.get("event_time")
         )
     return output
@@ -6637,6 +6601,13 @@ def _canonical_capability_value(
 ) -> Any:
     if capability_id == "intraday.bars":
         return _canonical_intraday_value(value)
+    if capability_id == "daily.ohlcv" and isinstance(value, dict):
+        # Bound history only after chronological ordering, independent of input order.
+        return {
+            key: sorted(rows, key=series_point_sort_key)
+            if key in {"points", "bars"} and isinstance(rows, list) else rows
+            for key, rows in value.items()
+        }
     if capability_id == "market.sample_ranking" and isinstance(value, dict):
         output = dict(value)
         output["deprecated"] = True
@@ -6760,12 +6731,7 @@ def _reconcile_projected_series_counts(
     if capability_id == "intraday.bars" and rows:
         value["latest_point"] = rows[-1]
         value["event_time"] = (
-            rows[-1].get("event_time")
-            or rows[-1].get("event_at")
-            or rows[-1].get("bar_time")
-            or rows[-1].get("end_at")
-            or rows[-1].get("start_at")
-            or rows[-1].get("time")
+            series_point_time(rows[-1])
             if isinstance(rows[-1], dict)
             else value.get("selected_event_at")
         )

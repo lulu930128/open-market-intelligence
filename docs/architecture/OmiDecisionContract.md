@@ -465,6 +465,11 @@ Brief 模式的 byte budget 先裁切 execution diagnostics，再把 selected ev
 以 `projection_level=summary` 標示，核心 evidence 只有在摘要化後仍無法滿足 hard
 budget 時才會進入 `omitted_capabilities`。
 
+Series projection 共用 pure temporal helper 排序與選取最新點；Daily history 先排序再裁切，
+同一 evidence snapshot 的 latest identity 不隨 requested limit 改變。摘要保留 canonical
+bar timestamps；若 Daily latest point 與已提供的 selected event／明示 latest date 矛盾，
+以 `DAILY_LATEST_POINT_TEMPORAL_MISMATCH` 阻擋 latest summary，不另行推算 session 或 freshness。
+
 `diagnostics.source_health` 使用逐級降級：完整 entries → summary 加 20 筆問題 →
 summary 加 5 筆問題 → summary only。其 summary 明確分離
 `total_entry_count`／`returned_entry_count` 與

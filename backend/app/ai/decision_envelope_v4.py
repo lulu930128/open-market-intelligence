@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 import json
 from typing import Any
 
+from app.ai.projection_temporal import (
+    daily_latest_point_mismatch,
+    series_point_sort_key,
+    series_point_time,
+)
+
 from app.ai import (
     answer_composer,
     answer_localization,
@@ -1924,30 +1930,11 @@ def _brief_capability_summary(
             if isinstance(value.get("bars"), list)
             else []
         )
-        def point_time(point: dict[str, Any]) -> datetime:
-            for key in ("bar_time", "event_time", "time", "date", "trade_date"):
-                raw_value = point.get(key)
-                if isinstance(raw_value, datetime):
-                    parsed = raw_value
-                else:
-                    text = str(raw_value or "").strip()
-                    if not text:
-                        continue
-                    try:
-                        parsed = datetime.fromisoformat(
-                            text.replace("Z", "+00:00")
-                        )
-                    except ValueError:
-                        continue
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return parsed.astimezone(timezone.utc)
-            return datetime.min.replace(tzinfo=timezone.utc)
-
         latest_point = (
             max(
-                (row for row in rows if isinstance(row, dict)),
-                key=point_time,
+                # Match stable sort + tail truncation when timestamps tie.
+                (row for row in reversed(rows) if isinstance(row, dict)),
+                key=series_point_sort_key,
                 default={},
             )
             if rows
@@ -1955,14 +1942,13 @@ def _brief_capability_summary(
             if isinstance(value.get("latest_point"), dict)
             else {}
         )
-        latest_event_time = next(
-            (
-                latest_point.get(key)
-                for key in ("bar_time", "event_time", "time", "date", "trade_date")
-                if latest_point.get(key) is not None
-            ),
-            None,
-        )
+        latest_event_time = series_point_time(latest_point)
+        temporal_mismatch = capability_id == "daily.ohlcv" and daily_latest_point_mismatch(value, latest_point)
+        if temporal_mismatch:
+            # Retain selected metadata for diagnosis, but never label a conflicting
+            # point as the latest fact. This is projection integrity, not freshness.
+            latest_point = {}
+            latest_event_time = None
         return {
             **_summary_dict(
                 value,
@@ -1979,6 +1965,7 @@ def _brief_capability_summary(
                     "limitations",
                     "available_bar_count",
                     "as_of",
+                    "latest_trade_date",
                     "latest_data_date",
                     "expected_data_date",
                     "interval",
@@ -2048,6 +2035,9 @@ def _brief_capability_summary(
                     "trade_date",
                     "time",
                     "bar_time",
+                    "start_at",
+                    "end_at",
+                    "event_at",
                     "event_time",
                     "open",
                     "open_price",
@@ -2067,7 +2057,18 @@ def _brief_capability_summary(
                     "volume_semantics",
                 ),
             ),
-            "event_time": latest_event_time or value.get("event_time"),
+            "event_time": None if temporal_mismatch else latest_event_time or value.get("event_time"),
+            **({
+                "status": "blocked",
+                "reason_code": "DAILY_LATEST_POINT_TEMPORAL_MISMATCH",
+                "facts_usable": False,
+                "research_usable": False,
+                "decision_usable": False,
+                "limitations": list(dict.fromkeys([
+                    *(value.get("limitations") or []),
+                    "DAILY_LATEST_POINT_TEMPORAL_MISMATCH",
+                ])),
+            } if temporal_mismatch else {}),
             "points_included": 0,
             "projection_level": "summary",
         }
