@@ -2644,8 +2644,8 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertIn("intraday", plan.requested_domains)
         self.assertIn("quote.snapshot", plan.selected_capabilities)
         self.assertIn("intraday.bars", plan.selected_capabilities)
-        self.assertIn("read_taiwan_quote_evidence", plan.required_readers)
-        self.assertIn("read_taiwan_bars", plan.required_readers)
+        self.assertIn("quote", plan.required_readers)
+        self.assertIn("intraday", plan.required_readers)
 
     def test_multi_intent_broker_question_uses_standard_stock_planner(self) -> None:
         payload = AiAskRequest(
@@ -2667,7 +2667,9 @@ class AiCapabilityContractTests(unittest.TestCase):
             effective_mode="data_only",
         )
 
-        self.assertEqual(plan.required_readers, ())
+        self.assertIn("identity", plan.required_readers)
+        self.assertIn("technical_evidence", plan.required_readers)
+        self.assertNotIn("overnight", plan.required_readers)
         self.assertEqual(plan.excluded_readers, ())
         self.assertIn("quote.snapshot", plan.selected_capabilities)
         self.assertIn("daily.ohlcv", plan.selected_capabilities)
@@ -2697,15 +2699,10 @@ class AiCapabilityContractTests(unittest.TestCase):
             effective_mode="data_only",
         )
 
-        self.assertEqual(
-            plan.required_readers,
-            ("get_stock", "get_broker_branch_trade_summary"),
-        )
-        self.assertIn(
-            "get_latest_stock_monthly_revenue",
-            plan.excluded_readers,
-        )
-        self.assertFalse(plan.external_refresh_allowed)
+        self.assertIn("broker_branch", plan.required_readers)
+        self.assertNotIn("revenue", plan.required_readers)
+        self.assertNotIn("technical_evidence", plan.required_readers)
+        self.assertTrue(plan.external_refresh_allowed)  # Actual acquisition remains policy/fill-owned.
 
     def test_explicit_intents_add_capabilities_without_keyword_hints(self) -> None:
         payload = AiAskRequest(
@@ -2728,7 +2725,9 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertIn("daily.ohlcv", plan.selected_capabilities)
         self.assertIn("technical.structure", plan.selected_capabilities)
         self.assertIn("broker_branch.summary", plan.selected_capabilities)
-        self.assertEqual(plan.required_readers, ())
+        self.assertIn("identity", plan.required_readers)
+        self.assertIn("technical_evidence", plan.required_readers)
+        self.assertNotIn("overnight", plan.required_readers)
 
     def test_market_volume_question_selects_bounded_volume_capability(self) -> None:
         payload = AiAskRequest(
@@ -3437,14 +3436,11 @@ class AiCapabilityContractTests(unittest.TestCase):
             effective_mode="data_only",
         )
 
-        self.assertEqual(plan.reader_profile, "daily_only")
-        self.assertEqual(
-            plan.required_readers,
-            ("get_stock", "list_stock_ohlc_chart_data"),
-        )
-        self.assertFalse(plan.external_refresh_allowed)
-        self.assertIn("read_fundamentals", plan.excluded_readers)
-        self.assertIn("read_taiwan_source_health", plan.excluded_readers)
+        self.assertEqual(plan.reader_profile, "capability_graph")
+        self.assertEqual(set(plan.required_readers), {"identity", "daily", "selected_freshness"})
+        self.assertTrue(plan.external_refresh_allowed)  # Actual acquisition remains policy/fill-owned.
+        self.assertNotIn("financials", plan.required_readers)
+        self.assertNotIn("source_health", plan.required_readers)
         self.assertEqual(plan.selection["limits"]["daily.ohlcv"], 20)
 
     def test_tw_explicit_technical_selection_uses_only_technical_dependencies(
@@ -3473,20 +3469,13 @@ class AiCapabilityContractTests(unittest.TestCase):
             effective_mode="data_only",
         )
 
-        self.assertEqual(plan.reader_profile, "technical_only")
-        self.assertEqual(
-            plan.required_readers,
-            (
-                "get_stock",
-                "list_stock_ohlc_chart_data",
-                "build_stock_technical_report",
-                "build_tw_stock_technical_evidence",
-            ),
-        )
-        self.assertIn("read_fundamentals", plan.excluded_readers)
-        self.assertIn("read_cross_market_context", plan.excluded_readers)
-        self.assertIn("get_broker_branch_trade_summary", plan.excluded_readers)
-        self.assertFalse(plan.external_refresh_allowed)
+        self.assertEqual(plan.reader_profile, "capability_graph")
+        self.assertTrue({"identity", "daily", "technical_reports", "technical_evidence"} <= set(plan.required_readers))
+        self.assertEqual(len(plan.required_readers), len(set(plan.required_readers)))
+        self.assertNotIn("financials", plan.required_readers)
+        self.assertNotIn("overnight", plan.required_readers)
+        self.assertNotIn("broker_branch", plan.required_readers)
+        self.assertTrue(plan.external_refresh_allowed)  # Actual acquisition remains policy/fill-owned.
 
     def test_crypto_capability_plan_is_target_provider_and_interval_bounded(self) -> None:
         plan, warnings = agentic_planning.plan_crypto_asset_tools(
@@ -3714,10 +3703,10 @@ class AiCapabilityContractTests(unittest.TestCase):
             target_market="TW",
         )
 
-        self.assertEqual(plan.reader_profile, "quote_only")
-        self.assertIn("read_taiwan_bars", plan.required_readers)
-        self.assertIn("build_stock_technical_report", plan.excluded_readers)
-        self.assertIn("get_broker_branch_trade_summary", plan.excluded_readers)
+        self.assertEqual(plan.reader_profile, "capability_graph")
+        self.assertIn("intraday", plan.required_readers)
+        self.assertNotIn("technical_reports", plan.required_readers)
+        self.assertNotIn("broker_branch", plan.required_readers)
 
     def test_natural_regulation_question_uses_event_only_capabilities(self) -> None:
         question = "2330 是否為處置股？請說明撮合間隔與交易限制。"
@@ -3737,7 +3726,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
 
         self.assertEqual(intent, "regulation")
-        self.assertEqual(plan.reader_profile, "event_only")
+        self.assertEqual(plan.reader_profile, "capability_graph")
         self.assertEqual(
             set(plan.selected_capabilities),
             {
@@ -3766,7 +3755,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
 
         self.assertEqual(intent, "quote")
-        self.assertEqual(plan.reader_profile, "quote_only")
+        self.assertEqual(plan.reader_profile, "capability_graph")
         self.assertIn("quote.official_close", plan.selected_capabilities)
         self.assertNotIn("daily.ohlcv", plan.selected_capabilities)
         self.assertNotIn("technical.structure", plan.selected_capabilities)

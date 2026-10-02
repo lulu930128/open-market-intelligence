@@ -185,6 +185,111 @@ def capability_dependency_closure(
                 resolved.add(dependency)
                 pending.append(dependency)
     return frozenset(resolved)
+@dataclass(frozen=True)
+class CapabilityReadNode:
+    """Read ownership, deliberately independent of acquisition operations."""
+
+    node_id: str
+    depends_on: tuple[str, ...] = ()
+    timeout_seconds: float = 8.0
+
+
+TW_STOCK_READ_NODES = {
+    node.node_id: node for node in (
+        CapabilityReadNode("identity"),
+        CapabilityReadNode("calendar"),
+        CapabilityReadNode("company_profile", ("identity",)),
+        CapabilityReadNode("latest_daily", ("identity", "calendar")),
+        CapabilityReadNode("institutional", ("identity",)),
+        CapabilityReadNode("margin", ("identity",)),
+        CapabilityReadNode("shareholding", ("identity",)),
+        CapabilityReadNode("revenue", ("identity",)),
+        CapabilityReadNode("financials", ("identity", "latest_daily", "revenue")),
+        CapabilityReadNode("daily", ("identity",)),
+        CapabilityReadNode("broker_branch", ("identity",)),
+        CapabilityReadNode("technical_reports", ("daily", "latest_daily"), 12.0),
+        CapabilityReadNode("overnight", ("identity",), 10.0),
+        CapabilityReadNode("source_health", ("identity",), 10.0),
+        CapabilityReadNode("selected_freshness", ("identity",)),
+        CapabilityReadNode("disposition", ("identity",)),
+        CapabilityReadNode("quote", ("latest_daily", "disposition")),
+        CapabilityReadNode("events", ("identity",)),
+        CapabilityReadNode("intraday", ("identity", "calendar")),
+        CapabilityReadNode("corporate_history", ("identity",)),
+        CapabilityReadNode("technical_evidence", ("daily", "corporate_history", "calendar"), 15.0),
+        CapabilityReadNode("price_map", ("identity",), 15.0),
+    )
+}
+
+# Dependencies here describe executable read groups, including trust metadata.
+# DERIVED_DEPENDENCIES remains the acquisition/quality dependency vocabulary;
+# e.g. data.freshness does not require a full diagnostics.source_health scan.
+TW_CAPABILITY_READ_NODES: dict[str, tuple[str, ...]] = {
+    "target.identity": ("identity",),
+    "data.freshness": ("selected_freshness",),
+    "company.profile": ("company_profile",),
+    "daily.ohlcv": ("daily",),
+    "quote.snapshot": ("quote",),
+    "quote.last_trade": ("quote",),
+    "quote.order_book": ("quote",),
+    "quote.auction": ("quote",),
+    "quote.session_close": ("quote",),
+    "quote.official_close": ("latest_daily",),
+    "intraday.bars": ("intraday",),
+    "chips.institutional": ("institutional",),
+    "chips.margin": ("margin",),
+    "ownership.distribution": ("shareholding",),
+    "broker_branch.summary": ("broker_branch",),
+    "fundamentals.revenue": ("revenue",),
+    "fundamentals.financials": ("financials",),
+    # Completed daily structure consumes no live quote/intraday input. Those
+    # remain independently selectable; acquisition dependencies are broader.
+    "technical.structure": ("technical_reports", "technical_evidence"),
+    "technical.indicators": ("technical_evidence",),
+    "technical.swings": ("technical_evidence",),
+    "technical.fibonacci": ("technical_evidence",),
+    "technical.divergence": ("technical_evidence",),
+    "technical.breakout": ("technical_evidence",),
+    "technical.volume_profile": ("technical_evidence",),
+    "technical.anchored_vwap": ("technical_evidence",),
+    "technical.relative_strength": ("technical_evidence",),
+    "technical.price_map": ("price_map",),
+    "events.upcoming": ("events",),
+    "events.calendar": ("events",),
+    "events.history": ("events",),
+    "corporate.actions": ("events",),
+    "regulation.disposition": ("events",),
+    "regulation.trading_restrictions": ("events",),
+    "cross_market.overnight": ("overnight",),
+    "cross_market.relations": ("overnight",),
+    "cross_market.parity": ("overnight",),
+    "diagnostics.source_health": ("source_health",),
+}
+
+
+def compile_tw_stock_read_plan(capability_ids: Iterable[str]) -> tuple[str, ...]:
+    """Deterministic dependency closure; each canonical read group runs once."""
+    ordered: list[str] = []
+    visiting: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in ordered:
+            return
+        if node_id in visiting:
+            raise ValueError(f"Cyclic Taiwan read dependency: {node_id}")
+        visiting.add(node_id)
+        for dependency in TW_STOCK_READ_NODES[node_id].depends_on:
+            visit(dependency)
+        visiting.remove(node_id)
+        ordered.append(node_id)
+
+    for capability_id in sorted(set(capability_ids) | {"target.identity", "data.freshness"}):
+        for node_id in TW_CAPABILITY_READ_NODES.get(capability_id, ()):
+            visit(node_id)
+    # Registry declaration order is the stable topological execution order.
+    return tuple(node_id for node_id in TW_STOCK_READ_NODES if node_id in ordered)
+
+
 SCHEDULER_OWNED_CAPABILITIES = frozenset(
     {
         "market.sectors",

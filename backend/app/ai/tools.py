@@ -473,6 +473,21 @@ def read_stock_context(
     analysis_horizon: str = "swing",
     market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from app.market.tw_bar_service import taiwan_bar_read_scope
+
+    with taiwan_bar_read_scope():
+        return _read_stock_context_graph(
+            db, stock_id, branch_days=branch_days, bars=bars, revenue_months=revenue_months,
+            financial_quarters=financial_quarters, include_intraday=include_intraday,
+            analysis_horizon=analysis_horizon, market_data_params=market_data_params,
+        )
+
+
+def _read_stock_context_graph(
+    db: Session, stock_id: str, *, branch_days: int, bars: int, revenue_months: int,
+    financial_quarters: int, include_intraday: bool, analysis_horizon: str,
+    market_data_params: dict[str, Any] | None,
+) -> dict[str, Any]:
     return taiwan_stock.read_stock_context(
         db=db,
         stock_id=stock_id,

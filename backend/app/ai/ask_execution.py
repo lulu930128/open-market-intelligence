@@ -92,6 +92,12 @@ def _market_data_params(
         can_external_fetch and realtime_policy != "cache_only"
     )
     plan = policy.get("query_plan", {}) if isinstance(policy, dict) else {}
+    if plan.get("reader_profile") == "capability_graph":
+        params["requested_capabilities"] = list(dict.fromkeys([
+            *(plan.get("selected_capabilities") or []), *(plan.get("optional_selected_capabilities") or []),
+        ]))
+        params["capability_limits"] = dict((plan.get("selection") or {}).get("limits") or {})
+        params["capability_parameters"] = dict((plan.get("selection") or {}).get("parameters") or {})
     if plan:
         origins = (plan.get("selection") or {}).get("capability_origins") or {}
         params["quote_acquisition_requested"] = any(
@@ -541,7 +547,10 @@ def _read_data_only(
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and read_context is not None:
+        return "omi.read_stock_context", read_context
     if scope_type == "market":
         return _read_market_context(
             db=db,
@@ -847,7 +856,16 @@ def _build_brief(
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and _reader_profile(payload, policy=policy) == "capability_graph":
+        if read_context is None:
+            _, read_context = _read_data_only(db, payload, scope_type, policy=policy)
+        return "omi.generate_stock_brief", reports.build_stock_brief(
+            db=db, stock_id=_require_scope_id(payload, "stock"),
+            strategy_profile=payload.strategy_profile, read_context=read_context,
+            response_preferences=_response_preferences(payload),
+        )
     if scope_type == "stock" and _uses_reader_profile(
         payload,
         expected="event_only",
@@ -998,7 +1016,16 @@ def _generate_report(
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and _reader_profile(payload, policy=policy) == "capability_graph":
+        if read_context is None:
+            _, read_context = _read_data_only(db, payload, scope_type, policy=policy)
+        return "omi.generate_stock_llm_report", orchestrator.generate_stock_llm_report(
+            db=db, stock_id=_require_scope_id(payload, "stock"),
+            strategy_profile=payload.strategy_profile, read_context=read_context,
+            response_preferences=_response_preferences(payload),
+        )
     if scope_type == "stock" and (
         _uses_reader_profile(
             payload,
@@ -1074,7 +1101,16 @@ def _generate_analysis(
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and _reader_profile(payload, policy=policy) == "capability_graph":
+        if read_context is None:
+            _, read_context = _read_data_only(db, payload, scope_type, policy=policy)
+        return "omi.generate_stock_llm_analysis", orchestrator.generate_stock_llm_analysis(
+            db=db, stock_id=_require_scope_id(payload, "stock"),
+            strategy_profile=payload.strategy_profile, read_context=read_context,
+            response_preferences=_response_preferences(payload),
+        )
     if scope_type == "stock" and (
         _uses_reader_profile(
             payload,
@@ -1149,6 +1185,10 @@ def _check_freshness(
     *,
     question_intent: str = "general",
 ) -> dict[str, Any]:
+    if scope_type == "stock" and _reader_profile(payload) == "capability_graph":
+        # The graph evaluates selected evidence freshness once, after reading.
+        # This preflight must not open the legacy all-domain gap scanner.
+        return {}
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         if _uses_reader_profile(

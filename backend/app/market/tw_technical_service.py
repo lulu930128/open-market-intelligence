@@ -690,6 +690,7 @@ class TaiwanTechnicalService:
         parameters: TechnicalAnalysisParameters,
         affected_swing_dates: tuple[str, ...] = (),
         breakout_corporate_action_contract: dict[str, Any] | None = None,
+        requested_capabilities: set[str] | None = None,
     ) -> dict[str, Any]:
         """Compose all Taiwan advanced technical semantics in one owner.
 
@@ -698,18 +699,23 @@ class TaiwanTechnicalService:
         algorithm sequence or constructs a parallel outward capability set.
         """
 
+        # The evidence caller supplies the closed capability selection.
+        selected = requested_capabilities or set()
+        def needs(capability: str) -> bool:
+            return requested_capabilities is None or "technical.structure" in selected or capability in selected
+
         swing_points = points[-260:]
         canonical_swing = canonical_points[-len(swing_points):]
         swings = build_swing_evidence(
             swing_points,
             affected_dates=affected_swing_dates,
-        )
-        fibonacci = build_fibonacci_evidence(swings)
+        ) if needs("technical.swings") else {}
+        fibonacci = build_fibonacci_evidence(swings) if needs("technical.fibonacci") else {}
         divergence = build_divergence_evidence(
             swings,
             canonical_swing,
             parameters=parameters,
-        )
+        ) if needs("technical.divergence") else {}
         breakout = build_breakout_evidence(
             points,
             canonical_points,
@@ -718,15 +724,15 @@ class TaiwanTechnicalService:
                 or {"coverage_status": "missing", "affected_dates": []}
             ),
             parameters=parameters,
-        )
+        ) if needs("technical.breakout") else {}
         return {
             "algorithm_version": ADVANCED_ALGORITHM_VERSION,
             "swings": swings,
             "fibonacci": fibonacci,
             "divergence": divergence,
             "breakout": breakout,
-            "volume_profile": build_volume_profile(points),
-            "anchored_vwap": build_anchored_vwap(swing_points, swings),
+            "volume_profile": build_volume_profile(points) if needs("technical.volume_profile") else {},
+            "anchored_vwap": build_anchored_vwap(swing_points, swings) if needs("technical.anchored_vwap") else {},
             "relative_strength": build_relative_strength(
                 points,
                 benchmark_points,
@@ -735,7 +741,7 @@ class TaiwanTechnicalService:
                 ),
                 sector_identity=(sector_benchmark or {}).get("identity"),
                 sector_metadata=sector_benchmark,
-            ),
+            ) if needs("technical.relative_strength") else {},
         }
 
     def calculate_price_map_capabilities(

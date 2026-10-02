@@ -1276,8 +1276,9 @@ def build_stock_brief(
     analysis_horizon: str = "swing",
     market_data_params: dict[str, Any] | None = None,
     response_preferences: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    context = tools.read_stock_context(
+    context = read_context if read_context is not None else tools.read_stock_context(
         db=db,
         stock_id=stock_id,
         branch_days=branch_days,
@@ -1291,7 +1292,7 @@ def build_stock_brief(
         scope_type="stock",
         scope_id=stock_id,
         strategy_profile=profile.key,
-    )
+    ) if read_context is None else []
 
     return {
         **context,

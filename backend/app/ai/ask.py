@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any
+from time import monotonic
+from functools import partial
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,7 @@ from app.ai import (
     ask_policy,
     ask_response_support,
     ask_stages,
+    capability_contract,
     decision_core,
     decision_envelope,
     decision_engine,
@@ -26,6 +29,7 @@ from app.ai import (
 )
 from app.ai.schemas import AiAskRequest
 from app.ai.market_context import atlas_context, atlas_company_news
+from app.market_data.policies import RealtimePolicy
 from app.portfolio import service as portfolio_service
 
 
@@ -244,6 +248,7 @@ def ask(
     server_policy: AiAskServerPolicy | None = None,
     progress_callback: pipeline_progress.ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    request_started = monotonic()
     progress = pipeline_progress.OmiPipelineProgress(progress_callback)
     _validate_request(payload)
 
@@ -374,9 +379,51 @@ def ask(
     )
     query_plan_payload = execution_plan.as_dict()
     policy["query_plan"] = query_plan_payload
+    stock_read_context = None
+    tool_stage_payload = payload
+    if execution_plan.reader_profile == "capability_graph":
+        # Preserve the registry's reader_fetch quote command outside the pure
+        # read graph. The existing market owner retains acquisition bounds and
+        # persistence; the graph then rereads its canonical evidence once.
+        market_params = ask_execution._market_data_params(payload, policy=policy)
+        quote_capabilities = tuple(
+            capability for capability in (
+                *execution_plan.selected_capabilities,
+                *execution_plan.optional_selected_capabilities,
+            )
+            if capability.startswith("quote.")
+            and (quote_resolution := capability_contract.capability_resolution_for(
+                scope_type="stock", capability_id=capability,
+            )) is not None
+            and quote_resolution.resolution_mode == "reader_fetch"
+        )
+        if (
+            quote_capabilities
+            and market_params.get("quote_acquisition_requested")
+            and market_params.get("external_fetch_allowed")
+            and _refresh_before_answer_enabled(payload)
+            and policy["tool_budget"]["max_calls"] > 0
+            and policy["tool_budget"]["max_external_fetches"] > 0
+        ):
+            try:
+                tools.acquire_taiwan_quote_evidence_projection(
+                    db=db, stock_id=_require_scope_id(payload, "stock"),
+                    policy=RealtimePolicy(execution_plan.realtime_policy),
+                    requested_capabilities=quote_capabilities,
+                )
+            except Exception as exc:
+                warnings.append(f"Taiwan quote acquisition unavailable: {type(exc).__name__}")
+            tool_stage_payload = payload.model_copy(update={"tool_budget": {
+                **policy["tool_budget"],
+                "max_calls": policy["tool_budget"]["max_calls"] - 1,
+                "max_external_fetches": policy["tool_budget"]["max_external_fetches"] - 1,
+            }})
+        _, stock_read_context = _read_data_only(
+            db, payload, scope_type, question_intent=question_intent, policy=policy,
+        )
     freshness_result = progress.run_freshness_check(
         scope_type=scope_type,
-        operation=lambda: _check_freshness(
+        operation=lambda: (stock_read_context or {}).get("freshness") or _check_freshness(
             db,
             payload,
             scope_type,
@@ -385,7 +432,7 @@ def ask(
     )
     tool_stage = ask_stages.execute_tool_stages(
         scope_type=scope_type,
-        payload=payload,
+        payload=tool_stage_payload,
         resolution=resolution,
         policy=policy,
         query_plan=query_plan_payload,
@@ -421,6 +468,17 @@ def ask(
     tool_runs = tool_stage.tool_runs
     freshness_result = tool_stage.freshness_result
     warnings.extend(tool_stage.warnings)
+    if stock_read_context is not None and any(
+        run.get("status") in {"ok", "success", "completed"} for run in tool_runs
+    ):
+        # A successful, separately authorized fill invalidates the pre-fill
+        # request snapshot. Cache-only requests execute exactly one read graph.
+        before_fill = stock_read_context.get("read_execution")
+        _, stock_read_context = _read_data_only(
+            db, payload, scope_type, question_intent=question_intent, policy=policy,
+        )
+        stock_read_context.setdefault("read_execution", {})["before_fill"] = before_fill
+        freshness_result = stock_read_context.get("freshness") or freshness_result
     ask_stages.apply_freshness_guard(policy=policy, freshness_result=freshness_result)
 
     effective_mode = ask_stages.effective_mode_after_freshness(
@@ -440,15 +498,19 @@ def ask(
         warnings=warnings,
         policy=policy,
         progress=progress,
-        read_data_only=_read_data_only,
-        build_brief=_build_brief,
-        generate_analysis=_generate_analysis,
-        generate_report=_generate_report,
+        read_data_only=partial(_read_data_only, read_context=stock_read_context) if stock_read_context is not None else _read_data_only,
+        build_brief=partial(_build_brief, read_context=stock_read_context) if stock_read_context is not None else _build_brief,
+        generate_analysis=partial(_generate_analysis, read_context=stock_read_context) if stock_read_context is not None else _generate_analysis,
+        generate_report=partial(_generate_report, read_context=stock_read_context) if stock_read_context is not None else _generate_report,
     )
     effective_mode = mode_result.effective_mode
     action = mode_result.action
     result = mode_result.result
     warnings = mode_result.warnings
+    if execution_plan.reader_profile == "capability_graph":
+        freshness_result = result.get("freshness") or freshness_result
+        query_plan_payload["read_execution"] = result.get("read_execution") or {}
+        ask_stages.apply_freshness_guard(policy=policy, freshness_result=freshness_result)
 
     response_target = _resolution_target(resolution)
     if (
@@ -490,6 +552,10 @@ def ask(
         query_plan=query_plan_payload,
     )
 
+    if execution_plan.reader_profile == "capability_graph":
+        query_plan_payload["read_execution"]["request_to_projection_ms"] = round(
+            (monotonic() - request_started) * 1000, 3,
+        )
     response = ask_finalizer.finalize_ask_response(
         payload=payload,
         resolution=resolution,

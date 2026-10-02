@@ -4289,6 +4289,7 @@ def _build_stock_compact_evidence(
     financial_contract: dict[str, Any] | None = None,
     fundamentals_applicable: bool = True,
     latest_daily_evidence: Any = None,
+    selected_capabilities: set[str] | None = None,
 ) -> dict[str, Any]:
     target = {
         "type": "tw_stock",
@@ -4317,7 +4318,7 @@ def _build_stock_compact_evidence(
         analysis=technical_analysis,
         technical_levels=technical_levels,
         technical_reports=technical_reports,
-    )
+    ) if selected_capabilities is None or "technical.structure" in selected_capabilities else {}
     technical["contract_version"] = "tw_technical_current_state_v2"
     technical["advanced_shadow"] = technical_evidence.get("structure_v2")
     technical_indicators = technical_evidence.get("indicators")
@@ -4469,7 +4470,10 @@ def _build_stock_compact_evidence(
         payload.update(source_reported_financial_semantics(row))
         financial_history_payload.append(payload)
 
-    revenue_continuity = analyze_monthly_revenue_continuity(revenue_history)
+    revenue_continuity = (
+        analyze_monthly_revenue_continuity(revenue_history)
+        if selected_capabilities is None or "fundamentals.revenue" in selected_capabilities else {}
+    )
     resolved_financial_contract = (
         financial_contract
         or build_legacy_financial_contract(

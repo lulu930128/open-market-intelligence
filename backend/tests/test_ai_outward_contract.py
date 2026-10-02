@@ -830,13 +830,13 @@ class QueryPlanContractTests(unittest.TestCase):
                 ),
                 patch.object(
                     ai_ask.tools,
-                    "read_stock_quote_context",
+                    "read_stock_context",
                     return_value=quote_context(),
                 ) as quote_reader,
                 patch.object(
                     ai_ask.tools,
-                    "read_stock_context",
-                    side_effect=AssertionError("full stock reader must not run"),
+                    "read_stock_quote_context",
+                    side_effect=AssertionError("legacy profile reader must not run"),
                 ) as full_reader,
             ):
                 response = ai_ask.ask(db=db, payload=payload)
@@ -844,7 +844,7 @@ class QueryPlanContractTests(unittest.TestCase):
             quote_reader.assert_called_once()
             full_reader.assert_not_called()
             self.assertTrue(response["ok"])
-            self.assertEqual(response["action"], "omi.read_stock_quote")
+            self.assertEqual(response["action"], "omi.read_stock_context")
         finally:
             db.close()
 
@@ -1042,7 +1042,7 @@ class QueryPlanContractTests(unittest.TestCase):
             self.assertEqual(response["action"], "omi.read_stock_context")
             self.assertEqual(
                 response["execution"]["query_plan"]["reader_profile"],
-                "standard",
+                "capability_graph",
             )
             selected = set(
                 response["execution"]["selection"]["required"]

@@ -185,7 +185,9 @@ def test_ask_request_pipeline_routes_before_evidence_io(db, monkeypatch, questio
         assert set(result.selected_capabilities) == required | {"target.identity", "data.freshness"}
     pure_quote = not market and required <= {"quote.auction", "quote.snapshot"}
     if pure_quote:
-        assert result.reader_profile == "quote_only"
+        assert result.reader_profile == "capability_graph"
+        assert "quote" in result.required_readers
+        assert "technical_reports" not in result.required_readers
         assert "news.events" not in result.optional_selected_capabilities
     else:
         assert ("news.events" in result.optional_selected_capabilities) is atlas_enabled

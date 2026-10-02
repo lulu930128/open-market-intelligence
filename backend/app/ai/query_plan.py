@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from app.ai import capability_contract
+from app.ai.capability_resolution_registry import compile_tw_stock_read_plan
 from app.ai.market_payload_contract import PAYLOAD_LEVELS
 from app.ai.question_capabilities import has_market_hot_group_intent
 from app.ai.schemas import AiAskRequest
@@ -1217,6 +1218,26 @@ def build_query_plan(
         *selection.get("required", ()),
         *selection.get("optional", ()),
     }
+    if scope_type == "stock" and (
+        payload.contract_version == "omi.decision.v4" or has_explicit_capability_selection
+    ):
+        return QueryPlan(
+            intent=question_intent, intents=intents, target_type="tw_stock",
+            response_mode=response_mode, reader_profile="capability_graph",
+            payload_level=payload_level, diagnostics_level=diagnostics_level,
+            required_capabilities=(), optional_capabilities=(), excluded_capabilities=(),
+            required_readers=compile_tw_stock_read_plan(selected_capability_set),
+            excluded_readers=(), freshness_scope=tuple(sorted(selected_capability_set)),
+            external_refresh_allowed=True, requested_domains=requested_domains,
+            excluded_domains=excluded_domains, matched_positive_terms=positive_terms,
+            matched_negative_terms=negative_terms, capability_selection_mode=capability_selection_mode,
+            selected_action_reason="Taiwan stock selection compiles to deduplicated canonical read nodes.",
+            requested_provider=requested_provider, strict_provider=strict_provider,
+            selection=selection, selected_capabilities=tuple(selection["required"]),
+            optional_selected_capabilities=tuple(selection["optional"]),
+            max_response_bytes=int(selection["max_response_bytes"]),
+            realtime_policy=str(selection["realtime_policy"]),
+        )
     if (
         scope_type == "stock"
         and (

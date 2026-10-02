@@ -3540,6 +3540,7 @@ def _fit_budget(
                 key: deepcopy(query_plan_contract[key])
                 for key in (
                     "reader_profile",
+                    "read_execution",
                     "target_type",
                     "question_intent",
                     "question_intents",

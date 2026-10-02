@@ -14,6 +14,12 @@ TW Base-1m 亦由 market owner 判定 completed-session repair eligibility，透
 
 Canonical read selection 不以 external acquisition／fallback permission 為條件；明確排除的能力仍不讀取。`require_live` 可讀取本機 evidence，但必須獨立通過既有 realtime policy，不能把 cache 存在視為即時成功。
 
+TW stock 的 public v4 selection 由 `capability_resolution_registry` 編譯為 `capability_graph`，在同一 logical `omi.ask` 執行 selected readers、必要 trust metadata 與 read dependency closure。Read nodes 與 fill operations 分開宣告；read 不根據 fill operation 自動 acquisition。Compact／standard／full 使用同一 graph 與 canonical market readers，差別由 output projection、fields、limits 與 byte budget 處理；wide selection 只合併 graph，不回退 monolithic standard context。`data.freshness` 只讀 selected datasets 的 freshness，不隱含完整 source health 或跨市場資料。
+
+既有 quote `reader_fetch` command 由 ask orchestration 在 graph 前呼叫 canonical acquisition owner，僅限明確選取、server 允許 external fetch、非 cache-only、啟用 before-answer refresh 且 command/fetch budget 非零的 request；graph 本身仍不 acquisition。取得失敗保留警告與 canonical cache 的原始品質限制。
+
+Graph 在 request 內循序執行且去重；相同輸入的 TaiwanBarService 讀取可在該 request 內共用，不建立持久 cache。每個 read node 在同一 thread 擁有獨立 read-only Session／transaction，SQLite VM execution 與 lock wait 受 deadline 約束。Pure Python 計算依 canonical row／iteration limits 有界，deadline 在返回時檢查，不宣稱可強制中斷任意 Python code。Node timeout／error 保留其他 evidence，透過 missing、limitations 與既有 quality gate 降級；必要能力缺失仍可 blocked。Debug `execution.query_plan.read_execution` 記錄 planned／actual nodes、狀態與耗時，tool_runs 不代表所有普通 reader 工作。既有 freshness guard、brief／report owner 使用同一份 pre-read evidence；另行授權的成功 fill 後才重讀同一 graph。`continuation.fill_plan` 繼續代表 acquisition，不是 payload pagination。
+
 市場 Human Answer 由既有 answer composer 渲染同一份 selected canonical evidence，再進單一 v4 projection。Breadth、指數與盤中 ranking 不另讀 snapshot；排名保留時間、metric 與 eligible／universe 的有限樣本限制。非 `evidence_only` 的 `answer_ready` 需在最終 response budget projection 後仍有實質文字；`response_ready` 只代表回應已完成。必要盤中 bars 不可用時，intraday 主結論與 action synthesis 必須由 canonical quality 降級，完成日線只作有日期的背景。
 
 TW current quote 與 completed daily technical structure 的跨日融合，只接受 backend 已分類的 expected session-date relation，且 target、日線 timeframe、completed snapshot、raw-unadjusted basis 與 daily lineage 相符。此例外不要求 caller 額外選 `daily.ohlcv`，也不提升原本 stale／unusable technical evidence。

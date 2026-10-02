@@ -91,6 +91,7 @@ def generate_stock_llm_analysis(
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
     response_preferences: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
@@ -100,6 +101,7 @@ def generate_stock_llm_analysis(
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
         response_preferences=response_preferences,
+        read_context=read_context,
     )
     return _build_non_persistent_analysis(envelope, kind="stock_llm_analysis")
 
@@ -155,6 +157,7 @@ def generate_stock_llm_report(
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
     response_preferences: dict[str, Any] | None = None,
+    read_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
@@ -164,6 +167,7 @@ def generate_stock_llm_report(
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
         response_preferences=response_preferences,
+        read_context=read_context,
     )
 
     started_at = _now()

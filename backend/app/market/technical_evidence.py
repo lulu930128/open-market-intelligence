@@ -2089,7 +2089,11 @@ def build_tw_stock_technical_evidence(
     intraday_points: list[Mapping[str, Any]] | None = None,
     market_calendar_status: Mapping[str, Any] | None = None,
     to_date: date | None = None,
+    requested_capabilities: set[str] | None = None,
 ) -> dict[str, Any]:
+    include_relative = requested_capabilities is None or bool(
+        requested_capabilities & {"technical.structure", "technical.relative_strength"}
+    )
     parameters = get_technical_analysis_parameters()
     daily, daily_lineage, daily_series = _daily_points(
         db,
@@ -2236,7 +2240,7 @@ def build_tw_stock_technical_evidence(
     advanced = TaiwanTechnicalService().calculate_advanced(
         points=daily,
         canonical_points=canonical_daily,
-        benchmark_points=_benchmark_points(db, to_date=to_date),
+        benchmark_points=_benchmark_points(db, to_date=to_date) if include_relative else [],
         sector_benchmark=build_tw_sector_benchmark(
             db,
             stock_id=stock_id,
@@ -2245,7 +2249,8 @@ def build_tw_stock_technical_evidence(
                 for point in daily
                 if (parsed := point_date(point.get("time"))) is not None
             ],
-        ),
+        ) if include_relative else None,
+        requested_capabilities=requested_capabilities,
         parameters=parameters,
         affected_swing_dates=tuple(swing_corporate_actions["affected_dates"]),
         breakout_corporate_action_contract=dict(breakout_corporate_actions),
@@ -2300,6 +2305,9 @@ def build_tw_stock_technical_evidence(
         "anchored_vwap": anchored_vwap,
         "relative_strength": relative_strength,
     }
+    if requested_capabilities is not None and "technical.structure" not in requested_capabilities:
+        advanced_payloads = {key: value for key, value in advanced_payloads.items() if value}
+        capability_contracts = {key: value for key, value in capability_contracts.items() if key in advanced_payloads}
     for capability_name, payload in advanced_payloads.items():
         _apply_capability_corporate_contract(
             payload,
@@ -2331,7 +2339,7 @@ def build_tw_stock_technical_evidence(
             contract.get("coverage_status") != "complete"
             for contract in capability_contracts.values()
         )
-        or relative_strength["status"] != "ready"
+        or (include_relative and relative_strength.get("status") != "ready")
         else "ready"
     )
     indicators = {
@@ -2389,7 +2397,7 @@ def build_tw_stock_technical_evidence(
         anchored_vwap=anchored_vwap,
         relative_strength=relative_strength,
         parameters=parameters,
-    )
+    ) if requested_capabilities is None or "technical.structure" in requested_capabilities else None
     return {
         "kind": "tw_stock_technical_evidence",
         "version": "tw.stock.technical.evidence.v1",

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
+from inspect import signature
 from decimal import Decimal
 from collections import OrderedDict
 from datetime import date, datetime, time, timedelta
@@ -11,6 +15,44 @@ from threading import Lock
 from time import monotonic
 
 from sqlalchemy.orm import Session
+
+
+_request_bar_reads: ContextVar[dict | None] = ContextVar("tw_request_bar_reads", default=None)
+
+
+@contextmanager
+def taiwan_bar_read_scope():
+    """Share identical canonical reads inside one sequential research request.
+
+    No storage, TTL, acquisition or cross-request reuse. All bounds, cutoff and
+    session parameters are part of the key; callers receive independent copies.
+    """
+    if _request_bar_reads.get() is not None:
+        yield
+        return
+    token = _request_bar_reads.set({})
+    try:
+        yield
+    finally:
+        _request_bar_reads.reset(token)
+
+
+def _deduplicate_request_read(read):
+    call_signature = signature(read)
+
+    @wraps(read)
+    def wrapped(self, *args, **kwargs):
+        reads = _request_bar_reads.get()
+        if reads is None:
+            return read(self, *args, **kwargs)
+        bound = call_signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        key = (id(self._db.get_bind()), tuple((name, value) for name, value in bound.arguments.items() if name != "self"))
+        if key not in reads:
+            reads[key] = read(self, *args, **kwargs)
+        return reads[key].model_copy(deep=True)
+
+    return wrapped
 
 from app.market.daily_ohlcv_platform import build_taiwan_daily_cache_requirement, read_taiwan_latest_daily_evidence
 from app.observability.provider_fallback import observe_provider_fallback
@@ -995,6 +1037,7 @@ class TaiwanBarService:
         )
 
     @exchange_calendar_read_scope()
+    @_deduplicate_request_read
     def read_bars(
         self,
         *,
