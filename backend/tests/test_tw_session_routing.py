@@ -310,7 +310,7 @@ def test_auction_alias_and_explicit_precedence():
     ("台股正式市場漲跌家數", False),
 ])
 def test_auction_presentation_intent_shares_positive_planning_terms(question, expected):
-    assert query_plan.has_auction_intent(question) is expected
+    assert query_plan.has_auction_intent(question, market="TW") is expected
 
 
 @pytest.mark.parametrize("capability", ["screening.intraday", "market.hot_groups", "screening.price_map"])

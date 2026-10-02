@@ -3836,6 +3836,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
                 },
             ],
         }
+        response["result"]["data"]["chart"] = {"selected_provider": "yahoo_chart"}
         response["tool_runs"] = [
             {
                 "tool": "jp.refresh_daily_price",
@@ -3949,6 +3950,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
             "data.freshness",
         ]
         response["query_plan"]["requested_domains"] = ["quote", "freshness"]
+        response["result"]["data"]["compact"]["quote"] = {"provider": "twse_mis"}
         response["result"]["data"]["source_health"] = {
             "kind": "taiwan_source_health",
             "expected_daily_price_date": "2026-07-27",
@@ -4035,6 +4037,7 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
                 }
             ],
         }
+        response["result"]["data"]["compact"]["quote"] = {"provider": "twse_mis"}
         response["tool_runs"] = [
             {
                 "tool": "tw.refresh_quote",

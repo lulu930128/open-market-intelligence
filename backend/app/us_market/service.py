@@ -3405,7 +3405,18 @@ def _market_truth_compat_intraday_payload(
                 )
             )
         )
-    if series.get("regular_session_completed"):
+    from app.us_market.historical_intraday import USIntradayRequestedScope, requested_us_intraday_scope
+    series_scope = (
+        requested_us_intraday_scope(
+            series["trade_date"], now=bundle.snapshot.evaluated_at, session_scope=session_scope,
+        )
+        if series.get("trade_date") else None
+    )
+    if (
+        series.get("regular_session_completed")
+        and series_scope is not None
+        and series_scope.scope is USIntradayRequestedScope.COMPLETED_HISTORY
+    ):
         coverage = series.get("regular_session_coverage") or {}
         # Transport the canonical completed-session result; do not infer
         # completeness from a continuous returned prefix or market phase.
@@ -3450,6 +3461,7 @@ def get_us_intraday_trend(
     since_revision: str | None = None,
     bypass_read_cache: bool = False,
     trade_date: date | str | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """Compatibility facade over the canonical US Market Truth owner."""
 
@@ -3459,14 +3471,25 @@ def get_us_intraday_trend(
     if interval not in {"1m", "5m", "15m", "30m", "1h", "4h"}:
         raise ValueError("unsupported US intraday interval")
     normalized_symbol = normalize_us_symbol(symbol)
+    requested_at = now or datetime.now(timezone.utc)
+    requested_scope = None
     if trade_date is not None:
-        if db is None:
-            raise ValueError("historical intraday requires canonical database context")
-        from app.us_market.market_truth import read_us_historical_intraday_trend
-        return read_us_historical_intraday_trend(
-            db, symbol=normalized_symbol, trade_date=trade_date,
-            evaluated_at=datetime.now(timezone.utc), session_scope=session_scope, interval=interval,
+        from app.us_market.historical_intraday import (
+            USIntradayRequestedScope, requested_us_intraday_scope,
         )
+        requested_scope = requested_us_intraday_scope(
+            trade_date, now=requested_at, session_scope=session_scope,
+        )
+        if db is None:
+            raise ValueError("explicit intraday requires canonical database context")
+        if requested_scope.scope is USIntradayRequestedScope.INELIGIBLE:
+            raise ValueError(requested_scope.reason_code)
+        if requested_scope.scope is USIntradayRequestedScope.COMPLETED_HISTORY:
+            from app.us_market.market_truth import read_us_historical_intraday_trend
+            return read_us_historical_intraday_trend(
+                db, symbol=normalized_symbol, trade_date=trade_date,
+                evaluated_at=requested_at, session_scope=session_scope, interval=interval,
+            )
     if db is None:
         return _get_us_intraday_trend_legacy(
             symbol=normalized_symbol,
@@ -3475,7 +3498,6 @@ def get_us_intraday_trend(
             db=None,
             since_revision=since_revision,
         )
-    requested_at = datetime.now(timezone.utc)
     market_phase = str(build_us_calendar_status(requested_at).get("phase") or "market_closed")
     cache_key = (
         id(db.get_bind()),
@@ -3483,6 +3505,7 @@ def get_us_intraday_trend(
         session_scope,
         interval,
         market_phase,
+        requested_at.astimezone(US_MARKET_TIMEZONE).date(),
     )
     cached_payload = None if bypass_read_cache else _get_us_intraday_cache(cache_key)
     if cached_payload is None:
@@ -3499,10 +3522,13 @@ def get_us_intraday_trend(
             interval=interval,
         )
         _set_us_intraday_cache(cache_key, cached_payload)
-    return _project_us_intraday_revision_response(
+    payload = _project_us_intraday_revision_response(
         cached_payload,
         since_revision=since_revision,
     )
+    if requested_scope is not None:
+        payload["requested_trade_date"] = requested_scope.trade_date.isoformat()
+    return payload
 
 
 def get_us_quote_snapshot(

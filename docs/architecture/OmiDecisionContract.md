@@ -476,6 +476,8 @@ Series projection 共用 pure temporal helper 排序與選取最新點；Daily h
 bar timestamps；若 Daily latest point 與已提供的 selected event／明示 latest date 矛盾，
 以 `DAILY_LATEST_POINT_TEMPORAL_MISMATCH` 阻擋 latest summary，不另行推算 session 或 freshness。
 
+`selected_source_health` 必須有 resolved／selected projection 的 provider 與 resource 證據，並符合 request target；capability/domain 的文字相關性只界定需求，不證明 provider 已被選中。未選中的 eligible/stale provider 留在 `supplemental_source_health`，完整 source-health evidence 與歷史 provider events 保留；缺少 selected identity 時不可猜測 selected。
+
 `diagnostics.source_health` 使用逐級降級：完整 entries → summary 加 20 筆問題 →
 summary 加 5 筆問題 → summary only。其 summary 明確分離
 `total_entry_count`／`returned_entry_count` 與
@@ -566,3 +568,9 @@ KR intraday bar close 是 market-owned price reference，不能宣稱是獨立 l
   payload bytes/latency；付費 LLM 只做一次明確有 cost bound 的 smoke。
 
 TW 純自然 quote/auction 問句的 bounded selection 不被自動 optional 補充（如 Atlas shadow）擴成 standard reader。使用者明確選取的 optional 能力與 mixed quote+technical 維持正常 wider path，selected quote 仍進入同一 canonical quote owner。`market.volume_state` 的 `comparison_identity`、baseline diagnostics/sample dates 與 authority 由 executable capability field registry 投影到 v4 evidence；HTTP typed volume schema 同樣保留，不由 MCP/AI/Frontend 另做 normalization。
+
+Planner 的「盤前」語意以 target market 決定：TW 保留 auction／indicative，US
+pre-market 選 quote／intraday 並提供 extended session intent。Answer 的 auction
+判斷同樣必須傳入 market；未指定 market 時不把模糊的「盤前」推為 auction。
+US 有具體 capability／domain 需求時不套用 vague-stock 的廣泛 required defaults；
+technical 的資料品質依賴由既有 dependency layer 擁有，不升格為 user-required。

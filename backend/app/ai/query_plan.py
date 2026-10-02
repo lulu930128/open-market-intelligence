@@ -219,7 +219,7 @@ CAPABILITY_HINTS = {
         "五檔", "買五", "賣五", "委買", "委賣", "order book", "depth",
     ),
     "quote.auction": (
-        "試撮", "試搓", "盤前", "auction", "indicative",
+        "試撮", "試搓", "auction", "indicative",
     ),
     "technical.indicators": (
         "rsi",
@@ -333,6 +333,20 @@ CAPABILITY_HINTS = {
         "shareholding distribution",
         "ownership distribution",
     ),
+}
+
+# Ambiguous session words are interpreted in the target market, before
+# capability selection. Explicit auction terminology retains its own meaning.
+PREMARKET_HINTS = ("盤前", "pre-market", "premarket", "pre market")
+MARKET_CAPABILITY_HINTS = {
+    "TW": {"quote.auction": PREMARKET_HINTS},
+    "US": {
+        "quote.snapshot": PREMARKET_HINTS,
+        "intraday.bars": PREMARKET_HINTS,
+        "daily.ohlcv": ("日k", "日線", "daily technical", "daily chart"),
+        "technical.structure": ("日k技術", "技術結構", "technical structure"),
+        "technical.indicators": ("technical", "技術面", "技術分析"),
+    },
 }
 
 # These are semantic alternatives only. Target eligibility remains owned by the
@@ -498,6 +512,7 @@ class QueryPlan:
     optional_selected_capabilities: tuple[str, ...]
     max_response_bytes: int
     realtime_policy: str
+    inferred_session_scope: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -546,10 +561,11 @@ def _selection_question(question: str, *, positive_only: bool = False) -> str:
     return "，".join(selected)
 
 
-def has_auction_intent(question: str) -> bool:
-    """Share planning's positive auction vocabulary with answer selection."""
+def has_auction_intent(question: str, *, market: str | None = None) -> bool:
+    """Ambiguous pre-market words require a Taiwan target, even in answers."""
     positive = _selection_question(question, positive_only=True)
-    return any(hint in positive for hint in CAPABILITY_HINTS["quote.auction"])
+    hints = (*CAPABILITY_HINTS["quote.auction"], *MARKET_CAPABILITY_HINTS.get(str(market or "").upper(), {}).get("quote.auction", ()))
+    return any(hint in positive for hint in hints)
 
 
 def _hint_negation(question: str, hint: str) -> str | None:
@@ -649,7 +665,10 @@ def _query_capabilities(
     question = _selection_question(payload.question)
     requested: list[str] = []
     excluded: list[str] = []
-    for capability_id, hints in CAPABILITY_HINTS.items():
+    market = str(target_market or ("US" if scope_type == "us_stock" else "TW" if scope_type == "stock" else "")).upper()
+    scoped_hints = MARKET_CAPABILITY_HINTS.get(market, {})
+    for capability_id in dict.fromkeys((*CAPABILITY_HINTS, *scoped_hints)):
+        hints = (*CAPABILITY_HINTS.get(capability_id, ()), *scoped_hints.get(capability_id, ()))
         if capability_id.startswith("market.") and scope_type != "market":
             continue
         for hint in hints:
@@ -875,7 +894,7 @@ def _infer_tw_intraday_screening_selection(
 
     question = _selection_question(payload.question, positive_only=True)
     hot_groups_requested = has_market_hot_group_intent(question) or (
-        has_auction_intent(payload.question) and "族群" in question
+        has_auction_intent(payload.question, market="TW") and "族群" in question
     )
     metric = next(
         (
@@ -908,7 +927,7 @@ def _infer_tw_intraday_screening_selection(
             "bottom ",
         )
     ))
-    auction_ranking = has_auction_intent(payload.question) and not daily_ranking_requested and any(
+    auction_ranking = has_auction_intent(payload.question, market="TW") and not daily_ranking_requested and any(
         hint in question for hint in ("強勢", "偏強", "偏弱", "漲幅", "跌幅", "漲停", "跌停", "strong", "ranking")
     )
     intraday_ranking_requested = intraday_ranking_requested or (auction_ranking and not hot_groups_requested) or (auction_ranking and "股票" in question)
@@ -956,7 +975,7 @@ def _infer_tw_intraday_screening_selection(
             "limit": limit,
             "offset": 0,
         }
-        if has_auction_intent(payload.question):
+        if has_auction_intent(payload.question, market="TW"):
             intraday_parameters["lane"] = "indicative"
         explicit_parameters = raw_parameters.get("screening.intraday")
         if isinstance(explicit_parameters, dict):
@@ -965,7 +984,7 @@ def _infer_tw_intraday_screening_selection(
     if hot_groups_requested:
         include.append("market.hot_groups")
         hot_group_parameters = {"limit": min(limit, 100)}
-        if has_auction_intent(payload.question):
+        if has_auction_intent(payload.question, market="TW"):
             hot_group_parameters["lane"] = "indicative"
         explicit_parameters = raw_parameters.get("market.hot_groups")
         if isinstance(explicit_parameters, dict):
@@ -1139,6 +1158,20 @@ def build_query_plan(
     )
     request_domains_before_selection = requested_domains
     selection_input = payload.selection
+    if (
+        scope_type == "us_stock"
+        and not has_explicit_capability_selection
+        and (requested_capabilities or request_domains_before_selection)
+    ):
+        # Seed only identity; normalization still expands requested domains and
+        # preserves automatic optional evidence, without the vague-stock default.
+        selection_input = {
+            **raw_selection,
+            "required": list(dict.fromkeys([
+                "target.identity", *(raw_selection.get("required") or raw_selection.get("include") or []),
+            ])),
+            "auto_planning": True,
+        }
     if capability_selection_mode == "restrictive":
         selection_input = {
             **raw_selection,
@@ -1688,6 +1721,16 @@ def build_query_plan(
         optional_selected_capabilities=tuple(selection["optional"]),
         max_response_bytes=int(selection["max_response_bytes"]),
         realtime_policy=str(selection["realtime_policy"]),
+        inferred_session_scope=(
+            "extended"
+            if scope_type == "us_stock"
+            and "intraday.bars" in selected_capabilities
+            and any(
+                hint in _selection_question(payload.question, positive_only=True)
+                for hint in PREMARKET_HINTS
+            )
+            else None
+        ),
     )
 
 

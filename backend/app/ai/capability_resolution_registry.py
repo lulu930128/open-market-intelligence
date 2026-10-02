@@ -167,8 +167,26 @@ DERIVED_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 }
 
 
+# US research is computed from completed Daily bars by the shared technical
+# engine. The generic structure vocabulary also supports intraday/TW evidence;
+# it must not expand a US daily technical fill into quote/intraday acquisition.
+SCOPED_DERIVED_DEPENDENCIES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("us_stock", "technical.structure"): ("daily.ohlcv",),
+}
+
+
+def capability_dependencies(
+    capability_id: str, *, scope_type: str = ""
+) -> tuple[str, ...]:
+    return SCOPED_DERIVED_DEPENDENCIES.get(
+        (scope_type, capability_id), DERIVED_DEPENDENCIES.get(capability_id, ())
+    )
+
+
 def capability_dependency_closure(
     capability_ids: Iterable[str],
+    *,
+    scope_type: str = "",
 ) -> frozenset[str]:
     """Return requested capabilities plus their transitive registry dependencies."""
 
@@ -180,11 +198,27 @@ def capability_dependency_closure(
     pending = list(resolved)
     while pending:
         capability_id = pending.pop()
-        for dependency in DERIVED_DEPENDENCIES.get(capability_id, ()):
+        for dependency in capability_dependencies(capability_id, scope_type=scope_type):
             if dependency not in resolved:
                 resolved.add(dependency)
                 pending.append(dependency)
     return frozenset(resolved)
+
+
+def materialized_capability_dependencies(
+    capability_ids: Iterable[str], *, scope_type: str
+) -> frozenset[str]:
+    """Resolve derived capabilities to their materialized upstream fill owners."""
+    return frozenset(
+        capability_id
+        for capability_id in capability_dependency_closure(
+            capability_ids, scope_type=scope_type
+        )
+        if capability_id not in DERIVED_DEPENDENCIES
+        and (scope_type, capability_id) not in SCOPED_DERIVED_DEPENDENCIES
+    )
+
+
 @dataclass(frozen=True)
 class CapabilityReadNode:
     """Read ownership, deliberately independent of acquisition operations."""
@@ -520,9 +554,9 @@ def build_capability_resolution_registry(
                 resolution_mode=resolution_mode,
                 operation=operation,
                 produces=produces,
-                depends_on=DERIVED_DEPENDENCIES.get(
+                depends_on=capability_dependencies(
                     spec.capability_id,
-                    (),
+                    scope_type=scope_type,
                 ),
                 provider_contract_ids=(
                     PROVIDER_CONTRACTS_BY_SCOPE_CAPABILITY.get(

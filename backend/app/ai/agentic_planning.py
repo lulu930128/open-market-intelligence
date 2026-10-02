@@ -4,6 +4,8 @@ from typing import Any
 from datetime import datetime, timezone
 
 from app.ai import agentic_policy, llm
+from app.ai.capability_resolution_registry import materialized_capability_dependencies
+from app.ai.market_date_request import requests_us_daily_close
 from app.crypto_market.contract import (
     BINANCE_PROVIDER,
     BITOPRO_PROVIDER,
@@ -14,17 +16,15 @@ from app.crypto_market.contract import (
     normalize_symbol as normalize_crypto_symbol,
 )
 from app.us_market.sources import normalize_us_symbol
-from app.us_market.historical_intraday import completed_intraday_window
+from app.us_market.historical_intraday import USIntradayRequestedScope, requested_us_intraday_scope
 
 
-def _completed_us_intraday_request(trade_date: str | None, session_scope: str) -> bool:
+def _us_intraday_request_scope(trade_date: str | None, session_scope: str) -> USIntradayRequestedScope:
     if trade_date is None:
-        return False
-    try:
-        completed_intraday_window(trade_date, now=datetime.now(timezone.utc), session_scope=session_scope)
-    except (TypeError, ValueError):
-        return False
-    return True
+        return USIntradayRequestedScope.CURRENT_SESSION
+    return requested_us_intraday_scope(
+        trade_date, now=datetime.now(timezone.utc), session_scope=session_scope,
+    ).scope
 
 
 TW_STOCK_REFRESH_KEYS = agentic_policy.TW_STOCK_REFRESH_KEYS
@@ -55,7 +55,6 @@ US_CAPABILITY_REQUIREMENTS = {
     "quote.snapshot": ("us_intraday_trend",),
     "intraday.bars": ("us_intraday_trend",),
     "daily.ohlcv": ("us_daily_price",),
-    "technical.structure": ("us_daily_price",),
     "company.profile": ("us_company_profile",),
     "corporate.actions": ("us_corporate_action",),
     "fundamentals.financials": ("us_sec_company_fact",),
@@ -79,6 +78,20 @@ CRYPTO_PROVIDER_PRIORITY = {
 }
 
 
+def us_capability_requirements(capability: str) -> tuple[str, ...]:
+    """Map canonical materialized dependencies to US dataset health owners."""
+    upstreams = materialized_capability_dependencies(
+        (capability,), scope_type="us_stock"
+    )
+    return tuple(
+        dict.fromkeys(
+            requirement
+            for upstream in sorted(upstreams)
+            for requirement in US_CAPABILITY_REQUIREMENTS.get(upstream, ())
+        )
+    )
+
+
 def _fallback_plan(
     *,
     symbol: str,
@@ -93,8 +106,9 @@ def _fallback_plan(
     lowered_question = question.lower()
     steps: list[dict[str, Any]] = []
 
-    if "us_intraday_trend" in missing and (requested_trade_date is None or _completed_us_intraday_request(requested_trade_date, session_scope)):
-        if "quote.snapshot" in required and requested_trade_date is None:
+    requested_scope = _us_intraday_request_scope(requested_trade_date, session_scope)
+    if "us_intraday_trend" in missing and requested_scope is not USIntradayRequestedScope.INELIGIBLE:
+        if "quote.snapshot" in required and requested_scope is USIntradayRequestedScope.CURRENT_SESSION and not requests_us_daily_close(question):
             steps.append(
                 {
                     "tool": "us.refresh_quote",
@@ -117,7 +131,7 @@ def _fallback_plan(
                 }
             )
 
-    if "us_daily_price" in missing:
+    if "us_daily_price" in missing and gaps.get("daily_request_eligible") is not False:
         steps.append(
             {
                 "tool": "us.refresh_daily_price",
@@ -126,6 +140,9 @@ def _fallback_plan(
                     "provider": "auto",
                     "outputsize": "compact",
                     "adjusted": False,
+                    "bars": 260,
+                    "max_provider_calls": 2,
+                    **({"trade_date": requested_trade_date} if requested_trade_date else {}),
                 },
                 "reason": "Local US daily price evidence is missing or stale.",
             }
@@ -193,16 +210,18 @@ def _selected_us_plan(
     session_scope: str = "regular",
     intraday_interval: str = "1m",
     force_selected_capabilities: bool = False,
+    require_daily_close: bool = False,
 ) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
     steps: list[dict[str, Any]] = []
     steps_by_tool: dict[str, dict[str, Any]] = {}
+    requested_scope = _us_intraday_request_scope(requested_trade_date, session_scope)
     for capability in requested_capabilities:
-        requirements = US_CAPABILITY_REQUIREMENTS.get(capability, ())
+        requirements = us_capability_requirements(capability)
         if requested_trade_date is not None:
-            if capability == "quote.snapshot":
+            if capability == "quote.snapshot" and (require_daily_close or requested_scope is not USIntradayRequestedScope.CURRENT_SESSION):
                 requirements = ("us_daily_price",)
-            elif not _completed_us_intraday_request(requested_trade_date, session_scope):
+            elif requested_scope is USIntradayRequestedScope.INELIGIBLE:
                 requirements = tuple(
                     requirement
                     for requirement in requirements
@@ -231,12 +250,17 @@ def _selected_us_plan(
                     ),
                 }
             elif requirement == "us_daily_price":
+                if gaps.get("daily_request_eligible") is False:
+                    continue
                 tool_name = "us.refresh_daily_price"
                 args = {
                     "symbol": symbol,
                     "provider": "auto",
                     "outputsize": "compact",
                     "adjusted": False,
+                    "bars": 260,
+                    "max_provider_calls": 2,
+                    **({"trade_date": requested_trade_date} if requested_trade_date else {}),
                 }
             elif requirement == "us_sec_company_fact":
                 tool_name = "us.refresh_sec_facts"
@@ -698,6 +722,7 @@ def plan_us_stock_tools(
                 session_scope=session_scope,
                 intraday_interval=normalized_intraday_interval,
                 force_selected_capabilities=force_selected_capabilities,
+                require_daily_close=requests_us_daily_close(question),
             ),
             default_symbol=normalized_symbol,
             provider="capability_registry",

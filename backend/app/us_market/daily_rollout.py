@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from app.config import settings
@@ -104,6 +106,36 @@ def require_us_daily_acquisition_enabled(
     )
 
 
+def build_us_daily_operation_rollout_state(
+    *,
+    symbols: Sequence[str],
+    max_symbols: int,
+    changed_at: datetime | None = None,
+) -> CapabilityRolloutState:
+    """Authorize exact targets for an already trusted, bounded operation.
+
+    Owned here, shared by priority repair and explicit AI fill. Never installed
+    in settings or exposed as request args. Callers own trust/call/time budgets;
+    the normal Platform gate still checks every target against this local state.
+    """
+    if isinstance(symbols, str) or not symbols or len(symbols) > max_symbols:
+        raise USMarketConfigurationError("US_DAILY_OPERATION_INVALID_TARGET_BOUND")
+    # Do not let permissive symbol normalization turn a list/wildcard into one
+    # authorized target. Callers supply already resolved canonical identifiers.
+    if any(
+        not re.fullmatch(r"\^?[A-Z0-9][A-Z0-9.$-]{0,31}", symbol)
+        for symbol in symbols
+    ):
+        raise USMarketConfigurationError("US_DAILY_OPERATION_INVALID_SYMBOL")
+    state = build_us_daily_acquisition_rollout_state(
+        mode=CapabilityRolloutMode.CANARY,
+        symbols=",".join(symbols),
+        max_symbols=max_symbols,
+        changed_at=changed_at,
+    )
+    return state.model_copy(update={"reason_code": "US_DAILY_BOUNDED_EXPLICIT_OPERATION"})
+
+
 def us_daily_full_market_acquisition_enabled() -> bool:
     """Return whether full-market acquisition may be scheduled."""
 
@@ -164,6 +196,7 @@ __all__ = [
     "US_DAILY_CAPABILITY_ID",
     "US_DAILY_READ_BINDING_MODE",
     "build_us_daily_acquisition_rollout_state",
+    "build_us_daily_operation_rollout_state",
     "require_us_daily_acquisition_enabled",
     "us_daily_full_market_acquisition_enabled",
     "us_daily_rollout_snapshot",

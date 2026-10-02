@@ -27,6 +27,7 @@ from app.us_market.daily_market_state import (
     USInstrumentIdentity,
     expected_us_completed_daily_state,
     resolve_us_instrument_identity,
+    requested_us_completed_daily_state,
 )
 from app.us_market.daily_ohlcv_acquisition import USDailyOhlcvAcquisitionExecutor
 from app.us_market.daily_rollout import require_us_daily_acquisition_enabled
@@ -268,10 +269,19 @@ class USDailyOhlcvPlatform:
         now: datetime | None = None,
         to_date: date | None = None,
     ) -> USDailyPlatformResult:
+        resolved_now = now or datetime.now(timezone.utc)
+        if to_date is not None:
+            requested = requested_us_completed_daily_state(
+                trade_date=to_date, now=resolved_now,
+            )
+            if not requested.eligible:
+                # An exact unreleased session cannot use older cached bars as
+                # its payload, even when the resolver permits stale facts.
+                raise ValueError(requested.reason_code)
         return self._run(
             symbol=symbol,
             bars=bars,
-            now=now or datetime.now(timezone.utc),
+            now=resolved_now,
             to_date=to_date,
             allow_acquisition=False,
             max_provider_calls=0,
@@ -337,6 +347,10 @@ def refresh_us_daily_ohlcv(
     symbol: str,
     outputsize: str = "compact",
     adjusted: bool = False,
+    rollout_state: CapabilityRolloutState | None = None,
+    to_date: date | None = None,
+    bars: int | None = None,
+    max_provider_calls: int = 2,
 ) -> dict:
     """Run the canonical explicit refresh and retain the legacy command shape."""
 
@@ -346,9 +360,17 @@ def refresh_us_daily_ohlcv(
         raise ValueError(
             "canonical US daily refresh currently supports price_basis=raw only"
         )
-    refreshed = USDailyOhlcvPlatform(db).refresh(
+    if to_date is not None:
+        requested = requested_us_completed_daily_state(
+            trade_date=to_date, now=datetime.now(timezone.utc)
+        )
+        if not requested.eligible:
+            raise ValueError(requested.reason_code)
+    refreshed = USDailyOhlcvPlatform(db, rollout_state=rollout_state).refresh(
         symbol=symbol,
-        bars=5000 if outputsize == "full" else 90,
+        bars=bars if bars is not None else 5000 if outputsize == "full" else 90,
+        to_date=to_date,
+        max_provider_calls=max_provider_calls,
     )
     persistence = refreshed.result.persistence
     acquisition = refreshed.result.acquisition

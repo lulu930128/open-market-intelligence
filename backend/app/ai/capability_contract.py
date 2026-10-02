@@ -1580,6 +1580,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         fields=(
             "analysis",
             "as_of",
+            "requested_trade_date",
+            "temporal_semantics",
+            "request_status",
             "trade_date",
             "latest_price",
             "current_price",
@@ -1651,6 +1654,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         default_fields=(
             "analysis",
             "as_of",
+            "requested_trade_date",
+            "temporal_semantics",
+            "request_status",
             "trade_date",
             "latest_price",
             "current_price",
@@ -1739,6 +1745,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "status",
             "stock_id",
             "as_of",
+            "requested_trade_date",
+            "temporal_semantics",
+            "request_status",
             "price_basis",
             "currency",
             "price_unit",
@@ -1768,6 +1777,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "status",
             "stock_id",
             "as_of",
+            "requested_trade_date",
+            "temporal_semantics",
+            "request_status",
             "price_basis",
             "methods",
             "timeframes",
@@ -6884,6 +6896,7 @@ def _canonical_available_count(value: Any, *, included: bool) -> int | None:
 def _historical_intraday_fill_state(
     *, scope_type: str, capability_id: str, value: Any,
     realtime_policy: str = "prefer_live",
+    current_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if scope_type in {"stock", "tw_stock"} and capability_id == "intraday.bars" and isinstance(value, dict):
         from app.market.tw_intraday_platform import completed_taiwan_intraday_repair_eligibility
@@ -6913,7 +6926,7 @@ def _historical_intraday_fill_state(
     requested_date = value.get("requested_trade_date")
     if not requested_date:
         return None
-    from app.us_market.historical_intraday import completed_intraday_window
+    from app.us_market.historical_intraday import USIntradayRequestedScope, requested_us_intraday_scope
 
     coverage = value.get("session_coverage") or {}
     if not isinstance(coverage, dict):
@@ -6922,11 +6935,23 @@ def _historical_intraday_fill_state(
     complete = coverage.get("coverage_status") == "complete" and value.get("is_partial") is False
     params = {"trade_date": requested_date, "session_scope": scope,
               "interval": value.get("requested_interval") or value.get("interval") or "1m"}
+    request = requested_us_intraday_scope(requested_date, now=datetime.now(timezone.utc), session_scope=scope)
+    if request.scope is USIntradayRequestedScope.CURRENT_SESSION:
+        if current_state is None:
+            return None
+        satisfied = _fill_payload_is_satisfied(current_state)
+        return {"satisfied": satisfied, "refresh_required": not satisfied,
+                "refresh_possible_now": current_state.get("refresh_possible_now") is True,
+                "reason_code": "current_session_intraday", "market_data_params": params,
+                "coverage_status": coverage.get("coverage_status", "missing")}
+    if request.scope is USIntradayRequestedScope.INELIGIBLE:
+        return {"satisfied": False, "refresh_required": True, "refresh_possible_now": False,
+                "reason_code": request.reason_code, "market_data_params": params,
+                "coverage_status": coverage.get("coverage_status", "missing")}
     reason = "historical_intraday_complete" if complete else "historical_intraday_coverage_partial"
     possible = False
     if not complete:
         try:
-            completed_intraday_window(requested_date, now=datetime.now(timezone.utc), session_scope=scope)
             resolution = capability_resolution_for(scope_type=scope_type, capability_id=capability_id)
             possible = bool(resolution and resolution.operation == "us.refresh_intraday_bars" and scope == "regular")
             if not possible:
@@ -7202,15 +7227,17 @@ def build_manifest(
         fill_state = _historical_intraday_fill_state(
             scope_type=scope_type, capability_id=capability_id, value=projected_value,
             realtime_policy=str(selection.get("realtime_policy") or "prefer_live"),
+            current_state=capabilities[-1],
         )
         if fill_state is not None:
             capabilities[-1].update(
                 fill_state=fill_state,
                 coverage_status=fill_state["coverage_status"],
-                historical_fill_required=fill_state["refresh_required"],
+                historical_fill_required=fill_state["refresh_required"] and fill_state["reason_code"] != "current_session_intraday",
                 refresh_recommended=fill_state["refresh_required"],
                 refresh_possible_now=fill_state["refresh_possible_now"],
-                refresh_requires_market_open=False,
+                refresh_requires_market_open=(capabilities[-1].get("refresh_requires_market_open", False)
+                    if fill_state["reason_code"] == "current_session_intraday" else False),
             )
     unsupported_capabilities = [
         dict(item)

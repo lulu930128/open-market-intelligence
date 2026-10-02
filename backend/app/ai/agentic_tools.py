@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func
@@ -43,6 +44,7 @@ from app.resource_market import service as resource_market_service
 from app.resource_market.source_health import build_resource_source_health
 from app.us_market import service as us_market_service
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.daily_market_state import requested_us_completed_daily_state
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 from app.watchlists import backfill_service as watchlist_backfill_service
@@ -144,16 +146,34 @@ def scan_us_stock_gaps(
     question: str = "",
     satisfied_capabilities: set[str] | None = None,
     requested_capabilities: tuple[str, ...] | None = None,
+    requested_trade_date: str | None = None,
+    session_scope: str = "regular",
+    intraday_interval: str = "1m",
+    require_daily_close: bool = False,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
+    from app.ai.market_date_request import requests_us_daily_close, resolve_us_market_date_request
+    from app.us_market.historical_intraday import USIntradayRequestedScope
+
+    evaluated_at = now or _now()
+    date_request = resolve_us_market_date_request(
+        explicit_value=requested_trade_date,
+        requested_capabilities=requested_capabilities or (),
+        session_scope=session_scope,
+        require_daily_close=require_daily_close or requests_us_daily_close(question),
+        now=evaluated_at,
+    )
+    quote_requires_daily = not date_request.current_quote_allowed
+    intraday_request = date_request.intraday_scope
     normalized_symbol = normalize_us_symbol(symbol)
     instrument_type = us_instrument_type(normalized_symbol)
     required_capabilities = (
         {
             requirement
             for capability in requested_capabilities
-            for requirement in agentic_planning.US_CAPABILITY_REQUIREMENTS.get(
-                capability,
-                (),
+            for requirement in (
+                ("us_daily_price",) if capability == "quote.snapshot" and quote_requires_daily
+                else agentic_planning.us_capability_requirements(capability)
             )
         }
         if requested_capabilities is not None
@@ -161,6 +181,11 @@ def scan_us_stock_gaps(
     )
     satisfied_capabilities = satisfied_capabilities or set()
     needs_daily = "us_daily_price" in required_capabilities
+    requested_date = date_request.daily_trade_date
+    daily_request = (
+        requested_us_completed_daily_state(trade_date=requested_date, now=evaluated_at)
+        if requested_date is not None else None
+    )
     needs_profile = "us_company_profile" in required_capabilities
     needs_sec = "us_sec_company_fact" in required_capabilities
     needs_corporate_actions = "us_corporate_action" in required_capabilities
@@ -168,9 +193,10 @@ def scan_us_stock_gaps(
         USDailyOhlcvPlatform(db).read(
             symbol=normalized_symbol,
             bars=2,
-            now=_now(),
+            now=evaluated_at,
+            to_date=requested_date,
         )
-        if needs_daily
+        if needs_daily and (daily_request is None or daily_request.eligible)
         else None
     )
     profile = _latest_profile(db, normalized_symbol) if needs_profile else None
@@ -183,6 +209,8 @@ def scan_us_stock_gaps(
     missing: list[str] = []
     warnings: list[str] = []
     expected_dates: dict[str, Any] = {}
+    if daily_request is not None:
+        expected_dates["us_daily_request"] = daily_request.model_dump(mode="json")
     canonical_capabilities: dict[str, Any] = {}
 
     daily_projection = (
@@ -310,8 +338,10 @@ def scan_us_stock_gaps(
         try:
             intraday_contract = us_market_service.get_us_intraday_trend(
                 symbol=normalized_symbol,
-                session_scope="all",
-                interval="1m",
+                session_scope=session_scope,
+                interval=intraday_interval,
+                trade_date=requested_trade_date,
+                now=evaluated_at,
                 db=db,
                 persist_history=False,
             )
@@ -330,6 +360,9 @@ def scan_us_stock_gaps(
             }
 
             def canonical_satisfied(capability_id: str) -> bool:
+                if capability_id == "intraday.bars" and intraday_request is not None and intraday_request.scope is USIntradayRequestedScope.COMPLETED_HISTORY:
+                    coverage = intraday_contract.get("session_coverage") or {}
+                    return coverage.get("coverage_status") == "complete" and intraday_contract.get("is_partial") is False
                 projection = canonical_capabilities.get(capability_id) or {}
                 if projection.get("requirement_satisfied") is True:
                     return True
@@ -344,6 +377,7 @@ def scan_us_stock_gaps(
                 for capability_id in ("quote.snapshot", "intraday.bars")
                 if requested_capabilities is not None
                 and capability_id in requested_capabilities
+                and not (capability_id == "quote.snapshot" and quote_requires_daily)
             )
             intraday_satisfied = (
                 all(
@@ -377,6 +411,7 @@ def scan_us_stock_gaps(
         },
         "instrument_type": instrument_type,
         "required_capabilities": sorted(required_capabilities),
+        "daily_request_eligible": daily_request.eligible if daily_request is not None else True,
         "canonical_capabilities": canonical_capabilities,
         "tool_session_satisfied_capabilities": sorted(satisfied_capabilities),
         "not_applicable": (
@@ -482,6 +517,9 @@ def run_us_stock_tool_session(
         normalized_symbol,
         question=question,
         requested_capabilities=requested_capabilities,
+        requested_trade_date=requested_trade_date,
+        session_scope=session_scope,
+        intraday_interval=intraday_interval,
     )
     plan_warnings: list[str] = []
 
@@ -517,6 +555,7 @@ def run_us_stock_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        us_daily_fill_symbol=normalized_symbol,
         fallback_to_cached=_fallback_to_cached(policy),
         progress_callback=progress_callback,
     )
@@ -536,6 +575,9 @@ def run_us_stock_tool_session(
         question=question,
         satisfied_capabilities=satisfied_capabilities,
         requested_capabilities=requested_capabilities,
+        requested_trade_date=requested_trade_date,
+        session_scope=session_scope,
+        intraday_interval=intraday_interval,
     )
     return {
         "tool_plan": plan,

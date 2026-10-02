@@ -17,7 +17,7 @@ from app.ai import (
     tools,
 )
 from app.ai import ask_policy
-from app.ai.market_date_request import parse_market_trade_date, requested_us_trade_date
+from app.ai.market_date_request import parse_market_trade_date, requested_us_trade_date, requests_us_daily_close
 from app.ai.schemas import AiAskRequest
 from app.us_market.market_indices import read_us_market_indices
 
@@ -216,6 +216,8 @@ def _us_market_data_params(
     )
     if selected_capabilities:
         params["requested_capabilities"] = selected_capabilities
+    if query_plan.get("inferred_session_scope"):
+        params.setdefault("session_scope", query_plan["inferred_session_scope"])
     selection = (
         query_plan.get("selection")
         if isinstance(query_plan.get("selection"), dict)
@@ -247,8 +249,8 @@ def _us_market_data_params(
     )
     if requested_trade_date is not None:
         params["trade_date"] = requested_trade_date.isoformat()
-        # Keep an explicitly selected historical series alongside Daily close;
-        # the context owner prevents its last minute from replacing that close.
+        # Date routing and an exact Daily close are independent intents.
+        params["require_daily_close"] = bool(params.get("require_daily_close")) or requests_us_daily_close(payload.question)
         params["include_intraday"] = "intraday.bars" in selected_capabilities
     return params
 

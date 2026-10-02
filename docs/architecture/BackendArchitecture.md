@@ -595,6 +595,10 @@ US Today 的 `us.chart.session_summary.v1` 由同一 Market Truth component gene
 
 ## 19. Frontend / MCP / Kuro
 
+US completed-daily technical 的 acquisition dependencies 由 capability resolution registry 按 scope 定義；gap scan 與 fill planner 只把 materialized upstream 映射到 US dataset owner，不另存 technical-to-dataset mapping。單股 trusted explicit fill 沿用 `daily_rollout` 的 operation-local CANARY 與既有 Platform/Gateway/transaction/mandatory reread；授權不接受 tool args 指定，不改 global allowlist，full-market scheduler 仍要求 global ON。Priority repair 共用此 operation scope 建構器，call/timeout budget 仍由既有 operation 與 Gateway 執法。
+
+US research 的 explicit `trade_date` 表示 exact completed/released daily session，讀取以該日期截止並沿用同一 technical engine；尚未發布、非交易日、缺指定日 canonical evidence 分別保留 typed reason。Historical weekly/monthly technical 暫回 unsupported，不冒充 daily 或回捲其他日期。這是以本次可見 canonical cache 回看指定 session，並非還原當時收到哪些資料的 point-in-time replay。Corporate-action completeness 與 benchmark quality gates 維持原規則。
+
 ### Frontend
 
 只呈現 backend contract 與發出 viewer intent。

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import func
@@ -22,7 +22,10 @@ from app.research.technical import (
     build_technical_indicators,
     build_technical_structure,
 )
-from app.us_market.daily_market_state import resolve_us_instrument_identity
+from app.us_market.daily_market_state import (
+    resolve_us_instrument_identity,
+    requested_us_completed_daily_state,
+)
 from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
 from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
 from app.us_market.resolved_reads import (
@@ -107,6 +110,7 @@ def build_us_market_research(
     include_market_coverage: bool = True,
     include_daily_ohlcv: bool = True,
     timeframe: str = "daily",
+    to_date: date | None = None,
 ) -> dict[str, Any]:
     """Build bounded research from cache only; never fetch or persist provider data."""
 
@@ -119,6 +123,17 @@ def build_us_market_research(
     if resolved_now.tzinfo is None or resolved_now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     expected_trade_date = expected_us_daily_price_date(now=resolved_now)
+    requested_state = (
+        requested_us_completed_daily_state(trade_date=to_date, now=resolved_now)
+        if to_date is not None else None
+    )
+    request_reason = None
+    if requested_state is not None:
+        expected_trade_date = requested_state.expected_trade_date
+        if not requested_state.eligible:
+            request_reason = requested_state.reason_code
+        elif timeframe != "daily":
+            request_reason = "US_HISTORICAL_TECHNICAL_TIMEFRAME_UNSUPPORTED"
     if timeframe not in {"daily", "weekly", "monthly"}:
         raise ValueError("timeframe must be one of: daily, weekly, monthly.")
     coverage_gate = (
@@ -127,7 +142,7 @@ def build_us_market_research(
             expected_trade_date=expected_trade_date,
             now=resolved_now,
         )
-        if include_market_coverage
+        if include_market_coverage and to_date is None
         else {
             "kind": "market_coverage_reference",
             "schema_version": "omi.us_market.coverage_reference.v1",
@@ -143,7 +158,7 @@ def build_us_market_research(
     identity = None
     try:
         identity = resolve_us_instrument_identity(db, normalized_symbol)
-        daily_ohlcv = (
+        daily_ohlcv = {} if request_reason else (
             read_resolved_us_daily_bars_for_symbol(
                 db=db,
                 symbol=normalized_symbol,
@@ -165,6 +180,12 @@ def build_us_market_research(
     except LookupError as exc:
         missing.append("instrument_identity")
         warnings.append(str(exc))
+
+    if to_date is not None and request_reason is None and (
+        daily_ohlcv.get("latest_trade_date") != to_date.isoformat()
+        or daily_ohlcv.get("is_current") is not True
+    ):
+        request_reason = "US_DAILY_REQUESTED_SESSION_EVIDENCE_MISSING"
 
     is_index = bool(
         identity is not None
@@ -199,6 +220,12 @@ def build_us_market_research(
         ),
         [],
     )
+    if request_reason:
+        # Keep upstream diagnostics, but never compute a requested-date result
+        # from an older session or an unreleased/future canonical observation.
+        resolved_bars = []
+        missing.append(request_reason)
+        warnings.append(request_reason)
     lineage = {
         "selected_provider": daily_ohlcv.get("selected_provider"),
         "selected_source": daily_ohlcv.get("selected_source"),
@@ -213,7 +240,8 @@ def build_us_market_research(
         profile=technical_profile,
         freshness_status=(
             "fresh"
-            if daily_ohlcv.get("research_usable") is True
+            if daily_ohlcv.get("is_current") is True
+            and daily_ohlcv.get("research_usable") is True
             and daily_ohlcv.get("selected_event_at")
             else "missing"
         ),
@@ -221,11 +249,29 @@ def build_us_market_research(
         corporate_action_coverage=corporate_action_coverage,
         lineage=lineage,
     )
+    if to_date is not None:
+        indicators["requested_trade_date"] = to_date.isoformat()
+        indicators["temporal_semantics"] = "historical_completed_session"
+        indicators["request_status"] = (
+            "pending" if request_reason == "US_DAILY_REQUESTED_SESSION_NOT_RELEASED"
+            else "unsupported" if request_reason in {
+                "US_DAILY_REQUESTED_DATE_NOT_TRADING_SESSION",
+                "US_HISTORICAL_TECHNICAL_TIMEFRAME_UNSUPPORTED",
+            }
+            else "missing" if request_reason else "available"
+        )
+        if request_reason:
+            indicators["quality"]["reason_codes"].append(request_reason)
+        else:
+            indicators["as_of"] = to_date.isoformat()
     structure = build_technical_structure(
         indicators=indicators,
         bars=resolved_bars,
         profile=technical_profile,
     )
+    if to_date is not None:
+        for key in ("requested_trade_date", "temporal_semantics", "request_status"):
+            structure[key] = indicators[key]
     if indicators["quality"]["decision_usable"] is not True:
         warnings.append(
             "US technical evidence is not decision-usable; quality reason codes remain visible."
@@ -238,6 +284,7 @@ def build_us_market_research(
         "timeframe": timeframe,
         "status": indicators["status"],
         "as_of": indicators.get("as_of"),
+        "requested_trade_date": to_date.isoformat() if to_date is not None else None,
         "daily_ohlcv": daily_ohlcv if include_daily_ohlcv else {},
         "technical_indicators": indicators,
         "technical_structure": structure,

@@ -1,14 +1,31 @@
 """US session validation and bounded coverage for completed intraday evidence."""
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from enum import Enum
 
 from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE, is_us_trading_day, us_session_close_time,
+    us_post_market_close_time,
 )
 
 US_INTRADAY_HISTORY_DAYS = 35
 
-def completed_intraday_window(
+class USIntradayRequestedScope(str, Enum):
+    CURRENT_SESSION = "current_session"
+    COMPLETED_HISTORY = "completed_history"
+    INELIGIBLE = "ineligible"
+
+
+@dataclass(frozen=True)
+class USIntradayScopeRequest:
+    trade_date: date
+    session_scope: str
+    scope: USIntradayRequestedScope
+    reason_code: str | None = None
+
+
+def _intraday_window(
     trade_date: date | str, *, now: datetime, session_scope: str = "regular",
 ) -> tuple[datetime, datetime]:
     if now.tzinfo is None or now.utcoffset() is None:
@@ -21,12 +38,41 @@ def completed_intraday_window(
     if not is_us_trading_day(day):
         raise ValueError("US_INTRADAY_NO_TRADING_SESSION")
     start = datetime.combine(day, time(9, 30) if session_scope == "regular" else time(4), US_MARKET_TIMEZONE)
-    end = datetime.combine(day, us_session_close_time(day) if session_scope == "regular" else time(20), US_MARKET_TIMEZONE)
+    end = datetime.combine(day, us_session_close_time(day) if session_scope == "regular" else us_post_market_close_time(day), US_MARKET_TIMEZONE)
+    return start, end
+
+
+def completed_intraday_window(
+    trade_date: date | str, *, now: datetime, session_scope: str = "regular",
+) -> tuple[datetime, datetime]:
+    start, end = _intraday_window(trade_date, now=now, session_scope=session_scope)
     if now < end:
         raise ValueError("US_INTRADAY_SESSION_NOT_COMPLETED")
-    if (now.astimezone(US_MARKET_TIMEZONE).date() - day).days > US_INTRADAY_HISTORY_DAYS:
+    if (now.astimezone(US_MARKET_TIMEZONE).date() - start.date()).days > US_INTRADAY_HISTORY_DAYS:
         raise ValueError("US_INTRADAY_HISTORY_OUTSIDE_BOUNDED_HORIZON")
     return start, end
+
+
+def requested_us_intraday_scope(
+    trade_date: date | str, *, now: datetime, session_scope: str = "regular",
+) -> USIntradayScopeRequest:
+    """Resolve explicit date intent; current evidence still belongs to Market Truth.
+
+    An extended/all request remains current until the exchange's post-market
+    close, including the early-close schedule. Eligibility does not assert
+    evidence availability, freshness, or Daily release.
+    """
+    day = date.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
+    try:
+        start, end = _intraday_window(day, now=now, session_scope=session_scope)
+        if day == now.astimezone(US_MARKET_TIMEZONE).date() and start <= now < end:
+            return USIntradayScopeRequest(day, session_scope, USIntradayRequestedScope.CURRENT_SESSION)
+        completed_intraday_window(day, now=now, session_scope=session_scope)
+    except ValueError as exc:
+        if not str(exc).startswith("US_INTRADAY_"):
+            raise
+        return USIntradayScopeRequest(day, session_scope, USIntradayRequestedScope.INELIGIBLE, str(exc))
+    return USIntradayScopeRequest(day, session_scope, USIntradayRequestedScope.COMPLETED_HISTORY)
 
 
 def regular_intraday_coverage(times: list[datetime], *, trade_date: date) -> dict:

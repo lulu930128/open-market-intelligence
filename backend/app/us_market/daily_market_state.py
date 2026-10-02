@@ -17,6 +17,7 @@ from app.market_data.contracts import (
 from app.us_market.symbols import US_INDEX_SYMBOLS, normalize_us_symbol
 from app.us_market.trading_calendar import (
     expected_us_daily_price_date,
+    is_us_trading_day,
     us_daily_price_finalization_time,
 )
 
@@ -95,9 +96,32 @@ def expected_us_completed_daily_state(*, now: datetime) -> USCompletedDailyState
     )
 
 
+def requested_us_completed_daily_state(
+    *, trade_date: date, now: datetime
+) -> USCompletedDailyState:
+    """Validate an exact requested session, without rolling to another date."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    release_at = us_daily_price_finalization_time(trade_date)
+    reason = (
+        "US_DAILY_REQUESTED_DATE_NOT_TRADING_SESSION"
+        if not is_us_trading_day(trade_date)
+        else "US_DAILY_REQUESTED_SESSION_NOT_RELEASED"
+        if now < release_at
+        else "REQUESTED_COMPLETED_SESSION"
+    )
+    return USCompletedDailyState(
+        expected_trade_date=trade_date,
+        release_at=release_at,
+        eligible=reason == "REQUESTED_COMPLETED_SESSION",
+        reason_code=reason,
+    )
+
+
 __all__ = [
     "USCompletedDailyState",
     "USInstrumentIdentity",
     "expected_us_completed_daily_state",
+    "requested_us_completed_daily_state",
     "resolve_us_instrument_identity",
 ]

@@ -18,7 +18,7 @@ from app.ai.market_context.regional_params import (
     _market_data_int,
     _market_data_str,
 )
-from app.ai.market_date_request import parse_market_trade_date
+from app.ai.market_date_request import resolve_us_market_date_request
 from app.ai.market_payload_contract import (
     intraday_point_limit as _market_intraday_point_limit,
     payload_level as _market_payload_level,
@@ -28,6 +28,7 @@ from app.db.models import USSecCompanyFact, USStockMaster
 from app.market.calendar_status import build_us_calendar_status
 from app.observability.source_health_contract import summarize_source_health
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.historical_intraday import USIntradayRequestedScope
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 from app.us_market.trading_calendar import (
@@ -847,7 +848,7 @@ def read_us_stock_context(
         else None
     )
     requested_capability_set = capability_dependency_closure(
-        requested_capabilities or ()
+        requested_capabilities or (), scope_type="us_stock"
     )
     selection_bounded = requested_capabilities is not None
 
@@ -871,35 +872,53 @@ def read_us_stock_context(
     include_intraday = _market_data_bool(market_data_params, "include_intraday", False)
     payload_level = _market_payload_level(market_data_params)
     session_scope = _market_data_str(market_data_params, "session_scope", "regular") or "regular"
-    requested_trade_date_value = parse_market_trade_date(
-        _market_data_str(market_data_params, "trade_date")
+    context_now = dependencies.now()
+    date_request = resolve_us_market_date_request(
+        explicit_value=_market_data_str(market_data_params, "trade_date"),
+        requested_capabilities=requested_capabilities or (("intraday.bars",) if include_intraday else ()),
+        session_scope=session_scope,
+        require_daily_close=_market_data_bool(market_data_params, "require_daily_close", False),
+        now=context_now,
     )
+    requested_trade_date_value = date_request.trade_date
+    daily_trade_date_value = date_request.daily_trade_date
     requested_trade_date = (
         requested_trade_date_value.isoformat()
         if requested_trade_date_value is not None
         else None
     )
+    requested_scope = date_request.intraday_scope
+    current_quote_allowed = date_request.current_quote_allowed
+    exact_daily_required = daily_trade_date_value is not None and (
+        wants("daily.ohlcv") or (wants("quote.snapshot") and not current_quote_allowed)
+    )
     intraday_summary = (
         None
-        if requested_trade_date is not None
+        if requested_scope is not None and requested_scope.scope is not USIntradayRequestedScope.CURRENT_SESSION
         else (
             _latest_tool_result(tool_runs, "us.refresh_intraday_bars")
             or _latest_tool_result(tool_runs, "us.read_intraday_trend")
         )
     )
+    if requested_trade_date is not None and isinstance(intraday_summary, dict):
+        coverage = intraday_summary.get("session_coverage") or {}
+        result_date = intraday_summary.get("requested_trade_date") or coverage.get("trade_date")
+        if result_date != requested_trade_date or intraday_summary.get("session_scope") != session_scope:
+            intraday_summary = None
+        else:
+            intraday_summary = {**intraday_summary, "requested_trade_date": requested_trade_date}
     stock = (
         db.query(USStockMaster)
         .filter(USStockMaster.symbol == normalized_symbol)
         .first()
     )
-    context_now = dependencies.now()
     quote_snapshot = None
-    if requested_trade_date is None and isinstance(intraday_summary, dict):
+    if current_quote_allowed and isinstance(intraday_summary, dict):
         nested_quote = intraday_summary.get("quote_snapshot")
         quote_snapshot = nested_quote if isinstance(nested_quote, dict) else None
     quote_reader = getattr(dependencies.us_market_service, "get_us_quote_snapshot", None)
     if (
-        requested_trade_date is None
+        current_quote_allowed
         and wants("quote.snapshot")
         and callable(quote_reader)
     ):
@@ -918,7 +937,7 @@ def read_us_stock_context(
                 symbol=normalized_symbol,
                 bars=bars,
                 now=context_now,
-                to_date=requested_trade_date_value,
+                to_date=daily_trade_date_value,
             )
             daily_projection = daily_platform_result.projection
             daily_rows = _resolved_daily_context_rows(
@@ -1008,17 +1027,15 @@ def read_us_stock_context(
             limit=10,
         )
     )
-    if selection_bounded:
-        try:
-            gaps = dependencies.scan_us_stock_gaps(
-                db,
-                normalized_symbol,
-                requested_capabilities=requested_capabilities,
-            )
-        except TypeError:
-            gaps = dependencies.scan_us_stock_gaps(db, normalized_symbol)
-    else:
-        gaps = dependencies.scan_us_stock_gaps(db, normalized_symbol)
+    gaps = dependencies.scan_us_stock_gaps(
+        db, normalized_symbol,
+        requested_capabilities=requested_capabilities,
+        session_scope=session_scope,
+        intraday_interval=_requested_intraday_interval(market_data_params, default="1m") or "1m",
+        require_daily_close=_market_data_bool(market_data_params, "require_daily_close", False),
+        now=context_now,
+        **({"requested_trade_date": requested_trade_date} if requested_trade_date is not None else {}),
+    )
     source_health = dependencies.us_market_service.build_us_source_health(
         db=db,
         symbol=normalized_symbol,
@@ -1065,7 +1082,7 @@ def read_us_stock_context(
             "US SEC financial contract is not decision-usable"
             + (f": {', '.join(issue_codes[:6])}" if issue_codes else ".")
         )
-    if requested_trade_date is not None and latest_daily is None:
+    if exact_daily_required and latest_daily is None:
         requested_missing = "us_daily_price_requested_trade_date"
         if requested_missing not in missing:
             missing.append(requested_missing)
@@ -1093,6 +1110,7 @@ def read_us_stock_context(
                 interval=requested_interval,
                 db=db,
                 persist_history=False,
+                now=context_now,
             )
         except Exception as exc:
             if "us_intraday_trend" not in missing:
@@ -1116,7 +1134,7 @@ def read_us_stock_context(
                 symbol=normalized_symbol,
                 timeframe=timeframe,
                 bars=bars,
-                to_date=requested_trade_date_value,
+                to_date=daily_trade_date_value,
             )
             if intraday_requested and session_scope != "regular":
                 chart["requested_session_scope"] = session_scope
@@ -1137,14 +1155,16 @@ def read_us_stock_context(
         "build_us_market_research",
         None,
     )
-    if callable(research_builder) and requested_trade_date is None and needs_research:
+    if callable(research_builder) and needs_research:
         try:
             research_candidate = research_builder(
                 db,
                 symbol=normalized_symbol,
                 bars=min(max(bars, 260), 500),
-                now=dependencies.now(),
+                now=context_now,
                 include_market_coverage=not selection_bounded,
+                **({"to_date": daily_trade_date_value} if daily_trade_date_value is not None else {}),
+                **({"timeframe": timeframe} if timeframe != "daily" else {}),
             )
             if isinstance(research_candidate, dict):
                 resolved_daily = research_candidate.get("daily_ohlcv")
@@ -1161,6 +1181,9 @@ def read_us_stock_context(
                     resolved_research["market_coverage"] = coverage
                 for warning in research_candidate.get("warnings") or []:
                     warnings.append(str(warning))
+                for reason in research_candidate.get("missing") or []:
+                    if reason not in missing:
+                        missing.append(str(reason))
         except Exception as exc:
             warnings.append(f"US technical research unavailable: {exc}")
 
@@ -1274,7 +1297,7 @@ def read_us_stock_context(
         instrument_type=instrument_type,
         previous_close_reference=temporal_change_reference,
     )
-    intraday_quote = {} if requested_trade_date is not None else _us_intraday_quote(
+    intraday_quote = {} if not current_quote_allowed else _us_intraday_quote(
         intraday_summary,
         calendar_status=us_calendar_status,
         instrument_type=instrument_type,
@@ -1297,7 +1320,7 @@ def read_us_stock_context(
         latest_daily,
         intraday_requested=intraday_requested,
         calendar_status=us_calendar_status,
-        requested_trade_date=requested_trade_date,
+        requested_trade_date=daily_trade_date_value.isoformat() if daily_trade_date_value else None,
         instrument_type=instrument_type,
     )
     intraday_bars = _us_intraday_compact(intraday_summary, market_data_params=market_data_params)
@@ -1511,7 +1534,7 @@ def read_us_stock_context(
             ),
             "intraday": (
                 str((intraday_summary or {}).get("status") or "missing")
-                if requested_trade_date is not None
+                if daily_trade_date_value is not None
                 else "current"
                 if selected_resolved_quote or intraday_quote
                 else "missing"

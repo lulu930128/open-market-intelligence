@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
 from time import perf_counter
@@ -24,6 +25,8 @@ from app.market import stock_selection_refresh
 from app.market.cross_market import refresh as cross_market_refresh
 from app.us_market import service as us_market_service
 from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
+from app.us_market.daily_rollout import build_us_daily_operation_rollout_state
+from app.market_data.rollout import CapabilityRolloutState
 from app.us_market.sources import normalize_us_symbol
 from app.watchlists import backfill_service as watchlist_backfill_service
 
@@ -513,6 +516,7 @@ def _execute_tool(
     args: dict[str, Any],
     *,
     cancel_event: Event | None = None,
+    us_daily_rollout: CapabilityRolloutState | None = None,
 ) -> dict[str, Any]:
     symbol = normalize_us_symbol(args.get("symbol"))
     crypto_symbol = normalize_crypto_symbol(args.get("symbol"))
@@ -687,11 +691,17 @@ def _execute_tool(
         }
 
     if tool_name == "us.refresh_daily_price":
+        if cancel_event is not None and cancel_event.is_set():
+            raise ValueError("US_DAILY_OPERATION_CANCELLED")
         return refresh_us_daily_ohlcv(
             db=db,
             symbol=symbol,
             outputsize=str(args.get("outputsize") or "compact"),
             adjusted=bool(args.get("adjusted", False)),
+            rollout_state=us_daily_rollout,
+            to_date=date.fromisoformat(str(args["trade_date"])) if args.get("trade_date") else None,
+            bars=min(max(int(args.get("bars") or 260), 1), 500) if us_daily_rollout is not None else None,
+            max_provider_calls=2,
         )
 
     if tool_name == "us.refresh_company_profile":
@@ -861,6 +871,7 @@ def _execute_tool_with_deadline(
     args: dict[str, Any],
     timeout_seconds: float,
     tracking_job_id: int | None = None,
+    us_daily_rollout: CapabilityRolloutState | None = None,
 ) -> tuple[dict[str, Any], str, str | None]:
     outcome: Queue[tuple[str, Any]] = Queue(maxsize=1)
     cancel_event = Event()
@@ -890,6 +901,7 @@ def _execute_tool_with_deadline(
                 tool_name,
                 args,
                 cancel_event=cancel_event,
+                **({"us_daily_rollout": us_daily_rollout} if us_daily_rollout is not None else {}),
             )
             outcome.put(("success", result))
             worker_status = "success"
@@ -1020,6 +1032,7 @@ def execute_tool_plan(
     plan: dict[str, Any],
     budget: dict[str, int],
     can_external_fetch: bool,
+    us_daily_fill_symbol: str | None = None,
     fallback_to_cached: bool = True,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1264,6 +1277,9 @@ def execute_tool_plan(
                 args=args,
                 timeout_seconds=max(0.0, budget["max_total_seconds"] - elapsed_seconds),
                 tracking_job_id=tracking_job_id,
+                **({"us_daily_rollout": build_us_daily_operation_rollout_state(
+                    symbols=(us_daily_fill_symbol,), max_symbols=1,
+                )} if tool_name == "us.refresh_daily_price" and can_external_fetch and us_daily_fill_symbol else {}),
             )
         except Exception as exc:
             result = {}

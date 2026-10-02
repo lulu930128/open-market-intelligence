@@ -10,10 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import PortfolioHolding, USWatchlistGroup, USWatchlistItem
 from app.db.session import SessionLocal
-from app.market_data.rollout import CapabilityRolloutMode
 from app.portfolio.service import normalize_market
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
-from app.us_market.daily_rollout import build_us_daily_acquisition_rollout_state
+from app.us_market.daily_rollout import build_us_daily_operation_rollout_state
 from app.us_market.daily_market_state import expected_us_completed_daily_state
 from app.us_market.symbols import normalize_us_symbol
 
@@ -165,9 +164,8 @@ def reconcile_us_priority_ohlc(
     symbols = pinned_symbols + rotated_symbols
     run_symbols = symbols[:max_symbols]
     operation_rollout = (
-        build_us_daily_acquisition_rollout_state(
-            mode=CapabilityRolloutMode.CANARY,
-            symbols=",".join(run_symbols),
+        build_us_daily_operation_rollout_state(
+            symbols=run_symbols,
             max_symbols=max(len(run_symbols), 1),
             changed_at=requested_at,
         )

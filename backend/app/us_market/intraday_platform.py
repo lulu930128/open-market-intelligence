@@ -53,6 +53,8 @@ from app.us_market.trading_calendar import is_us_trading_day
 from app.us_market.historical_intraday import (
     US_INTRADAY_HISTORY_DAYS,
     completed_intraday_window,
+    requested_us_intraday_scope,
+    USIntradayRequestedScope,
     regular_intraday_coverage,
 )
 
@@ -561,6 +563,11 @@ class USIntradayMarketPlatform:
         self._validate_now(requested_at)
         historical_range = {}
         if trade_date is not None:
+            requested_scope = requested_us_intraday_scope(trade_date, now=requested_at, session_scope=session_scope)
+            if requested_scope.scope is USIntradayRequestedScope.INELIGIBLE:
+                raise ValueError(requested_scope.reason_code)
+        is_historical = trade_date is not None and requested_scope.scope is USIntradayRequestedScope.COMPLETED_HISTORY
+        if is_historical:
             if require_live:
                 raise ValueError("historical intraday cannot satisfy require_live")
             start, end = completed_intraday_window(trade_date, now=requested_at, session_scope=session_scope)
@@ -599,7 +606,7 @@ class USIntradayMarketPlatform:
             route_resolution_gate=True,
         )
         projection = project_resolved_us_bars(result.resolved, max_bars=bars)
-        if trade_date is not None:
+        if is_historical:
             # Full-session acquisition can fail its coverage requirement while
             # committed partial evidence remains useful and must stay visible.
             reread = self.read_intraday_bars_for_trade_date(symbol=symbol, trade_date=start.date(), bars=1000, now=requested_at)
@@ -612,7 +619,7 @@ class USIntradayMarketPlatform:
                 decision_usable=False, is_live=False, is_realtime=False,
             )
         platform_result = self._platform_result(identity=identity, result=result, projection=projection, profile=profile)
-        if trade_date is not None:
+        if is_historical:
             complete = (
                 session_scope == "regular"
                 and coverage["coverage_status"] == "complete"
@@ -628,6 +635,8 @@ class USIntradayMarketPlatform:
                 postcondition_satisfied=complete,
                 postcondition_reasons=() if complete else ("HISTORICAL_SESSION_COVERAGE_INCOMPLETE",),
             )
+        if trade_date is not None:
+            projection.update(requested_trade_date=requested_scope.trade_date.isoformat(), session_scope=session_scope)
         return platform_result
 
 

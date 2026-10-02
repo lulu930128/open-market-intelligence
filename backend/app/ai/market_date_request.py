@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from dataclasses import dataclass
 import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.us_market.trading_calendar import previous_us_trading_day
+from app.us_market.historical_intraday import (
+    USIntradayRequestedScope, USIntradayScopeRequest, requested_us_intraday_scope,
+)
 
 
 US_MARKET_TIMEZONE = ZoneInfo("America/New_York")
@@ -95,6 +99,51 @@ def parse_market_trade_date(value: Any) -> date | None:
         raise ValueError(
             "market_data_params.trade_date must be a valid ISO date in YYYY-MM-DD format."
         ) from exc
+
+
+def requests_us_daily_close(question: str) -> bool:
+    """Keep close intent separate from exchange-date routing."""
+    return bool(_CLOSE_HINT_PATTERN.search(str(question or "")))
+
+
+@dataclass(frozen=True)
+class USMarketDateRequest:
+    trade_date: date | None
+    daily_trade_date: date | None
+    intraday_scope: USIntradayScopeRequest | None
+    current_quote_allowed: bool
+
+
+def resolve_us_market_date_request(
+    *,
+    explicit_value: Any = None,
+    requested_capabilities: tuple[str, ...] = (),
+    session_scope: str = "regular",
+    require_daily_close: bool = False,
+    now: datetime,
+) -> USMarketDateRequest:
+    """Scope legacy trade_date by capability; market owners retain eligibility.
+
+    Current intraday intent does not request an unreleased Daily close. An
+    explicit close, daily-only request, or completed historical date stays exact.
+    None delegates latest-completed Daily selection to USDailyOhlcvPlatform.
+    """
+    trade_date = parse_market_trade_date(explicit_value)
+    scope = (
+        requested_us_intraday_scope(trade_date, now=now, session_scope=session_scope)
+        if trade_date is not None else None
+    )
+    current_quote_allowed = not require_daily_close and (
+        scope is None or scope.scope is USIntradayRequestedScope.CURRENT_SESSION
+    )
+    daily_trade_date = trade_date
+    if trade_date is not None and "intraday.bars" in requested_capabilities and not require_daily_close:
+        # A regular-only series can be not-yet-observable during pre-market;
+        # the market-owned all-session window still identifies today's intent.
+        current_session = requested_us_intraday_scope(trade_date, now=now, session_scope="all")
+        if current_session.scope is USIntradayRequestedScope.CURRENT_SESSION:
+            daily_trade_date = None
+    return USMarketDateRequest(trade_date, daily_trade_date, scope, current_quote_allowed)
 
 
 def requested_us_trade_date(

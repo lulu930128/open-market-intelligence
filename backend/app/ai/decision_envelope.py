@@ -531,6 +531,35 @@ SOURCE_HEALTH_CAPABILITY_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _selected_health_providers(response: dict[str, Any]) -> dict[str, set[str]]:
+    """Read selected projections only; candidates and provider health are not selection."""
+    data, compact = _result_data(response)
+    resolved = _dict(data.get("resolved_market_data"))
+    selected: dict[str, set[str]] = {}
+
+    def add(hints: tuple[str, ...], projection: Any) -> None:
+        value = _dict(projection)
+        health = _dict(value.get("resolved_health")) or _dict(value.get("source_status"))
+        provider = value.get("selected_provider") or value.get("provider") or health.get("selected_provider") or health.get("provider")
+        if isinstance(provider, str) and provider.strip() and provider != "unresolved":
+            for hint in hints:
+                selected.setdefault(hint, set()).add(provider.strip().casefold())
+
+    # Bind provider identity to the evidence resource, never to the whole target.
+    quote = _dict(compact.get("quote"))
+    quote_hints = SOURCE_HEALTH_DOMAIN_HINTS[
+        "chart" if "close" in str(quote.get("quote_semantics") or "") else "quote"
+    ]
+    add(quote_hints, quote)
+    add(SOURCE_HEALTH_DOMAIN_HINTS["quote"], resolved.get("quote_snapshot"))
+    add(SOURCE_HEALTH_DOMAIN_HINTS["chart"], resolved.get("daily_ohlcv"))
+    add(SOURCE_HEALTH_DOMAIN_HINTS["chart"], data.get("chart"))
+    add(SOURCE_HEALTH_DOMAIN_HINTS["intraday"], resolved.get("intraday_bars"))
+    for value in _dict(_dict(compact.get("intraday_bars")).get("series")).values():
+        add(SOURCE_HEALTH_DOMAIN_HINTS["intraday"], value)
+    return selected
+
+
 def _source_health_relevance_context(
     response: dict[str, Any],
 ) -> dict[str, Any]:
@@ -590,6 +619,7 @@ def _source_health_relevance_context(
         "target_ids": target_ids,
         "source_ref_hints": source_ref_hints,
         "select_all_source_health": select_all_source_health,
+        "selected_providers": _selected_health_providers(response),
     }
 
 
@@ -598,8 +628,6 @@ def _source_health_relevance(
     *,
     context: dict[str, Any],
 ) -> str:
-    if context["select_all_source_health"]:
-        return "selected"
     text = " ".join(
         str(entry.get(key) or "").casefold()
         for key in ("resource", "provider", "target", "market", "source")
@@ -623,8 +651,17 @@ def _source_health_relevance(
     source_ref_resource = any(
         hint in text for hint in context["source_ref_hints"]
     )
-    if target_matches and selected_resource:
-        return "selected"
+    if target_matches and (selected_resource or context["select_all_source_health"]):
+        resource = str(entry.get("resource") or "").casefold()
+        providers = {
+            provider
+            for hint, values in context["selected_providers"].items()
+            if hint in resource
+            for provider in values
+        }
+        if str(entry.get("provider") or "").casefold() in providers:
+            return "selected"
+        return "supplemental"
     if target_matches and source_ref_resource:
         return "dependent"
     return "supplemental"

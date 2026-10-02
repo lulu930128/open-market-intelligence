@@ -101,7 +101,9 @@ active phase 只接受Backend calendar投影的`current_session_trade_date`。�
 session requirement不滿足，Today series不得回退到latest cached date。Intraday bar
 freshness仍以最新bar event time判斷；off-session才可明示投影latest historical session。
 
-明示 `trade_date` 的 US historical intraday 使用 `historical_intraday.py` 驗證已完成的交易時窗與 bounded horizon；read path 僅從 canonical cache 讀取指定交易日。獲授權的 acquisition 才將該時窗傳入 provider，經 transaction persistence 後 mandatory reread。Regular completeness 依交易日曆（含 early close）的逐分鐘時槽、重複／缺段與 finalization 判定，不以總筆數單獨推定完整。Partial evidence 保持可見，historical projection 與其 points 不宣稱 live／realtime／decision usable。Extended completeness 尚不升級為 complete。
+明示 US intraday `trade_date` 由 `historical_intraday.requested_us_intraday_scope()` 統一區分 current session、completed history 與 ineligible。當日 exchange date 在 requested scope 的可觀測時窗內，沿用 current canonical Market Truth；regular 在正常／early close 後才進 completed history，extended/all 則等到 calendar-owned post-market close。Reader、gap scan、planner、fill state 與 acquisition 共用此判定，consumer 不計算 session，日期與 session/interval 保留到 continuation identity。
+
+Completed history 仍由 `completed_intraday_window()` 驗證已完成交易時窗與 bounded horizon；read path 僅從 canonical cache 讀取指定交易日。獲授權的 acquisition 才將該時窗傳入 provider，經 transaction persistence 後 mandatory reread。Regular completeness 依交易日曆（含 early close）的逐分鐘時槽、重複／缺段與 finalization 判定，不以總筆數單獨推定完整。Partial evidence 保持可見，historical projection 與其 points 不宣稱 live／realtime／decision usable。Extended completeness 尚不升級為 complete。Exact Daily close 的 release/eligibility 獨立判斷，盤中 quote/minute evidence 不得代替尚未發布的指定日收盤價。
 
 一般 US Today 讀取選到已完成 regular session 時，也傳遞 Market Truth 的
 `regular_session_coverage` 與 `regular_session_completed`。Compatibility API 保存
@@ -130,6 +132,15 @@ US current-market comparison base 是另一個獨立 projection：盤前／正�
 completed-session Daily；consumer 不得用它猜測盤後漲跌基準。若當日正常盤 close
 尚未可證明，`change_reference_status=missing` 並回
 `CURRENT_DAY_REGULAR_CLOSE_PENDING`，不得沿用前一交易日 close。
+
+## Capability-scoped request dates
+
+AI request 的日期正規化由 `market_date_request.py` 擁有，並消費既有 US market
+scope classification；market calendar 不反向依賴 AI。Legacy `trade_date` 搭配
+current-session `intraday.bars` 時只限制 current quote／intraday，Daily／technical
+預設交由 Daily owner 選 latest completed session。Daily-only 明示日期、completed
+historical mixed request 與 `require_daily_close=true` 仍保持 exact date；未發布的
+指定日收盤不得 fallback。Context 與 gap scan 共用同一正規化結果，不自行猜日期。
 
 ## Derived labels
 

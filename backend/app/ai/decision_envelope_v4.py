@@ -2090,6 +2090,9 @@ def _brief_capability_summary(
                     "contract_version",
                     "as_of",
                     "trade_date",
+                    "requested_trade_date",
+                    "temporal_semantics",
+                    "request_status",
                     "latest_price",
                     "current_price",
                     "trend",
@@ -2210,6 +2213,9 @@ def _brief_capability_summary(
                     "timeframe",
                     "as_of",
                     "bar_count",
+                    "requested_trade_date",
+                    "temporal_semantics",
+                    "request_status",
                     "price_basis",
                     "currency",
                     "price_unit",
@@ -4169,7 +4175,10 @@ def build(
         factual_answer = answer_composer.build_selected_market_consumer_answer(
             target=_dict(canonical.get("target")), projected_data=projected_data,
             quality=quality, response_preferences=preferences,
-            auction_intent=query_plan.has_auction_intent(str(source_response.get("question") or "")),
+            auction_intent=query_plan.has_auction_intent(
+                str(source_response.get("question") or ""),
+                market=_dict(canonical.get("target")).get("market"),
+            ),
         )
         if factual_answer:
             canonical["answer"] = factual_answer

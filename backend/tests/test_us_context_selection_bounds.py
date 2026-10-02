@@ -82,6 +82,7 @@ def test_intraday_only_context_skips_unselected_research_resources() -> None:
         interval="5m",
         db=db,
         persist_history=False,
+        now=dependencies.now(),
     )
     gap_scan.assert_called_once_with(
         db,
@@ -91,6 +92,10 @@ def test_intraday_only_context_skips_unselected_research_resources() -> None:
             "intraday.bars",
             "data.freshness",
         ),
+        session_scope="all",
+        intraday_interval="5m",
+        require_daily_close=False,
+        now=dependencies.now(),
     )
     service.list_us_daily_prices.assert_not_called()
     service.list_us_ohlc_chart_data.assert_not_called()
