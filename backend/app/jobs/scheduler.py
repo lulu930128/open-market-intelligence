@@ -2289,6 +2289,33 @@ def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
     return True
 
 
+def send_discord_market_report(phase: str) -> None:
+    from app.dispatch.discord_market_report import run_discord_market_report
+
+    result = run_discord_market_report(phase)
+    logger.info(
+        "Discord market report phase=%s status=%s sent_chunks=%s reason=%s.",
+        phase, result["status"], result["sent_chunks"], result.get("reason"),
+    )
+
+
+def _add_discord_market_report_jobs(scheduler: Any) -> bool:
+    if not settings.enable_discord_market_report_scheduler:
+        return False
+    for phase in ("preopen", "intraday", "postclose"):
+        hour, minute = _parse_hour_minute(
+            getattr(settings, f"scheduler_discord_market_report_{phase}_time")
+        )
+        scheduler.add_job(
+            send_discord_market_report,
+            trigger="cron", day_of_week="mon-fri", hour=hour, minute=minute,
+            second=0, timezone="Asia/Taipei", kwargs={"phase": phase},
+            id=f"discord_market_report_{phase}", replace_existing=True,
+            max_instances=1, coalesce=True, misfire_grace_time=60,
+        )
+    return True
+
+
 def enqueue_due_dispatch_schedules() -> None:
     from app.dispatch import service as dispatch_service
 
@@ -2720,6 +2747,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
+        and not settings.enable_discord_market_report_scheduler
         and not settings.enable_watchlist_radar_scheduler
         and not settings.enable_us_priority_ohlc_scheduler
         and not settings.enable_us_index_data_repair_gate
@@ -2826,6 +2854,7 @@ def start_scheduler() -> Any | None:
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     taiwan_derivatives_refresh_enabled = _add_taiwan_derivatives_refresh_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
+    _add_discord_market_report_jobs(scheduler)
     dispatch_schedule_reconcile_enabled = _add_dispatch_schedule_reconcile_job(scheduler)
     market_chip_margin_refresh_enabled = _add_market_chip_margin_refresh_job(
         scheduler

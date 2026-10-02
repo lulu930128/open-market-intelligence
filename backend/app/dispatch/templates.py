@@ -671,7 +671,10 @@ def _build_tw_market_overview_preview(
     content_depth: str = "standard",
     radar_limit: int | None = None,
 ) -> dict[str, Any]:
-    envelope = tools.read_market_overview(db=db, limit=8)
+    envelope = tools.read_market_overview(
+        db=db, limit=8,
+        market_data_params={"requested_capabilities": ["market.indices"]},
+    )
     generated_at = utc_now()
     data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
     breadth = data.get("breadth") if isinstance(data.get("breadth"), dict) else {}
@@ -895,6 +898,15 @@ def _build_tw_market_overview_preview(
         missing=missing,
         metadata={
             "kind": envelope.get("kind"),
+            # Preserve canonical evidence axes for phase-aware report consumers.
+            # No acquisition, ranking, freshness or market selection here.
+            **{key: data.get(key) for key in (
+                "latest_trade_date", "sample_coverage", "breadth_by_market",
+                "sample_breadth", "top_gainers", "top_losers", "value_leaders",
+                "index_intraday", "cross_market", "market_chips", "volume_state",
+                "market", "freshness_by_capability",
+            )},
+            "freshness": envelope.get("freshness"),
             "breadth": breadth,
             "distribution": distribution,
             "stance": stance,
