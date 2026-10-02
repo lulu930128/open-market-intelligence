@@ -52,6 +52,8 @@ def request_market_refresh_priority(
             row = db.execute(select(MarketRefreshPriority).where(*predicate)).scalar_one()
     row.requested_at = moment
     row.expires_at = expiry
+    # Persist renewal before cleanup reads expiry with production autoflush=False.
+    db.flush()
     # Only short-lived demand is removed; no market observations are touched.
     db.execute(delete(MarketRefreshPriority).where(MarketRefreshPriority.expires_at < moment))
     db.commit()
