@@ -46,12 +46,14 @@ def _list_daily_history(
     db: Session,
     stock_id: str,
     limit: int,
+    as_of_date: date | None = None,
 ) -> list[TaiwanCanonicalDailyRow]:
     try:
         result = read_taiwan_official_daily(
             db,
             stock_id=stock_id,
             limit=limit,
+            to_date=as_of_date,
         )
     except ValueError:
         return []
@@ -618,6 +620,7 @@ def build_tw_stock_next_session_plan(
     db: Session,
     stock_id: str,
     now: datetime | None = None,
+    as_of_date: date | None = None,
     candidate_close: float | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
@@ -640,6 +643,7 @@ def build_tw_stock_next_session_plan(
     raw_rows = _list_daily_history(
         db=db,
         stock_id=normalized_stock_id,
+        **({"as_of_date": as_of_date} if as_of_date is not None else {}),
         limit=history_limit,
     )
     history, raw_row_count = normalize_daily_history(raw_rows)

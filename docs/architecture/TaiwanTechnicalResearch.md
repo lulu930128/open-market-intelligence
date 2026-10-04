@@ -8,6 +8,42 @@ TW 指標選單取 Backend capability、interval applicability 與實際 rendere
 
 ## Price Map v4
 
+Daily continuity 使用 `market.tw_daily_day_state` 的 instrument × trade_date canonical
+day-state 與 expected sessions。Calendar、historical instrument status、official daily
+price、trade activity、corporate-action price basis 分別輸入純 resolver；缺失或未知
+不能推成停牌或無成交。七種 day-state 與 blocker 由 executable contract 擁有。
+
+Historical suspension/resume/capital-reduction/price-basis-changing evidence 由
+`tw_corporate_events` 既有 official acquisition → normalized event → atomic cache → revision
+lifecycle 擁有，透過 `TradingStatusObservation` 提供 historical eligibility。沒有獨立
+historical JSON truth 或人工日期／price-basis import。官方公告 parser 只接受明示有效區間；
+列表只提供 positive evidence，不能作為完整 negative coverage。來源不可達或回應未涵蓋目標
+時 refresh 保留精確 blocker。Price basis resolver 回傳 unchanged/changed/unknown 與 coverage；
+所有 price-changing event families 的 coverage 完整才可推導 unchanged。
+
+`TaiwanOfficialDailyBarRepository.complete_no_trade_bars` 在 canonical resolution 後
+消費 day-state，只對 verified no-trade 產生 read-only derived bar。必須是明確零量、零金額、
+零筆數、連續的 prior resolved raw close，以及完整官方 event coverage 的 unchanged
+price-basis；企業行動不明、
+不安全、來源不可信、非零金額／筆數或缺 prior close 都保留缺口。衍生 bar 的 authority
+為 derived、非官方成交價、不持久化價格，保留 raw/prior/basis lineage 及 limitation。
+原始 MarketDailyPrice 不變；缺少 price-basis acquisition 時不製造 safety evidence。
+
+Receipt visibility 與行情截止日分開：`to_date` 限制 market events；`requested_at`
+限制可見 receipts。派報 `current_cache_bounded_report_date` 使用目前可見 cache，
+所以今日補入的歷史官方證據可以供 replay 使用；明示歷史 requested_at 則仍排除晚收 evidence。
+Bar revision 納入 day-state；Price Map snapshot dependency digest 沿用 corporate-event revision，避免沿用舊判定。
+
+`jobs.tw_technical_input_readiness` 是共用 write-side owner，按 canonical blocker 分派
+既有 bounded daily backfill、instrument/corporate-event refresh 或 alternate official price
+resolution，最後 canonical/technical reread。尚無 qualified alternate official price acquisition
+時保留 unavailable；不能重新抓相同 null row 卻宣稱已解析。Technical 不解析 raw/provider/event
+頁面，只消費 canonical bars、bar-state、expected sessions 與 day-state。
+
+派報 preparation 只固定本次八檔 selection → common readiness → receipt，同時 reread chart coverage 與 technical
+`input_quality.decision_usable`。Coverage complete 且 technical partial 仍列 unresolved，
+不能替換候選；`--prepare-only` 只執行 preparation、不發送 Discord。
+
 Technical input quality 分開輸出 `decision_window` 與 `history_coverage`。近期所需完成 Bars 由可用指標的最大 warmup 決定；週／月由 Bar owner 附上每期缺少的交易日 component 數，未知 coverage、近期缺口、不合法順序與不足 warmup 都阻擋 decision。更早的缺口及 requested history 未達目標保留 warning，不單獨封鎖已足夠的近期視窗。計算仍保留既有歷史輸入與遞迴指標演算法；不適格歷史輸入仍保守阻擋，不以截斷或補值改寫來源。
 
 尚未完成的週／月不計入 decision warmup、structures、signals 或 completed technical revision；觀測點可另列。Report 對四個 timeframe 提供 backend-owned structured state；Today 只投影 session 觀測，日線背景分開。Frontend 不重新計算狀態、指標或市場完成性。

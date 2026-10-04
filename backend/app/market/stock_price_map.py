@@ -997,6 +997,7 @@ def build_tw_stock_price_map(
     now: datetime | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
     timeframe: str = "daily",
+    as_of_date: date | None = None,
 ) -> dict[str, Any]:
     if timeframe not in {"today", "daily", "weekly", "monthly"}:
         raise ValueError("Unsupported Price Map timeframe")
@@ -1014,6 +1015,7 @@ def build_tw_stock_price_map(
         candidate_close=candidate_close,
         now=local_now,
         parameters=resolved_parameters,
+        **({"as_of_date": as_of_date} if as_of_date is not None else {}),
     )
     reference = _number(next_plan.get("as_of_close"))
     cache_key = (
@@ -1023,7 +1025,7 @@ def build_tw_stock_price_map(
             next_plan=next_plan,
             parameter_revision=resolved_parameters.revision,
         )
-        if now is None and structure_timeframe == "daily"
+        if now is None and as_of_date is None and structure_timeframe == "daily"
         else None
     )
     cached_basis = _read_basis_cache(cache_key) if cache_key is not None else None
@@ -1037,6 +1039,7 @@ def build_tw_stock_price_map(
             include_intraday=False,
             include_volume_pace=False,
             parameters=resolved_parameters,
+            **({"to_date": as_of_date} if as_of_date is not None else {}),
         )
         evidence = {}
         evidence_error = None

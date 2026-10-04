@@ -344,12 +344,19 @@ class TaiwanBarReadDiagnostics(CanonicalModel):
     storage_revision: str | None = None
 
 
+from app.market.tw_daily_day_state import TaiwanDailyDayState
+
+
 class TaiwanBarSeriesRead(CanonicalModel):
     contract_version: str = "tw.bar.series_read.v1"
     instrument: InstrumentKey
     requested_interval: str
     base_interval: str
     derived: bool
+    # Resolved by the canonical Bar owner, never inferred by technical consumers.
+    nontrading_dates: tuple[date, ...] = ()
+    expected_sessions: tuple[date, ...] = ()
+    day_states: tuple[TaiwanDailyDayState, ...] = ()
     market_phase: str | None = None
     aggregation_version: str | None = None
     bars: tuple[BarObservation, ...] = ()

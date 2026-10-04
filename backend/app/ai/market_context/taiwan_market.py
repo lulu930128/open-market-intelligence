@@ -2322,6 +2322,11 @@ def read_market_overview(
     source_refs: list[dict[str, Any]] = []
     payload_level = _payload_level(market_data_params)
     data_params = _market_data_params(market_data_params)
+    requested_trade_date = data_params.get("trade_date")
+    pinned_trade_date = (
+        date.fromisoformat(str(requested_trade_date))
+        if requested_trade_date is not None else None
+    )
     requested_domains = {
         str(value).strip().lower()
         for value in data_params.get("requested_domains") or []
@@ -2556,7 +2561,11 @@ def read_market_overview(
         }
         return _with_evidence_passport(envelope, freshness={"status": compact_health["status"]})
 
-    latest_trade_date = dependencies.market_service.get_latest_trade_date(db)
+    latest_trade_date = (
+        pinned_trade_date
+        if pinned_trade_date is not None
+        else dependencies.market_service.get_latest_trade_date(db)
+    )
     for source_ref in cross_market.get("source_refs") or []:
         if isinstance(source_ref, dict):
             _append_source_ref_once(source_refs, source_ref)
@@ -2736,6 +2745,14 @@ def read_market_overview(
         include_etf=False,
     )
     rows = list(daily_snapshot.rows)
+    if pinned_trade_date is not None and daily_snapshot.trade_date != pinned_trade_date:
+        # The daily snapshot owner may cap unreleased dates. An exact-date
+        # request must never relabel another session's rows as the requested day.
+        rows = []
+        daily_snapshot = None
+    if pinned_trade_date is not None and not rows:
+        missing.append("market_daily_price")
+        warnings.append(f"No market daily rows are available for requested trade_date {pinned_trade_date}.")
     sample_coverage = _daily_sample_coverage(daily_snapshot)
     stock_ids = sorted({row.stock_id for row in rows if row.stock_id})
     stock_industries: dict[str, str | None] = {}
@@ -2933,6 +2950,8 @@ def read_market_overview(
         )
     if not omit_sample_rankings:
         warnings.append(
+            f"Top movers, value leaders, distribution, and industry rankings use the OMI local daily sample for {pinned_trade_date}."
+            if pinned_trade_date is not None else
             "Top movers, value leaders, distribution, and industry rankings still use the latest OMI local daily sample."
         )
 

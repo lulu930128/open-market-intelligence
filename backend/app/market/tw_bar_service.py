@@ -1428,7 +1428,21 @@ class TaiwanBarService:
         if not isinstance(result.resolved, ResolvedBarSeries):
             raise RuntimeError("Taiwan daily gateway returned non-Bar payload")
         base_bars = list(result.resolved.bars)
-        projection_limitations: list[str] = []
+        from app.market.tw_daily_day_state import TaiwanDailyState
+        day_states = repository.resolve_daily_days(instrument=instrument,
+            start_date=requested_from.date(), end_date=requested_to.date(), resolved_bars=base_bars)
+        base_bars, day_states = repository.complete_no_trade_bars(
+            resolved_bars=base_bars, day_states=day_states)
+        nontrading_dates = frozenset(item.trade_date for item in day_states
+            if item.state is TaiwanDailyState.INSTRUMENT_SUSPENDED)
+        expected_sessions = tuple(item.trade_date for item in day_states if item.expected_session)
+        conflicted_dates = {item.trade_date for item in day_states
+                            if item.state is TaiwanDailyState.CONFLICTED_EVIDENCE}
+        projection_limitations = [f"TW_DAILY_DAY_STATE:{item.trade_date}:{item.state.value}:{blocker}"
+                                  for item in day_states for blocker in item.blockers]
+        projection_limitations.extend(
+            limitation for bar in base_bars if bar.derivation_kind
+            for limitation in bar.limitations)
         metadata = repository.outward_state_metadata(
             tuple(
                 item.lineage.observation_id
@@ -1455,10 +1469,11 @@ class TaiwanBarService:
                     reconciliation_status=TaiwanReconciliationStatus(
                         state.get("reconciliation_status") or "pending"
                     ),
-                    persisted=True,
+                    persisted=item.lineage.materialization_version != "tw.daily.zero_trade_carry.v1",
                     source_interval="1d",
                     technical_eligible=(
                         state.get("reconciliation_status") != "mismatched"
+                        and item.start_at.astimezone(TAIWAN_TZ).date() not in conflicted_dates
                     ),
                 )
             )
@@ -1580,7 +1595,7 @@ class TaiwanBarService:
                 if not all(has_taiwan_calendar_year(year) for year in range(first.year, last.year + 1)):
                     # Weekday fallback cannot prove historical holiday gaps.
                     return None
-                return len(set(_trading_dates(first, last)) - component_dates)
+                return len(set(_trading_dates(first, last)) - nontrading_dates - component_dates)
 
             outward_states = tuple(
                 TaiwanBarOutwardState(
@@ -1620,6 +1635,7 @@ class TaiwanBarService:
             requested_from.date(),
             min(requested_to.date(), current_date),
         )
+        requested_dates = [day for day in requested_dates if day not in nontrading_dates]
         covered_dates = {item.start_at.date() for item in ordered_base}
         covered_session_count = len(set(requested_dates) & covered_dates)
         history_status = (
@@ -1656,6 +1672,7 @@ class TaiwanBarService:
             aggregation_version=aggregation_version,
             state={
                 "history_status": history_status.value,
+                "day_states": [item.model_dump(mode="json") for item in day_states],
                 "bar_states": [item.model_dump(mode="json") for item in outward_states],
             },
         )
@@ -1664,7 +1681,10 @@ class TaiwanBarService:
             requested_interval=requested_interval,
             base_interval="1d",
             market_phase=taiwan_market_session_phase(now),
-            derived=requested_interval != "1d",
+            derived=requested_interval != "1d" or any(bar.derivation_kind for bar in outward_bars),
+            nontrading_dates=tuple(sorted(nontrading_dates)),
+            expected_sessions=expected_sessions,
+            day_states=day_states,
             aggregation_version=aggregation_version,
             bars=outward_bars,
             bar_states=outward_states,

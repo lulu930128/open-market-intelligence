@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from html import escape
 from typing import Any
 
@@ -670,10 +670,12 @@ def _build_tw_market_overview_preview(
     radar_mode: str = "action",
     content_depth: str = "standard",
     radar_limit: int | None = None,
+    trade_date: date | None = None,
 ) -> dict[str, Any]:
     envelope = tools.read_market_overview(
         db=db, limit=8,
-        market_data_params={"requested_capabilities": ["market.indices"]},
+        market_data_params={"requested_capabilities": ["market.indices"],
+                            **({"trade_date": trade_date.isoformat()} if trade_date is not None else {})},
     )
     generated_at = utc_now()
     data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
@@ -1221,6 +1223,7 @@ def build_market_overview_preview(
     radar_mode: str = "action",
     content_depth: str = "standard",
     radar_limit: int | None = None,
+    trade_date: date | None = None,
 ) -> dict[str, Any]:
     normalized_market = str(market or "tw").strip().lower()
     if normalized_market == "us":
@@ -1235,6 +1238,7 @@ def build_market_overview_preview(
         radar_mode=radar_mode,
         content_depth=content_depth,
         radar_limit=radar_limit,
+        trade_date=trade_date,
     )
 
 

@@ -124,6 +124,20 @@ def pure_history(count: int = 60) -> list[dict]:
 
 
 class NextSessionPlanPureTests(unittest.TestCase):
+    def test_as_of_date_bounds_canonical_daily_history(self) -> None:
+        with make_session() as db:
+            add_stock(db)
+            add_daily_history(db, end=date(2026, 8, 7))
+            now = datetime(2026, 8, 7, 16, tzinfo=TAIWAN_TZ)
+            bounded = build_tw_stock_next_session_plan(
+                db=db, stock_id="2330", now=now, as_of_date=date(2026, 8, 6))
+            latest = build_tw_stock_next_session_plan(
+                db=db, stock_id="2330", now=now, as_of_date=None)
+            assert str(bounded["as_of_trade_date"]) == "2026-08-06"
+            assert bounded["as_of_close"] == 178
+            assert str(latest["as_of_trade_date"]) == "2026-08-07"
+            assert latest["as_of_close"] == 179
+
     def test_ma20_transition_is_self_consistent_candidate_threshold(self) -> None:
         history = pure_history()
         level = build_transition_level(

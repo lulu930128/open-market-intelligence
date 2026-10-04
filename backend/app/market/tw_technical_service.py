@@ -33,7 +33,7 @@ from app.market.technical_parameters import (
     get_technical_analysis_parameters,
 )
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead
-from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
+from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
@@ -42,7 +42,7 @@ from app.market_data.contracts import (
 )
 
 
-INPUT_QUALITY_VERSION = "tw.technical.input_quality.v2"
+INPUT_QUALITY_VERSION = "tw.technical.input_quality.v3"
 
 
 class TaiwanTechnicalStatus(str, Enum):
@@ -154,6 +154,8 @@ def _bar_subset_revision(
             "contract_version": "tw.technical.bar_subset_revision.v1",
             "instrument": series.instrument.model_dump(mode="json"),
             "interval": series.requested_interval,
+            "expected_sessions": [day.isoformat() for day in series.expected_sessions],
+            "day_states": [item.model_dump(mode="json") for item in series.day_states],
             "bars": [
                 bar.model_dump(mode="json") for bar in series.bars[:stop]
             ],
@@ -334,10 +336,12 @@ def _input_quality(
             else:
                 cursor += timedelta(days=1)
             while cursor < end:
-                missing += int(is_taiwan_trading_day(cursor))
+                missing += int(cursor in bars.expected_sessions)
                 cursor += timedelta(days=1)
         return missing, ordered
 
+    if interval in {"1d", "1w", "1mo"} and not bars.expected_sessions:
+        reasons.append("TW_TECHNICAL_EXPECTED_SESSIONS_UNKNOWN")
     history_missing, history_ordered = continuity(completed)
     window_missing, window_ordered = continuity(window)
     component_known = True
@@ -382,6 +386,10 @@ def _input_quality(
         history_warnings.append("TW_TECHNICAL_HISTORY_COMPONENT_COVERAGE_UNKNOWN")
     return {
         "contract_version": INPUT_QUALITY_VERSION,
+        "canonical_limitations": list(bars.limitations),
+        "day_states": [item.model_dump(mode="json") for item in bars.day_states],
+        "day_state_blockers": [{"trade_date": item.trade_date.isoformat(), "state": item.state.value,
+                                "reasons": list(item.blockers)} for item in bars.day_states if item.blockers],
         "status": "partial" if reasons else "ready",
         "decision_usable": not reasons,
         "required_bars": required,

@@ -1,6 +1,38 @@
 schema_version = 1
 
 [[rules]]
+id = "tw_daily_day_state_pure"
+kind = "python_forbidden_import"
+description = "Instrument-day classification is pure and cannot acquire, persist or depend on consumers."
+roots = ["backend/app/market/tw_daily_day_state.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.db", "sqlalchemy", "app.market.providers", "app.jobs", "app.dispatch", "requests", "httpx"]
+
+[[rules]]
+id = "discord_history_orchestration_only"
+kind = "python_forbidden_import"
+description = "Discord history preparation delegates market repair to common technical readiness."
+roots = ["backend/app/jobs/market_report_history.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.market", "app.market_data", "app.db", "app.sources", "app.pipelines"]
+
+[[rules]]
+id = "tw_technical_canonical_inputs_only"
+kind = "python_forbidden_import"
+description = "Technical consumes canonical bars and day-state; providers and event persistence remain at market owners."
+roots = ["backend/app/market/tw_technical_service.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.market.providers", "app.market.tw_corporate_events", "app.db", "app.jobs"]
+
+[[rules]]
+id = "discord_report_read_boundary"
+kind = "python_forbidden_import"
+description = "Discord selection/enrichment stays cache-only; history preparation belongs to the explicit jobs write phase."
+roots = ["backend/app/dispatch/discord_market_report.py", "backend/app/dispatch/market_report_presentation.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.jobs", "app.market.backfill", "app.market.providers", "app.sources", "app.pipelines"]
+
+[[rules]]
 id = "tw_materialization_single_command_owner"
 kind = "python_forbidden_import_names"
 description = "Taiwan fetch/repair entry points must use the canonical materialization JobRun, not acquisition primitives. Streaming ingestion keeps its own lifecycle."

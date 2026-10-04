@@ -86,15 +86,22 @@ def add_stock(db: Session, stock_id: str = "2330") -> None:
 
 def add_daily_history(db: Session, stock_id: str = "2330", count: int = 80) -> None:
     source_id, raw_result_id = add_raw_source(db, "market_daily_price")
-    start = date(2026, 1, 1)
+    from app.market.trading_calendar import is_taiwan_trading_day
+    days = []
+    cursor = date(2026, 3, 20)
+    while len(days) < count:
+        if is_taiwan_trading_day(cursor):
+            days.append(cursor)
+        cursor -= timedelta(days=1)
+    days.reverse()
 
-    for index in range(count):
+    for index, trade_date in enumerate(days):
         close = 100.0 + index
         db.add(
             MarketDailyPrice(
                 source_id=source_id,
                 raw_result_id=raw_result_id,
-                trade_date=start + timedelta(days=index),
+                trade_date=trade_date,
                 stock_id=stock_id,
                 stock_name="TSMC",
                 trade_volume=1_000_000 + index * 1000,
@@ -112,7 +119,7 @@ def add_daily_history(db: Session, stock_id: str = "2330", count: int = 80) -> N
 def add_chip_rows(db: Session, stock_id: str = "2330") -> None:
     institutional_source_id, institutional_raw_id = add_raw_source(db, "institutional_trade")
     margin_source_id, margin_raw_id = add_raw_source(db, "margin_trading")
-    trade_date = date(2026, 3, 21)
+    trade_date = date(2026, 3, 20)
 
     db.add(
         InstitutionalTradeDaily(
@@ -272,7 +279,7 @@ class TechnicalReportTests(unittest.TestCase):
             MarketDailyPrice(
                 source_id=vendor_source_id,
                 raw_result_id=vendor_raw_id,
-                trade_date=date(2026, 3, 21),
+                trade_date=date(2026, 3, 20),
                 stock_id="2330",
                 stock_name="TSMC vendor duplicate",
                 trade_volume=9_999_999,
@@ -417,7 +424,7 @@ class TechnicalReportTests(unittest.TestCase):
             "intraday_series_latest_price",
         )
         self.assertFalse(price_context["bid_ask_price_used"])
-        self.assertEqual(price_context["daily_indicator_time"], "2026-03-21")
+        self.assertEqual(price_context["daily_indicator_time"], "2026-03-20")
         self.assertEqual(
             price_context["moving_average_structure"]["price_state"],
             "above_all",
@@ -439,12 +446,12 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["data"]["decision_snapshot"], "completed")
         self.assertEqual(report["data"]["decision_state"]["position"]["price"], 179.0)
         self.assertEqual(report["data"]["current_state"]["position"]["price"], 179.0)
-        self.assertEqual(report["data"]["decision_state_time"], "2026-03-21")
-        self.assertEqual(report["data"]["current_state_time"], "2026-03-21")
+        self.assertEqual(report["data"]["decision_state_time"], "2026-03-20")
+        self.assertEqual(report["data"]["current_state_time"], "2026-03-20")
         self.assertTrue(report["data"]["current_state_decision_usable"])
         self.assertIsNone(report["data"]["current_partial_indicator"])
         self.assertIsNone(report["data"]["current_observation"])
-        self.assertEqual(report["data"]["daily_indicator"]["time"], date(2026, 3, 21))
+        self.assertEqual(report["data"]["daily_indicator"]["time"], date(2026, 3, 20))
 
     def test_post_close_report_does_not_inject_session_close_into_bar_truth(self) -> None:
         with (
@@ -824,7 +831,7 @@ class TechnicalReportTests(unittest.TestCase):
             self.assertLessEqual(date.fromisoformat(benchmark_latest), cutoff)
         self.assertEqual(
             evidence["indicators"]["corporate_action"]["relevant_analysis_end"],
-            cutoff.isoformat(),
+            completed["time"].isoformat(),
         )
 
     def test_period_component_coverage_counts_missing_daily_constituents(self) -> None:

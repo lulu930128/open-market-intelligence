@@ -75,6 +75,8 @@ $script:FrontendDir = Join-Path $script:RepoRoot "frontend"
 $script:TrayIconPath = Join-Path $script:RepoRoot "OMI.ico"
 $script:AppDisplayName = "OMI_search"
 $script:TrayIcon = $null
+$script:RunEventName = "OpenMarketIntelligenceLauncherRun"
+$script:RunEvent = $null
 $script:ActivationEventName = "OpenMarketIntelligenceLauncherActivate"
 $script:ActivationEvent = $null
 $script:ExitEventName = "OpenMarketIntelligenceLauncherExit"
@@ -104,6 +106,10 @@ $script:LastStatusText = $null
 $script:BackendStopExpected = $false
 $script:BackendRecoveryInProgress = $false
 $script:BackendPortRecoveryAttempts = 0
+$script:ServiceStartRequestInProgress = $false
+# Debounce explicit requests during startup, including the runner's bounded retries.
+# Automatic frontend recovery retains its separate grace and attempt budget.
+$script:ServiceStartupGraceSeconds = 120
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
 $script:DefaultFrontendHost = "127.0.0.1"
@@ -191,14 +197,16 @@ catch [System.Threading.AbandonedMutexException] {
 
 if (-not $script:OwnsMutex) {
     $requestedEventName = switch ($LauncherAction) {
+        "Run" { $script:RunEventName }
+        "Activate" { $script:ActivationEventName }
         "Exit" { $script:ExitEventName }
         "RestartServices" { $script:RestartEventName }
-        default { $script:ActivationEventName }
     }
     $requestedAction = switch ($LauncherAction) {
+        "Run" { "Run" }
+        "Activate" { "activation" }
         "Exit" { "exit" }
         "RestartServices" { "service restart" }
-        default { "activation" }
     }
     $actionSignaled = $false
     try {
@@ -220,7 +228,7 @@ if (-not $script:OwnsMutex) {
     else {
         Write-LauncherLog "$($script:AppDisplayName) launcher $requestedAction requested but the existing tray instance did not expose the required control event." "WARN"
         if ($LauncherAction -in @("Run", "Activate")) {
-            Show-Message "$($script:AppDisplayName) is already running, but its tray icon could not be restored automatically. End the existing launcher process before starting it again."
+            Show-Message "$($script:AppDisplayName) has an existing launcher owner, but it does not expose the requested '$LauncherAction' control event. Service health is not confirmed. At a safe checkpoint, use Exit Launcher from its tray menu, then reopen the desktop launcher to load the current source."
         }
     }
 
@@ -231,7 +239,7 @@ if (-not $script:OwnsMutex) {
     exit 2
 }
 
-if ($LauncherAction -in @("Exit", "RestartServices")) {
+if ($LauncherAction -in @("Activate", "Exit", "RestartServices")) {
     Write-LauncherLog "Launcher action '$LauncherAction' found no existing tray owner; no service lifecycle action was required." "WARN"
     if ($script:OwnsMutex) {
         $script:Mutex.ReleaseMutex()
@@ -243,6 +251,11 @@ if ($LauncherAction -in @("Exit", "RestartServices")) {
     exit 3
 }
 
+$script:RunEvent = New-Object System.Threading.EventWaitHandle(
+    $false,
+    [System.Threading.EventResetMode]::AutoReset,
+    $script:RunEventName
+)
 $script:ActivationEvent = New-Object System.Threading.EventWaitHandle(
     $false,
     [System.Threading.EventResetMode]::AutoReset,
@@ -1491,6 +1504,9 @@ function Start-Frontend {
 }
 
 function Start-Services {
+    # A previous stopped status must not turn the next Run into another restart
+    # before the status timer has observed the new processes.
+    $script:LastStatusText = $null
     if ((-not (Test-ProcessRunning $script:BackendProcess)) -and
         (-not (Test-ProcessRunning $script:FrontendProcess))) {
         try {
@@ -1680,17 +1696,118 @@ function Stop-Services {
     Stop-BackendService
 }
 
-function Restart-Services {
-    Write-LauncherLog "Restart requested."
+function Reset-ServiceRecoveryState {
     $script:BackendPortRecoveryAttempts = 0
     $script:FrontendHealthRecoveryAttempts = 0
     $script:FrontendHealthUnhealthySinceUtc = $null
     $script:FrontendHealthHealthySinceUtc = $null
     $script:FrontendHealthRecoveryExhaustedLogged = $false
     $script:FrontendHealthRecoveryAdoptedLogged = $false
+    Write-LauncherLog "Service recovery rearmed. backend_attempts=0 frontend_attempts=0"
+}
+
+function Restart-Services {
+    Write-LauncherLog "Restart requested."
+    Reset-ServiceRecoveryState
     Stop-Services
     Start-Sleep -Seconds 1
     Start-Services
+}
+
+function Test-TrackedServiceStarting {
+    param($Process)
+
+    if ($null -eq $Process) {
+        return $false
+    }
+    try {
+        $ageSeconds = ([DateTime]::UtcNow - $Process.StartTime.ToUniversalTime()).TotalSeconds
+        return ($ageSeconds -ge 0 -and $ageSeconds -lt $script:ServiceStartupGraceSeconds)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-ServiceStartRequest {
+    param([Parameter(Mandatory = $true)][string]$Reason)
+
+    Restore-TrayIcon -Reason $Reason
+    if ($script:IsShuttingDown) {
+        return
+    }
+    if ($script:ServiceStartRequestInProgress -or
+        $script:BackendRecoveryInProgress -or
+        $script:FrontendHealthRecoveryInProgress) {
+        Write-LauncherLog "Explicit service start coalesced; recovery in progress. reason=$Reason"
+        return
+    }
+
+    $script:ServiceStartRequestInProgress = $true
+    try {
+        $backendHealth = Get-BackendHealth
+        $backendHealthy = ($null -ne $backendHealth -and
+            (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath (Get-ExpectedBackendPython)) -and
+            (Test-HttpOk $script:BackendReadyUrl))
+        $frontendHealthy = Test-FrontendOk
+        $backendRunning = Test-ProcessRunning $script:BackendProcess
+        $frontendRunning = Test-ProcessRunning $script:FrontendProcess
+
+        $stateDetails = "reason=$Reason backend_healthy=$backendHealthy frontend_healthy=$frontendHealthy backend_tracked_running=$backendRunning frontend_tracked_running=$frontendRunning last_status=$($script:LastStatusText)"
+        if ($backendHealthy -and $frontendHealthy) {
+            Write-LauncherLog "Explicit service start: services healthy; activated only. $stateDetails"
+            return
+        }
+
+        # Spending the last attempt is not exhaustion while that attempt is
+        # still inside its normal frontend health grace period.
+        $frontendRecoveryExhausted = (-not $frontendHealthy) -and (
+            $script:FrontendHealthRecoveryExhaustedLogged -or (
+                $script:FrontendHealthRecoveryAttempts -ge $script:MaxFrontendHealthRecoveryAttempts -and
+                $null -ne $script:FrontendHealthUnhealthySinceUtc -and
+                ([DateTime]::UtcNow - $script:FrontendHealthUnhealthySinceUtc).TotalSeconds -ge $script:FrontendHealthRecoveryGraceSeconds
+            )
+        )
+        $serviceStopped = $script:BackendStopExpected -or
+            $script:LastStatusText -match '(API|UI) stopped' -or
+            ((-not $backendHealthy) -and (-not $backendRunning)) -or
+            ((-not $frontendHealthy) -and (-not $frontendRunning)) -or
+            ($null -ne $script:BackendProcess -and (-not $backendRunning)) -or
+            ($null -ne $script:FrontendProcess -and (-not $frontendRunning))
+        $servicesStarting = (-not $serviceStopped) -and (-not $frontendRecoveryExhausted) -and
+            ($backendHealthy -or ($backendRunning -and (Test-TrackedServiceStarting $script:BackendProcess))) -and
+            ($frontendHealthy -or ($frontendRunning -and (Test-TrackedServiceStarting $script:FrontendProcess)))
+        if ($servicesStarting) {
+            Write-LauncherLog "Explicit service start: services starting; activated only. $stateDetails"
+            return
+        }
+
+        Write-LauncherLog "Explicit service start: services degraded. $stateDetails frontend_recovery_exhausted=$frontendRecoveryExhausted" "WARN"
+        if ((-not $backendRunning) -and (-not $frontendRunning)) {
+            Write-LauncherLog "Explicit service start taking Start-Services; both tracked services stopped. reason=$Reason"
+            Reset-ServiceRecoveryState
+            Start-Services
+        }
+        else {
+            Write-LauncherLog "Explicit service start taking Restart-Services; tracked services remain alive. reason=$Reason"
+            Restart-Services
+        }
+    }
+    catch {
+        Write-LauncherLog "Explicit service start failed. reason=$Reason error=$($_.Exception.Message)" "ERROR"
+    }
+    finally {
+        # AutoReset collapses simultaneous requests; discard requests queued
+        # during this synchronous operation, including a failed start dialog.
+        try {
+            if ($null -ne $script:RunEvent -and (-not $script:IsShuttingDown)) {
+                [void]$script:RunEvent.Reset()
+            }
+        }
+        finally {
+            $script:ServiceStartRequestInProgress = $false
+        }
+    }
 }
 
 function Exit-Launcher {
@@ -1768,7 +1885,7 @@ $script:StatusItem.Enabled = $false
 
 $startItem = New-Object System.Windows.Forms.MenuItem
 $startItem.Text = "Start Services"
-$startItem.add_Click({ Start-Services })
+$startItem.add_Click({ Invoke-ServiceStartRequest -Reason "tray-start" })
 
 $restartItem = New-Object System.Windows.Forms.MenuItem
 $restartItem.Text = "Restart Services"
@@ -1815,6 +1932,9 @@ $script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
+    if ($script:IsShuttingDown -or $script:ServiceStartRequestInProgress) {
+        return
+    }
     $backendRunnerExitCode = Get-ExitedProcessCode $script:BackendProcess
     if ($backendRunnerExitCode -eq $script:BackendBindFailureExitCode -and
         (-not $script:BackendStopExpected)) {
@@ -1915,6 +2035,11 @@ $script:ActivationTimer.add_Tick({
         Restart-Services
         return
     }
+    if ($null -ne $script:RunEvent -and $script:RunEvent.WaitOne(0)) {
+        Write-LauncherLog "Secondary Run received by existing tray owner."
+        Invoke-ServiceStartRequest -Reason "secondary-run"
+        return
+    }
     if ($null -ne $script:ActivationEvent -and $script:ActivationEvent.WaitOne(0)) {
         Restore-TrayIcon -Reason "secondary-launch"
     }
@@ -1935,6 +2060,9 @@ $script:ActivationTimer.add_Tick({
     if ($null -ne $script:TrayIcon) {
         $script:TrayIcon.Dispose()
     }
+    if ($null -ne $script:RunEvent) {
+        $script:RunEvent.Dispose()
+    }
     if ($null -ne $script:ActivationEvent) {
         $script:ActivationEvent.Dispose()
     }
@@ -1954,7 +2082,7 @@ $script:ActivationTimer.add_Tick({
 Start-Services
 $script:Timer.Start()
 $script:ActivationTimer.Start()
-Write-LauncherLog "Tray recovery initialized. activation_event=$($script:ActivationEventName) exit_event=$($script:ExitEventName) restart_event=$($script:RestartEventName) taskbar_message=$($script:TaskbarListener.TaskbarCreatedMessage)"
-$script:NotifyIcon.ShowBalloonTip(3000, $script:AppDisplayName, "$($script:AppDisplayName) is running in the system tray.", [System.Windows.Forms.ToolTipIcon]::Info)
+Write-LauncherLog "Tray recovery initialized. run_event=$($script:RunEventName) activation_event=$($script:ActivationEventName) exit_event=$($script:ExitEventName) restart_event=$($script:RestartEventName) taskbar_message=$($script:TaskbarListener.TaskbarCreatedMessage)"
+$script:NotifyIcon.ShowBalloonTip(3000, $script:AppDisplayName, "$($script:AppDisplayName) tray controls are available. Check Status for API/UI health.", [System.Windows.Forms.ToolTipIcon]::Info)
 
 [System.Windows.Forms.Application]::Run()

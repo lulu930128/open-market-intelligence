@@ -2,81 +2,13 @@
 from __future__ import annotations
 
 from datetime import date
-from math import isfinite
-from typing import Any
+from app.dispatch.market_report_presentation import (
+    MarketReportPresentation, PHASE_LABELS, build_presentation, daily_sample_scope,
+    report_limitations, _map, _rows, _text, _number, _stamp, _stock,
+)
 
 
-def _map(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _rows(value: Any) -> list[dict]:
-    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
-
-
-def _text(value: Any) -> str:
-    return str(value) if value is not None and value != "" else "missing"
-
-
-def _number(value: Any, *, percent: bool = False, ratio: bool = False, money: bool = False) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
-        return "missing"
-    if ratio:
-        return f"{value * 100:.1f}%"
-    if percent:
-        return f"{value:+.2f}%"
-    if money:
-        return f"{value / 100_000_000:,.2f} 億元" if abs(value) >= 100_000_000 else f"{value:,.0f} 元"
-    return f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
-
-
-def _stamp(row: dict) -> str:
-    return f"trade_date={_text(row.get('trade_date'))}｜as_of={_text(row.get('as_of') or row.get('event_time'))}"
-
-
-def _stock(row: dict) -> str:
-    return " ".join(str(row[key]) for key in ("stock_id", "stock_name") if row.get(key)) or "missing"
-
-
-def daily_sample_scope(metadata: dict, report_date: date) -> str:
-    value = metadata.get("latest_trade_date")
-    try:
-        sample_date = date.fromisoformat(str(value))
-    except ValueError:
-        return "日線樣本日期 missing（不可判定為本交易日）"
-    if sample_date < report_date:
-        return f"前一已完成交易日樣本（{sample_date}）"
-    if sample_date == report_date:
-        return f"本交易日日線樣本（{sample_date}；非即時排行）"
-    return f"日線樣本（{sample_date}；晚於報告日期，不作當時證據）"
-
-
-def report_limitations(preview: dict) -> tuple[list[str], list[str]]:
-    """Keep upstream detail, including nested axes, once in the final section."""
-    warnings: list[str] = []
-    missing: list[str] = []
-
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, items in value.items():
-                if key in {"warnings", "limitations", "missing"} and isinstance(items, list):
-                    target = missing if key == "missing" else warnings
-                    for item in items:
-                        if isinstance(item, str) and item.strip() and item not in target:
-                            target.append(item)
-                elif isinstance(items, (dict, list)):
-                    visit(items)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-
-    visit({"warnings": preview.get("warnings"), "missing": preview.get("missing"),
-           "metadata": preview.get("metadata")})
-    return warnings, missing
-
-
-def _index_lines(metadata: dict) -> list[str]:
-    indices = _map(_map(metadata.get("market")).get("indices"))
+def _index_lines(indices: dict) -> list[str]:
     rows = _rows(indices.get("items"))
     lines = []
     for identity, label in (("TAIEX", "加權指數"), ("TPEX", "櫃買指數")):
@@ -163,9 +95,11 @@ def _chips_lines(chips: dict) -> list[str]:
         aggregate = _map(block.get("aggregate"))
         coverage = _map(block.get("coverage"))
         lines.append(f"- {label}：status={_text(block.get('status'))}｜{_stamp(block)}｜"
-                     f"上游資料庫覆蓋 {_number(coverage.get('covered_stock_count'))}/"
-                     f"{_number(coverage.get('active_stock_master_count'))} "
-                     f"（{_number(coverage.get('coverage_ratio'), ratio=True)}；非全市場保證）")
+                     f"普通股 canonical coverage {_number(coverage.get('covered_eligible_count'))}/"
+                     f"{_number(coverage.get('eligible_count'))} "
+                     f"（{_number(coverage.get('coverage_ratio'), ratio=True)}；非全市場保證）｜"
+                     f"母體類別 universe_class={_text(coverage.get('universe_class'))}｜"
+                     f"母體外來源代碼 {_number(coverage.get('out_of_universe_source_count'))} 檔")
         facts = [f"{name} {_number(aggregate[field])}" for field, name in fields if aggregate.get(field) is not None]
         if facts:
             lines.append("  " + "｜".join(facts))
@@ -192,22 +126,26 @@ def _cross_lines(context: dict) -> list[str]:
 
 
 def render_sections(preview: dict, *, phase: str, report_date: date) -> str:
-    metadata = _map(preview.get("metadata"))
-    breadth = _map(metadata.get("breadth"))
-    distribution = _map(metadata.get("distribution"))
-    volume = _map(metadata.get("volume_state"))
-    sample = daily_sample_scope(metadata, report_date)
-    coverage = _map(metadata.get("sample_coverage"))
-    strong = _rows(metadata.get("top_industries"))
-    weak = _rows(metadata.get("weak_industries"))
-    leaders = _rows(metadata.get("value_leaders"))
-    indices = _index_lines(metadata)
+    return render_model_sections(build_presentation(preview, phase=phase, report_date=report_date))
+
+
+def render_model_sections(model: MarketReportPresentation) -> str:
+    phase = model.phase
+    breadth = model.breadth
+    distribution = model.distribution
+    volume = model.volume
+    sample = model.daily_sample_scope
+    coverage = model.sample_coverage
+    strong = model.strong_sectors
+    weak = model.weak_sectors
+    leaders = model.value_leaders
+    indices = _index_lines(model.indices)
     volume_head = (f"- 累計成交值：{_number(volume.get('current_cumulative_trade_value'), money=True)}｜"
                    f"可用部分 {_number(volume.get('available_cumulative_trade_value'), money=True)}｜"
                    f"as_of={_text(volume.get('as_of'))}｜status={_text(volume.get('status'))}")
     distribution_head = (f"- 漲停/跌停門檻樣本 {_number(distribution.get('limit_up_count'))}/{_number(distribution.get('limit_down_count'))}｜"
                          f"大漲/大跌 {_number(distribution.get('strong_up_count'))}/{_number(distribution.get('strong_down_count'))}")
-    lines = ["## 一眼看盤", f"- 市場 stance：{_text(metadata.get('stance'))}（依廣度證據）｜"
+    lines = ["## 一眼看盤", f"- 市場 stance：{model.stance}（依廣度證據）｜"
              f"as_of={_text(breadth.get('as_of') or breadth.get('trade_date'))}｜status={_text(breadth.get('status'))}",
              *[line for line in indices if line.startswith('- ')], _breadth_line("市場廣度", breadth),
              volume_head, _pace_line(volume, 5), _pace_line(volume, 20),
@@ -229,7 +167,7 @@ def render_sections(preview: dict, *, phase: str, report_date: date) -> str:
              f"- {_stamp(breadth)}｜status={_text(breadth.get('status'))}｜scope={_text(breadth.get('scope'))}｜"
              f"session={_text(breadth.get('market_session'))} / {_text(breadth.get('session_semantics'))}"]
     for market in ("TWSE", "TPEX"):
-        row = _map(_map(metadata.get("breadth_by_market")).get(market))
+        row = _map(model.breadth_by_market.get(market))
         lines.extend([_breadth_line(str(market), row), f"  {_stamp(row)}｜status={_text(row.get('status'))}"])
     lines.extend([f"- 漲跌分布：{sample}（日漲跌幅門檻樣本，非全市場即時法定漲跌停統計）", distribution_head,
                   f"- 小漲/平盤/小跌 {_number(distribution.get('mild_up_count'))}/{_number(distribution.get('flat_count'))}/{_number(distribution.get('mild_down_count'))}",
@@ -241,9 +179,9 @@ def render_sections(preview: dict, *, phase: str, report_date: date) -> str:
                   f"{_number(coverage.get('coverage_ratio'), ratio=True)}｜status={_text(coverage.get('status'))}",
                   "- 本派報未納入當日盤中個股排行；以下僅為已取得的日線樣本。"])
     for key, title in (("top_gainers", "漲幅前列"), ("top_losers", "跌幅前列"), ("value_leaders", "成交值前列")):
-        lines.extend([f"### {title}｜{sample}", *_rank_lines(_rows(metadata.get(key)))])
-    lines.extend(["", "## 籌碼", *_chips_lines(_map(metadata.get("market_chips"))),
-                  "", "## 跨市場背景", *_cross_lines(_map(metadata.get("cross_market"))),
+        lines.extend([f"### {title}｜{sample}", *_rank_lines(getattr(model, key))])
+    lines.extend(["", "## 籌碼", *_chips_lines(model.chips),
+                  "", "## 跨市場背景", *_cross_lines(model.cross_market),
                   "", "## 本時段觀察 / 下一時段觀察"])
     observations = {
         "preopen": [f"盤前先看隔夜跨市場背景的各自日期；族群與個股依 {sample}，不能當作開盤後表現。",
@@ -256,14 +194,30 @@ def render_sections(preview: dict, *, phase: str, report_date: date) -> str:
                       "若籌碼尚未發布或日期未齊，待既有資料更新後再檢查；不把未發布當作沒有變化。"],
     }
     lines.extend(f"- {line}" for line in observations[phase])
-    warnings, missing = report_limitations(preview)
+    for item in model.stock_analysis:
+        blockers = item.get("technical_blockers", [])
+        if blockers:
+            lines.extend([f"### {_stock(item)}｜技術輸入限制", *[f"- {reason}" for reason in blockers]])
+    warnings, missing = model.full_limitations["warnings"], model.full_limitations["missing"]
     lines.extend(["", "## 資料品質與限制",
                   "- 廣度依 canonical 市場證據；排行、族群與漲跌分布依本地日線樣本；跨市場僅為輔助背景，不共用單一資料時鐘。",
-                  "- 跨市場 stale / missing 不可當作本時段確認；籌碼覆蓋數與比例沿用上游口徑，不代表已驗證的全市場去重覆蓋。",
+                  "- 跨市場 stale / missing 不可當作本時段確認；個股籌碼使用 canonical 普通股母體，不代表 ETF、權證或全證券市場。",
                   "- 派報 phase 是觸發時段，不代表底層證據已更新、即時或定稿；本報告為觀察清單，無價格預測或買賣建議。"])
     # A detail present on both axes remains visible once, with both labels.
     lines.extend(f"- {'warning / missing' if item in missing else 'warning'}: {item}" for item in warnings)
     lines.extend(f"- missing: {item}" for item in missing if item not in warnings)
     if not warnings and not missing:
         lines.append("- canonical preview 未回報額外 warnings / missing；欄位缺值仍標為 missing。")
+    return "\n".join(lines)
+
+
+def render_presentation(model: MarketReportPresentation) -> str:
+    warnings, missing = model.full_limitations["warnings"], model.full_limitations["missing"]
+    lines = [f"# {model.header}",
+             f"派報時段：{PHASE_LABELS[model.phase]}（{model.phase}）｜Asia/Taipei",
+             f"as_of：{model.as_of}",
+             f"證據 session：{_text(model.session.get('market_session'))} / {_text(model.session.get('session_semantics'))}",
+             f"資料品質：{model.quality}｜{len(warnings)} warnings｜{len(missing)} missing",
+             "", render_model_sections(model)]
+    lines.extend(f"- 呈現提醒：{warning}" for warning in model.presentation_warnings)
     return "\n".join(lines)

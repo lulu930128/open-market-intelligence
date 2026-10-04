@@ -44,6 +44,16 @@ logger = logging.getLogger(__name__)
 CACHE_SCHEMA_VERSION = 1
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 PROVIDER_CONFIG = {
+    "twse_instrument_history": {
+        "provider": TWSE_PROVIDER, "market": "TWSE", "archive": True,
+        "source": "TWSE official instrument lifecycle announcements",
+        "source_url": "https://www.twse.com.tw/en/announcement/announcement/list.html",
+    },
+    "tpex_instrument_history": {
+        "provider": TPEX_PROVIDER, "market": "TPEX", "archive": True,
+        "source": "TPEx official instrument lifecycle",
+        "source_url": "https://www.tpex.org.tw/zh-tw/announce/market/reduction/reference.html",
+    },
     "twse_ex_dividend": {
         "provider": TWSE_PROVIDER,
         "market": "TWSE",
@@ -156,6 +166,144 @@ def taiwan_corporate_event_revision() -> str:
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
+def refresh_taiwan_instrument_event_history(
+    *, instrument, start_date: date, end_date: date, timeout_seconds: int = 20,
+    cache_path: Path | None = None,
+) -> dict[str, Any]:
+    """Explicit bounded acquisition -> normalized events -> existing atomic cache.
+
+    No manual status/price-basis import surface. Failed acquisition preserves the
+    previous official evidence and never asserts negative event coverage.
+    """
+    from app.market.providers.tw_trading_status import fetch_taiwan_instrument_events
+    if not 0 <= (end_date - start_date).days <= 366:
+        raise ValueError("instrument event history exceeds bounded 366-day window")
+    key = {"TWSE": "twse_instrument_history", "TPEX": "tpex_instrument_history"}.get(instrument.venue)
+    if key is None:
+        return {"status": "unresolved", "reason": "UNSUPPORTED_INSTRUMENT_EVENT_MARKET"}
+    attempted = datetime.now(timezone.utc)
+    try:
+        batch = fetch_taiwan_instrument_events(instrument=instrument,
+            start_date=start_date, end_date=end_date, timeout_seconds=timeout_seconds)
+    except Exception as error:
+        logger.exception("Instrument event acquisition failed market=%s symbol=%s", instrument.venue, instrument.symbol)
+        _write_refresh(updates={}, errors={key: type(error).__name__}, attempted_at=attempted, path=cache_path)
+        failure = provider_http_failure(error)
+        return {"status": "unresolved", "reason": "OFFICIAL_INSTRUMENT_HISTORY_ACQUISITION_FAILED",
+                "error_type": type(error).__name__,
+                "provider_failure": failure.diagnostic_fields() if failure else None}
+    if batch.get("raw_receipts"):
+        _write_refresh(updates={key: {**batch, "merge_instrument_evidence": True}},
+            errors={}, attempted_at=attempted, path=cache_path)
+    return {name: value for name, value in batch.items() if name not in {"entries", "raw_receipts", "evidence_windows"}} | {
+        "event_count": len(batch.get("entries", []))}
+
+
+def read_taiwan_instrument_event_evidence(*, instrument, available_at: datetime, path: Path | None = None):
+    """Read validated official events/windows from the sole corporate-event cache.
+
+    Existing ex-dividend entries contribute positive basis-change evidence. Only
+    receipt-backed exhaustive coverage of every price-changing event family can
+    establish unchanged. An empty event list alone never establishes safety.
+    """
+    from app.market_data.contracts import AuthorityClass, SourceLineage
+    cache = read_taiwan_corporate_event_cache(path=path)
+    events, windows, limitations = [], [], []
+    cutoff = available_at.astimezone(timezone.utc)
+    for key, provider in (cache.get("providers") or {}).items():
+        if instrument.venue not in str(provider.get("market", "")).split(","):
+            continue
+        if key.endswith("_instrument_history"):
+            receipts = {}
+            for raw in provider.get("raw_receipts", []):
+                raw_text = raw.get("raw_text")
+                if isinstance(raw_text, str) and sha256(raw_text.encode("utf-8")).hexdigest() == raw.get("content_hash"):
+                    receipts[raw.get("receipt_id")] = raw
+            for item in [*provider.get("entries", []), *provider.get("evidence_windows", [])]:
+                if item.get("stock_id") != instrument.symbol:
+                    continue
+                try:
+                    lineage = SourceLineage.model_validate(item.get("lineage"))
+                    raw = receipts.get(lineage.raw_receipt_id)
+                    from urllib.parse import urlparse
+                    domains = {"TWSE": {"www.twse.com.tw", "wwwc.twse.com.tw"},
+                               "TPEX": {"www.tpex.org.tw"}}
+                    if (not raw or lineage.authority is not AuthorityClass.EXCHANGE
+                        or raw["content_hash"] != lineage.content_hash
+                        or urlparse(raw.get("url", "")).hostname not in domains.get(instrument.venue, set())
+                        or lineage.fetched_at is None or lineage.fetched_at > cutoff):
+                        raise ValueError("unqualified event receipt")
+                    first, last = _parse_date(item.get("start_date")), _parse_date(item.get("end_date"))
+                    if first is None or last is None or not 0 <= (last - first).days <= 366:
+                        raise ValueError("invalid event interval")
+                    normalized = {**item, "start_date": first, "end_date": last, "lineage": lineage}
+                    (windows if "window_id" in item else events).append(normalized)
+                except (TypeError, ValueError):
+                    limitations.append("INSTRUMENT_EVENT_EVIDENCE_INVALID")
+        elif "ex_dividend" in key:
+            fetched = _parse_datetime(provider.get("fetched_at"))
+            if fetched is None or fetched > cutoff:
+                continue
+            for item in provider.get("entries", []):
+                event_day = _parse_date(item.get("start_date"))
+                if item.get("stock_id") == instrument.symbol and event_day:
+                    events.append({**item, "start_date": event_day, "end_date": event_day,
+                        "event_type": "ex_dividend", "lineage": SourceLineage(
+                            provider=provider.get("provider", "official"), source=key,
+                            authority=AuthorityClass.EXCHANGE, fetched_at=fetched,
+                            content_hash=sha256(json.dumps(item, sort_keys=True).encode()).hexdigest(),
+                            raw_receipt_id=f"tw_corporate_events:{key}:{item.get('event_id')}")})
+    return {"events": tuple(events), "windows": tuple(windows), "limitations": tuple(dict.fromkeys(limitations))}
+
+
+def resolve_taiwan_historical_status(evidence, *, instrument, trade_date: date):
+    from app.market_data.contracts import TradingStatusObservation
+    return tuple(TradingStatusObservation(instrument=instrument, lineage=item["lineage"],
+        official=True, status=item["status"],
+        effective_at=datetime.combine(item["start_date"], datetime.min.time(), tzinfo=TAIWAN_TZ),
+        reason=f"Official instrument event: {item['event_type']}")
+        for item in evidence["events"] if item.get("event_type") in {"suspension", "resume"}
+        and item.get("status") in {"suspended", "halted", "tradable", "unknown"}
+        and item["start_date"] <= trade_date <= item["end_date"])
+
+
+def resolve_taiwan_price_basis(evidence, *, prior_date: date, trade_date: date):
+    from app.market.tw_daily_day_state import TaiwanPriceBasis
+    kinds = {"ex_dividend", "capital_reduction", "price_basis_change"}
+    changed = [item for item in evidence["events"] if item.get("event_type") in kinds
+               and prior_date < item["start_date"] <= trade_date]
+    windows = [item for item in evidence["windows"] if item.get("complete") is True
+               and item["start_date"] <= prior_date and item["end_date"] >= trade_date]
+    covered = {kind for item in windows for kind in item.get("event_types", [])}
+    complete = kinds <= covered and not evidence["limitations"]
+    return TaiwanPriceBasis(status="changed" if changed else "unchanged" if complete else "unknown",
+        coverage="complete" if complete else "partial" if windows else "missing",
+        lineage=tuple(item["lineage"] for item in [*changed, *windows]),
+        limitations=() if complete else ("PRICE_BASIS_EVENT_COVERAGE_MISSING",))
+
+
+def refresh_taiwan_price_basis_events(*, instrument, start_date, end_date, timeout_seconds=20, cache_path=None):
+    """Bounded existing official corporate-event refresh, no per-day truth import."""
+    if not 0 <= (end_date - start_date).days <= 366:
+        raise ValueError("price-basis event refresh exceeds bounded window")
+    key, fetch = {
+        "TWSE": ("twse_ex_dividend_history", fetch_twse_ex_dividend_history),
+        "TPEX": ("tpex_ex_dividend_history", fetch_tpex_ex_dividend_history),
+    }[instrument.venue]
+    attempted = datetime.now(timezone.utc)
+    try:
+        entries = fetch(date_from=start_date, date_to=end_date, timeout_seconds=timeout_seconds)
+        _write_refresh(updates={key: {"merge_entries": True, "entries": entries,
+            "request_count": 1, "coverage_start": start_date, "coverage_end": end_date}},
+            errors={}, attempted_at=attempted, path=cache_path)
+        return {"status": "partial", "event_count": len(entries),
+            "reason": "PRICE_BASIS_OTHER_EVENT_FAMILIES_NOT_COVERED"}
+    except Exception as error:
+        logger.exception("Price-basis corporate-event acquisition failed symbol=%s", instrument.symbol)
+        _write_refresh(updates={}, errors={key: type(error).__name__}, attempted_at=attempted, path=cache_path)
+        return {"status": "unresolved", "reason": "CORPORATE_EVENT_ACQUISITION_FAILED", "error_type": type(error).__name__}
+
+
 def read_taiwan_corporate_event_cache(
     *, path: Path | None = None
 ) -> dict[str, Any]:
@@ -253,6 +401,14 @@ def _write_refresh(
 
             for provider_key, update in updates.items():
                 config = PROVIDER_CONFIG[provider_key]
+                if update.get("merge_instrument_evidence") or update.get("merge_entries"):
+                    previous = providers.get(provider_key) or {}
+                    update = dict(update)
+                    for field, identity in (("entries", "event_id"), ("raw_receipts", "receipt_id"),
+                                            ("evidence_windows", "window_id")):
+                        merged = {item[identity]: item for item in previous.get(field, [])}
+                        merged.update({item[identity]: item for item in update.get(field, [])})
+                        update[field] = list(merged.values())
                 providers[provider_key] = {
                     **config,
                     "fetched_at": attempted_text,
@@ -287,6 +443,8 @@ def _write_refresh(
                     "entries": [
                         _json_entry(entry) for entry in update.get("entries") or []
                     ],
+                    **({field: update.get(field, []) for field in ("raw_receipts", "evidence_windows")}
+                       if update.get("merge_instrument_evidence") else {}),
                 }
 
             for provider_key, error_message in errors.items():
@@ -711,7 +869,9 @@ def list_taiwan_corporate_events(
     elif start_filter >= as_of:
         provider_keys = CURRENT_PROVIDER_KEYS
     else:
-        provider_keys = tuple(PROVIDER_CONFIG)
+        provider_keys = (*CURRENT_PROVIDER_KEYS, *HISTORY_PROVIDER_KEYS)
+    if normalized_types & {"suspension", "resume", "capital_reduction", "price_basis_change"}:
+        provider_keys = (*provider_keys, "twse_instrument_history", "tpex_instrument_history")
 
     for provider_key in provider_keys:
         config = PROVIDER_CONFIG[provider_key]

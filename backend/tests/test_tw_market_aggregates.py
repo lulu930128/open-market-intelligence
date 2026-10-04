@@ -1,5 +1,78 @@
 from __future__ import annotations
 
+
+def test_market_overview_exact_trade_date_reads_canonical_daily_sample():
+    from datetime import date, datetime
+    from unittest.mock import Mock, patch
+    from zoneinfo import ZoneInfo
+
+    from app.ai.market_context import taiwan_market
+    from app.db.models import MarketDailyPrice, StockMaster
+    from app.market import service
+    from test_next_session_plan import make_session, add_stock, add_daily_history
+
+    day = date(2026, 8, 6)
+    newer = date(2026, 8, 7)
+    empty = Mock(return_value={})
+    dependencies = taiwan_market.TaiwanMarketDependencies(
+        market_service=service, read_taiwan_bars=empty, read_taiwan_index_intraday_bars=empty,
+        get_market_index_summary=empty, read_cross_market_context=empty,
+        read_market_chips_context=empty, read_market_volume_state=empty,
+        build_taiwan_source_health=empty,
+        now=lambda: datetime(2026, 8, 7, 16, tzinfo=ZoneInfo("Asia/Taipei")),
+    )
+    with make_session() as db:
+        add_stock(db)
+        add_stock(db, stock_id="2324")
+        add_daily_history(db, end=newer, count=2)
+        for stock in db.query(StockMaster).all():
+            stock.industry = "\u534a\u5c0e\u9ad4\u696d"
+        for row in db.query(MarketDailyPrice).all():
+            row.price_change = 5 if row.trade_date == day else -5
+            row.trade_value = 1000
+            db.add(MarketDailyPrice(
+                source_id=row.source_id, raw_result_id=row.raw_result_id, stock_id="2324",
+                stock_name="fixture", trade_date=row.trade_date, close_price=200,
+                open_price=200, high_price=210, low_price=190, trade_volume=1000,
+                trade_value=2000, price_change=10 if row.trade_date == day else -10))
+        db.commit()
+
+        with patch.object(service, "get_latest_trade_date", wraps=service.get_latest_trade_date) as latest, \
+             patch.object(service, "read_market_daily_snapshot", wraps=service.read_market_daily_snapshot) as reader:
+            def overview(trade_date=None):
+                return taiwan_market.read_market_overview(
+                    db, dependencies=dependencies,
+                    market_data_params={"requested_capabilities": ["market.sectors"],
+                        **({"trade_date": trade_date} if trade_date is not None else {})})
+
+            pinned = overview(day.isoformat())
+            latest.assert_not_called()
+            assert reader.call_args.kwargs["trade_date"] == day
+            data = pinned["data"]
+            assert data["latest_trade_date"] == day.isoformat()
+            assert {row["stock_id"] for row in data["top_gainers"]} == {"2330", "2324"}
+            assert data["top_losers"] == []
+            assert data["top_industries"][0]["average_change_pct"] > 0
+            assert data["market"]["sectors"]["observed_trade_date"] == day.isoformat()
+            assert all(row["trade_date"] == day.isoformat() for row in data["market"]["sectors"]["items"])
+
+            missing_day = date(2026, 8, 5)
+            missing = overview(missing_day)
+            latest.assert_not_called()
+            assert reader.call_args.kwargs["trade_date"] == missing_day
+            assert missing["data"]["latest_trade_date"] == missing_day.isoformat()
+            for key in ("top_gainers", "top_losers", "value_leaders", "top_industries", "weak_industries"):
+                assert missing["data"][key] == []
+            assert missing["data"]["market"]["sectors"]["items"] == []
+            assert "market_daily_price" in missing["missing"]
+
+            current = overview()
+            latest.assert_called_once()
+            assert reader.call_args.kwargs["trade_date"] == newer
+            assert current["data"]["latest_trade_date"] == newer.isoformat()
+            assert {row["stock_id"] for row in current["data"]["top_losers"]} == {"2330", "2324"}
+            assert current["data"]["market"]["sectors"]["observed_trade_date"] == newer.isoformat()
+
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 import unittest

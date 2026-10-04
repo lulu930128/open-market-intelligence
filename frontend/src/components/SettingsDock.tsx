@@ -1631,15 +1631,17 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     }
   }, [t]);
 
-  useEffect(() => {
-    storePreference(SETTINGS_COLOR_STORAGE_KEY, color);
-    applyColorTheme(color);
-  }, [color]);
+  function handleColorChange(nextColor: ColorSetting) {
+    setColor(nextColor);
+    storePreference(SETTINGS_COLOR_STORAGE_KEY, nextColor);
+    applyColorTheme(nextColor);
+  }
 
-  useEffect(() => {
-    storeBooleanPreference(SETTINGS_HIGH_CONTRAST_STORAGE_KEY, highContrast);
-    applyHighContrastTheme(highContrast);
-  }, [highContrast]);
+  function handleHighContrastChange(nextHighContrast: boolean) {
+    setHighContrast(nextHighContrast);
+    storeBooleanPreference(SETTINGS_HIGH_CONTRAST_STORAGE_KEY, nextHighContrast);
+    applyHighContrastTheme(nextHighContrast);
+  }
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -1920,12 +1922,12 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   { value: "light", label: t("settings.colors.light") },
                   { value: "dark", label: t("settings.colors.dark") },
                 ]}
-                onChange={setColor}
+                onChange={handleColorChange}
               />
               <PreferenceSwitch
                 label={t("settings.highContrast")}
                 checked={highContrast}
-                onChange={setHighContrast}
+                onChange={handleHighContrastChange}
               />
               <button
                 type="button"

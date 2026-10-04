@@ -674,6 +674,108 @@ class TaiwanOfficialDailyBarRepository:
             rows_accepted=sum(len(values) for values in bars_by_source.values()),
         )
 
+    def resolve_daily_days(self, *, instrument, start_date, end_date, resolved_bars):
+        """Read official activity and event evidence; resolve one state per date."""
+        from datetime import timedelta
+        from app.market.trading_calendar import has_taiwan_calendar_year, is_taiwan_trading_day
+        from app.market.tw_corporate_events import (
+            read_taiwan_instrument_event_evidence, resolve_taiwan_historical_status,
+            resolve_taiwan_price_basis,
+        )
+        from app.market.tw_daily_day_state import TaiwanDailyEvidence, resolve_taiwan_daily_day_state
+        available = (_as_aware_utc(self._available_at) if self._available_at else datetime.now(timezone.utc))
+        events = read_taiwan_instrument_event_evidence(instrument=instrument, available_at=available)
+        stored = self.load_daily_bars(DailyBarCandidateQuery(
+            instrument=instrument, start_date=start_date, end_date=end_date, max_rows=5000))
+        ids = {item.storage_row_id for item in stored.rejections if item.reason_code == "MISSING_REQUIRED_OHLC"}
+        ids.update(row_id for series in stored.series for row_id in series.storage_row_ids)
+        rows = (self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
+                .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
+                .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+                .filter(MarketDailyPrice.id.in_(ids)).all()) if ids else []
+        activity = {}
+        for row, raw, source in rows:
+            if raw.status_code != 200 or raw.error_message or not raw.content_hash:
+                continue
+            binding = next((item for item in _bindings_for_instrument(instrument)
+                            if item.source_name == source.source_name and not item.materialized), None)
+            if binding is None:
+                continue
+            activity.setdefault(row.trade_date, []).append(TaiwanDailyEvidence(
+                trade_date=row.trade_date, all_prices_missing=len(_missing_ohlc(row)) == 4,
+                volume=row.trade_volume, trade_value=row.trade_value, transaction_count=row.transaction_count,
+                lineage=SourceLineage(provider=binding.provider, source=source.source_name,
+                    authority=AuthorityClass.EXCHANGE, fetched_at=_as_aware_utc(raw.fetched_at),
+                    raw_receipt_id=f"raw_fetch_result:{raw.id}", content_hash=raw.content_hash,
+                    observation_id=f"market_daily_price:{row.id}", cache_hit=True)))
+        prices = {}
+        for bar in resolved_bars:
+            prices.setdefault(bar.start_at.astimezone(TAIWAN_TZ).date(), []).append(bar)
+        states = []
+        day = start_date
+        while day <= end_date:
+            prior = day - timedelta(days=1)
+            while prior > day - timedelta(days=14) and not is_taiwan_trading_day(prior):
+                prior -= timedelta(days=1)
+            states.append(resolve_taiwan_daily_day_state(
+                instrument=instrument, trade_date=day,
+                market_open=is_taiwan_trading_day(day) if has_taiwan_calendar_year(day.year) else None,
+                statuses=resolve_taiwan_historical_status(events, instrument=instrument, trade_date=day),
+                prices=tuple(prices.get(day, ())), daily=tuple(activity.get(day, ())),
+                price_basis=resolve_taiwan_price_basis(events, prior_date=prior, trade_date=day),
+                limitations=events["limitations"]))
+            day += timedelta(days=1)
+        return tuple(states)
+
+    def complete_no_trade_bars(self, *, resolved_bars, day_states):
+        """Derive only verified zero-activity days with a safe event price basis.
+
+        This read projection never changes MarketDailyPrice. Suspension and
+        activity-without-price never enter this derivation.
+        """
+        from hashlib import sha256
+        from app.market.tw_daily_day_state import TaiwanDailyState
+        output = {bar.start_at.astimezone(TAIWAN_TZ).date(): bar for bar in resolved_bars}
+        states = []
+        prior_session = None
+        for state in day_states:
+            day = state.trade_date
+            if state.state is TaiwanDailyState.VERIFIED_NO_TRADE and day not in output:
+                blockers = list(state.blockers)
+                prior = output.get(prior_session)
+                if (prior is None or prior.price_basis != "raw" or
+                    prior.finalization not in {BarFinalization.FINAL, BarFinalization.CORRECTED}):
+                    blockers.append("PRIOR_CANONICAL_CLOSE_MISSING")
+                elif not prior.lineage.content_hash or not state.lineage or not all(item.content_hash for item in state.lineage):
+                    blockers.append("PRIOR_CANONICAL_LINEAGE_MISSING")
+                if not blockers:
+                    hashes = tuple(dict.fromkeys((prior.lineage.content_hash, *(item.content_hash for item in state.lineage))))
+                    activity = next(item for item in state.lineage if (item.observation_id or "").startswith("market_daily_price:"))
+                    lineage = SourceLineage(provider="omi", source="tw.daily.zero_trade_carry",
+                        authority=AuthorityClass.DERIVED,
+                        event_at=datetime.combine(day, time(13, 30), tzinfo=TAIWAN_TZ),
+                        fetched_at=max(item.fetched_at for item in (*state.lineage, prior.lineage) if item.fetched_at),
+                        cache_hit=True, observation_id=f"zero_trade:{activity.observation_id}",
+                        raw_receipt_id=activity.raw_receipt_id,
+                        content_hash=sha256("|".join(hashes).encode()).hexdigest(),
+                        component_content_hashes=hashes, materialization_version="tw.daily.zero_trade_carry.v1")
+                    output[day] = BarObservation(instrument=state.instrument, lineage=lineage, interval="1d",
+                        start_at=datetime.combine(day, time(9), tzinfo=TAIWAN_TZ), end_at=lineage.event_at,
+                        open_price=prior.close_price, high_price=prior.close_price,
+                        low_price=prior.close_price, close_price=prior.close_price,
+                        volume=Quantity(value=Decimal(0), unit=QuantityUnit.SHARE), volume_status="observed",
+                        turnover_value=Decimal(0), turnover_currency="TWD", trade_count=0, price_change=Decimal(0),
+                        price_basis="raw", finalization=BarFinalization.FINAL,
+                        derivation_kind="official_zero_trade_carry_forward",
+                        limitations=("DERIVED_PREVIOUS_CLOSE_NOT_AN_EXECUTED_PRICE",
+                                     f"PRIOR_CANONICAL_OBSERVATION:{prior.lineage.observation_id}"))
+                state = state.model_copy(update={"blockers": tuple(dict.fromkeys(blockers))})
+            states.append(state)
+            # Even a suspension can carry a basis-changing event. Never jump it.
+            if state.market_open is not False:
+                prior_session = day
+        return [output[day] for day in sorted(output)], tuple(states)
+
     def outward_state_metadata(
         self,
         observation_ids: tuple[str, ...],

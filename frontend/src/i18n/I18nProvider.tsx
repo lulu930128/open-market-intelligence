@@ -4,7 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useMemo,
   useSyncExternalStore,
   type ReactNode,
@@ -44,7 +44,7 @@ function subscribeLocale(callback: () => void) {
   if (typeof window === "undefined") return () => {};
 
   function onStorage(event: StorageEvent) {
-    if (event.key === LOCALE_STORAGE_KEY) callback();
+    if (event.key === LOCALE_STORAGE_KEY || event.key === null) callback();
   }
 
   window.addEventListener("storage", onStorage);
@@ -78,9 +78,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     () => DEFAULT_LOCALE
   );
 
-  useEffect(() => {
-    writeStoredLocale(locale);
+  useLayoutEffect(() => {
+    // Hydration starts with the server snapshot. Do not apply it or reveal
+    // content until useSyncExternalStore has read the persisted client locale.
+    if (locale !== readStoredLocale()) return;
     applyDocumentLocale(locale);
+    document.documentElement.dataset.omiPreferenceState = "ready";
   }, [locale]);
 
   const setLocale = useCallback((nextLocale: AppLocale) => {

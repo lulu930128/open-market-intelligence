@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import { I18nProvider } from "@/i18n";
 import "./globals.css";
 
@@ -36,6 +37,13 @@ try {
     document.documentElement.dataset.locale = omiLocale;
   }
 } catch (error) {}
+document.documentElement.dataset.omiPreferenceBootstrap = "ready";
+setTimeout(function () {
+  if (document.documentElement.dataset.omiPreferenceState === "pending") {
+    // Diagnostic only. I18nProvider owns readiness; CSS owns stalled-JS visibility.
+    document.documentElement.dataset.omiPreferenceBootstrap = "timeout";
+  }
+}, 1500);
 `;
 
 export default function RootLayout({
@@ -44,9 +52,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-Hant" className="h-full antialiased" suppressHydrationWarning>
+    <html
+      lang="zh-Hant"
+      className="h-full antialiased"
+      data-omi-preference-state="pending"
+      suppressHydrationWarning
+    >
       <head>
-        <script dangerouslySetInnerHTML={{ __html: preferenceInitScript }} />
+        <Script
+          id="omi-preference-init"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: preferenceInitScript }}
+        />
       </head>
       <body className="min-h-full flex flex-col">
         <I18nProvider>{children}</I18nProvider>

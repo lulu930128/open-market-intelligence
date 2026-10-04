@@ -1274,8 +1274,8 @@ class AiSupplementalContextTests(unittest.TestCase):
     def test_tw_market_chips_separates_official_aggregate_from_rank_coverage(self) -> None:
         self.db.add_all(
             [
-                StockMaster(stock_id="2330", stock_name="TSMC", is_active=True),
-                StockMaster(stock_id="2317", stock_name="Hon Hai", is_active=True),
+                StockMaster(stock_id="2330", stock_name="TSMC", market="TWSE", instrument_type="stock", is_active=True),
+                StockMaster(stock_id="2317", stock_name="Hon Hai", market="TWSE", instrument_type="stock", is_active=True),
                 MarketChipDaily(
                     index_id="TAIEX",
                     market="TWSE",
@@ -1347,7 +1347,7 @@ class AiSupplementalContextTests(unittest.TestCase):
 
         self.assertEqual(result["official_market_aggregate"]["status"], "ready")
         coverage = result["institutional_per_stock"]["coverage"]
-        self.assertEqual(coverage["scope"], "omi_database_coverage")
+        self.assertEqual(coverage["scope"], "canonical_ordinary_stock_coverage")
         self.assertTrue(coverage["is_full_database_coverage"])
         self.assertEqual(coverage["full_market_verification"], "not_asserted")
         self.assertEqual(result["institutional_per_stock"]["top_net_buy"][0]["stock_id"], "2317")

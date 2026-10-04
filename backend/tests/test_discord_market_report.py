@@ -17,6 +17,7 @@ from app.config import Settings
 from app.dispatch import discord_market_report as report
 from app.dispatch import discord_sender as sender
 from app.dispatch import market_report_text as renderer
+from app.dispatch import market_report_presentation as presentation
 from app.jobs import scheduler
 
 
@@ -51,7 +52,7 @@ def prepared(monkeypatch, webhook):
     })
     monkeypatch.setattr(report.templates, "build_market_overview_preview", preview)
     send = Mock(return_value={"status": "sent", "sent_chunks": 1, "total_chunks": 1})
-    monkeypatch.setattr(report, "send_discord_report", send)
+    monkeypatch.setattr(report, "send_discord_rich_report", send)
     return SimpleNamespace(calendar=calendar, sessions=sessions, preview=preview, send=send)
 
 
@@ -152,13 +153,15 @@ def test_calendar_skip_precedes_template_and_transport(prepared, calendar, reaso
 
 @pytest.mark.parametrize("phase,label", list(report.PHASE_LABELS.items()))
 def test_template_reuse_preserves_asof_warnings_missing(prepared, phase, label, webhook):
-    result = report.run_discord_market_report(phase, now=NOW)
+    result = report.run_discord_market_report(phase, now=NOW, mode="audit")
+    assert result["evidence_time_mode"] == "live"
+    assert result["semantics"] == "strict_availability"
     db = prepared.sessions.return_value.__enter__.return_value
     prepared.preview.assert_called_once_with(db, market="tw")
     assert str(db.execute.call_args.args[0]) == "PRAGMA query_only=ON"
     db.commit.assert_not_called()
     prepared.sessions.return_value.__exit__.assert_called_once()
-    content = prepared.send.call_args.args[1]
+    content = next(item.data.decode("utf-8") for item in prepared.send.call_args.kwargs["attachments"] if item.filename == "full_report.txt")
     assert content.startswith(f"# OMI 台股{label}分析｜2026-10-02")
     assert "as_of：2026-10-01" in content
     assert "warning: stale: coverage partial" in content and "missing: market.chips" in content
@@ -205,29 +208,39 @@ def test_real_template_uses_formal_reader_only(monkeypatch, webhook, transport):
     })
     monkeypatch.setattr(report.templates.tools, "read_market_overview", reader)
     try:
-        result = report.run_discord_market_report("postclose", now=NOW)
+        result = report.run_discord_market_report("postclose", now=NOW, mode="audit")
     finally:
         engine.dispose()
     reader.assert_called_once()
     assert reader.call_args.kwargs["limit"] == 8
     assert reader.call_args.kwargs["market_data_params"] == {"requested_capabilities": ["market.indices"]}
-    content = "".join(json.loads(call.kwargs["body"])["content"] for call in transport.return_value.request.call_args_list)
+    content = transport.return_value.request.call_args.kwargs["body"].decode("utf-8", errors="replace")
     assert "canonical stale" in content and "canonical breadth" in content
     assert result["status"] == "sent"
 
 
 def test_discord_modules_cannot_import_market_data_providers_or_ai():
-    allowed = {
+    orchestration_allowed = {
         "__future__", "datetime", "typing", "zoneinfo", "sqlalchemy", "contextlib",
         "http.client", "json", "re", "urllib.parse", "app.config", "app.db.session",
         "app.dispatch", "app.dispatch.discord_sender", "app.market.calendar_status",
-        "app.dispatch.market_report_text", "math",
+        "app.dispatch.market_report_text", "math", "dataclasses", "uuid",
+        "app.dispatch.market_report_presentation", "app.dispatch.market_report_discord",
+        "app.dispatch.market_report_chart", "time", "app.market.stock_price_map",
+        "app.market.service", "app.market.daily_ohlcv_platform", "app.market.technical_report",
+        "app.market.taiwan_rules",
     }
-    for module in (report, sender, renderer):
+    module_boundaries = (
+        (report, orchestration_allowed),
+        (sender, {"__future__", "http.client", "json", "re", "contextlib", "dataclasses", "uuid", "urllib.parse"}),
+        (renderer, {"__future__", "datetime", "app.dispatch.market_report_presentation"}),
+        (presentation, {"__future__", "dataclasses", "datetime", "math", "typing", "re"}),
+    )
+    for module, allowed in module_boundaries:
         tree = ast.parse(inspect.getsource(module))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                assert node.module in allowed
+                assert node.module in allowed, (module.__name__, node.module)
             elif isinstance(node, ast.Import):
                 assert all(alias.name in allowed for alias in node.names)
 
@@ -263,6 +276,11 @@ def test_scheduler_exact_three_phases_and_timezone(monkeypatch):
 
 
 def test_scheduler_disabled_and_dispatch_wrapper(monkeypatch):
+    from app.jobs import market_report_history
+    monkeypatch.setattr(market_report_history, "prepare_discord_market_report_history", Mock(return_value={
+        "status": "ready", "selected": [], "attempted": [], "repaired": [], "unresolved": [], "selection": None}))
+    monkeypatch.setattr(scheduler, "SessionLocal", MagicMock())
+    assert inspect.signature(report.run_discord_market_report).parameters["evidence_time_mode"].default == "live"
     monkeypatch.setattr(scheduler.settings, "enable_discord_market_report_scheduler", False)
     instance = Mock()
     assert not scheduler._add_discord_market_report_jobs(instance)
@@ -270,10 +288,50 @@ def test_scheduler_disabled_and_dispatch_wrapper(monkeypatch):
     runner = Mock(return_value={"status": "sent", "sent_chunks": 2})
     monkeypatch.setattr(report, "run_discord_market_report", runner)
     scheduler.send_discord_market_report("intraday")
-    runner.assert_called_once_with("intraday")
+    runner.assert_called_once()
+    assert runner.call_args.args == ("intraday",)
+    assert runner.call_args.kwargs["now"].tzinfo is not None
+
+
+@pytest.mark.parametrize("mode", [None, "live", "replay"])
+def test_cli_evidence_time_mode(monkeypatch, capsys, mode):
+    import runpy
+    from pathlib import Path
+    import sys
+
+    cli = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts/run-discord-market-report.py"))
+    runner = Mock(return_value={"status": "sent"})
+    monkeypatch.setattr(report, "run_discord_market_report", runner)
+    argv = ["run-discord-market-report.py", "--confirm-live-send"]
+    if mode is not None:
+        argv.extend(["--evidence-time-mode", mode])
+    monkeypatch.setattr(sys, "argv", argv)
+    assert cli["main"]() == 0
+    runner.assert_called_once_with("postclose", mode="compact", evidence_time_mode=mode or "live")
+    assert json.loads(capsys.readouterr().out)["status"] == "sent"
+
+
+def test_run_replay_returns_semantics_and_warning(prepared):
+    result = report.run_discord_market_report("postclose", now=NOW, evidence_time_mode="replay")
+    assert result["evidence_time_mode"] == "replay"
+    assert result["semantics"] == "current_cache_bounded_report_date"
+    assert any("not an immutable historical snapshot" in value for value in result["presentation_warnings"])
+    assert prepared.preview.call_args.kwargs["trade_date"].isoformat() == "2026-10-02"
+
+
+def test_invalid_evidence_time_mode_fails_before_io(prepared):
+    with pytest.raises(ValueError, match="evidence time mode"):
+        report.run_discord_market_report("postclose", evidence_time_mode="snapshot")
+    prepared.calendar.assert_not_called()
+    prepared.sessions.assert_not_called()
+    prepared.send.assert_not_called()
 
 
 def test_scheduler_error_propagates_without_retry(monkeypatch):
+    from app.jobs import market_report_history
+    monkeypatch.setattr(market_report_history, "prepare_discord_market_report_history", Mock(return_value={
+        "status": "ready", "selected": [], "attempted": [], "repaired": [], "unresolved": [], "selection": None}))
+    monkeypatch.setattr(scheduler, "SessionLocal", MagicMock())
     runner = Mock(side_effect=sender.DiscordDeliveryError("HTTP failure", status_code=429))
     monkeypatch.setattr(report, "run_discord_market_report", runner)
     with pytest.raises(sender.DiscordDeliveryError):
@@ -402,6 +460,30 @@ def test_canonical_values_dates_and_partial_axes_are_preserved(evidence_preview)
     assert "個股法人：status=partial｜trade_date=2026-09-30" in chips
     assert "融資融券：status=unreleased｜trade_date=2026-09-29" in chips
     assert "輔助背景" in content and "as_of=2026-09-28" in content
+
+
+@pytest.mark.parametrize("key", ["institutional_per_stock", "margin_per_stock"])
+def test_chips_text_uses_canonical_ordinary_stock_coverage(key):
+    content = "\n".join(renderer._chips_lines({key: {"status": "partial", "coverage": {
+        "universe_class": "ordinary_stock", "eligible_count": 2,
+        "covered_eligible_count": 1, "missing_eligible_count": 1,
+        "out_of_universe_source_count": 50, "coverage_ratio": 0.5,
+        # Conflicting legacy counts must never override canonical evidence.
+        "covered_stock_count": 51, "active_stock_master_count": 3,
+    }}}))
+    assert "普通股 canonical coverage 1/2 （50.0%" in content
+    assert "母體類別 universe_class=ordinary_stock" in content
+    assert "母體外來源代碼 50 檔" in content
+    assert "51/3" not in content
+    assert "上游資料庫覆蓋" not in content
+
+
+def test_chips_legacy_only_counts_are_not_relabelled_as_ordinary_stock():
+    content = "\n".join(renderer._chips_lines({"institutional_per_stock": {"coverage": {
+        "covered_stock_count": 24677, "active_stock_master_count": 2023,
+    }}}))
+    assert "普通股 canonical coverage missing/missing" in content
+    assert "24,677/2,023" not in content
 
 
 @pytest.mark.parametrize("value", [None, {}, [], "malformed"])

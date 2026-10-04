@@ -83,6 +83,23 @@ def level(evidence_id: str, price: float, source_type: str = "swing") -> dict:
 
 
 class StockPriceMapPureTests(unittest.TestCase):
+    def test_as_of_date_bounds_reference_and_technical_report(self) -> None:
+        from app.market import stock_price_map as owner
+
+        with make_session() as db:
+            add_daily_fixture(db)
+            now = datetime(2026, 8, 7, 16, tzinfo=TAIWAN_TZ)
+            with patch.object(owner, "build_stock_technical_report", wraps=owner.build_stock_technical_report) as technical:
+                bounded = build_tw_stock_price_map(
+                    db=db, stock_id="2330", now=now, as_of_date=date(2026, 8, 6))
+                assert technical.call_args.kwargs["to_date"] == date(2026, 8, 6)
+                latest = build_tw_stock_price_map(db=db, stock_id="2330", now=now, as_of_date=None)
+                assert "to_date" not in technical.call_args.kwargs
+            assert str(bounded["reference"]["trade_date"]) == "2026-08-06"
+            assert bounded["reference"]["price"] == 188
+            assert str(latest["reference"]["trade_date"]) == "2026-08-07"
+            assert latest["reference"]["price"] == 189
+
     def test_hard_cap_survives_split_merge_and_tick_rounding(self) -> None:
         for reference in (9.99, 49.95, 99.9, 499.5, 618, 1000):
             inputs = [level(str(i), reference * (1.01 + i * 0.012)) for i in range(9)]

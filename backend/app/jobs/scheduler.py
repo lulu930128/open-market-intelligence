@@ -2291,8 +2291,23 @@ def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
 
 def send_discord_market_report(phase: str) -> None:
     from app.dispatch.discord_market_report import run_discord_market_report
+    from app.jobs.market_report_history import prepare_discord_market_report_history
 
-    result = run_discord_market_report(phase)
+    local_now = datetime.now(_timezone())
+    selection = None
+    try:
+        with SessionLocal() as db:
+            preparation = prepare_discord_market_report_history(db, phase, local_now)
+        selection = preparation["selection"]
+        logger.info(
+            "Discord history phase=%s status=%s selected=%s attempted=%s repaired=%s unresolved=%s",
+            phase, preparation["status"], preparation["selected"], preparation["attempted"],
+            preparation["repaired"], preparation["unresolved"],
+        )
+    except Exception:
+        logger.exception("Discord history preparation failed phase=%s; continuing read-only report", phase)
+    result = run_discord_market_report(phase, now=local_now,
+                                       **({"selection": selection} if selection is not None else {}))
     logger.info(
         "Discord market report phase=%s status=%s sent_chunks=%s reason=%s.",
         phase, result["status"], result["sent_chunks"], result.get("reason"),

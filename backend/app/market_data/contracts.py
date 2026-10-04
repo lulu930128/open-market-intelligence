@@ -409,6 +409,8 @@ class BarObservation(CanonicalModel):
     trade_count: int | None = Field(default=None, ge=0)
     price_change: Decimal | None = None
     finalization: BarFinalization
+    derivation_kind: str | None = Field(default=None, max_length=96)
+    limitations: tuple[str, ...] = ()
 
     @field_validator("start_at", "end_at")
     @classmethod

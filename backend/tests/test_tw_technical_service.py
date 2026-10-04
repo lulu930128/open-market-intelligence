@@ -115,6 +115,7 @@ def _series(*, technical_eligible: bool = True, count: int = 80) -> TaiwanBarSer
         base_interval="1d",
         derived=False,
         bars=resolved_bars,
+        expected_sessions=tuple(bar.start_at.date() for bar in resolved_bars),
         bar_states=tuple(states),
         bucket_coverage=coverage,
         history=TaiwanHistoryCoverage(
@@ -460,6 +461,11 @@ def _period_series(interval: str, count: int = 80) -> TaiwanBarSeriesRead:
     return series.model_copy(update={
         "requested_interval": interval, "derived": True,
         "bars": tuple(bars), "bar_states": tuple(states),
+        "expected_sessions": tuple(
+            (bars[0].start_at + timedelta(days=offset)).date()
+            for offset in range((bars[-1].end_at - bars[0].start_at).days + 1)
+            if (bars[0].start_at + timedelta(days=offset)).weekday() < 5
+        ),
         "history": series.history.model_copy(update={"requested_coverage_satisfied": False}),
     })
 

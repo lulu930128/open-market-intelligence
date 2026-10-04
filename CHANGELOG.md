@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-10-04
+
+### Changed
+
+- 台股日線加入 canonical instrument-day state 與共用技術輸入 readiness，區分無成交、停牌、缺少價格及證據衝突，保留資料缺口與修復限制。
+- Discord 市場報告共用 detached presentation model，支援文字、embeds、圖表與 evidence 附件，並由明確 job boundary 執行有界歷史準備。
+- 台股法人與融資券 coverage、彙總及排行對齊 canonical 普通股母體；AI 台股能力讀取整合有界執行圖。
+
+### Fixed
+
+- 對齊美股指定 session、未發布日線的 fail-closed 行為、有界技術歷史補齊，以及 AI 日線 evidence 的日期語意。
+- 修正 refresh priority 續期、launcher 重複啟動與 recovery 判定，並保留既有 process owner。
+- 修正前端首次顯示時的語言、色彩與高對比偏好還原，避免 hydration 覆寫儲存設定。
+- 對齊 VERSION、Frontend package／lockfile 與三語 README 的版本標示為 4.7.0。
+
+### Notes
+
+- 本次版本提交與 runtime 採用、live provider、Discord 實際發送及正式交易時段驗收分開記錄。
+
 ## [4.5.3] - 2026-09-21
 
 ### Changed

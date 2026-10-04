@@ -10,10 +10,10 @@ from app.db.models import (
     InstitutionalTradeDaily,
     MarginTradingDaily,
     MarketChipDaily,
-    StockMaster,
 )
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.market_chips import market_chip_daily_to_dict, project_market_chip_freshness
+from app.market.tw_universe import list_taiwan_stock_ids
 
 
 def _latest_date(db: Session, model: Any) -> Any:
@@ -23,24 +23,45 @@ def _latest_date(db: Session, model: Any) -> Any:
 def _coverage(
     *,
     covered_count: int,
-    active_count: int,
+    eligible_count: int,
+    source_count: int = 0,
 ) -> dict[str, Any]:
-    ratio = covered_count / active_count if active_count else None
+    ratio = covered_count / eligible_count if eligible_count else None
+    complete = bool(eligible_count and covered_count == eligible_count)
     return {
-        "scope": "omi_database_coverage",
-        "covered_stock_count": covered_count,
-        "active_stock_master_count": active_count,
+        "scope": "canonical_ordinary_stock_coverage",
+        "universe_class": "ordinary_stock",
+        "eligible_count": eligible_count,
+        "covered_eligible_count": covered_count,
+        "missing_eligible_count": eligible_count - covered_count,
+        # Count distinct stock IDs at this dataset's latest date, not raw rows.
+        "out_of_universe_source_count": source_count - covered_count,
         "coverage_ratio": ratio,
-        "is_full_database_coverage": bool(active_count and covered_count >= active_count),
+        "is_full_eligible_coverage": complete,
+        # Public compatibility aliases; all now describe the canonical universe.
+        "compatibility_aliases": {
+            "covered_stock_count": "covered_eligible_count",
+            "active_stock_master_count": "eligible_count",
+            "is_full_database_coverage": "is_full_eligible_coverage",
+        },
+        "covered_stock_count": covered_count,
+        "active_stock_master_count": eligible_count,
+        "is_full_database_coverage": complete,
         "full_market_verification": "not_asserted",
-        "label": "OMI 資料庫覆蓋率",
+        "label": "普通股 canonical coverage",
     }
+
+
+def _source_stock_count(db: Session, model: Any, trade_date: Any) -> int:
+    return db.query(func.count(func.distinct(model.stock_id))).filter(
+        model.trade_date == trade_date,
+    ).scalar() or 0
 
 
 def _institutional_context(
     db: Session,
     *,
-    active_count: int,
+    eligible_ids: frozenset[str],
     limit: int,
 ) -> dict[str, Any]:
     trade_date = _latest_date(db, InstitutionalTradeDaily)
@@ -48,7 +69,7 @@ def _institutional_context(
         return {
             "status": "missing",
             "trade_date": None,
-            "coverage": _coverage(covered_count=0, active_count=active_count),
+            "coverage": _coverage(covered_count=0, eligible_count=len(eligible_ids)),
             "aggregate": {},
             "top_net_buy": [],
             "top_net_sell": [],
@@ -64,6 +85,7 @@ def _institutional_context(
             func.sum(func.coalesce(InstitutionalTradeDaily.total_institutional_net, 0)),
         )
         .filter(InstitutionalTradeDaily.trade_date == trade_date)
+        .filter(InstitutionalTradeDaily.stock_id.in_(eligible_ids))
         .group_by(InstitutionalTradeDaily.stock_id)
         .all()
     )
@@ -79,9 +101,12 @@ def _institutional_context(
         for row in rows
     ]
     ranked = sorted(serialized, key=lambda row: row["total_institutional_net"], reverse=True)
-    coverage = _coverage(covered_count=len(serialized), active_count=active_count)
+    coverage = _coverage(
+        covered_count=len(serialized), eligible_count=len(eligible_ids),
+        source_count=_source_stock_count(db, InstitutionalTradeDaily, trade_date),
+    )
     return {
-        "status": "ready" if coverage["is_full_database_coverage"] else "partial",
+        "status": "ready" if coverage["is_full_eligible_coverage"] else "partial",
         "trade_date": trade_date.isoformat(),
         "coverage": coverage,
         "aggregate": {
@@ -89,7 +114,7 @@ def _institutional_context(
             "investment_trust_net": sum(row["investment_trust_net"] for row in serialized),
             "dealer_net": sum(row["dealer_net"] for row in serialized),
             "total_institutional_net": sum(row["total_institutional_net"] for row in serialized),
-        },
+        } if serialized else {},
         "top_net_buy": ranked[:limit],
         "top_net_sell": list(reversed(ranked[-limit:])),
     }
@@ -98,7 +123,7 @@ def _institutional_context(
 def _margin_context(
     db: Session,
     *,
-    active_count: int,
+    eligible_ids: frozenset[str],
     limit: int,
 ) -> dict[str, Any]:
     trade_date = _latest_date(db, MarginTradingDaily)
@@ -106,7 +131,7 @@ def _margin_context(
         return {
             "status": "missing",
             "trade_date": None,
-            "coverage": _coverage(covered_count=0, active_count=active_count),
+            "coverage": _coverage(covered_count=0, eligible_count=len(eligible_ids)),
             "aggregate": {},
             "top_margin_increase": [],
             "top_short_increase": [],
@@ -122,6 +147,7 @@ def _margin_context(
             func.sum(func.coalesce(MarginTradingDaily.short_previous_balance, 0)),
         )
         .filter(MarginTradingDaily.trade_date == trade_date)
+        .filter(MarginTradingDaily.stock_id.in_(eligible_ids))
         .group_by(MarginTradingDaily.stock_id)
         .all()
     )
@@ -138,9 +164,12 @@ def _margin_context(
     ]
     margin_ranked = sorted(serialized, key=lambda row: row["margin_balance_change"], reverse=True)
     short_ranked = sorted(serialized, key=lambda row: row["short_balance_change"], reverse=True)
-    coverage = _coverage(covered_count=len(serialized), active_count=active_count)
+    coverage = _coverage(
+        covered_count=len(serialized), eligible_count=len(eligible_ids),
+        source_count=_source_stock_count(db, MarginTradingDaily, trade_date),
+    )
     return {
-        "status": "ready" if coverage["is_full_database_coverage"] else "partial",
+        "status": "ready" if coverage["is_full_eligible_coverage"] else "partial",
         "trade_date": trade_date.isoformat(),
         "coverage": coverage,
         "aggregate": {
@@ -148,7 +177,7 @@ def _margin_context(
             "margin_balance_change": sum(row["margin_balance_change"] for row in serialized),
             "short_balance": sum(row["short_balance"] for row in serialized),
             "short_balance_change": sum(row["short_balance_change"] for row in serialized),
-        },
+        } if serialized else {},
         "top_margin_increase": margin_ranked[:limit],
         "top_short_increase": short_ranked[:limit],
     }
@@ -228,15 +257,10 @@ def read_tw_market_chips_context(
     limit: int = 10,
 ) -> dict[str, Any]:
     bounded_limit = max(1, min(int(limit), 50))
-    active_count = (
-        db.query(func.count(StockMaster.id))
-        .filter(StockMaster.is_active.is_(True))
-        .scalar()
-        or 0
-    )
+    eligible_ids = frozenset(list_taiwan_stock_ids(db))
     official = _official_market_aggregate(db)
-    institutional = _institutional_context(db, active_count=active_count, limit=bounded_limit)
-    margin = _margin_context(db, active_count=active_count, limit=bounded_limit)
+    institutional = _institutional_context(db, eligible_ids=eligible_ids, limit=bounded_limit)
+    margin = _margin_context(db, eligible_ids=eligible_ids, limit=bounded_limit)
     statuses = {official["status"], institutional["status"], margin["status"]}
     status = "missing" if statuses == {"missing"} else "ready" if statuses == {"ready"} else "partial"
     missing = [
@@ -256,7 +280,7 @@ def read_tw_market_chips_context(
         "margin_per_stock": margin,
         "missing": missing,
         "warnings": [
-            "Official market aggregate and per-stock database coverage are separate contracts; per-stock rankings never assert exchange full-market coverage.",
+            "Official market aggregate and canonical ordinary-stock coverage are separate contracts; per-stock rankings never assert exchange full-market coverage.",
             "Institutional and margin rankings use the latest dates independently and may have different release dates.",
         ],
         "source_refs": [

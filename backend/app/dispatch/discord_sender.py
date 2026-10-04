@@ -5,6 +5,8 @@ import http.client
 import json
 import re
 from contextlib import closing
+from dataclasses import dataclass
+from uuid import uuid4
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 
@@ -120,3 +122,144 @@ def send_discord_report(webhook_url: str | None, content: str) -> dict[str, int 
             raise failure
         sent += 1
     return {"status": "sent", "sent_chunks": sent, "total_chunks": len(chunks)}
+
+
+@dataclass(frozen=True, repr=False)
+class DiscordAttachment:
+    filename: str
+    data: bytes
+    content_type: str
+
+
+MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
+MAX_TOTAL_ATTACHMENT_BYTES = 6 * 1024 * 1024
+MAX_ATTACHMENTS = 5
+
+
+def validate_rich_payload(*, content: str = "", embeds: list[dict] | None = None,
+                          attachments: list[DiscordAttachment] | None = None) -> dict:
+    """Strict local subset. Errors contain no caller values or credential URLs."""
+    def reject() -> None:
+        raise DiscordDeliveryError("invalid rich payload")
+
+    def bounded(value: object, limit: int, *, empty: bool = False) -> int:
+        if not isinstance(value, str) or (not empty and not value.strip()):
+            reject()
+        # Surrogates cannot be encoded as valid JSON UTF-8; reject before IO.
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            reject()
+        units = sum(2 if ord(character) > 0xFFFF else 1 for character in value)
+        if units > limit:
+            reject()
+        return units
+
+    bounded(content, 2000, empty=True)
+    embeds = [] if embeds is None else embeds
+    attachments = [] if attachments is None else attachments
+    if not isinstance(embeds, list) or len(embeds) > 10:
+        reject()
+    if not isinstance(attachments, list) or len(attachments) > MAX_ATTACHMENTS:
+        reject()
+    names = set()
+    image_names = set()
+    total_bytes = 0
+    for attachment in attachments:
+        if not isinstance(attachment, DiscordAttachment):
+            reject()
+        if (not isinstance(attachment.filename, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", attachment.filename)
+                or ".." in attachment.filename or attachment.filename in names):
+            reject()
+        if not isinstance(attachment.content_type, str) or attachment.content_type not in {"image/png", "text/plain; charset=utf-8", "application/json; charset=utf-8"}:
+            reject()
+        if not isinstance(attachment.data, bytes) or not 0 < len(attachment.data) <= MAX_ATTACHMENT_BYTES:
+            reject()
+        names.add(attachment.filename)
+        if attachment.content_type == "image/png":
+            image_names.add(attachment.filename)
+        total_bytes += len(attachment.data)
+    if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES:
+        reject()
+    total_text = 0
+    for embed in embeds:
+        if not isinstance(embed, dict) or not embed or set(embed) - {
+            "title", "description", "fields", "footer", "author", "color", "image", "thumbnail",
+        }:
+            reject()
+        for key, limit in (("title", 256), ("description", 4096)):
+            if key in embed:
+                total_text += bounded(embed[key], limit)
+        fields = embed.get("fields", [])
+        if not isinstance(fields, list) or len(fields) > 25:
+            reject()
+        for item in fields:
+            if not isinstance(item, dict) or set(item) - {"name", "value", "inline"}:
+                reject()
+            total_text += bounded(item.get("name"), 256)
+            total_text += bounded(item.get("value"), 1024)
+            if "inline" in item and not isinstance(item["inline"], bool):
+                reject()
+        for key, text_key, limit in (("footer", "text", 2048), ("author", "name", 256)):
+            if key in embed:
+                item = embed[key]
+                if not isinstance(item, dict) or set(item) != {text_key}:
+                    reject()
+                total_text += bounded(item[text_key], limit)
+        if "color" in embed and (type(embed["color"]) is not int or not 0 <= embed["color"] <= 0xFFFFFF):
+            reject()
+        for key in ("image", "thumbnail"):
+            if key in embed:
+                item = embed[key]
+                if (not isinstance(item, dict) or set(item) != {"url"}
+                        or not isinstance(item["url"], str)
+                        or item["url"] not in {f"attachment://{name}" for name in image_names}):
+                    reject()
+    if total_text > 6000 or not (content.strip() or embeds or attachments):
+        reject()
+    return {"content": content, "embeds": embeds, "allowed_mentions": {"parse": []},
+            "attachments": [{"id": index, "filename": attachment.filename}
+                            for index, attachment in enumerate(attachments)]}
+
+
+def encode_rich_payload(*, content: str = "", embeds: list[dict] | None = None,
+                        attachments: list[DiscordAttachment] | None = None) -> tuple[bytes, str]:
+    """Validate everything before opening the connection; encode one request."""
+    payload = validate_rich_payload(content=content, embeds=embeds, attachments=attachments)
+    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    if not attachments:
+        return encoded, "application/json"
+    boundary = "omi-" + uuid4().hex
+    # Random boundary; guard even the extremely unlikely byte collision.
+    while any(boundary.encode() in item.data for item in attachments) or boundary.encode() in encoded:
+        boundary = "omi-" + uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
+             'Content-Type: application/json; charset=utf-8\r\n\r\n'.encode() + encoded + b"\r\n"]
+    for index, attachment in enumerate(attachments):
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="files[{index}]"; '
+                      f'filename="{attachment.filename}"\r\nContent-Type: {attachment.content_type}\r\n\r\n').encode()
+                     + attachment.data + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def send_discord_rich_report(webhook_url: str | None, *, content: str = "",
+                             embeds: list[dict] | None = None,
+                             attachments: list[DiscordAttachment] | None = None) -> dict[str, int | str]:
+    host, path = _webhook_target(webhook_url)
+    body, content_type = encode_rich_payload(content=content, embeds=embeds, attachments=attachments)
+    failure = None
+    try:
+        with closing(http.client.HTTPSConnection(host, timeout=30)) as connection:
+            connection.request("POST", path, body=body,
+                               headers={"Content-Type": content_type, "User-Agent": "OMI-Discord-Dispatch"})
+            response = connection.getresponse()
+            status = response.status
+            response.close()
+        if not 200 <= status < 300:
+            failure = DiscordDeliveryError("HTTP failure", total_chunks=1, status_code=status,
+                                           outcome="unknown" if status >= 500 else "failed")
+    except Exception:
+        failure = DiscordDeliveryError("transport failure", total_chunks=1, outcome="unknown")
+    if failure is not None:
+        raise failure
+    return {"status": "sent", "sent_chunks": 1, "total_chunks": 1}
