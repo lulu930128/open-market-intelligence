@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-10-06
+
+### Changed
+
+- 台股盤中 snapshot cache 以 canonical storage revision 驗證與失效，同 revision 的 1m bars 可跨分鐘重用，並持續重算 coverage、保留缺值與修復限制。
+- Discord 市場報告加入專用 runtime 事件記錄，改善派報流程的可觀測性；runtime log 檔案仍由 launcher 管理。
+- 台股報告加入 Technology Pulse、族群 participation 與日期明確的相對族群證據，增強市場、個股與科技圖表，保留既有選股順序及資料限制。
+- 對齊 VERSION、Frontend package／lockfile 與三語 README 的版本標示為 4.8.0。
+
+### Notes
+
+- 本次版本 metadata／文件同步與 runtime 採用、live provider、Discord 實際發送及正式交易時段驗收分開記錄。
+
 ## [4.7.0] - 2026-10-04
 
 ### Changed

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Callable, Protocol
@@ -25,6 +26,7 @@ from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.index_resolution import project_taiwan_index_headline
 from app.market.taiwan_market_state import compose_taiwan_market_volume_state
 from app.market.taiwan_industries import (
+    TAIWAN_TECH_INDUSTRY_CODES,
     canonical_tw_sector_identity,
     normalize_tw_industry_label,
 )
@@ -2308,6 +2310,88 @@ def _market_aggregate_slots(
     return output
 
 
+def _daily_report_context(*, ranked: list[dict], industry_summary: list[dict],
+                          candidate_ids: set[str], trade_date: str, coverage: dict) -> tuple[dict, dict]:
+    """Add report evidence to the existing daily sample, without IO or rescanning DB.
+
+    Relative changes are percentage points within this dated local sample.
+    Participation excludes missing changes; missing turnover never becomes zero.
+    Focus order is a bounded round-robin of turnover, up/down moves and sectors.
+    """
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
+
+    sectors = {}
+    for row in industry_summary:
+        identity = canonical_tw_sector_identity(row.get("industry"))
+        count = row.get("count")
+        advances = row.get("advance_count")
+        row.update({"sector_identity": identity, "sample_count": count,
+                    "positive_ratio": advances / count if number(count) and count > 0 and number(advances) else None})
+        if identity["identity_status"] == "canonical":
+            sectors[identity["sector_id"]] = row
+
+    contexts = {}
+    tech_rows = []
+    for row in ranked:
+        identity = canonical_tw_sector_identity(row.get("industry"))
+        sector = sectors.get(identity["sector_id"], {})
+        change, average = row.get("change_pct"), sector.get("average_change_pct")
+        context = {"sector_identity": identity, "industry": identity["name"],
+                   "trade_date": trade_date, "scope": "omi_local_daily_sample",
+                   "stock_change_pct": change if number(change) else None,
+                   "average_change_pct": average,
+                   "relative_change_pp": change - average if number(change) and number(average) else None,
+                   "sample_count": sector.get("sample_count"), "positive_ratio": sector.get("positive_ratio")}
+        if row["stock_id"] in candidate_ids:
+            contexts[row["stock_id"]] = context
+        if identity["canonical_code"] in TAIWAN_TECH_INDUSTRY_CODES:
+            tech_rows.append({**row, "sector_context": context})
+
+    changes = [row["change_pct"] for row in tech_rows if number(row.get("change_pct"))]
+    values = [row["trade_value"] for row in tech_rows if number(row.get("trade_value"))]
+    tech_sectors = sorted(
+        [row for row in sectors.values() if row["sector_identity"]["canonical_code"] in TAIWAN_TECH_INDUSTRY_CODES],
+        key=lambda row: (-row["average_change_pct"], row["sector_identity"]["sector_id"]))
+    by_id = {row["stock_id"]: row for row in tech_rows}
+    sources = [
+        ("成交前列", sorted([r for r in tech_rows if number(r.get("trade_value"))],
+                           key=lambda r: (-r["trade_value"], r["stock_id"]))),
+        ("漲幅前列", sorted([r for r in tech_rows if number(r.get("change_pct")) and r["change_pct"] > 0],
+                           key=lambda r: (-r["change_pct"], r["stock_id"]))),
+        ("跌幅前列", sorted([r for r in tech_rows if number(r.get("change_pct")) and r["change_pct"] < 0],
+                           key=lambda r: (r["change_pct"], r["stock_id"]))),
+        ("子產業代表", [by_id[r["top_stock_id"]] for r in tech_sectors if r.get("top_stock_id") in by_id]),
+    ]
+    # Each reason describes membership in a bounded leading list, not all rows.
+    sources = [(reason, rows[:6]) for reason, rows in sources]
+    focus = {}
+    for depth in range(6):
+        for _, rows in sources:
+            if depth < len(rows) and len(focus) < 6:
+                row = rows[depth]
+                focus.setdefault(row["stock_id"], {**row, "reason_tags": []})
+    for reason, rows in sources:
+        for row in rows:
+            if row["stock_id"] in focus:
+                focus[row["stock_id"]]["reason_tags"].append(reason)
+    pulse = {
+        "scope": "omi_local_daily_sample", "trade_date": trade_date,
+        "universe_codes": sorted(TAIWAN_TECH_INDUSTRY_CODES),
+        "universe_label": "電子 24–31・電子商務 34・數位雲端 36",
+        "coverage": coverage, "sample_count": len(tech_rows), "change_count": len(changes),
+        "missing_change_count": len(tech_rows) - len(changes),
+        "average_change_pct": sum(changes) / len(changes) if changes else None,
+        "advance_count": sum(value > 0 for value in changes) if changes else None,
+        "decline_count": sum(value < 0 for value in changes) if changes else None,
+        "unchanged_count": sum(value == 0 for value in changes) if changes else None,
+        "positive_ratio": sum(value > 0 for value in changes) / len(changes) if changes else None,
+        "trade_value": sum(values) if values else None, "trade_value_count": len(values),
+        "sectors": tech_sectors, "focus_stocks": list(focus.values()),
+    }
+    return contexts, pulse
+
+
 def read_market_overview(
     db: Session,
     limit: int = 10,
@@ -2919,6 +3003,18 @@ def read_market_overview(
         ),
     )[:6]
     industry_strength_label = _industry_strength_label(top_industries)
+    stock_sector_context = {}
+    technology_pulse = {}
+    if not omit_sample_rankings:
+        institutional = market_chips.get("institutional_per_stock") or {}
+        candidate_ids = {str(row.get("stock_id")) for row in (
+            top_gainers + top_losers + value_leaders
+            + list(institutional.get("top_net_buy") or [])
+            + list(institutional.get("top_net_sell") or []))}
+        candidate_ids.update(str(row.get("top_stock_id")) for row in top_industries + weak_industries)
+        stock_sector_context, technology_pulse = _daily_report_context(
+            ranked=ranked, industry_summary=industry_summary, candidate_ids=candidate_ids,
+            trade_date=latest_trade_date.isoformat(), coverage=sample_coverage)
     if omit_sample_rankings:
         top_gainers = []
         top_losers = []
@@ -3020,6 +3116,8 @@ def read_market_overview(
             "sample_value_leaders": value_leaders,
             "sample_top_industries": top_industries,
             "sample_weak_industries": weak_industries,
+            "stock_sector_context": stock_sector_context,
+            "technology_pulse": technology_pulse,
             "industry_strength_label": industry_strength_label,
             "index_intraday": index_intraday,
             "cross_market": cross_market,

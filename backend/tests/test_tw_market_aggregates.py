@@ -53,6 +53,11 @@ def test_market_overview_exact_trade_date_reads_canonical_daily_sample():
             assert {row["stock_id"] for row in data["top_gainers"]} == {"2330", "2324"}
             assert data["top_losers"] == []
             assert data["top_industries"][0]["average_change_pct"] > 0
+            reader.assert_called_once()
+            assert data["top_industries"][0]["positive_ratio"] == 1
+            assert data["technology_pulse"]["sample_count"] == 2
+            assert data["technology_pulse"]["trade_date"] == day.isoformat()
+            assert data["stock_sector_context"]["2324"]["trade_date"] == day.isoformat()
             assert data["market"]["sectors"]["observed_trade_date"] == day.isoformat()
             assert all(row["trade_date"] == day.isoformat() for row in data["market"]["sectors"]["items"])
 
@@ -64,6 +69,7 @@ def test_market_overview_exact_trade_date_reads_canonical_daily_sample():
             for key in ("top_gainers", "top_losers", "value_leaders", "top_industries", "weak_industries"):
                 assert missing["data"][key] == []
             assert missing["data"]["market"]["sectors"]["items"] == []
+            assert missing["data"]["technology_pulse"]["focus_stocks"] == []
             assert "market_daily_price" in missing["missing"]
 
             current = overview()

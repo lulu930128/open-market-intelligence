@@ -9,7 +9,7 @@ from hashlib import sha256
 import json
 
 from pydantic import ValidationError
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session, load_only
 
 from app.db.models import (
@@ -17,6 +17,7 @@ from app.db.models import (
     MarketIntradayBarLineage,
     RawFetchResult,
     SourceRegistry,
+    TaiwanTechnicalInputRevision,
 )
 from app.market.trading_calendar import is_taiwan_trading_day
 from app.market.tw_bar_contracts import (
@@ -87,29 +88,37 @@ class TaiwanIntradayBarRepository:
     def current_session_storage_revision(
         self, *, instrument_id: str, from_time: datetime, to_time: datetime,
     ) -> str | None:
-        """Bounded persisted revision check, including insert/delete/lineage corrections."""
-        inspector = inspect(self._db.get_bind())
-        if not all(inspector.has_table(model.__tablename__) for model in (
-            MarketIntradayBar, MarketIntradayBarLineage,
-        )):
+        """Read the write-owned generation, never materialize bars to validate cache.
+
+        It covers all sessions for this instrument (conservative invalidation).
+        Old/unmigrated stores disable snapshot reuse, without a read-time repair.
+        """
+        inspector = inspect(self._db.connection())
+        table = TaiwanTechnicalInputRevision.__tablename__
+        if not inspector.has_table(table):
             return None
-        if "source_id" not in {item["name"] for item in inspector.get_columns(MarketIntradayBar.__tablename__)}:
+        if "intraday_generation" not in {item["name"] for item in inspector.get_columns(table)}:
             return None
-        rows = (
-            self._db.query(
-                MarketIntradayBar.id, MarketIntradayBar.updated_at,
-                MarketIntradayBarLineage.id, MarketIntradayBarLineage.updated_at,
-                MarketIntradayBarLineage.raw_result_id,
-            )
-            .outerjoin(MarketIntradayBarLineage, MarketIntradayBarLineage.bar_id == MarketIntradayBar.id)
-            .filter(MarketIntradayBar.stock_id == instrument_id, MarketIntradayBar.interval == "1m",
-                    MarketIntradayBar.bar_time >= from_time, MarketIntradayBar.bar_time <= to_time)
-            .order_by(MarketIntradayBar.id, MarketIntradayBarLineage.id)
-            .limit(5001).all()
-        )
-        if len(rows) > 5000:
+        if self._db.get_bind().dialect.name == "sqlite" and self._db.execute(text(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+            "AND name='tr_tw_intraday_revision_market_intraday_bar_update'"
+        )).first() is None:
             return None
-        return sha256(json.dumps([tuple(row) for row in rows], default=str).encode("utf-8")).hexdigest()
+        generation = self._db.execute(select(TaiwanTechnicalInputRevision.intraday_generation).where(
+            TaiwanTechnicalInputRevision.stock_id == instrument_id,
+        )).scalar_one_or_none()
+        return f"tw.intraday.g1:{generation or 0}"
+
+    def has_bars_entering_window(
+        self, *, instrument_id: str, from_time: datetime, to_time: datetime,
+    ) -> bool:
+        """A pre-persisted future bucket may become eligible without a write."""
+        return self._db.query(MarketIntradayBar.id).filter(
+            MarketIntradayBar.stock_id == instrument_id,
+            MarketIntradayBar.interval == "1m",
+            MarketIntradayBar.bar_time >= from_time,
+            MarketIntradayBar.bar_time < to_time,
+        ).first() is not None
 
     @staticmethod
     def _validate(requirement: DataRequirementV2) -> tuple[InstrumentTarget, BarCapabilityRequest]:

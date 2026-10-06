@@ -63,6 +63,15 @@ def nodes(result):
     return [item["node"] for item in result["read_execution"]["nodes"]]
 
 
+def test_only_intraday_timeout_override_changes_default_budget():
+    from app.ai.capability_resolution_registry import TW_STOCK_READ_NODES
+
+    assert CapabilityReadNode("default").timeout_seconds == 8.0
+    assert TW_STOCK_READ_NODES["intraday"].timeout_seconds == 15.0
+    assert TW_STOCK_READ_NODES["institutional"].timeout_seconds == 8.0
+    assert TW_STOCK_READ_NODES["margin"].timeout_seconds == 8.0
+
+
 @pytest.mark.parametrize("capabilities,expected", [
     (["chips.institutional", "chips.margin"], {"identity", "institutional", "margin", "selected_freshness"}),
     (["fundamentals.revenue"], {"identity", "revenue", "selected_freshness"}),

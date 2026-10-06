@@ -21,6 +21,96 @@ from app.dispatch import market_report_presentation as presentation
 from app.jobs import scheduler
 
 
+@pytest.fixture
+def event_output(monkeypatch):
+    from io import StringIO
+    from app.dispatch.discord_report_events import event_logger
+    output = StringIO()
+    handler = next(h for h in event_logger().handlers if h.name == "discord_market_report_stderr")
+    monkeypatch.setattr(handler, "stream", output)
+    return output
+
+
+def test_event_logger_uvicorn_stderr_and_reload():
+    import subprocess
+    import sys
+    from pathlib import Path
+    # Configure real Uvicorn logging without starting a server or any app jobs.
+    code = '''
+import importlib
+import logging
+from uvicorn import Config
+Config("unused:app").configure_logging()
+root = logging.getLogger()
+before = (root.level, list(root.handlers))
+from app.dispatch import discord_report_events as events
+for _ in range(3):
+    events = importlib.reload(events)
+    events.event_logger()
+logger = events.event_logger()
+assert len(logger.handlers) == 1
+assert not logger.propagate
+assert (root.level, root.handlers) == before
+logging.getLogger("app.requests").info("must_not_appear")
+events.report_event("triggered", phase="preopen")
+'''
+    result = subprocess.run([sys.executable, "-c", code],
+                            cwd=Path(__file__).resolve().parents[1],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("stage=triggered") == 1
+    assert "INFO" in result.stderr and "phase=preopen" in result.stderr
+    assert "must_not_appear" not in result.stderr + result.stdout
+    assert not result.stdout
+
+
+@pytest.mark.parametrize("history_status", ["ready", "partial", "error"])
+@pytest.mark.parametrize("send_fails", [False, True])
+def test_scheduler_event_stages(monkeypatch, event_output, history_status, send_fails):
+    from app.jobs import market_report_history
+    secret = "https://discord.com/api/webhooks/123/private-token"
+    prepare = Mock(return_value=dict(status=history_status, selection=None,
+                                    selected=[], attempted=[], repaired=[], unresolved=[]))
+    if history_status == "error":
+        prepare.side_effect = RuntimeError(secret)
+    monkeypatch.setattr(market_report_history, "prepare_discord_market_report_history", prepare)
+    monkeypatch.setattr(scheduler, "SessionLocal", MagicMock())
+    failure = RuntimeError(secret)
+    runner = Mock(return_value={"status": "sent", "sent_chunks": 1},
+                  side_effect=failure if send_fails else None)
+    monkeypatch.setattr(report, "run_discord_market_report", runner)
+    if send_fails:
+        with pytest.raises(RuntimeError) as caught:
+            scheduler.send_discord_market_report("postclose")
+        assert caught.value is failure
+    else:
+        scheduler.send_discord_market_report("postclose")
+    lines = event_output.getvalue().splitlines()
+    assert [line.split("stage=")[1].split()[0] for line in lines] == [
+        "triggered", "history_ready" if history_status == "ready" else "history_failed",
+        "report_start", "failed" if send_fails else "completed"]
+    assert len({line.split("run_id=")[1].split()[0] for line in lines}) == 1
+    assert all("phase=postclose" in line for line in lines)
+    assert secret not in event_output.getvalue() and "private-token" not in event_output.getvalue()
+    runner.assert_called_once()
+
+
+def test_registered_events(monkeypatch, event_output):
+    monkeypatch.setattr(scheduler.settings, "enable_discord_market_report_scheduler", True)
+    instance = Mock()
+    scheduler._add_discord_market_report_jobs(instance)
+    lines = event_output.getvalue().splitlines()
+    assert len(lines) == 3
+    for line, call in zip(lines, instance.add_job.call_args_list):
+        fields = call.kwargs
+        assert "stage=registered" in line
+        assert f"phase={fields['kwargs']['phase']}" in line
+        assert f"job_id={fields['id']}" in line
+        assert f"scheduled_time={fields['hour']:02d}:{fields['minute']:02d}" in line
+        assert "timezone=Asia/Taipei" in line
+        assert "webhook" not in line
+
+
 NOW = datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)
 
 
@@ -232,7 +322,8 @@ def test_discord_modules_cannot_import_market_data_providers_or_ai():
     }
     module_boundaries = (
         (report, orchestration_allowed),
-        (sender, {"__future__", "http.client", "json", "re", "contextlib", "dataclasses", "uuid", "urllib.parse"}),
+        (sender, {"__future__", "http.client", "json", "re", "contextlib", "dataclasses", "uuid", "urllib.parse",
+                  "app.dispatch.discord_report_events"}),
         (renderer, {"__future__", "datetime", "app.dispatch.market_report_presentation"}),
         (presentation, {"__future__", "dataclasses", "datetime", "math", "typing", "re"}),
     )

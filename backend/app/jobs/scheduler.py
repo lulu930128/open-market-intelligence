@@ -2291,30 +2291,38 @@ def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
 
 def send_discord_market_report(phase: str) -> None:
     from app.dispatch.discord_market_report import run_discord_market_report
+    from app.dispatch.discord_report_events import report_event, report_event_context, safe_exception_fields
     from app.jobs.market_report_history import prepare_discord_market_report_history
 
-    local_now = datetime.now(_timezone())
-    selection = None
-    try:
-        with SessionLocal() as db:
-            preparation = prepare_discord_market_report_history(db, phase, local_now)
-        selection = preparation["selection"]
-        logger.info(
-            "Discord history phase=%s status=%s selected=%s attempted=%s repaired=%s unresolved=%s",
-            phase, preparation["status"], preparation["selected"], preparation["attempted"],
-            preparation["repaired"], preparation["unresolved"],
-        )
-    except Exception:
-        logger.exception("Discord history preparation failed phase=%s; continuing read-only report", phase)
-    result = run_discord_market_report(phase, now=local_now,
-                                       **({"selection": selection} if selection is not None else {}))
-    logger.info(
-        "Discord market report phase=%s status=%s sent_chunks=%s reason=%s.",
-        phase, result["status"], result["sent_chunks"], result.get("reason"),
-    )
+    with report_event_context(phase):
+        report_event("triggered")
+        try:
+            local_now = datetime.now(_timezone())
+            selection = None
+            try:
+                with SessionLocal() as db:
+                    preparation = prepare_discord_market_report_history(db, phase, local_now)
+                selection = preparation["selection"]
+                report_event(
+                    "history_ready" if preparation["status"] == "ready" else "history_failed",
+                    status=preparation["status"],
+                    **{key: len(preparation[key]) for key in ("selected", "attempted", "repaired", "unresolved")},
+                )
+            except Exception as error:
+                # Preserve the existing preparation failure -> read-only report path.
+                report_event("history_failed", **safe_exception_fields(error))
+            report_event("report_start")
+            result = run_discord_market_report(phase, now=local_now,
+                                               **({"selection": selection} if selection is not None else {}))
+            report_event("completed", status=result["status"], sent_chunks=result["sent_chunks"])
+        except Exception as error:
+            report_event("failed", **safe_exception_fields(error))
+            raise
 
 
 def _add_discord_market_report_jobs(scheduler: Any) -> bool:
+    from app.dispatch.discord_report_events import report_event
+
     if not settings.enable_discord_market_report_scheduler:
         return False
     for phase in ("preopen", "intraday", "postclose"):
@@ -2328,6 +2336,8 @@ def _add_discord_market_report_jobs(scheduler: Any) -> bool:
             id=f"discord_market_report_{phase}", replace_existing=True,
             max_instances=1, coalesce=True, misfire_grace_time=60,
         )
+        report_event("registered", phase=phase, job_id=f"discord_market_report_{phase}",
+                     scheduled_time=f"{hour:02d}:{minute:02d}", timezone="Asia/Taipei")
     return True
 
 

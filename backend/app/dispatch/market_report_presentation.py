@@ -10,6 +10,18 @@ import re
 PHASE_LABELS = {"preopen": "盤前", "intraday": "盤中", "postclose": "盤後"}
 MARKET_LABELS = {"us": "美國", "jp": "日本", "kr": "韓國", "resource": "原物料", "crypto": "加密資產"}
 
+# Literal explanations of selection evidence, not inferred market signals.
+SELECTION_ROLE_LABELS = {
+    "成交前列": "成交焦點", "漲幅前列": "上漲異動", "跌幅前列": "下跌異動",
+    "法人淨買": "法人買超焦點", "法人淨賣": "法人賣超焦點",
+    "強族群代表": "強勢族群代表", "弱族群代表": "弱勢族群代表",
+    "子產業代表": "科技子產業代表",
+}
+
+
+def selection_role(reason_tags: list[str]) -> str:
+    return "／".join(SELECTION_ROLE_LABELS[tag] for tag in reason_tags if tag in SELECTION_ROLE_LABELS) or "入選依據未提供"
+
 def _map(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -131,6 +143,8 @@ class MarketReportPresentation:
     cross_market_strip: dict = field(default_factory=dict)
     price_maps: dict = field(default_factory=dict)
     stock_analysis: list[dict] = field(default_factory=list)
+    stock_sector_context: dict = field(default_factory=dict)
+    technology_pulse: dict = field(default_factory=dict)
     presentation_warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def evidence(self) -> dict:
@@ -145,7 +159,8 @@ def build_presentation(preview: dict, *, phase: str, report_date: date) -> Marke
     keys = ("market", "breadth", "breadth_by_market", "volume_state", "distribution",
             "latest_trade_date", "sample_coverage", "top_industries", "weak_industries",
             "value_leaders", "top_gainers", "top_losers", "market_chips", "cross_market",
-            "stance", "freshness", "freshness_by_capability", "source_refs", "radar")
+            "stance", "freshness", "freshness_by_capability", "source_refs", "radar",
+            "stock_sector_context", "technology_pulse")
     data = _evidence({key: metadata.get(key) for key in keys})
     warnings, missing = report_limitations(_evidence(preview))
     canonical_quality = _map(data.get("freshness")).get("status")
@@ -189,6 +204,8 @@ def build_presentation(preview: dict, *, phase: str, report_date: date) -> Marke
         evidence_axes={key: data.get(key) for key in ("freshness", "freshness_by_capability", "source_refs")},
         radar=_map(data.get("radar")),
         sector_radar=sectors, stock_radar=stocks, cross_market_strip=build_cross_market_strip(groups),
+        stock_sector_context=_map(data.get("stock_sector_context")),
+        technology_pulse=_map(data.get("technology_pulse")),
     )
     return with_price_maps(model, {})
 
@@ -197,7 +214,7 @@ def build_sector_radar_rows(strong: list[dict], weak: list[dict]) -> dict:
     """Preserve canonical ordering/counts/representatives; never derive A/D."""
     return {key: [{field: row.get(field) for field in (
         "industry", "average_change_pct", "advance_count", "decline_count", "top_stock_id", "top_stock_name",
-        "sample_count", "trade_value",
+        "sample_count", "trade_value", "positive_ratio",
     )} for row in _rows(rows)[:6]] for key, rows in (("strong", strong), ("weak", weak))}
 
 
@@ -344,6 +361,8 @@ def with_price_maps(model: MarketReportPresentation, price_maps: dict, *,
                     "headline": _map(evidence.get("technical")).get("headline") if usable else None,
                     "observe": observe, "decision_changes": evidence.get("decision_changes", []) if usable else []}
         analysis.append({**_evidence(item),
+                         "market_role": selection_role(item["reason_tags"]),
+                         "sector_context": _evidence(_map(model.stock_sector_context.get(item["stock_id"]))),
                          "identity": {key: item.get(key) for key in ("stock_id", "stock_name")},
                          "market": market, "selection": {"reasons": _evidence(item["reason_tags"])},
                          "institutional": institutional, "sector": sectors,
@@ -392,7 +411,7 @@ def cross_market_strip(model: MarketReportPresentation) -> dict:
 
 def display_status(value: Any) -> str:
     return {"current": "有效", "delayed": "延遲", "stale": "已過期", "partial": "部分資料",
-            "missing": "缺資料", "ready": "可用", "available": "可用", "usable": "可用",
+            "missing": "缺資料", "ready": "可用", "available": "可用", "usable": "可用", "complete": "完整",
             "unreleased": "尚未發布", "ordinary_stock": "普通股母體",
             "regular": "一般交易時段", "closed": "已收盤", "post_close": "盤後",
             "current_session": "本交易時段", "latest_completed_session": "最近完成交易日",

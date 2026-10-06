@@ -134,6 +134,17 @@ def test_qualified_formal_close_component_preserves_close_without_making_1m_bar(
 def _db() -> tuple[Session, object]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    spec = spec_from_file_location("intraday_revision_migration", Path(__file__).parents[1] / "alembic/versions/20261006_0091_tw_intraday_revision.py")
+    migration = module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    with engine.begin() as connection:
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
     session = Session(engine)
     session.add(
         StockMaster(
@@ -233,6 +244,108 @@ def _seed_session(
             )
         )
     db.commit()
+
+
+def test_intraday_write_revision_invalidates_corrections_deletes_and_rollbacks() -> None:
+    from app.market.intraday_repository import TaiwanIntradayBarRepository
+    from app.db.models import TaiwanTechnicalInputRevision
+
+    db, engine = _db()
+    try:
+        now = datetime(2026, 9, 1, 9, 5, tzinfo=TAIPEI)
+        repository = TaiwanIntradayBarRepository(db)
+        def revision():
+            return repository.current_session_storage_revision(instrument_id="2330", from_time=now, to_time=now)
+        initial = revision()
+        _seed_session(db, trade_date=now.date(), provider=FUGLE_INTRADAY_PROVIDER,
+                      source_name=FUGLE_INTRADAY_SOURCE, parser_version=FUGLE_INTRADAY_PARSER_VERSION, authority="vendor")
+        seeded = revision()
+        assert seeded != initial
+        service = TaiwanBarService(db)
+        before = service.read_current_session_bars(instrument_id="2330", requested_at=now)
+        bar = db.query(MarketIntradayBar).first()
+        # Preserve timestamps deliberately: generation tracks semantic writes.
+        stamp = bar.updated_at
+        db.query(MarketIntradayBar).filter_by(id=bar.id).update({"close_price": 100.75, "updated_at": stamp})
+        db.commit()
+        corrected = revision()
+        assert corrected != seeded
+        after = service.read_current_session_bars(instrument_id="2330", requested_at=now)
+        assert after.read_diagnostics.snapshot_cache_status == "miss"
+        assert after.bars[0].close_price != before.bars[0].close_price
+        lineage = db.query(MarketIntradayBarLineage).filter_by(bar_id=bar.id).one()
+        lineage.finalization = "provisional"
+        db.flush()
+        assert revision() != corrected
+        db.rollback()
+        assert revision() == corrected
+        lineage = db.query(MarketIntradayBarLineage).filter_by(bar_id=bar.id).one()
+        lineage.finalization = "provisional"
+        db.commit()
+        lineage_revision = revision()
+        assert lineage_revision != corrected
+        db.delete(lineage)
+        db.commit()
+        deleted_lineage = revision()
+        assert deleted_lineage != lineage_revision
+        db.delete(bar)
+        db.commit()
+        assert revision() != deleted_lineage
+        # Intraday writes must not invalidate daily geometry.
+        assert db.query(TaiwanTechnicalInputRevision.generation).filter_by(stock_id="2330").scalar() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_current_snapshot_reuses_storage_across_minute_and_keeps_missing_truth() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(db, trade_date=date(2026, 9, 1), provider=FUGLE_INTRADAY_PROVIDER,
+                      source_name=FUGLE_INTRADAY_SOURCE, parser_version=FUGLE_INTRADAY_PARSER_VERSION, authority="vendor")
+        service = TaiwanBarService(db)
+        first = service.read_current_session_bars(instrument_id="2330", requested_at=datetime(2026, 9, 1, 9, 5, 59, tzinfo=TAIPEI))
+        with patch.object(service, "read_bars", side_effect=AssertionError("sub-minute coverage rebuilt")):
+            same_minute = service.read_current_session_bars(instrument_id="2330", requested_at=datetime(2026, 9, 1, 9, 5, 59, 500000, tzinfo=TAIPEI))
+        assert same_minute.read_diagnostics.snapshot_cache_status == "hit"
+        assert same_minute.history.requested_to.microsecond == 500000
+        with patch.object(tw_bar_service_module.MarketDataGateway, "resolve_bars", side_effect=AssertionError("unchanged storage reread")):
+            second = service.read_current_session_bars(instrument_id="2330", requested_at=datetime(2026, 9, 1, 9, 6, tzinfo=TAIPEI))
+        assert first.bars == second.bars
+        assert first.current_session_coverage.missing_bucket_count == 0
+        assert second.current_session_coverage.missing_bucket_count == 1
+        assert second.current_session_coverage.status.value == "partial_prefix"
+        assert second.current_session_coverage.repair_recommended
+        assert second.identity.series_revision != first.identity.series_revision
+        assert all(bucket.status.value != "verified_no_trade" for bucket in second.bucket_coverage)
+        # Cache-only reuse executes no INSERT/UPDATE/DELETE or provider port.
+        statements = []
+        event.listen(engine, "before_cursor_execute", lambda _c, _cur, sql, _p, _ctx, _many: statements.append(sql))
+        with patch.object(service, "read_bars", side_effect=AssertionError("warm snapshot rebuilt")):
+            for _ in range(10):
+                service.read_current_session_bars(instrument_id="2330", requested_at=datetime(2026, 9, 1, 9, 6, tzinfo=TAIPEI))
+        assert not any(sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql in statements)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_snapshot_minute_boundary_reads_already_persisted_newly_eligible_bar() -> None:
+    db, engine = _db()
+    try:
+        _seed_session(db, trade_date=date(2026, 9, 1), provider=FUGLE_INTRADAY_PROVIDER,
+                      source_name=FUGLE_INTRADAY_SOURCE, parser_version=FUGLE_INTRADAY_PARSER_VERSION,
+                      authority="vendor", minutes=6)
+        service = TaiwanBarService(db)
+        before = service.read_current_session_bars(instrument_id="2330", requested_at=datetime(2026, 9, 1, 9, 5, 59, tzinfo=TAIPEI))
+        with tw_bar_service_module.taiwan_bar_read_scope():
+            after = service.read_current_session_bars(instrument_id="2330", requested_at=datetime(2026, 9, 1, 9, 6, tzinfo=TAIPEI))
+        assert len(before.bars) == 5
+        assert len(after.bars) == 6
+        assert before.read_diagnostics.storage_revision == after.read_diagnostics.storage_revision
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_multisession_read_resolves_each_session_then_derives_one_series() -> None:
@@ -358,9 +471,9 @@ def test_current_session_read_excludes_previous_session() -> None:
         assert delta.current_session_coverage.snapshot_bar_count == 5
         assert delta.identity.series_revision != result.identity.series_revision
         revision_queries = [query for query in recent_snapshot_queries if query.lstrip().upper().startswith("SELECT")]
-        assert len(revision_queries) == 1
-        assert "market_intraday_bar_lineage.updated_at" in revision_queries[0]
-        assert "market_intraday_bar.open_price" not in revision_queries[0]
+        assert len(revision_queries) == 2
+        assert "intraday_generation" in revision_queries[-1]
+        assert all("market_intraday_bar.open_price" not in query for query in revision_queries)
         assert delta.read_diagnostics.snapshot_cache_status == "hit"
         assert delta.read_diagnostics.final_series_revision == delta.identity.series_revision
 

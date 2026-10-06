@@ -391,7 +391,7 @@ class Settings(BaseSettings):
     cross_market_radar_materialize_enabled: bool = True
 
     discord_market_report_webhook_url: str | None = Field(default=None, repr=False, exclude=True)
-    enable_discord_market_report_scheduler: bool = False
+    enable_discord_market_report_scheduler: bool = True
     scheduler_discord_market_report_preopen_time: str = Field(default="08:55", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     scheduler_discord_market_report_intraday_time: str = Field(default="10:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     scheduler_discord_market_report_postclose_time: str = Field(default="16:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")

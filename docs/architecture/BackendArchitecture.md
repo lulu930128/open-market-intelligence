@@ -1,5 +1,35 @@
 # OMI Backend Architecture
 
+## 台股 current-session snapshot revision
+
+Canonical intraday persistence 重用 `TaiwanTechnicalInputRevision` 的獨立
+`intraday_generation`。Alembic-installed triggers 與 bar／lineage insert、update、delete
+在同一 transaction 中遞增；identity、receipt 與 source correction 也會失效。
+Daily `generation` 不受 intraday 寫入影響。Repository 只讀單一 instrument generation，
+不在正常 read path materialize bar／lineage rows 後計算 storage hash。
+
+`TaiwanBarService` 以 storage revision 驗證 snapshot，15 秒 TTL 作 safety bound。
+同 revision 的 canonical 1m bars 可跨分鐘 reuse；截至現在的 expected coverage
+仍由既有 coverage evaluator 重算。無成交分鐘若無 verified evidence，仍是 missing；
+不製造 zero-volume bars。Read path 不 fetch、enqueue 或寫入；repair 維持既有
+Taiwan intraday demand／JobRun owner，且不等同已可回答 partial evidence 的 request status。
+
+## 台股每日派報的樣本證據
+
+`ai/market_context/taiwan_market.py` 在同一次 canonical daily snapshot 的 ranked 與
+industry_summary 上延伸族群 participation、日期明確的個股相對族群百分點差，以及
+Technology Pulse。科技範圍由 `market/taiwan_industries.py` 的集中代碼集合定義，
+沿用 canonical sector identity；不新增 StockMaster／日線掃描、provider 或 cache。
+科技焦點最多六檔，以成交、漲跌異動、子產業代表的 bounded round-robin 解釋入選，
+不產生 composite score，也不改動每日派報原本八檔 selection/order。
+
+templates／presentation 複製上述 evidence；市場角色只是既有 selection reason 的固定文字投影。
+chart 只顯示上游數值及語意色，不重算 participation、相對族群或技術位置。
+相對族群附帶該次日線樣本日期與個股樣本漲跌，和獨立日期的個股行情分開。
+Price Map decision gate 維持既有契約。compact 原子建立市場、個股、科技三張 PNG；
+任一 ChartUnavailable 略過整組圖片。audit 加上原有 TXT／JSON，維持五附件上限。
+缺值保持缺值，樣本 coverage 不得被當成全科技 universe 的覆蓋保證。
+
 ## Taiwan Base-1m materialization commands
 
 台股主動 fetch／repair 由 `app.jobs.taiwan_intraday_demand` 的單一股票、交易日 JobRun 擁有。Frontend refresh、viewer warmup、AI／MCP、Tier-A、close-tail 與盤後 audit 都提交此 owner；Fugle／KGI streaming 保留既有 lease／ingestion lifecycle，兩者仍共用 canonical transaction、repository 與 TaiwanBarService。

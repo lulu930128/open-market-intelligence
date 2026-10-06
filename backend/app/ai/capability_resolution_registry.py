@@ -248,7 +248,7 @@ TW_STOCK_READ_NODES = {
         CapabilityReadNode("disposition", ("identity",)),
         CapabilityReadNode("quote", ("latest_daily", "disposition")),
         CapabilityReadNode("events", ("identity",)),
-        CapabilityReadNode("intraday", ("identity", "calendar")),
+        CapabilityReadNode("intraday", ("identity", "calendar"), 15.0),
         CapabilityReadNode("corporate_history", ("identity",)),
         CapabilityReadNode("technical_evidence", ("daily", "corporate_history", "calendar"), 15.0),
         CapabilityReadNode("price_map", ("identity",), 15.0),
