@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import pytest
 
 from types import SimpleNamespace
 
@@ -200,6 +201,46 @@ class AiAskRefactorModuleTests(unittest.TestCase):
         self.assertIn("evidence_passport", response)
         self.assertEqual(events[0]["stage"], "evidence_passport")
         self.assertEqual(events[1]["stage"], "answer_ready")
+
+
+@pytest.mark.parametrize("policy,fallback,count,status", [
+    ("prefer_live", True, 2, "completed"),
+    ("prefer_live", True, 0, "background_in_progress"),
+    ("prefer_live", False, 2, "background_in_progress"),
+    ("require_live", True, 2, "background_in_progress"),
+])
+def test_intraday_partial_answer_does_not_wait_for_background_repair(policy, fallback, count, status):
+    assembled = SimpleNamespace(
+        analysis_digest={}, result_source_refs=[{"type": "table", "name": "market_intraday_bar"}],
+        combined_missing=["intraday_missing_minutes"], combined_warnings=["partial evidence"],
+        answer_ready=True, clarification={"required": False}, next_actions=[],
+        response_analysis={}, reasoning_steps=[],
+    )
+    job = {"job_id": 123, "status": "running", "poll_url": "/api/ai/refresh-status/123"}
+    run = {"tool": "tw.refresh_intraday_bars", "status": "background_running",
+           "request_status": "background_in_progress", "operation_status": "pending", "job": job}
+    result = {"kind": "stock_context", "data": {"compact": {"intraday_bars": {
+        "enabled": True, "series": {"1m": {"interval": "1m", "points": [{"close": 100}] * count,
+        "returned_point_count": count, "is_partial": True, "freshness_status": "partial",
+        "current_session_coverage": {"status": "partial_prefix", "repair_recommended": True}}},
+    }}}}
+    response = ask_finalizer.finalize_ask_response(
+        payload=AiAskRequest(question="2330 intraday", target={"type": "tw_stock", "id": "2330"},
+                             realtime_policy=policy, refresh_policy={"fallback_to_cached": fallback}),
+        resolution=scope_resolution.ScopeResolution(selected_scope_type="stock", selected_scope_id="2330",
+            display_name="TSMC", confidence="high", source="test"),
+        requested_mode="data_only", effective_mode="data_only", action="omi.ask",
+        result=result, response_target={"type": "tw_stock", "id": "2330"}, assembled=assembled,
+        policy={}, tool_plan={}, tool_runs=[run], freshness_result={"is_current": False, "missing": [], "warnings": []},
+        progress=SimpleNamespace(evidence_passport=lambda _: None, answer_ready=lambda **_: None),
+    )
+    assert response["request_status"] == status
+    assert run["operation_status"] == "pending"
+    assert run["job"] == job
+    assert result["data"]["compact"]["intraday_bars"]["series"]["1m"]["is_partial"]
+    if status == "completed":
+        assert response["fallback_used"]
+        assert response["cached_data_returned"]
 
 
 if __name__ == "__main__":

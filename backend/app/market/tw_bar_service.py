@@ -47,7 +47,10 @@ def _deduplicate_request_read(read):
             return read(self, *args, **kwargs)
         bound = call_signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
-        key = (id(self._db.get_bind()), tuple((name, value) for name, value in bound.arguments.items() if name != "self"))
+        key = (id(self._db.get_bind()), tuple(
+            (name, value.identity.series_revision if name == "_current_session_base_snapshot" and value is not None else value)
+            for name, value in bound.arguments.items() if name != "self"
+        ))
         if key not in reads:
             reads[key] = read(self, *args, **kwargs)
         return reads[key].model_copy(deep=True)
@@ -153,10 +156,10 @@ _current_session_snapshot_cache: OrderedDict[
 ] = OrderedDict()
 _current_session_snapshot_cache_lock = Lock()
 _CURRENT_SESSION_RECENT_CACHE_MAX_ENTRIES = 64
-_CURRENT_SESSION_RECENT_LIVE_TTL_SECONDS = 1.0
+_CURRENT_SESSION_RECENT_LIVE_TTL_SECONDS = 15.0
 _CURRENT_SESSION_RECENT_OFF_SESSION_TTL_SECONDS = 15.0
 _current_session_recent_cache: OrderedDict[
-    tuple[object, str, str, bool, date, datetime],
+    tuple[object, str, str, bool, date],
     tuple[float, str | None, TaiwanBarSeriesRead],
 ] = OrderedDict()
 
@@ -590,6 +593,7 @@ class TaiwanBarService:
         trade_date: date,
         requested_to: datetime,
         storage_revision: str | None,
+        reuse_storage_snapshot: bool = False,
     ) -> None:
         coverage = series.current_session_coverage
         if coverage is None:
@@ -615,10 +619,10 @@ class TaiwanBarService:
                 series.requested_interval,
                 include_partial,
                 trade_date,
-                requested_to,
             )
-            _current_session_recent_cache.pop(recent_key, None)
-            _current_session_recent_cache[recent_key] = (monotonic(), storage_revision, series)
+            previous = _current_session_recent_cache.pop(recent_key, None)
+            cached_at = previous[0] if reuse_storage_snapshot and previous else monotonic()
+            _current_session_recent_cache[recent_key] = (cached_at, storage_revision, series)
             while (
                 len(_current_session_recent_cache)
                 > _CURRENT_SESSION_RECENT_CACHE_MAX_ENTRIES
@@ -651,7 +655,6 @@ class TaiwanBarService:
             interval,
             include_partial,
             trade_date,
-            requested_to,
         )
         with _current_session_snapshot_cache_lock:
             entry = _current_session_recent_cache.get(key)
@@ -803,14 +806,31 @@ class TaiwanBarService:
             local_now=local_now,
             storage_revision=storage_revision,
         )
-        if cached is not None and not bypass_snapshot_cache:
+        if cached is not None and not bypass_snapshot_cache and (
+            cached.history.requested_to.replace(second=0, microsecond=0)
+            == to_time.replace(second=0, microsecond=0)
+        ):
             return _current_session_response_window(
                 cached.model_copy(update={"market_phase": taiwan_market_session_phase(local_now),
+                    "history": cached.history.model_copy(update={"requested_to": to_time}),
                     "read_diagnostics": TaiwanBarReadDiagnostics(snapshot_cache_status="hit",
                         canonical_store_status="hit" if cached.bars else "miss",
                         final_series_revision=cached.identity.series_revision, storage_revision=storage_revision)}),
                 limit=limit,
             )
+        # The persisted 1m snapshot can survive the next minute boundary. Only
+        # expected coverage is time-dependent; reproject it through this owner.
+        reusable = cached if (
+            not bypass_snapshot_cache and cached is not None
+            and requested_interval == "1m" and include_partial
+            and cached.history.requested_to <= to_time
+        ) else None
+        if reusable is not None and TaiwanIntradayBarRepository(self._db).has_bars_entering_window(
+            instrument_id=instrument_id,
+            from_time=reusable.history.requested_to.replace(second=0, microsecond=0),
+            to_time=to_time.replace(second=0, microsecond=0),
+        ):
+            reusable = None
         full_snapshot = self.read_bars(
             instrument_id=instrument_id,
             interval=requested_interval,
@@ -820,6 +840,7 @@ class TaiwanBarService:
             include_partial=include_partial,
             requested_at=local_now,
             _session_scope=TaiwanBarSessionScope.CURRENT_SESSION,
+            _current_session_base_snapshot=reusable,
         )
         full_snapshot = full_snapshot.model_copy(update={"read_diagnostics": TaiwanBarReadDiagnostics(
             snapshot_cache_status="bypassed" if bypass_snapshot_cache else "miss",
@@ -832,6 +853,7 @@ class TaiwanBarService:
             trade_date=trade_date,
             requested_to=to_time,
             storage_revision=storage_revision,
+            reuse_storage_snapshot=reusable is not None,
         )
         return _current_session_response_window(full_snapshot, limit=limit)
 
@@ -1049,6 +1071,7 @@ class TaiwanBarService:
         include_partial: bool = True,
         requested_at: datetime | None = None,
         _session_scope: TaiwanBarSessionScope = TaiwanBarSessionScope.HISTORY,
+        _current_session_base_snapshot: TaiwanBarSeriesRead | None = None,
     ) -> TaiwanBarSeriesRead:
         requested_interval = normalize_taiwan_bar_interval(interval)
         if limit < 1 or limit > 5000:
@@ -1127,13 +1150,18 @@ class TaiwanBarService:
                 requested_at=now,
                 current_session=current_session,
             )
-            result = MarketDataGateway().resolve_bars(
-                requirement,
-                reader=TaiwanIntradayBarRepository(self._db),
-            )
-            if not isinstance(result.resolved, ResolvedBarSeries):
-                raise RuntimeError("Taiwan Bar gateway returned non-Bar payload")
-            resolved_session_bars = tuple(result.resolved.bars)
+            reusable = _current_session_base_snapshot if current_session else None
+            result = None
+            if reusable is None:
+                result = MarketDataGateway().resolve_bars(
+                    requirement,
+                    reader=TaiwanIntradayBarRepository(self._db),
+                )
+                if not isinstance(result.resolved, ResolvedBarSeries):
+                    raise RuntimeError("Taiwan Bar gateway returned non-Bar payload")
+                resolved_session_bars = tuple(result.resolved.bars)
+            else:
+                resolved_session_bars = reusable.bars
             session_bars = tuple(
                 item
                 for item in resolved_session_bars
@@ -1184,6 +1212,12 @@ class TaiwanBarService:
                 if missing_count or not session_trading_policy.market_semantics_usable
                 else TaiwanHistoryStatus.READY
             )
+            if reusable is not None:
+                manifests.append(reusable.session_resolution[0].model_copy(update={
+                    "coverage_status": coverage_status,
+                }))
+                limitations.extend(reusable.limitations)
+                continue
             rejected_candidate_reasons: dict[str, list[str]] = {}
             for item in result.resolved.candidates:
                 if item.eligible:

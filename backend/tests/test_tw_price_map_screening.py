@@ -34,6 +34,11 @@ def sessions():
         with Operations.context(MigrationContext.configure(conn)):
             migration.upgrade()
             migration.upgrade()
+            intraday_path = path.with_name("20261006_0091_tw_intraday_revision.py")
+            intraday_spec = importlib.util.spec_from_file_location("intraday_revision_migration", intraday_path)
+            intraday_migration = importlib.util.module_from_spec(intraday_spec)
+            intraday_spec.loader.exec_module(intraday_migration)
+            intraday_migration.upgrade()
     yield sessionmaker(bind=engine, expire_on_commit=False)
     engine.dispose()
 

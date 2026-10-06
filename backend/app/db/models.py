@@ -2963,11 +2963,12 @@ class TaiwanMarketMinuteState(Base):
 
 
 class TaiwanTechnicalInputRevision(Base):
-    """Storage revision maintained transactionally by daily-input triggers."""
+    """Independent daily and intraday generations maintained by storage triggers."""
 
     __tablename__ = "taiwan_technical_input_revision"
     stock_id: Mapped[str] = mapped_column(String(20), primary_key=True)
     generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    intraday_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
 
 
 class TaiwanPriceMapSnapshot(Base):

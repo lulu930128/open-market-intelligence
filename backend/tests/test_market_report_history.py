@@ -94,8 +94,9 @@ def test_scheduler_prepares_first_and_failure_still_sends(monkeypatch, caplog, f
     scheduler.send_discord_market_report("postclose")
     assert events == ["prepare", "send"]
     if fails:
-        assert "continuing read-only report" in caplog.text
-        assert any(record.exc_info for record in caplog.records)
+        assert "stage=history_failed" in caplog.text
+        assert "stage=completed" in caplog.text
+        assert not any(record.exc_info for record in caplog.records)
 
 
 @pytest.mark.parametrize("opt_in", [False, True])

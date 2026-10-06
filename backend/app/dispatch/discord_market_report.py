@@ -16,7 +16,9 @@ from app.dispatch import templates
 from app.dispatch.market_report_text import render_presentation
 from app.dispatch.market_report_presentation import MarketReportPresentation, PHASE_LABELS, _evidence, build_presentation, with_price_maps
 from app.dispatch.market_report_discord import render_compact_content, render_embeds
-from app.dispatch.market_report_chart import ChartUnavailable, render_market_dashboard_chart, render_stock_analysis_chart
+from app.dispatch.market_report_chart import (
+    ChartUnavailable, render_market_dashboard_chart, render_stock_analysis_chart, render_technology_pulse_chart,
+)
 from app.dispatch.discord_sender import (
     DiscordAttachment, DiscordDeliveryError, send_discord_rich_report, validate_rich_payload,
 )
@@ -65,7 +67,8 @@ def build_rich_report(model: MarketReportPresentation, *, mode: ReportMode = "co
         # Build the complete set before attaching; missing Pillow/font yields
         # summary-only compact, never a partial image set or audit fallback.
         images = [("market_dashboard.png", render_market_dashboard_chart(model)),
-                  ("stock_analysis.png", render_stock_analysis_chart(model))]
+                  ("stock_analysis.png", render_stock_analysis_chart(model)),
+                  ("technology_pulse.png", render_technology_pulse_chart(model))]
     except ChartUnavailable as error:
         model = replace(model, presentation_warnings=(*model.presentation_warnings, str(error)))
     else:

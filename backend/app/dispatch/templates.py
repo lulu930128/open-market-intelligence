@@ -907,6 +907,7 @@ def _build_tw_market_overview_preview(
                 "sample_breadth", "top_gainers", "top_losers", "value_leaders",
                 "index_intraday", "cross_market", "market_chips", "volume_state",
                 "market", "freshness_by_capability",
+                "stock_sector_context", "technology_pulse",
             )},
             "freshness": envelope.get("freshness"),
             "breadth": breadth,

@@ -909,11 +909,29 @@ def finalize_ask_response(
         tool_plan=tool_plan,
         tool_runs=tool_runs,
     )
+    # A repair job is independent of a usable cached answer. Keep the job and
+    # its pending evidence status in tool_runs; do not relax require_live.
+    intraday_summary = _intraday_summary_from_compact(
+        compact_for_passport.get("intraday_bars") or {},
+    )
+    cached_intraday_answer = bool(
+        facts_ready
+        and response_target.get("type") == "tw_stock"
+        and (payload.realtime_policy or query_plan.get("realtime_policy")) == "prefer_live"
+        and payload.refresh_policy.get("fallback_to_cached", True)
+        and intraday_summary.get("status") == "ok"
+        and intraday_summary.get("freshness_status") not in {"missing", "unavailable", "failed"}
+    )
     timeout_run = next(
         (
             run
             for run in tool_runs
             if str(run.get("status") or "") in {"timeout", "background_running"}
+            and not (
+                cached_intraday_answer
+                and run.get("tool") == "tw.refresh_intraday_bars"
+                and run.get("status") == "background_running"
+            )
         ),
         None,
     )
@@ -976,7 +994,9 @@ def finalize_ask_response(
         "available_sections": available_sections,
         "request_status": request_status,
         "fallback_used": bool(
-            isinstance(timeout_run, dict) and timeout_run.get("fallback_used")
+            (isinstance(timeout_run, dict) and timeout_run.get("fallback_used"))
+            or (cached_intraday_answer and any(run.get("tool") == "tw.refresh_intraday_bars"
+                and run.get("status") == "background_running" for run in tool_runs))
         ),
         "cached_data_returned": cached_data_returned,
         "job": job,

@@ -18,7 +18,7 @@ from app.dispatch import market_report_chart as chart
 from app.dispatch.market_report_discord import render_compact_content, render_embeds
 from app.dispatch.market_report_presentation import build_presentation, with_price_maps
 from app.dispatch.market_report_text import render_presentation
-from test_discord_market_report import NOW, evidence_preview, prepared, transport, webhook
+from test_discord_market_report import NOW, evidence_preview, event_output, prepared, transport, webhook
 
 
 def model(preview=None, phase="postclose"):
@@ -217,7 +217,7 @@ def test_actual_stock_png_with_backend_technical_blockers():
     assert result.stock_analysis[0]["technical_blockers"]
     png = chart.render_stock_analysis_chart(result)
     with Image.open(BytesIO(png)) as image:
-        assert image.size == (1600, 1600) and image.format == "PNG"
+        assert image.size == (1600, 1960) and image.format == "PNG"
         image.load()
 
 
@@ -286,23 +286,47 @@ def test_invalid_rich_payload_never_connects(webhook, transport, kwargs):
 
 
 @pytest.mark.parametrize("status", [301, 429, 500])
-def test_rich_http_failure_never_retries(webhook, transport, status):
+def test_rich_http_failure_never_retries(webhook, transport, status, event_output):
     transport.return_value.getresponse.return_value.status = status
     with pytest.raises(sender.DiscordDeliveryError) as caught:
         sender.send_discord_rich_report(webhook, embeds=render_embeds(model()))
     assert caught.value.outcome == ("unknown" if status >= 500 else "failed")
     assert transport.call_count == 1 and transport.return_value.request.call_count == 1
     transport.return_value.getresponse.return_value.read.assert_not_called()
+    logged = event_output.getvalue()
+    assert "stage=transport_response" in logged and f"status_code={status}" in logged
+    assert "stage=transport_failed" in logged and "stage=transport_sent" not in logged
 
 
-def test_rich_network_error_has_no_secret_chain(webhook, transport, caplog):
-    transport.return_value.request.side_effect = OSError(webhook)
+@pytest.mark.parametrize("operation", ["request", "getresponse", "close"])
+def test_rich_network_error_has_no_secret_chain(webhook, transport, caplog, event_output, operation):
+    error = OSError(10060, webhook)
+    error.winerror = 10060
+    getattr(transport.return_value, operation).side_effect = error
     with pytest.raises(sender.DiscordDeliveryError) as caught:
         sender.send_discord_rich_report(webhook, content="報表")
     assert caught.value.__context__ is None and caught.value.__cause__ is None
-    diagnostic = "".join(traceback.format_exception(caught.value)) + caplog.text
+    assert caught.value.cause_type == type(error).__name__
+    assert caught.value.cause_errno == 10060 and caught.value.cause_winerror == 10060
+    logged = event_output.getvalue()
+    assert "stage=transport_start" in logged and "stage=transport_failed" in logged
+    assert f"exception_type={type(error).__name__} errno=10060 winerror=10060" in logged
+    assert "stage=transport_sent" not in logged
+    diagnostic = "".join(traceback.format_exception(caught.value)) + caplog.text + logged
     assert webhook not in diagnostic and webhook.rsplit("/", 1)[1] not in diagnostic
     assert transport.call_count == 1
+
+
+def test_transport_success_events_share_scheduler_context(webhook, transport, event_output):
+    from app.dispatch.discord_report_events import report_event_context
+    with report_event_context("intraday"):
+        sender.send_discord_rich_report(webhook, content="report")
+    lines = event_output.getvalue().splitlines()
+    assert [line.split("stage=")[1].split()[0] for line in lines] == [
+        "transport_start", "transport_response", "transport_sent"]
+    assert len({line.split("run_id=")[1].split()[0] for line in lines}) == 1
+    assert all("phase=intraday" in line for line in lines)
+    assert webhook not in event_output.getvalue()
 
 
 def test_orchestration_closes_db_before_render_and_network(prepared, monkeypatch):
@@ -341,12 +365,12 @@ def test_report_modes_actual_pngs_and_single_request(evidence_preview, webhook, 
     rich = report.build_rich_report(model(evidence_preview), mode=mode)
     assert rich.mode == mode
     names = [item.filename for item in rich.attachments]
-    assert names[:2] == ["market_dashboard.png", "stock_analysis.png"]
-    assert names[2:] == (["full_report.txt", "evidence.json"] if mode == "audit" else [])
-    for item in rich.attachments[:2]:
+    assert names[:3] == ["market_dashboard.png", "stock_analysis.png", "technology_pulse.png"]
+    assert names[3:] == (["full_report.txt", "evidence.json"] if mode == "audit" else [])
+    for item in rich.attachments[:3]:
         assert item.data.startswith(b"\x89PNG\r\n\x1a\n")
         with Image.open(BytesIO(item.data)) as png:
-            assert png.size == (1600, 1600 if item.filename == "stock_analysis.png" else 1200) and png.format == "PNG"
+            assert png.size == (1600, 1960 if item.filename == "stock_analysis.png" else 1800 if item.filename == "technology_pulse.png" else 1200) and png.format == "PNG"
             png.load()
     assert len(rich.embeds) == (4 if mode == "audit" else 0)
     assert bool(rich.content) == (mode == "compact")
@@ -420,7 +444,7 @@ def test_default_orchestration_compact_and_invalid_mode(prepared):
     prepared.send.assert_called_once()
     kwargs = prepared.send.call_args.kwargs
     assert result["mode"] == "compact" and kwargs["embeds"] == []
-    assert [a.filename for a in kwargs["attachments"]] == ["market_dashboard.png", "stock_analysis.png"]
+    assert [a.filename for a in kwargs["attachments"]] == ["market_dashboard.png", "stock_analysis.png", "technology_pulse.png"]
 
 
 def test_radar_deduplicates_and_preserves_canonical_coverage(evidence_preview, monkeypatch):

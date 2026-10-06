@@ -128,7 +128,11 @@ Capability payload 明確回報 `unsupported`／`unavailable` 時，quality 與 
   - `cache_only`：不得為即時性呼叫外部 provider。
   - `prefer_live`：可在 trust 與 budget 允許時補 live；失敗時保留可用 cache，
     但必須揭露 stale/delayed。
-  - `require_live`：選定的即時 capability 未達 live 時，明確標記 policy 未滿足。
+- `require_live`：選定的即時 capability 未達 live 時，明確標記 policy 未滿足。
+- 台股 `intraday.bars` 在 `prefer_live` 且 `fallback_to_cached=true` 時，已可用的
+  canonical partial evidence 可以完成回答；`tw.refresh_intraday_bars` 的 pending
+  JobRun 保留於 execution tool runs，不單獨將回答改成 background_in_progress。
+  Coverage、missing、repair_recommended 與資料限制仍保留，require_live 不放寬。
 - `selection.include` / `required`：必要 capabilities。
 - `selection.optional`：可用時包含，不足時不阻塞整個要求。
 - `selection.exclude`：明確排除；`target.identity` 與 `data.freshness` 仍由

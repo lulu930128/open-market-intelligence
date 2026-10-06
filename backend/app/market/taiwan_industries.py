@@ -58,6 +58,12 @@ TAIWAN_INDUSTRY_LABEL_CODES = {
     label: code for code, label in TAIWAN_INDUSTRY_CODE_LABELS.items()
 }
 
+# Technology Pulse includes traditional electronics plus e-commerce and cloud.
+# Membership uses this taxonomy's canonical codes, never label substrings.
+TAIWAN_TECH_INDUSTRY_CODES = frozenset({
+    "24", "25", "26", "27", "28", "29", "30", "31", "34", "36",
+})
+
 
 def _numeric_code(value: Any) -> str | None:
     if isinstance(value, bool):

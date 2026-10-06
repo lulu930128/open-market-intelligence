@@ -106,8 +106,9 @@ def test_stock_chart_long_headline_observe_bounds_and_missing_quote(monkeypatch)
     def capture(draw, xy, text, *args, **kwargs):
         box = draw.textbbox(xy, text, font=kwargs["font"])
         card_right = 780 if xy[0] < 820 else 1560
-        if 140 <= xy[1] < 1530:
-            assert box[2] <= card_right and box[3] < 1530
+        if 140 <= xy[1] < 1890:
+            assert box[2] <= card_right and box[3] < 1890
+            assert box[3] <= 140 + ((xy[1] - 140) // 440) * 440 + 432
         captured.append(text)
         return original(draw, xy, text, *args, **kwargs)
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)
@@ -117,8 +118,8 @@ def test_stock_chart_long_headline_observe_bounds_and_missing_quote(monkeypatch)
         "decision_usable": True, "threshold_price": 42, "label": long, "result_summary": long}])
     png = chart.render_stock_analysis_chart(with_price_maps(base, {str(i): evidence for i in range(8)}))
     with Image.open(BytesIO(png)) as image:
-        assert image.size == (1600, 1600)
-    assert "行情暫未提供" in captured and "資料不足" not in captured
+        assert image.size == (1600, 1960)
+    assert "行情暫未提供" in captured and "技術位置暫不可用" not in captured
     assert "42" in captured and any("…" in value for value in captured)
 
 
@@ -138,7 +139,7 @@ def test_sector_projection_preserves_order_six_rows_counts_and_representative():
     model = presentation(top_industries=rows, weak_industries=list(reversed(rows)))
     result = sector_radar_rows(model)
     assert rows == original
-    expected = [{**row, "sample_count": None, "trade_value": None} for row in rows]
+    expected = [{**row, "sample_count": None, "trade_value": None, "positive_ratio": None} for row in rows]
     assert result["strong"] == expected[:6] and result["weak"] == list(reversed(expected))[:6]
     rows[0]["advance_count"] = 99
     assert result["strong"][0]["advance_count"] == 0
@@ -224,7 +225,7 @@ def test_cross_strip_status_only_limits_and_stale_values_absent():
     assert "987654321" not in str(result) and "998877" not in str(result)
 
 
-@pytest.mark.parametrize("renderer", [chart.render_market_dashboard_chart, chart.render_stock_analysis_chart])
+@pytest.mark.parametrize("renderer", [chart.render_market_dashboard_chart, chart.render_stock_analysis_chart, chart.render_technology_pulse_chart])
 @pytest.mark.parametrize("missing", [True, False])
 def test_all_pngs_signature_dimensions_safe_truncation_no_stale_price(renderer, missing, monkeypatch):
     captured = []
@@ -248,17 +249,17 @@ def test_all_pngs_signature_dimensions_safe_truncation_no_stale_price(renderer, 
     png = renderer(model)
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
     with Image.open(BytesIO(png)) as image:
-        assert image.size == (1600, 1600 if renderer is chart.render_stock_analysis_chart else 1200) and image.format == "PNG"
+        assert image.size == (1600, 1960 if renderer is chart.render_stock_analysis_chart else 1800 if renderer is chart.render_technology_pulse_chart else 1200) and image.format == "PNG"
         image.load()
     visible = "\n".join(captured)
     assert "987654321" not in visible and "missing" not in visible
-    if not missing:
+    if not missing and renderer is not chart.render_technology_pulse_chart:
         assert "…" in visible
     if renderer is chart.render_market_dashboard_chart and not missing:
         assert "漲 7 / 跌 0" in visible and "代表 2330" in visible
 
 
-@pytest.mark.parametrize("entry", ["render_market_dashboard_chart", "render_stock_analysis_chart"])
+@pytest.mark.parametrize("entry", ["render_market_dashboard_chart", "render_stock_analysis_chart", "render_technology_pulse_chart"])
 def test_late_font_failure_discards_partial_compact_images(entry, monkeypatch):
     def unavailable(model):
         raise chart.ChartUnavailable("中文字型不可用")
