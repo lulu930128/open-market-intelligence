@@ -1,0 +1,32 @@
+schema_version = 1
+
+[[rules]]
+id = "manual_mock_no_production_owner"
+kind = "python_forbidden_import"
+description = "The loopback bridge cannot import a production app, broker, account or M3 stub."
+roots = ["execution_manual_mock", "execution_simulation/fake_sdk.py"]
+exclude_path_prefixes = ["execution_manual_mock/tests"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "KGI", "execution_broker_preflight", "requests", "httpx", "urllib", "sqlite3", "sqlalchemy", "importlib", "ctypes", "pickle", "subprocess"]
+
+[[rules]]
+id = "manual_mock_no_production_caller"
+kind = "python_forbidden_import"
+roots = ["backend/app", "agents", "scripts", "execution", "execution_simulation", "execution_simulation_gateway", "execution_broker_preflight"]
+extensions = [".py"]
+forbidden_prefixes = ["execution_manual_mock"]
+
+[[rules]]
+id = "manual_mock_no_second_owner"
+kind = "python_forbidden_call"
+roots = ["execution_manual_mock", "execution_simulation/fake_sdk.py"]
+exclude_path_prefixes = ["execution_manual_mock/tests"]
+extensions = [".py"]
+forbidden_call_names = ["assess", "transition", "connect", "commit", "rollback", "login", "exec", "eval", "__import__", "import_module"]
+
+[[rules]]
+id = "fake_sdk_is_pure_closed_fixture"
+kind = "python_forbidden_import"
+roots = ["execution_simulation/fake_sdk.py"]
+extensions = [".py"]
+forbidden_prefixes = ["os", "sys", "pathlib", "socket", "http", "urllib", "requests", "httpx", "sqlite3", "subprocess", "multiprocessing", "ctypes", "importlib", "tempfile", "threading", "asyncio", "builtins", "time"]

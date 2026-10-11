@@ -1,0 +1,35 @@
+schema_version = 1
+
+[[rules]]
+id = "gateway_no_external_owner"
+kind = "python_forbidden_import"
+description = "The synthetic HTTP boundary never opens DB, network, broker or production owners."
+roots = ["execution_simulation_gateway"]
+exclude_path_prefixes = ["execution_simulation_gateway/tests"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "execution_broker_preflight", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "KGI", "requests", "httpx", "urllib", "http", "socket", "sqlite3", "sqlalchemy", "subprocess", "importlib", "ctypes", "pickle", "shelve", "uvicorn", "os", "pathlib", "execution_simulation.storage", "execution_simulation.codec", "execution.validation.assess", "execution.state_machine"]
+
+[[rules]]
+id = "gateway_no_production_caller"
+kind = "python_forbidden_import"
+description = "Gateway remains a separate test factory and is never integrated into runtime."
+roots = ["backend/app", "agents", "scripts", "execution", "execution_simulation"]
+extensions = [".py"]
+forbidden_prefixes = ["execution_simulation_gateway"]
+
+[[rules]]
+id = "gateway_no_dynamic_escape"
+kind = "python_forbidden_call"
+description = "No dynamic imports, arbitrary DB, process, network or business owner duplication."
+roots = ["execution_simulation_gateway"]
+exclude_path_prefixes = ["execution_simulation_gateway/tests"]
+extensions = [".py"]
+forbidden_call_names = ["exec", "eval", "compile", "__import__", "import_module", "Popen", "system", "open", "connect", "bind", "listen", "assess", "transition", "dispatch", "callback", "recover"]
+
+[[rules]]
+id = "headless_manual_no_worker_authority"
+kind = "python_forbidden_call"
+description = "MCP App command preparation cannot claim, execute, forge broker reports or enable sending."
+roots = ["execution_simulation_gateway/headless.py"]
+extensions = [".py"]
+forbidden_call_names = ["rehearsal_claim", "rehearsal_check_effect", "rehearsal_result", "rehearsal_report", "rehearsal_fence", "set_mock_send_enabled", "create_order", "login", "_command", "_event", "_audit"]

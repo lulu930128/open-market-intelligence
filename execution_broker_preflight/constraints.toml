@@ -1,0 +1,24 @@
+schema_version = 1
+
+[[rules]]
+id = "kgi_preflight_pure_dependency"
+kind = "python_forbidden_import"
+roots = ["execution_broker_preflight"]
+exclude_path_prefixes = ["execution_broker_preflight/tests"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "execution", "execution_simulation", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "requests", "httpx", "urllib", "http", "socket", "sqlite3", "sqlalchemy", "pathlib", "os", "io", "subprocess", "threading", "asyncio", "ctypes", "importlib", "sys", "builtins", "pickle", "time"]
+
+[[rules]]
+id = "kgi_preflight_no_io"
+kind = "python_forbidden_call"
+roots = ["execution_broker_preflight"]
+exclude_path_prefixes = ["execution_broker_preflight/tests"]
+extensions = [".py"]
+forbidden_call_names = ["open", "exec", "eval", "compile", "__import__", "input", "print", "connect", "login", "create_order", "cancel_order", "get_trades", "now", "utcnow", "today", "sleep", "Popen", "system", "import_module"]
+
+[[rules]]
+id = "kgi_preflight_no_production_callers"
+kind = "python_forbidden_import"
+roots = ["backend/app", "agents", "scripts", "execution", "execution_simulation"]
+extensions = [".py"]
+forbidden_prefixes = ["execution_broker_preflight"]

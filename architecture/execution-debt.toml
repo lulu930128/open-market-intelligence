@@ -1,0 +1,3 @@
+schema_version = 1
+# M1 has no architecture exceptions. Planned live gates are not accepted debt.
+debt = []

@@ -1,0 +1,24 @@
+schema_version = 1
+
+[[rules]]
+id = "kgi_sim_no_production_caller"
+kind = "python_forbidden_import"
+roots = ["backend/app", "agents", "execution", "execution_simulation", "execution_manual_mock", "execution_simulation_gateway", "execution_broker_preflight", "scripts"]
+extensions = [".py"]
+forbidden_prefixes = ["execution_kgi_simulator"]
+
+[[rules]]
+id = "kgi_sim_no_second_owner_or_live_sdk"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator"]
+exclude_path_prefixes = ["execution_kgi_simulator/tests"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "sqlite3", "sqlalchemy", "requests", "httpx", "urllib", "socket", "ctypes", "execution.state_machine", "execution.service", "execution_broker_preflight", "execution_manual_mock", "execution_simulation.storage"]
+
+[[rules]]
+id = "kgi_sim_no_second_reducer_or_dynamic_escape"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator"]
+exclude_path_prefixes = ["execution_kgi_simulator/tests"]
+extensions = [".py"]
+forbidden_call_names = ["assess", "transition", "connect", "commit", "rollback", "eval", "exec", "__import__", "import_module", "load_dotenv", "Popen", "system"]

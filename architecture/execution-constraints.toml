@@ -1,0 +1,29 @@
+schema_version = 1
+
+# Separate M1 manifest: the existing shared constraints file is unrelated dirty work.
+# Enforced by backend/tests/architecture/test_manual_execution_boundaries.py.
+[[rules]]
+id = "offline_execution_dependency"
+kind = "python_forbidden_import"
+description = "Offline execution never imports app owners, consumers, providers or IO libraries."
+roots = ["execution"]
+exclude_path_prefixes = ["execution/tests"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "KGI", "fastapi", "pydantic", "requests", "httpx", "urllib", "http", "socket", "sqlite3", "sqlalchemy", "pathlib", "os", "io", "subprocess", "multiprocessing", "threading", "asyncio", "ctypes", "importlib", "sys", "builtins", "pickle", "shelve", "tempfile", "secrets", "random", "time"]
+
+[[rules]]
+id = "offline_execution_no_io_or_implicit_clock"
+kind = "python_forbidden_call"
+description = "No IO, dynamic code/import, implicit clock or external transaction in domain."
+roots = ["execution"]
+exclude_path_prefixes = ["execution/tests"]
+extensions = [".py"]
+forbidden_call_names = ["open", "exec", "eval", "compile", "__import__", "input", "print", "connect", "commit", "rollback", "flush", "now", "utcnow", "today", "sleep", "Popen", "system", "import_module"]
+
+[[rules]]
+id = "offline_execution_no_production_callers"
+kind = "python_forbidden_import"
+description = "Production app, MCP and scripts cannot invoke offline execution."
+roots = ["backend/app", "agents", "scripts"]
+extensions = [".py"]
+forbidden_prefixes = ["execution"]

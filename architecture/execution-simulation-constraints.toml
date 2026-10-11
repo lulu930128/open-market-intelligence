@@ -1,0 +1,35 @@
+schema_version = 1
+
+[[rules]]
+id = "simulation_no_external_owner"
+kind = "python_forbidden_import"
+description = "M2A imports pure M1 and local SQLite only, never production, broker or network."
+roots = ["execution_simulation"]
+exclude_path_prefixes = ["execution_simulation/tests"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "KGI", "requests", "httpx", "urllib", "http", "socket", "sqlalchemy", "subprocess", "importlib", "ctypes", "pickle", "shelve", "fastapi", "uvicorn"]
+
+[[rules]]
+id = "simulation_no_production_caller"
+kind = "python_forbidden_import"
+description = "No production backend, MCP or scripts can call the simulation application."
+roots = ["backend/app", "agents", "scripts", "execution"]
+extensions = [".py"]
+forbidden_prefixes = ["execution_simulation"]
+
+[[rules]]
+id = "simulation_no_dynamic_escape"
+kind = "python_forbidden_call"
+description = "No dynamic execution, imports or process escape in the simulation application."
+roots = ["execution_simulation"]
+exclude_path_prefixes = ["execution_simulation/tests"]
+extensions = [".py"]
+forbidden_call_names = ["exec", "eval", "compile", "__import__", "import_module", "Popen", "system"]
+
+[[rules]]
+id = "settlement_projection_no_io_owner"
+kind = "python_forbidden_import"
+description = "Settlement contracts and projection are pure; application alone owns commands and transactions."
+roots = ["execution_simulation/settlement.py", "execution_simulation/settlement_contracts.py"]
+extensions = [".py"]
+forbidden_prefixes = ["sqlite3", "os", "pathlib", "tempfile", "execution_simulation.application", "execution_simulation.storage", "execution.state_machine", "execution.service"]
