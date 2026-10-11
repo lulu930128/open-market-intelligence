@@ -9,6 +9,8 @@ from datetime import date, datetime
 from sqlalchemy.orm import Session
 
 from app.market.realtime_snapshot_repository import (
+    PersistedAuctionRead,
+    PersistedDepthRead,
     TaiwanAuctionRepository,
     TaiwanDepthRepository,
 )
@@ -33,6 +35,7 @@ from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
     taiwan_market_session,
+    taiwan_evidence_session,
     taiwan_presentation_session,
 )
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
@@ -59,6 +62,7 @@ from app.market_data.contracts import (
     MarketSession,
     OperationalStatus,
     ProviderResourceHealth,
+    SourceLineage,
 )
 from app.market_data.gateway import (
     AuctionAcquisitionPort,
@@ -70,6 +74,7 @@ from app.market_data.gateway import (
 from app.market_data.integration_contracts import (
     DataRequirementV2,
     FreshnessRequirement,
+    FreshnessBasis,
     InstrumentTarget,
     MarketDataResultV1,
     QualityRequirement,
@@ -79,6 +84,7 @@ from app.market_data.integration_contracts import (
 from app.market_data.policies import DataPurpose, RealtimePolicy
 from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
 from app.market_data.resolution import ResolutionCandidate
+from app.market_data.quality_policy import evaluate_candidate_quality, snapshot_receipt_freshness
 
 
 TW_REALTIME_MAX_AGE_SECONDS = 15
@@ -166,7 +172,10 @@ def build_taiwan_realtime_requirement(
         realtime_policy=policy,
         session=session or _market_session(requested_at),
         requested_at=requested_at,
-        freshness=FreshnessRequirement(max_age_seconds=TW_REALTIME_MAX_AGE_SECONDS),
+        freshness=FreshnessRequirement(
+            max_age_seconds=TW_REALTIME_MAX_AGE_SECONDS,
+            basis=FreshnessBasis.RECEIVED_TIME,
+        ),
         quality=QualityRequirement(
             require_canonical_lineage=True,
             allow_partial=False,
@@ -175,11 +184,43 @@ def build_taiwan_realtime_requirement(
     )
 
 
-def _freshness(requirement: DataRequirementV2, event_at: datetime) -> EvidenceFreshness:
-    age = (requirement.requested_at - event_at).total_seconds()
-    if -300 <= age <= TW_REALTIME_MAX_AGE_SECONDS:
-        return EvidenceFreshness.LIVE
-    return EvidenceFreshness.STALE
+def _freshness(requirement: DataRequirementV2, lineage: SourceLineage) -> EvidenceFreshness:
+    """Receipt currency does not prove that an unchanged feed is still live."""
+    event_at = lineage.event_at
+    if event_at is None:
+        return EvidenceFreshness.UNKNOWN
+    now = requirement.requested_at
+    if (
+        event_at > now
+        or event_at.astimezone(TAIWAN_TZ).date() != now.astimezone(TAIWAN_TZ).date()
+        or taiwan_evidence_session(event_at) != requirement.session
+    ):
+        return EvidenceFreshness.STALE
+    return snapshot_receipt_freshness(
+        lineage, now=now, max_age_seconds=requirement.freshness.max_age_seconds,
+    )
+
+
+def _snapshot_candidate(
+    requirement: DataRequirementV2,
+    read: PersistedDepthRead | PersistedAuctionRead,
+    freshness: EvidenceFreshness,
+    session: MarketSession,
+) -> ResolutionCandidate:
+    quality = evaluate_candidate_quality(
+        read.observation, requirement=requirement, freshness=freshness,
+    )
+    if freshness is EvidenceFreshness.FRESH:
+        # A stable book and a frozen/replayed feed are indistinguishable without
+        # independent activity evidence. Keep facts, never infer execution grade.
+        quality = quality.model_copy(update={
+            "research_usable": False,
+            "limitations": (*quality.limitations, "TW_QUOTE_EVENT_RECENCY_UNVERIFIED"),
+        })
+    return ResolutionCandidate(
+        observation=read.observation, freshness=freshness,
+        provider_priority=read.provider_priority, session=session, quality=quality,
+    )
 
 
 def _health(
@@ -187,6 +228,7 @@ def _health(
     *,
     provider: str,
     freshness: EvidenceFreshness,
+    limitations: tuple[str, ...] = (),
 ) -> ProviderResourceHealth:
     return ProviderResourceHealth(
         provider=provider,
@@ -195,10 +237,10 @@ def _health(
         enablement=EnablementStatus.ENABLED,
         connection=ConnectionStatus.UNKNOWN,
         entitlement=EntitlementStatus.UNKNOWN,
-        operational=OperationalStatus.UNKNOWN,
+        operational=OperationalStatus.FAILED if limitations else OperationalStatus.UNKNOWN,
         freshness=freshness,
         checked_at=requirement.requested_at,
-        detail_code="PERSISTED_TW_REALTIME_CANDIDATE",
+        detail_code=limitations[0] if limitations else "PERSISTED_TW_REALTIME_CANDIDATE",
     )
 
 
@@ -231,7 +273,7 @@ class TaiwanDepthCandidateReader:
             allowed_sessions=closeout_sessions if self._closing_snapshot else None,
         )
         candidates: list[ResolutionCandidate] = []
-        health: list[ProviderResourceHealth] = list(self._provider_health)
+        health: list[ProviderResourceHealth] = []
         rejections: list[CandidateRowRejection] = []
         event_times: list[datetime] = []
         freshness_values: list[EvidenceFreshness] = []
@@ -281,14 +323,23 @@ class TaiwanDepthCandidateReader:
             freshness = (
                 EvidenceFreshness.FRESH
                 if self._closing_snapshot
-                else _freshness(requirement, event_at)
+                else _freshness(requirement, read.observation.lineage)
             )
+            if read.limitations or any(
+                item.provider == read.observation.lineage.provider
+                and item.operational in {
+                    OperationalStatus.FAILED, OperationalStatus.UNAVAILABLE,
+                    OperationalStatus.RATE_LIMITED,
+                }
+                for item in self._provider_health
+            ):
+                freshness = EvidenceFreshness.STALE
             event_times.append(event_at)
             freshness_values.append(freshness)
             candidates.append(
-                ResolutionCandidate(
-                    observation=read.observation,
-                    freshness=freshness,
+                _snapshot_candidate(requirement, read, freshness, read.market_session or requirement.session)
+                if not self._closing_snapshot else ResolutionCandidate(
+                    observation=read.observation, freshness=freshness,
                     provider_priority=read.provider_priority,
                     session=read.market_session or requirement.session,
                 )
@@ -298,11 +349,12 @@ class TaiwanDepthCandidateReader:
                     requirement,
                     provider=read.observation.lineage.provider,
                     freshness=freshness,
+                    limitations=read.limitations,
                 )
             )
         return DepthCandidateBatch(
             candidates=tuple(candidates),
-            provider_health=tuple(health),
+            provider_health=(*health, *self._provider_health),
             dataset_health=evaluate_taiwan_candidate_dataset_health(
                 requirement,
                 dataset_id=TW_ORDER_BOOK_DATASET_ID,
@@ -361,7 +413,7 @@ class TaiwanAuctionCandidateReader:
             else ()
         )
         candidates: list[ResolutionCandidate] = []
-        health: list[ProviderResourceHealth] = list(self._provider_health)
+        health: list[ProviderResourceHealth] = []
         rejections: list[CandidateRowRejection] = []
         event_times: list[datetime] = []
         freshness_values: list[EvidenceFreshness] = []
@@ -414,27 +466,32 @@ class TaiwanAuctionCandidateReader:
                         )
                     )
                 continue
-            freshness = _freshness(requirement, event_at)
+            freshness = _freshness(requirement, read.observation.lineage)
+            if read.limitations or any(
+                item.provider == read.observation.lineage.provider
+                and item.operational in {
+                    OperationalStatus.FAILED, OperationalStatus.UNAVAILABLE,
+                    OperationalStatus.RATE_LIMITED,
+                }
+                for item in self._provider_health
+            ):
+                freshness = EvidenceFreshness.STALE
             event_times.append(event_at)
             freshness_values.append(freshness)
             candidates.append(
-                ResolutionCandidate(
-                    observation=read.observation,
-                    freshness=freshness,
-                    provider_priority=read.provider_priority,
-                    session=requirement.session,
-                )
+                _snapshot_candidate(requirement, read, freshness, taiwan_evidence_session(event_at))
             )
             health.append(
                 _health(
                     requirement,
                     provider=read.observation.lineage.provider,
                     freshness=freshness,
+                    limitations=read.limitations,
                 )
             )
         return AuctionCandidateBatch(
             candidates=tuple(candidates),
-            provider_health=tuple(health),
+            provider_health=(*health, *self._provider_health),
             dataset_health=evaluate_taiwan_candidate_dataset_health(
                 requirement,
                 dataset_id=TW_AUCTION_DATASET_ID,

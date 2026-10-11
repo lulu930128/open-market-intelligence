@@ -1,9 +1,13 @@
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import json
 import logging
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Lock, RLock
+import time
 from typing import Any
 
 from sqlalchemy import inspect as sa_inspect
@@ -79,7 +83,12 @@ SUMMARY_COUNT_KEYS = (
 FAILED_RESULT_ITEM_LIMIT = 4
 
 _executor: ThreadPoolExecutor | None = None
-_executor_lock = Lock()
+_executor_lock = RLock()
+_admission_closed = False
+_active_enqueues = 0
+_pending_tasks: dict[Future, str] = {}
+_task_failures = 0
+_enqueue_failures = 0
 _materialization_executors: dict[str, ThreadPoolExecutor] = {}
 MARKET_BACKGROUND_MAX_IN_FLIGHT = 2
 _materialization_slots = {
@@ -92,6 +101,67 @@ _enqueue_lock = Lock()
 
 class JobRunNotFoundError(Exception):
     pass
+
+
+class JobAdmissionClosed(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class JobDrainResult:
+    admission_closed: bool
+    pending_by_lane: dict[str, int]
+    active_enqueues: int
+    task_failures: int
+    unresolved_enqueues: int = 0
+
+    @property
+    def drained(self) -> bool:
+        return self.admission_closed and not self.pending_by_lane and not self.active_enqueues and not self.unresolved_enqueues
+
+
+def require_job_admission() -> None:
+    with _executor_lock:
+        if _admission_closed:
+            raise JobAdmissionClosed("JOB_ADMISSION_CLOSED: new process lifecycle required")
+
+
+@contextmanager
+def _enqueue_admission():
+    global _active_enqueues
+    with _executor_lock:
+        require_job_admission()
+        _active_enqueues += 1
+    try:
+        yield
+    finally:
+        with _executor_lock:
+            _active_enqueues -= 1
+
+
+def begin_job_drain() -> None:
+    global _admission_closed
+    with _executor_lock:
+        _admission_closed = True
+
+
+def job_drain_status() -> JobDrainResult:
+    with _executor_lock:
+        lanes: dict[str, int] = {}
+        for lane in _pending_tasks.values():
+            lanes[lane] = lanes.get(lane, 0) + 1
+        return JobDrainResult(_admission_closed, lanes, _active_enqueues, _task_failures, _enqueue_failures)
+
+
+async def drain_job_executor(*, deadline: float) -> JobDrainResult:
+    begin_job_drain()
+    while not (result := job_drain_status()).drained:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return result
+        await asyncio.sleep(min(0.01, remaining))
+    shutdown_job_executor(wait=False)
+    return job_drain_status()
 
 
 class JobExecutionError(Exception):
@@ -489,6 +559,7 @@ def _get_executor() -> ThreadPoolExecutor:
     global _executor
 
     with _executor_lock:
+        require_job_admission()
         if _executor is None:
             _executor = ThreadPoolExecutor(
                 max_workers=max(settings.job_worker_max_concurrency, 1),
@@ -517,29 +588,45 @@ def _log_unhandled_task_exception(future) -> None:
 
 def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
                     execution_lane: str = "default") -> None:
-    if execution_lane == "default":
-        future = _get_executor().submit(task, job_id, *task_args)
-    else:
-        # Reserve one worker for interactive materialization and one for its
-        # bounded background producer. Long general jobs cannot starve either.
-        slots = _materialization_slots.get(execution_lane)
-        if slots is None:
-            raise ValueError("Unknown job execution lane")
-        if not slots.acquire(blocking=False):
-            raise RuntimeError("MARKET_MATERIALIZATION_QUEUE_FULL")
+    # Submit and register under the same fence. Immediate callbacks may re-enter.
+    with _executor_lock:
+        require_job_admission()
+        slots = None
+        if execution_lane != "default":
+            slots = _materialization_slots.get(execution_lane)
+            if slots is None:
+                raise ValueError("Unknown job execution lane")
+            if not slots.acquire(blocking=False):
+                raise RuntimeError("MARKET_MATERIALIZATION_QUEUE_FULL")
         try:
-            with _executor_lock:
+            if execution_lane == "default":
+                executor = _get_executor()
+            else:
                 executor = _materialization_executors.get(execution_lane)
                 if executor is None:
                     workers = settings.taiwan_completed_materialization_concurrency if execution_lane == "market_completed" else 1
                     executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"omi-{execution_lane}")
                     _materialization_executors[execution_lane] = executor
             future = executor.submit(task, job_id, *task_args)
-        except Exception:
-            slots.release()
+        except BaseException:
+            if slots is not None:
+                slots.release()
             raise
-        future.add_done_callback(lambda completed: slots.release())
-    future.add_done_callback(_log_unhandled_task_exception)
+        _pending_tasks[future] = execution_lane
+
+        def completed(done: Future) -> None:
+            global _task_failures
+            try:
+                _log_unhandled_task_exception(done)
+            finally:
+                with _executor_lock:
+                    if not done.cancelled() and done.exception() is not None:
+                        _task_failures += 1
+                    if slots is not None:
+                        slots.release()
+                    _pending_tasks.pop(done, None)
+
+        future.add_done_callback(completed)
 
 
 def enqueue_job(
@@ -554,6 +641,30 @@ def enqueue_job(
     task_args: tuple[Any, ...] = (),
     dedupe_active: bool | None = None,
     reuse_success_within_seconds: float = 0,
+) -> tuple[JobRun, bool]:
+    global _enqueue_failures
+    with _enqueue_admission():
+        try:
+            return _enqueue_job(
+                db, job_type=job_type, target=target, request=request,
+                progress_total=progress_total, message=message, task=task,
+                task_args=task_args, dedupe_active=dedupe_active,
+                reuse_success_within_seconds=reuse_success_within_seconds,
+            )
+        except BaseException:
+            # Commit/refresh/compensation may have failed after a durable insert.
+            # Rollback alone cannot prove that no queued record remains.
+            with _executor_lock:
+                _enqueue_failures += 1
+            db.rollback()
+            raise
+
+
+def _enqueue_job(
+    db: Session, *, job_type: str, target: str | None, request: Any,
+    progress_total: int, message: str | None, task: JobTask,
+    task_args: tuple[Any, ...], dedupe_active: bool | None,
+    reuse_success_within_seconds: float,
 ) -> tuple[JobRun, bool]:
     should_dedupe = settings.job_dedupe_active if dedupe_active is None else dedupe_active
 
@@ -599,18 +710,27 @@ def enqueue_job(
 
 
 def shutdown_job_executor(wait: bool = False) -> None:
-    global _executor
-
+    # Permanently fence this process and retain executor identity. Runtime uses
+    # async drain_job_executor. A timeout never cancels a running transaction.
+    begin_job_drain()
+    if wait:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("Use async drain_job_executor on the event loop")
+        deadline = time.monotonic() + 30.0
+        while not job_drain_status().drained:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Job executor drain deadline exceeded")
+            time.sleep(0.01)
     with _executor_lock:
-        executor = _executor
-        _executor = None
-        materialization_executors = list(_materialization_executors.values())
-        _materialization_executors.clear()
-
-    if executor is not None:
-        executor.shutdown(wait=wait, cancel_futures=not wait)
-    for materialization_executor in materialization_executors:
-        materialization_executor.shutdown(wait=wait, cancel_futures=not wait)
+        executors = list(_materialization_executors.values())
+        if _executor is not None:
+            executors.append(_executor)
+    for executor in executors:
+        executor.shutdown(wait=False, cancel_futures=False)
 
 
 def mark_interrupted_jobs(db: Session) -> int:

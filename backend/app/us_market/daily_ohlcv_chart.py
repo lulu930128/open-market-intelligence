@@ -1,18 +1,31 @@
-"""Compatibility chart projection backed only by canonical resolved US daily bars."""
+"""Finalized canonical Daily points with an opt-in, separate intraday overlay."""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
 from app.market.ohlc_overlay import aggregate_ohlc_points
+from app.market.calendar_status import build_us_calendar_status
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.intraday_platform import USIntradayMarketPlatform
+from app.us_market.historical_intraday import regular_intraday_coverage
+from app.us_market.schemas import USProvisionalDailyOverlayRead
+from app.us_market.temporal_expectedness import (
+    USCapabilitySessionScope,
+    evaluate_us_selected_evidence_temporal,
+)
+from app.market_data.contracts import BarFinalization
+from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.ohlc_continuity import build_us_daily_continuity
 from app.us_market.sources import normalize_us_symbol
-from app.us_market.trading_calendar import previous_us_trading_day
+from app.us_market.trading_calendar import (
+    previous_us_trading_day, is_us_trading_day, us_session_close_time,
+    us_daily_price_finalization_time,
+)
 
 
 US_EASTERN = ZoneInfo("America/New_York")
@@ -35,6 +48,68 @@ def _volume(value: Decimal | None) -> int | float | None:
     return int(integral) if value == integral else float(value)
 
 
+def _read_provisional_daily_overlay(db: Session, *, symbol: str, now: datetime) -> dict | None:
+    """Chart-only derived evidence; daily/technical finalized inputs stay intact."""
+    day = now.astimezone(US_EASTERN).date()
+    start = datetime.combine(day, time(9, 30), US_EASTERN)
+    end = datetime.combine(day, us_session_close_time(day), US_EASTERN)
+    if not is_us_trading_day(day) or now < start:
+        return None
+    read = USIntradayMarketPlatform(db).read_intraday_bars_for_trade_date(
+        symbol=symbol, trade_date=day, bars=1000, now=now,
+    )
+    resolved = read.result.resolved
+    selected = [
+        bar for bar in resolved.bars
+        if start <= bar.start_at < end and bar.start_at <= now and bar.interval == "1m"
+    ]
+    if not selected or not resolved.health.facts_usable:
+        return None
+    coverage = regular_intraday_coverage([bar.start_at for bar in selected], trade_date=day)
+    if (
+        any(coverage[key] for key in ("duplicate_count", "non_monotonic_count", "off_grid_count"))
+        or len({bar.price_basis for bar in selected}) != 1
+    ):
+        return None
+    coverage["unfinalized_count"] = sum(
+        bar.finalization not in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+        for bar in selected
+    )
+    if coverage["unfinalized_count"]:
+        coverage["coverage_status"] = "partial"
+    latest = selected[-1]
+    temporal = evaluate_us_selected_evidence_temporal(
+        now=now, market_phase=build_us_calendar_status(now)["phase"],
+        session_scope=USCapabilitySessionScope.REGULAR,
+        event_at=latest.lineage.event_at or latest.end_at,
+        fetched_at=latest.lineage.fetched_at or latest.lineage.received_at,
+    )
+    volume = (
+        sum(bar.volume.value for bar in selected)
+        if all(bar.volume is not None and bar.volume_status == "observed" for bar in selected)
+        and read.identity.instrument.instrument_type.value != "index" else None
+    )
+    limitations = [
+        *resolved.health.limitations,
+        "PROVISIONAL_DAILY_FROM_CANONICAL_INTRADAY",
+        "NOT_FINALIZED_DAILY",
+    ]
+    if coverage["coverage_status"] != "complete":
+        limitations.append("REGULAR_SESSION_COVERAGE_INCOMPLETE")
+    return USProvisionalDailyOverlayRead(
+        trade_date=day,
+        point={"time": day, "open": _number(selected[0].open_price),
+               "high": _number(max(bar.high_price for bar in selected)),
+               "low": _number(min(bar.low_price for bar in selected)),
+               "close": _number(latest.close_price), "volume": _volume(volume)},
+        release_status="pending_release" if now < us_daily_price_finalization_time(day) else "unavailable",
+        market_session=us_session_for_timestamp(latest.start_at).value, freshness=temporal.evidence_freshness.value,
+        coverage=coverage, event_at=latest.lineage.event_at or latest.end_at,
+        selected_provider=resolved.health.selected_provider, selected_source=resolved.health.selected_source,
+        limitations=list(dict.fromkeys(limitations)),
+    ).model_dump()
+
+
 def read_us_daily_ohlcv_chart(
     db: Session,
     *,
@@ -43,6 +118,7 @@ def read_us_daily_ohlcv_chart(
     bars: int = 90,
     to_date: date | None = None,
     now: datetime | None = None,
+    include_intraday_overlay: bool = False,
 ) -> dict:
     """Return the existing chart contract without legacy provider selection or repair."""
 
@@ -81,6 +157,15 @@ def read_us_daily_ohlcv_chart(
         }
         for bar in resolved_bars
     ]
+    today = resolved_now.astimezone(US_EASTERN).date()
+    overlay = None
+    if (
+        include_intraday_overlay
+        and timeframe == "daily"
+        and (to_date is None or to_date == today)
+        and not any(point["time"] == today for point in daily_points)
+    ):
+        overlay = _read_provisional_daily_overlay(db, symbol=symbol, now=resolved_now)
     points = aggregate_ohlc_points(
         points=daily_points,
         timeframe=timeframe,
@@ -151,7 +236,7 @@ def read_us_daily_ohlcv_chart(
             else "not_provided"
         ),
         "backfill": None,
-        "intraday_overlay": None,
+        "intraday_overlay": overlay,
         "latest_data_date": latest_date,
         "latest_trade_date": latest_date,
         **continuity,

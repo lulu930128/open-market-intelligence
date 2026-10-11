@@ -1,0 +1,160 @@
+{
+  "fixture_version": "tw.intraday.replay.v1",
+  "stock_id": "6442",
+  "stock_name": "光聖",
+  "market": "TWSE",
+  "trade_date": "2026-10-07",
+  "provenance": {
+    "kind": "bar_derived_replay",
+    "source": "local persisted market_intraday_bar",
+    "provider": "nstock",
+    "source_id": "nstock_minute_stock_data",
+    "previous_close_source": "twse_mis taiwan_intraday_stock_state 2026-10-07",
+    "volume_unit": "shares",
+    "availability_assumption": "bar start + 1 minute; simulated observation receipt, not original provider receipt",
+    "limitations": [
+      "Does not prove live full-market producer availability or discovery latency.",
+      "Single stored provider lane frozen for replay; not production provider selection.",
+      "Other universe members are synthetic controls."
+    ]
+  },
+  "previous_close": 1650.0,
+  "bars": [
+    {
+      "bar_time": "2026-10-07 09:00:00.000000",
+      "open_price": 1715.0,
+      "high_price": 1750.0,
+      "low_price": 1715.0,
+      "close_price": 1735.0,
+      "trade_volume": 230000
+    },
+    {
+      "bar_time": "2026-10-07 09:01:00.000000",
+      "open_price": 1740.0,
+      "high_price": 1760.0,
+      "low_price": 1740.0,
+      "close_price": 1755.0,
+      "trade_volume": 157000
+    },
+    {
+      "bar_time": "2026-10-07 09:02:00.000000",
+      "open_price": 1760.0,
+      "high_price": 1760.0,
+      "low_price": 1750.0,
+      "close_price": 1750.0,
+      "trade_volume": 64000
+    },
+    {
+      "bar_time": "2026-10-07 09:03:00.000000",
+      "open_price": 1750.0,
+      "high_price": 1755.0,
+      "low_price": 1750.0,
+      "close_price": 1750.0,
+      "trade_volume": 54000
+    },
+    {
+      "bar_time": "2026-10-07 09:04:00.000000",
+      "open_price": 1750.0,
+      "high_price": 1760.0,
+      "low_price": 1745.0,
+      "close_price": 1760.0,
+      "trade_volume": 74000
+    },
+    {
+      "bar_time": "2026-10-07 09:05:00.000000",
+      "open_price": 1765.0,
+      "high_price": 1765.0,
+      "low_price": 1750.0,
+      "close_price": 1750.0,
+      "trade_volume": 56000
+    },
+    {
+      "bar_time": "2026-10-07 09:06:00.000000",
+      "open_price": 1750.0,
+      "high_price": 1755.0,
+      "low_price": 1740.0,
+      "close_price": 1740.0,
+      "trade_volume": 78000
+    },
+    {
+      "bar_time": "2026-10-07 09:07:00.000000",
+      "open_price": 1740.0,
+      "high_price": 1750.0,
+      "low_price": 1740.0,
+      "close_price": 1745.0,
+      "trade_volume": 61000
+    },
+    {
+      "bar_time": "2026-10-07 09:08:00.000000",
+      "open_price": 1745.0,
+      "high_price": 1775.0,
+      "low_price": 1745.0,
+      "close_price": 1775.0,
+      "trade_volume": 130000
+    },
+    {
+      "bar_time": "2026-10-07 09:09:00.000000",
+      "open_price": 1775.0,
+      "high_price": 1780.0,
+      "low_price": 1770.0,
+      "close_price": 1775.0,
+      "trade_volume": 73000
+    },
+    {
+      "bar_time": "2026-10-07 09:10:00.000000",
+      "open_price": 1770.0,
+      "high_price": 1775.0,
+      "low_price": 1770.0,
+      "close_price": 1770.0,
+      "trade_volume": 25000
+    },
+    {
+      "bar_time": "2026-10-07 09:11:00.000000",
+      "open_price": 1770.0,
+      "high_price": 1790.0,
+      "low_price": 1770.0,
+      "close_price": 1785.0,
+      "trade_volume": 109000
+    },
+    {
+      "bar_time": "2026-10-07 09:12:00.000000",
+      "open_price": 1780.0,
+      "high_price": 1785.0,
+      "low_price": 1775.0,
+      "close_price": 1780.0,
+      "trade_volume": 28000
+    },
+    {
+      "bar_time": "2026-10-07 09:13:00.000000",
+      "open_price": 1780.0,
+      "high_price": 1785.0,
+      "low_price": 1780.0,
+      "close_price": 1785.0,
+      "trade_volume": 21000
+    },
+    {
+      "bar_time": "2026-10-07 09:14:00.000000",
+      "open_price": 1785.0,
+      "high_price": 1785.0,
+      "low_price": 1780.0,
+      "close_price": 1780.0,
+      "trade_volume": 41000
+    },
+    {
+      "bar_time": "2026-10-07 09:15:00.000000",
+      "open_price": 1775.0,
+      "high_price": 1810.0,
+      "low_price": 1775.0,
+      "close_price": 1805.0,
+      "trade_volume": 263000
+    },
+    {
+      "bar_time": "2026-10-07 09:16:00.000000",
+      "open_price": 1805.0,
+      "high_price": 1810.0,
+      "low_price": 1800.0,
+      "close_price": 1805.0,
+      "trade_volume": 57000
+    }
+  ]
+}

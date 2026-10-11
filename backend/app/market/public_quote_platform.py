@@ -40,6 +40,7 @@ from app.market_data.contracts import (
     Market,
     MarketSession,
     OperationalStatus,
+    ObservationState,
     ProviderResourceHealth,
     Quantity,
     QuantityUnit,
@@ -64,6 +65,7 @@ from app.market_data.policies import DataPurpose, RealtimePolicy
 from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
 from app.market_data.registry import DATASET_REGISTRY, evaluate_dataset_health
 from app.market_data.resolution import ResolutionCandidate
+from app.market_data.quality_policy import snapshot_receipt_freshness
 
 
 PUBLIC_QUOTE_MAX_AGE_SECONDS = 15
@@ -139,7 +141,8 @@ def build_taiwan_public_quote_requirement(
         session=_market_session(requested_at),
         requested_at=requested_at,
         freshness=FreshnessRequirement(
-            max_age_seconds=PUBLIC_QUOTE_MAX_AGE_SECONDS
+            max_age_seconds=PUBLIC_QUOTE_MAX_AGE_SECONDS,
+            basis=FreshnessBasis.EVENT_TIME if require_actual_trade else FreshnessBasis.RECEIVED_TIME,
         ),
         quality=QualityRequirement(
             required_fields=("last_trade_price",) if require_actual_trade else (),
@@ -367,6 +370,16 @@ class TaiwanPublicQuoteCandidateReader:
                             is MarketSession.CLOSE_RESOLUTION
                             else "SESSION_CLOSE_CONFIRMATION_MISSING"
                         )
+                elif (
+                    observation.state is ObservationState.INDICATIVE
+                    and not requirement.request.required_fields
+                    and same_trade_date
+                    and stored.market_session == requirement.session
+                ):
+                    freshness = snapshot_receipt_freshness(
+                        observation.lineage, now=requirement.requested_at,
+                        max_age_seconds=requirement.freshness.max_age_seconds,
+                    )
                 elif (
                     requirement.session in _ACTIVE_SESSIONS
                     and same_trade_date

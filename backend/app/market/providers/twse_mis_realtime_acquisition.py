@@ -283,6 +283,8 @@ class TwseMisRealtimeAcquisitionAdapter:
                             retry_after_seconds=guard.retry_after_seconds,
                             cooldown_until=guard.cooldown_until,
                         )
+            # Receipt time belongs to the completed transport, not its start.
+            sampled_at = self._clock()
             self._cache[instrument.symbol] = (provider_snapshot, sampled_at)
             external_calls = provider_snapshot.external_calls
         else:

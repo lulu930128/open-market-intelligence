@@ -1,4 +1,7 @@
+from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from threading import Event, Thread
 import json
 import logging
 from typing import Any
@@ -42,6 +45,7 @@ from app.jobs.taiwan_session_close_scheduler import (
 from app.jobs.taiwan_price_map_snapshot_scheduler import add_taiwan_price_map_snapshot_jobs
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
+    require_intraday_publisher_admission,
     us_intraday_materializer_jobs_requested,
 )
 from app.jobs.us_index_data_repair_gate import (
@@ -2753,6 +2757,7 @@ def _add_us_index_data_repair_gate(scheduler: Any) -> bool:
 
 
 def start_scheduler() -> Any | None:
+    require_intraday_publisher_admission()
     if (
         not settings.enable_scheduler
         and not settings.enable_tw_stock_detail_scheduler
@@ -3107,9 +3112,38 @@ def start_scheduler() -> Any | None:
     return scheduler
 
 
-def stop_scheduler(scheduler: Any | None) -> None:
-    if scheduler is None:
-        return
+@dataclass(frozen=True)
+class SchedulerDrain:
+    completion: Future
+    admission_stopped: Event
 
-    scheduler.shutdown(wait=False)
-    logger.info("Job scheduler stopped.")
+
+def stop_scheduler(scheduler: Any | None) -> SchedulerDrain:
+    """One stop per scheduler; a deadline observer must retain this receipt.
+
+    APScheduler owns additional executor jobs outside job_service. Joining its
+    executors runs off the asyncio loop. A stuck join is not a successful stop.
+    """
+    if scheduler is not None:
+        previous = getattr(scheduler, "_omi_drain", None)
+        if isinstance(previous, SchedulerDrain):
+            return previous
+    receipt = SchedulerDrain(Future(), Event())
+    if scheduler is None:
+        receipt.admission_stopped.set()
+        receipt.completion.set_result(None)
+        return receipt
+    scheduler._omi_drain = receipt
+
+    def stop_owned_scheduler() -> None:
+        try:
+            scheduler.pause()
+            receipt.admission_stopped.set()
+            scheduler.shutdown(wait=True)
+        except BaseException as exc:
+            receipt.completion.set_exception(exc)
+        else:
+            receipt.completion.set_result(None)
+
+    Thread(target=stop_owned_scheduler, name="omi-scheduler-drain", daemon=True).start()
+    return receipt

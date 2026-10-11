@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Load, Session
 
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
 from app.market_data.candidate_repository import (
@@ -161,6 +161,18 @@ class USDailyBarRepository:
         symbols = us_symbol_storage_candidates(instrument.symbol)
         rows_query = (
             self._db.query(USDailyPrice, RawFetchResult, SourceRegistry)
+            .options(
+                # Eligibility and lineage need receipt metadata, not the payload
+                # repeated by every joined Daily row. Reject deferred IO here.
+                Load(RawFetchResult).load_only(
+                    RawFetchResult.id,
+                    RawFetchResult.source_id,
+                    RawFetchResult.fetched_at,
+                    RawFetchResult.parser_version,
+                    RawFetchResult.content_hash,
+                    raiseload=True,
+                )
+            )
             .outerjoin(RawFetchResult, RawFetchResult.id == USDailyPrice.raw_result_id)
             .outerjoin(SourceRegistry, SourceRegistry.id == USDailyPrice.source_id)
             .filter(USDailyPrice.symbol.in_(symbols))

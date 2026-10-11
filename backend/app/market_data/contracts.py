@@ -511,6 +511,9 @@ class BreadthRescueDiagnostics(CanonicalModel):
 
 
 class BreadthAcquisitionDiagnostics(CanonicalModel):
+    # Optional reference to internal provider receipt evidence, never readiness truth.
+    receipt_evidence_id: str | None = Field(default=None, max_length=64)
+    receipt_evidence_version: str | None = Field(default=None, max_length=64)
     auction_error_code: str | None = Field(default=None, max_length=64)
     attempted_batch_count: int | None = Field(default=None, ge=0)
     skipped_batch_count: int = Field(default=0, ge=0)

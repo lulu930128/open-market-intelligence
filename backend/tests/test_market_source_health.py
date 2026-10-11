@@ -537,6 +537,14 @@ class TaiwanSourceHealthTests(unittest.TestCase):
                     refresh_outcome="updated",
                     freshness_status="live",
                     source="twse_mis_quote_depth",
+                    payload_json=json.dumps({
+                        "quote_time": observed_at.isoformat(),
+                        "data_core_components": {
+                            capability: {"freshness": {"is_current": True},
+                                         "resolved_health": {"facts_usable": True}}
+                            for capability in ("quote.snapshot", "quote.order_book", "quote.auction")
+                        },
+                    }),
                 ),
             ]
         )

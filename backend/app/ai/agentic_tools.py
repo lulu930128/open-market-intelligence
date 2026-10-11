@@ -44,7 +44,10 @@ from app.resource_market import service as resource_market_service
 from app.resource_market.source_health import build_resource_source_health
 from app.us_market import service as us_market_service
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
-from app.us_market.daily_market_state import requested_us_completed_daily_state
+from app.us_market.daily_market_state import (
+    USInstrumentIdentityUnavailableError,
+    requested_us_completed_daily_state,
+)
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 from app.watchlists import backfill_service as watchlist_backfill_service
@@ -189,16 +192,21 @@ def scan_us_stock_gaps(
     needs_profile = "us_company_profile" in required_capabilities
     needs_sec = "us_sec_company_fact" in required_capabilities
     needs_corporate_actions = "us_corporate_action" in required_capabilities
-    daily_platform_result = (
-        USDailyOhlcvPlatform(db).read(
-            symbol=normalized_symbol,
-            bars=2,
-            now=evaluated_at,
-            to_date=requested_date,
-        )
-        if needs_daily and (daily_request is None or daily_request.eligible)
-        else None
-    )
+    daily_platform_result = None
+    missing: list[str] = []
+    warnings: list[str] = []
+    if needs_daily and (daily_request is None or daily_request.eligible):
+        try:
+            daily_platform_result = USDailyOhlcvPlatform(db).read(
+                symbol=normalized_symbol,
+                bars=2,
+                now=evaluated_at,
+                to_date=requested_date,
+            )
+        except USInstrumentIdentityUnavailableError as exc:
+            # Missing identity is a data gap; contract/DB/programming failures
+            # must still propagate rather than masquerading as unavailable.
+            warnings.append(str(exc))
     profile = _latest_profile(db, normalized_symbol) if needs_profile else None
     sec_metric_count = _sec_metric_count(db, normalized_symbol) if needs_sec else 0
     corporate_action_count, corporate_action_fetched_at = (
@@ -206,8 +214,6 @@ def scan_us_stock_gaps(
         if needs_corporate_actions
         else (0, None)
     )
-    missing: list[str] = []
-    warnings: list[str] = []
     expected_dates: dict[str, Any] = {}
     if daily_request is not None:
         expected_dates["us_daily_request"] = daily_request.model_dump(mode="json")

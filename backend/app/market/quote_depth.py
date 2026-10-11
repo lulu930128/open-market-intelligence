@@ -1811,6 +1811,9 @@ def _component_evidence(result: Any, observation: Any) -> dict[str, Any]:
         and health.status in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK, ResolvedEvidenceStatus.PARTIAL}
         and freshness in {EvidenceFreshness.LIVE, EvidenceFreshness.FRESH}
     )
+    requested_at = result.requirement.requested_at
+    def age(value):
+        return max(0, int((requested_at - value).total_seconds())) if value is not None else None
     return {
         "result_kind": result.result_kind,
         "acquisition": result.acquisition.model_dump(mode="json"),
@@ -1833,10 +1836,15 @@ def _component_evidence(result: Any, observation: Any) -> dict[str, Any]:
             lineage.model_dump(mode="json") if lineage is not None else None
         ),
         "resolved_health": result.resolved.health.model_dump(mode="json"),
+        "provider_health": [item.model_dump(mode="json") for item in result.provider_health],
         "freshness": {
             "status": freshness.value,
             "is_current": current,
             "is_live": current and freshness is EvidenceFreshness.LIVE,
+            "basis": result.requirement.freshness.basis.value,
+            "age_seconds": age(getattr(lineage, "event_at", None)),
+            "receipt_age_seconds": age(getattr(lineage, "received_at", None)),
+            "fetch_age_seconds": age(getattr(lineage, "fetched_at", None)),
         },
         "dataset_health": (
             result.dataset_health.model_dump(mode="json")
@@ -2199,6 +2207,13 @@ def project_taiwan_quote_evidence_bundle(
             basis="actual_trade", finalization="provisional", authority="exchange_feed",
             source=projected_quote["source"], decision_usable=quote_result.resolved.health.research_usable,
         ))
+    # The parent describes the selected quote, never the age of a sibling book
+    # or the latest unselected legacy row. Canonical component health owns it.
+    quote_evidence = _component_evidence(quote_result, quote_result.resolved.quote)
+    response["freshness"].update({
+        **quote_evidence["freshness"],
+        "is_stale": quote_evidence["freshness"]["status"] in {"stale", "missing", "unknown"},
+    })
     _apply_resolved_depth(response, depth_result, phase=phase)
     _apply_resolved_auction(response, auction_result)
     _finalize_shared_projection_semantics(

@@ -1,6 +1,46 @@
 schema_version = 1
 
 [[rules]]
+id = "tw_intraday_radar_read_boundary"
+kind = "python_forbidden_import"
+description = "Intraday discovery uses cached lightweight state; candidate admission cannot acquire or depend on consumers."
+roots = ["backend/app/market/tw_intraday_discovery.py", "backend/app/market/tw_intraday_radar.py", "backend/app/market/tw_intraday_radar_contracts.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.market.providers", "app.jobs", "app.dispatch", "app.ai", "app.routers", "app.sources", "app.pipelines", "app.market.tw_intraday_universe", "app.market.tw_intraday_platform", "app.market.tw_realtime_lease_platform", "requests", "httpx"]
+
+[[rules]]
+id = "tw_intraday_radar_read_transaction"
+kind = "python_forbidden_call"
+description = "Intraday discovery and candidate evaluation never persist or admit acquisition."
+roots = ["backend/app/market/tw_intraday_discovery.py", "backend/app/market/tw_intraday_radar.py", "backend/app/market/tw_intraday_radar_contracts.py"]
+extensions = [".py"]
+forbidden_call_names = ["commit", "rollback", "flush", "persist_taiwan_intraday_stock_states", "resolve_taiwan_tier_a_target_plan"]
+
+[[rules]]
+id = "tw_intraday_candidate_engine_pure"
+kind = "python_forbidden_import"
+description = "Versioned Intraday candidate contract and gate are pure and do not reuse Radar v2 scoring."
+roots = ["backend/app/market/tw_intraday_radar.py", "backend/app/market/tw_intraday_radar_contracts.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.db", "sqlalchemy", "app.radar", "app.market.tw_intraday_state", "app.market.tw_intraday_discovery"]
+
+[[rules]]
+id = "tw_workspace_read_boundary"
+kind = "python_forbidden_import"
+description = "Progressive workspace composes canonical cache reads, never acquisition or job owners."
+roots = ["backend/app/market/tw_workspace.py", "backend/app/market/tw_watchlist_state.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.market.providers", "app.jobs", "app.dispatch", "app.sources", "app.pipelines", "requests", "httpx"]
+
+[[rules]]
+id = "tw_workspace_read_transaction"
+kind = "python_forbidden_call"
+description = "Workspace and canonical batch readers never own persistence transactions."
+roots = ["backend/app/market/tw_workspace.py", "backend/app/market/tw_watchlist_state.py", "backend/app/market/public_quote_repository.py", "backend/app/market/daily_price_repository.py"]
+extensions = [".py"]
+forbidden_call_names = ["commit", "rollback", "flush"]
+
+[[rules]]
 id = "tw_daily_day_state_pure"
 kind = "python_forbidden_import"
 description = "Instrument-day classification is pure and cannot acquire, persist or depend on consumers."
@@ -249,3 +289,10 @@ id = "us_market_service_compatibility_facade"
 kind = "forbidden_path"
 description = "The oversized US service compatibility facade is bounded debt and must be decomposed before it can become a canonical owner."
 paths = ["backend/app/us_market/service.py"]
+[[rules]]
+id = "tw_breadth_receipt_evidence_internal"
+kind = "python_forbidden_import"
+description = "RawResult batch evidence is provider internal; consumers use canonical breadth diagnostics or discovery coverage."
+roots = ["backend/app/ai", "backend/app/routers", "backend/app/market_data", "agents", "backend/app/market/tw_intraday_discovery.py", "backend/app/market/tw_intraday_radar.py", "backend/app/market/tw_intraday_radar_contracts.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.market.tw_breadth_acquisition_contract", "app.market.providers.twse_mis_breadth_evidence"]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from r1d_test_support import isolated_publisher_lifecycle  # noqa: F401
+
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from types import SimpleNamespace
@@ -1171,64 +1173,39 @@ def test_index_intraday_lane_publishes_cache_only_read_model_after_run(
 
 
 def test_read_model_publishers_are_deduplicated_and_bounded(monkeypatch) -> None:
-    started: list[tuple[str, tuple[str, ...]]] = []
-
-    class _DeferredThread:
-        def __init__(self, *, target, args, name, daemon):
-            assert daemon is True
-            started.append((name, args))
-
-        def start(self) -> None:
-            return None
-
-    monkeypatch.setattr(us_scheduler, "Thread", _DeferredThread)
-    with us_scheduler._READ_MODEL_PUBLISH_LOCK:
-        us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT.clear()
-    try:
-        assert us_scheduler._schedule_intraday_consumer_read_model("TSM") is True
-        assert us_scheduler._schedule_intraday_consumer_read_model("TSM") is False
-        assert us_scheduler._schedule_intraday_consumer_read_model("MU") is True
-        assert us_scheduler._schedule_intraday_consumer_read_model("^GSPC") is True
-        assert us_scheduler._schedule_intraday_consumer_read_model("^SOX") is True
-        assert us_scheduler._schedule_intraday_consumer_read_model("AAPL") is False
-        assert started == [
-            ("us-intraday-read-model-TSM", ("TSM",)),
-            ("us-intraday-read-model-MU", ("MU",)),
-            ("us-intraday-read-model-^GSPC", ("^GSPC",)),
-            ("us-intraday-read-model-^SOX", ("^SOX",)),
-        ]
-    finally:
-        with us_scheduler._READ_MODEL_PUBLISH_LOCK:
-            us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT.clear()
-
-
-def test_read_model_publisher_bypasses_old_projection_without_provider_io(
-    monkeypatch,
-) -> None:
+    from threading import Event
+    entered, release = Event(), Event()
     db = _FakeDb()
-    calls: list[dict[str, object]] = []
     monkeypatch.setattr(us_scheduler, "SessionLocal", lambda: db)
-    monkeypatch.setattr(
-        "app.us_market.service.get_us_intraday_trend",
-        lambda **kwargs: calls.append(kwargs),
-    )
-    with us_scheduler._READ_MODEL_PUBLISH_LOCK:
-        us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT.add("TSM")
+    def read(**kwargs):
+        entered.set()
+        assert release.wait(3)
+    monkeypatch.setattr(us_market_service, "get_us_intraday_trend", read)
+    try:
+        assert us_scheduler._schedule_intraday_consumer_read_model("TSM")
+        assert entered.wait(2)
+        assert not us_scheduler._schedule_intraday_consumer_read_model("TSM")
+        for symbol in ("MU", "^GSPC", "^SOX"):
+            assert us_scheduler._schedule_intraday_consumer_read_model(symbol)
+        assert not us_scheduler._schedule_intraday_consumer_read_model("AAPL")
+        assert len(us_scheduler._READ_MODEL_PUBLISH_TASKS) == 4
+    finally:
+        release.set()
+        for task in tuple(us_scheduler._READ_MODEL_PUBLISH_TASKS.values()):
+            task.thread.join(3)
 
-    us_scheduler._publish_intraday_consumer_read_model("TSM")
 
-    assert calls == [
-        {
-            "symbol": "TSM",
-            "session_scope": "regular",
-            "interval": "1m",
-            "db": db,
-            "bypass_read_cache": True,
-        }
-    ]
+def test_read_model_publisher_bypasses_old_projection_without_provider_io(monkeypatch) -> None:
+    db = _FakeDb()
+    calls = []
+    monkeypatch.setattr(us_scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(us_market_service, "get_us_intraday_trend", lambda **kwargs: calls.append(kwargs))
+    assert us_scheduler._schedule_intraday_consumer_read_model("TSM")
+    us_scheduler._READ_MODEL_PUBLISH_TASKS["TSM"].thread.join(3)
+    assert calls == [{"symbol": "TSM", "session_scope": "regular", "interval": "1m",
+                      "db": db, "bypass_read_cache": True}]
     assert db.closed is True
-    with us_scheduler._READ_MODEL_PUBLISH_LOCK:
-        assert "TSM" not in us_scheduler._READ_MODEL_PUBLISH_IN_FLIGHT
+    assert not us_scheduler.intraday_publisher_drain_status().retained_symbols
 
 
 def test_intraday_scheduler_reuses_complete_recurring_profile(

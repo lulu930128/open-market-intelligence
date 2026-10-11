@@ -16,6 +16,7 @@ from pydantic import Field, model_validator
 
 from app.market_data.contracts import (
     AuthorityClass,
+    BarFinalization,
     CanonicalModel,
     EvidenceFreshness,
     ObservationState,
@@ -67,6 +68,7 @@ class QualityReasonCode(str, Enum):
     INDICATIVE_EVIDENCE = "QUALITY_INDICATIVE_EVIDENCE"
     PRICE_BASIS_MISMATCH = "QUALITY_PRICE_BASIS_MISMATCH"
     BAR_COVERAGE_INSUFFICIENT = "QUALITY_BAR_COVERAGE_INSUFFICIENT"
+    BAR_NOT_FINALIZED = "QUALITY_BAR_NOT_FINALIZED"
 
 
 class QualityEvaluation(CanonicalModel):
@@ -100,6 +102,34 @@ def authority_satisfies(
     if minimum is None:
         return True
     return _AUTHORITY_RANK[actual] >= _AUTHORITY_RANK[minimum]
+
+
+def snapshot_receipt_freshness(
+    lineage: SourceLineage,
+    *,
+    now: datetime,
+    max_age_seconds: int,
+) -> EvidenceFreshness:
+    """Separate a current receipt from proof of recent provider activity.
+
+    Market owners must independently validate the trade date and session.
+    FRESH preserves a received snapshot; only recent event evidence is LIVE.
+    """
+    event_at, received_at, fetched_at = lineage.event_at, lineage.received_at, lineage.fetched_at
+    if event_at is None or received_at is None or fetched_at is None:
+        return EvidenceFreshness.UNKNOWN
+    if event_at > now:
+        return EvidenceFreshness.STALE
+    if any(
+        not 0 <= (now - value).total_seconds() <= max_age_seconds
+        for value in (received_at, fetched_at)
+    ):
+        return EvidenceFreshness.STALE
+    return (
+        EvidenceFreshness.LIVE
+        if (now - event_at).total_seconds() <= max_age_seconds
+        else EvidenceFreshness.FRESH
+    )
 
 
 def required_fields_for(requirement: DataRequirementV2) -> tuple[str, ...]:
@@ -202,6 +232,12 @@ def evaluate_candidate_quality(
         hard_rejection = True
 
     if isinstance(requirement.request, BarCapabilityRequest):
+        if requirement.request.completed_only and getattr(observation, "finalization", None) not in {
+            BarFinalization.FINAL, BarFinalization.CORRECTED,
+        }:
+            reasons.append(QualityReasonCode.BAR_NOT_FINALIZED)
+            limitations.append("Completed bar evidence requires final or corrected observations.")
+            hard_rejection = True
         actual_price_basis = getattr(observation, "price_basis", None)
         if (
             actual_price_basis is not None

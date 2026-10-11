@@ -466,6 +466,7 @@ def plan_data_acquisition_v2(
     descriptors: Iterable[ProviderCapabilityDescriptorV2],
     provider_health: Iterable[ProviderResourceHealth] = (),
     *,
+    excluded_providers: tuple[str, ...] = (),
     subscription_execution: Literal[
         "aggregate_budget",
         "sequential_fallback",
@@ -496,6 +497,8 @@ def plan_data_acquisition_v2(
             limitations=("ACQUISITION_BUDGET_ZERO",),
         )
 
+    if len(excluded_providers) > 32:
+        raise ValueError("excluded provider history exceeds bounded catalog size")
     descriptor_list = tuple(descriptors)
     if len(descriptor_list) > 32:
         raise ValueError("provider descriptor input exceeds bounded catalog size")
@@ -517,6 +520,8 @@ def plan_data_acquisition_v2(
             requirement,
             capability_id=requirement.request.capability_id,
         )
+        if descriptor.provider_key in excluded_providers:
+            reason = "PROVIDER_ALREADY_RESERVED"
         if reason is None:
             reason, health_limitations = _health_decision(
                 descriptor,

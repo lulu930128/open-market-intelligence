@@ -25,6 +25,7 @@ from app.market.public_quote_platform import acquire_taiwan_session_close
 from app.market.taiwan_realtime_platform import refresh_taiwan_realtime_snapshot
 from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
 from app.market_data.policies import RealtimePolicy
+from app.market_data.integration_contracts import MarketDataResultV1
 
 
 TAIWAN_QUOTE_CONTRACT_SLOTS = (
@@ -150,11 +151,22 @@ def quote_contract_snapshot_semantic_status(
             and isinstance(payload.get("freshness"), dict)
             else None
         )
-        ready = bool(same_trade_date and not source_error)
+        components = (payload or {}).get("data_core_components")
+        components = components if isinstance(components, dict) else {}
+        required = _slot_required_capabilities(str(row.capture_slot))
+        components_ready = all(
+            isinstance(components.get(capability), dict)
+            and isinstance(components[capability].get("freshness"), dict)
+            and isinstance(components[capability].get("resolved_health"), dict)
+            and components[capability].get("freshness", {}).get("is_current") is True
+            and components[capability].get("resolved_health", {}).get("facts_usable") is True
+            for capability in required
+        )
+        ready = bool(same_trade_date and not source_error and components_ready)
         return {
             "status": "ready" if ready else "captured_partial",
             "ready": ready,
-            "reason": None if ready else "current_trade_date_observation_missing",
+            "reason": None if ready else "required_current_components_missing",
         }
 
     components = (
@@ -348,24 +360,35 @@ def capture_taiwan_quote_contract_snapshot(
     )
     payload: dict[str, Any] | None = None
     error: str | None = None
+    projection_time = local_now
     try:
         if _slot_time(capture_slot) >= TAIWAN_QUOTE_CONTRACT_CLOSE_START:
-            acquire_taiwan_session_close(
+            acquired = acquire_taiwan_session_close(
                 db,
                 stock_id=normalized_stock_id,
                 requested_at=local_now,
             )
+            results = (acquired,)
         else:
-            refresh_taiwan_realtime_snapshot(
+            acquired = refresh_taiwan_realtime_snapshot(
                 db,
                 stock_id=normalized_stock_id,
                 policy=RealtimePolicy.PREFER_LIVE,
                 requested_at=local_now,
             )
+            results = (acquired.quote, acquired.depth, acquired.auction)
+        for result in results:
+            if not isinstance(result, MarketDataResultV1):
+                continue
+            if result.acquisition.attempted:
+                # Acquisition health is stamped at transport completion, also
+                # when no observation satisfies the requested live policy.
+                for health in result.provider_health:
+                    projection_time = max(projection_time, health.checked_at)
         payload = get_taiwan_stock_quote_depth(
             db=db,
             stock_id=normalized_stock_id,
-            now=local_now,
+            now=projection_time,
         )
         if contract_context:
             payload = {**payload, "scheduler_contract": deepcopy(contract_context)}
@@ -379,7 +402,7 @@ def capture_taiwan_quote_contract_snapshot(
         trade_date=local_now.date(),
         capture_slot=capture_slot,
         scheduled_at=scheduled_at,
-        captured_at=local_now,
+        captured_at=projection_time,
         payload=payload,
         error=error,
     )

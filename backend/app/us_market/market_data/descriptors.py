@@ -160,6 +160,8 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     max_external_calls_per_attempt=1,
     max_symbols_per_call=1,
     max_range_days=5,
+    supports_dated_queries=True,
+    max_lookback_days=5,
     allow_unknown_health=True,
     limitations=("DELAYED_VENDOR_EVIDENCE",),
 )
@@ -276,6 +278,8 @@ TWELVE_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     max_external_calls_per_attempt=1,
     max_symbols_per_call=1,
     max_range_days=30,
+    supports_dated_queries=True,
+    max_lookback_days=5,
     allow_unknown_health=True,
     limitations=("PARTIAL_US_MARKET_VOLUME", "PERSONAL_INTERNAL_USE_ONLY"),
 )

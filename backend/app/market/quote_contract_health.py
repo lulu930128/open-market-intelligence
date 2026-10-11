@@ -128,6 +128,7 @@ def build_taiwan_quote_scheduler_contract(
             db.query(TaiwanQuoteContractSnapshot)
             .filter(TaiwanQuoteContractSnapshot.trade_date == trade_date)
             .filter(TaiwanQuoteContractSnapshot.stock_id.in_(scoped_symbols))
+            .filter(TaiwanQuoteContractSnapshot.captured_at <= current_time.replace(tzinfo=None))
             .filter(
                 TaiwanQuoteContractSnapshot.capture_slot.in_(required_slots)
             )
@@ -191,7 +192,7 @@ def build_taiwan_quote_scheduler_contract(
         else "ready"
         if captured_count == requested_count
         else "partial"
-        if captured_count or failed_pairs
+        if transport_captured_count or failed_pairs
         else "missing"
     )
     observed_slots = {

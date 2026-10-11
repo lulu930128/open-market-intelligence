@@ -18,6 +18,7 @@ from app.db.models import (
     TaiwanIssuedSharesDaily,
     TaiwanIntradayStockState,
     WatchlistGroup,
+    WatchlistItem,
 )
 from app.market.official_index_platform import read_taiwan_official_index_series
 from app.market.intraday import get_market_intraday_history
@@ -32,15 +33,15 @@ from app.market.trading_calendar import (
 )
 from app.market.service import list_stock_ohlc_chart_data
 from app.market.technical_report import build_stock_technical_report
+from app.market.tw_workspace_research import project_tw_workspace_research
 from app.market.taiwan_industries import normalize_tw_industry_label
 from app.market.tw_intraday_state import (
     INTRADAY_STATE_VERSION,
     build_tw_hot_groups_snapshot,
 )
-from app.market.tw_instrument import TaiwanInstrumentResolutionError
-from app.market.tw_watchlist_state import read_taiwan_watchlist_instrument_state
+from app.market.tw_watchlist_state import read_taiwan_watchlist_instrument_states
 from app.market_data.contracts import MarketIndexObservation
-from app.watchlists.service import list_groups, list_items
+from app.watchlists.service import list_groups
 
 
 TW_MARKET_DASHBOARD_VERSION = "omi.tw_market_dashboard.v1"
@@ -443,16 +444,33 @@ def _build_watchlist(
             "warnings": ["No active root watchlist group is configured."],
         }
 
-    raw_items = list_items(
-        db=db,
-        group_id=group.id,
-        enabled=True,
-        include_children=include_children,
-        limit=limit + 1,
-        offset=0,
-    )
+    selected_groups = {group.id}
+    if include_children:
+        # Preserve legacy descendant selection (including inactive children),
+        # without one metadata query per watchlist item.
+        all_groups = db.query(WatchlistGroup.id, WatchlistGroup.parent_id).all()
+        pending = [group.id]
+        while pending:
+            parent = pending.pop()
+            for child_id, parent_id in all_groups:
+                if parent_id == parent and child_id not in selected_groups:
+                    selected_groups.add(child_id)
+                    pending.append(child_id)
+    raw_items = [
+        {"stock_id": item.stock_id, "stock_name": name, "market": market}
+        for item, name, market in db.query(WatchlistItem, StockMaster.stock_name, StockMaster.market)
+        .outerjoin(StockMaster, StockMaster.stock_id == WatchlistItem.stock_id)
+        .filter(WatchlistItem.group_id.in_(selected_groups), WatchlistItem.enabled.is_(True))
+        .order_by(WatchlistItem.priority.asc(), WatchlistItem.id.asc()).limit(limit + 1).all()
+    ]
     selection["truncated"] = len(raw_items) > limit
     deduplicated: list[dict[str, Any]] = []
+    selected_ids = tuple(dict.fromkeys(
+        str(item.get("stock_id") or "") for item in raw_items if item.get("stock_id")
+    ))[:limit]
+    observations = read_taiwan_watchlist_instrument_states(
+        db, instrument_ids=selected_ids, requested_at=requested_at,
+    )
     seen: set[str] = set()
     for item in raw_items:
         stock_id = str(item.get("stock_id") or "")
@@ -461,12 +479,8 @@ def _build_watchlist(
         seen.add(stock_id)
         market = str(item.get("market") or "").upper()
         try:
-            observation = read_taiwan_watchlist_instrument_state(
-                db,
-                instrument_id=stock_id,
-                requested_at=requested_at,
-            )
-        except TaiwanInstrumentResolutionError:
+            observation = observations[stock_id.strip().upper()]
+        except KeyError:
             observation = {
                 "instrument_type": "unknown",
                 "market": market or None,
@@ -755,9 +769,13 @@ def _build_index_estimates(
 
 def _build_resolved_indices(
     db: Session,
+    *, requested_at: datetime | None = None,
+    allow_universe_fallback: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     try:
-        summary = get_market_index_summary(db)
+        summary = get_market_index_summary(db) if requested_at is None and allow_universe_fallback else get_market_index_summary(
+            db, requested_at=requested_at, allow_universe_fallback=allow_universe_fallback,
+        )
     except Exception as exc:
         return [], {}, [f"Resolved Taiwan index cache is unavailable: {exc}"]
 
@@ -1039,7 +1057,7 @@ def search_tw_dashboard_symbols(
     rows = (
         db.query(StockMaster)
         .filter(StockMaster.market.in_(SUPPORTED_MARKETS))
-        .filter(StockMaster.instrument_type == "stock")
+        .filter(func.lower(StockMaster.instrument_type).in_(("stock", "etf")))
         .filter(StockMaster.is_active.is_(True))
         .filter(
             or_(
@@ -1056,6 +1074,7 @@ def search_tw_dashboard_symbols(
             StockMaster.stock_id.asc(),
         )
         .limit(limit)
+        .execution_options(autoflush=False)
         .all()
     )
     items = [
@@ -1182,6 +1201,12 @@ def _dashboard_intraday_chart(
         "cache_hit": bool(history.get("cache_hit")),
         "volume_unit": str(history.get("canonical_volume_unit") or "shares"),
         "volume_semantics": volume_semantics,
+        "series_coverage": history.get("series_coverage"),
+        "coverage_scope": "resolver_series_before_display_slice",
+        "cache_trade_date": history.get("cache_trade_date"),
+        "cache_latest_time": history.get("cache_latest_time"),
+        "resolved_health": history.get("resolved_health"),
+        "limitations": history.get("limitations") or [],
         "points": session_points,
     }
     return chart, {
@@ -1198,13 +1223,13 @@ def _dashboard_intraday_chart(
     }
 
 
-def build_tw_dashboard_stock_detail(
+def _build_tw_stock_chart(
     db: Session,
     *,
     stock_id: str,
     timeframe: str = "daily",
     bars: int = 90,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     normalized_stock_id = str(stock_id or "").strip()
     normalized_timeframe = str(timeframe or "daily").strip().lower()
     stock = (
@@ -1253,18 +1278,10 @@ def build_tw_dashboard_stock_detail(
         )
         moving_average_points = intraday_chart.get("points") or []
 
-    technical = build_stock_technical_report(
-        db=db,
-        stock_id=normalized_stock_id,
-        timeframe=normalized_timeframe,
-        include_intraday=include_intraday or normalized_timeframe == "today",
-        intraday_override=intraday_override,
-    )
     warnings = list(
         dict.fromkeys(
             [
                 *[str(value) for value in chart.get("warnings") or []],
-                *[str(value) for value in technical.get("warnings") or []],
                 *(
                     ["Cached intraday history is unavailable for the latest session."]
                     if normalized_timeframe == "today"
@@ -1275,8 +1292,8 @@ def build_tw_dashboard_stock_detail(
         )
     )
     return {
-        "kind": "omi.tw_stock_dashboard_detail",
-        "version": TW_STOCK_DASHBOARD_DETAIL_VERSION,
+        "kind": "omi.tw_stock_chart",
+        "version": "omi.tw_stock_chart.v1",
         "stock_id": normalized_stock_id,
         "stock_name": stock.stock_name,
         "instrument_type": str(stock.instrument_type or "unknown").lower(),
@@ -1289,14 +1306,68 @@ def build_tw_dashboard_stock_detail(
         "moving_averages": build_dashboard_moving_average_series(
             moving_average_points
         ),
-        "technical": technical,
         "warnings": warnings,
         "limitations": [
-            "This read path uses cached local OHLC, intraday, and technical evidence only.",
+            "This read path uses cached local OHLC and intraday evidence only.",
             "The today timeframe uses the latest persisted one-minute trading session and does not refresh providers.",
             "Missing or stale history is returned truthfully and never backfilled by this GET request.",
         ],
-    }
+    }, intraday_override
+
+
+def build_tw_stock_chart(
+    db: Session, *, stock_id: str, timeframe: str = "daily", bars: int = 90,
+) -> dict[str, Any]:
+    with db.no_autoflush:
+        return _build_tw_stock_chart(db, stock_id=stock_id, timeframe=timeframe, bars=bars)[0]
+
+
+def build_tw_stock_research(
+    db: Session, *, stock_id: str, timeframe: str = "daily", projection: str = "full",
+) -> dict[str, Any]:
+    if projection not in {"full", "workspace"}:
+        raise ValueError("projection must be one of: full, workspace.")
+    with db.no_autoflush:
+        normalized = str(stock_id or "").strip()
+        stock = db.query(StockMaster).filter(
+            StockMaster.stock_id == normalized, StockMaster.market.in_(SUPPORTED_MARKETS),
+            func.lower(StockMaster.instrument_type).in_(("stock", "etf")), StockMaster.is_active.is_(True),
+        ).first()
+        if stock is None:
+            raise TaiwanDashboardStockNotFoundError(f"Active Taiwan stock or ETF id='{normalized}' was not found.")
+        technical = build_stock_technical_report(
+            db=db, stock_id=normalized, timeframe=timeframe,
+            include_intraday=timeframe in {"daily", "today"},
+        )
+        result = {
+            "kind": "omi.tw_stock_research", "version": "omi.tw_stock_research.v1",
+            "stock_id": normalized, "timeframe": timeframe, "cache_only": True,
+            "technical": technical, "warnings": technical.get("warnings") or [],
+        }
+        return project_tw_workspace_research(result) if projection == "workspace" else result
+
+
+def build_tw_dashboard_stock_detail(
+    db: Session, *, stock_id: str, timeframe: str = "daily", bars: int = 90,
+) -> dict[str, Any]:
+    # Public v2 compatibility composes the same chart with its original report
+    # input, including full-session intraday scope for today's volume analysis.
+    with db.no_autoflush:
+        chart, intraday_override = _build_tw_stock_chart(db, stock_id=stock_id, timeframe=timeframe, bars=bars)
+        technical = build_stock_technical_report(
+            db=db, stock_id=chart["stock_id"], timeframe=chart["timeframe"],
+            include_intraday=chart["timeframe"] in {"daily", "today"},
+            intraday_override=intraday_override,
+        )
+        return {
+            **chart, "kind": "omi.tw_stock_dashboard_detail", "version": TW_STOCK_DASHBOARD_DETAIL_VERSION,
+            "technical": technical,
+            "warnings": list(dict.fromkeys([*chart["warnings"], *technical.get("warnings", [])])),
+            "limitations": [
+                "This read path uses cached local OHLC, intraday, and technical evidence only.",
+                *chart["limitations"][1:],
+            ],
+        }
 
 
 __all__ = [
@@ -1311,6 +1382,8 @@ __all__ = [
     "build_dashboard_moving_average_series",
     "build_tw_dashboard_stock_detail",
     "build_tw_market_dashboard",
+    "build_tw_stock_chart",
+    "build_tw_stock_research",
     "estimate_cap_weighted_index",
     "search_tw_dashboard_symbols",
 ]

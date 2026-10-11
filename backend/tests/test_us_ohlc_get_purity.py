@@ -45,6 +45,7 @@ def test_public_get_forces_cache_only_service_read() -> None:
         timeframe="daily",
         bars=90,
         to_date=date(2026, 8, 21),
+        include_intraday_overlay=True,
     )
 
 

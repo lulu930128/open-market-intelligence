@@ -372,6 +372,11 @@ def read_taiwan_latest_daily_evidence(
         limit=1,
         requested_at=requested_at,
     )
+    return project_taiwan_latest_daily_evidence(result)
+
+
+def project_taiwan_latest_daily_evidence(result: MarketDataResultV1) -> TaiwanLatestDailyEvidence:
+    """Shared single/batch outward projection of resolved daily evidence."""
     bar = result.resolved.bars[-1] if result.resolved.bars else None
     daily = None
     limitations = list(result.limitations)

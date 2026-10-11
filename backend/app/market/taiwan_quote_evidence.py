@@ -273,12 +273,12 @@ def acquire_taiwan_quote_evidence_bundle(
         ),
         acquisition=acquisition,
     )
-    if "quote.auction" in requested and refreshed.auction is not None:
-        observation = refreshed.auction.resolved.auction
-        if observation is not None and observation.lineage.fetched_at is not None:
-            # As in the gateway, advance only the post-acquisition read cutoff
-            # to this request's selected receipt; preserve event/receipt lineage.
-            now = max(now, observation.lineage.fetched_at)
+    for result in (refreshed.quote, refreshed.depth, refreshed.auction):
+        if result is not None and result.acquisition.attempted:
+            # A successful receipt may have no eligible auction/actual trade.
+            # All components must reread after this acquisition completed.
+            for health in result.provider_health:
+                now = max(now, health.checked_at)
     session_close = (
         acquire_taiwan_session_close(
             db,

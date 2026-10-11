@@ -394,12 +394,21 @@ class USIntradayBarTransaction:
             }
             for bar, source, raw, receipt, parser, row, is_unchanged in row_records:
                 lineage = lineages_by_bar_id.get(row.id)
+                if (
+                    is_unchanged and lineage is not None
+                    and _stored_utc(lineage.fetched_at) > _utc(receipt.fetched_at)
+                ):
+                    # A late identical-price receipt cannot roll back newer
+                    # finalization evidence or repoint its provenance.
+                    unchanged += 1
+                    continue
                 lineage_compatible = bool(
                     lineage is not None
                     and lineage.provider == receipt.provider
                     and lineage.source == receipt.source
                     and lineage.source_interval == bar.interval
                     and lineage.authority == bar.lineage.authority.value
+                    and lineage.finalization == bar.finalization.value
                     and lineage.raw_contract_version
                     and (
                         lineage.raw_contract_version == parser
@@ -441,6 +450,12 @@ class USIntradayBarTransaction:
         except Exception:
             self._db.rollback()
             raise
+        if written:
+            # Invalidate at the commit boundary, before Gateway reread/projection.
+            from app.us_market.intraday_read_model_cache import invalidate_us_intraday_read_cache
+
+            for symbol in {bar.instrument.symbol for bar, *_rest in row_records}:
+                invalidate_us_intraday_read_cache(symbol)
         return PersistenceSummary(
             attempted=True,
             committed=True,

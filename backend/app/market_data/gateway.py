@@ -859,6 +859,8 @@ class MarketDataGateway:
         transaction_port: BarTransactionPort | None = None,
         acquisition_requirement: DataRequirementV2 | None = None,
         route_resolution_gate: bool = False,
+        excluded_providers: tuple[str, ...] = (),
+        before_acquire: Callable[[ProviderResourceRouteV2], None] | None = None,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, InstrumentTarget):
             raise ValueError("bar resolution requires an instrument target")
@@ -888,6 +890,14 @@ class MarketDataGateway:
         ):
             raise ValueError("bar acquisition range must stay within the cache read range")
 
+        if before_acquire is not None and (
+            not route_resolution_gate
+            or acquire_requirement.bounds.max_external_calls != 1
+            or acquire_requirement.bounds.max_provider_attempts != 1
+            or acquire_requirement.bounds.max_subscriptions != 0
+        ):
+            raise ValueError("durable bar admission requires one fetch route")
+
         initial_batch = self._read(requirement, reader)
         resolved = self._resolve(requirement, initial_batch)
         final_batch = initial_batch
@@ -915,6 +925,7 @@ class MarketDataGateway:
                 acquire_requirement,
                 descriptors,
                 initial_batch.provider_health,
+                excluded_providers=excluded_providers,
             )
             if plan.unfillable:
                 acquisition = _plan_unavailable(plan)
@@ -924,6 +935,15 @@ class MarketDataGateway:
                 acquisition = _not_attempted("TRANSACTION_PORT_UNAVAILABLE")
                 persistence = _not_persisted("TRANSACTION_PORT_UNAVAILABLE")
             elif route_resolution_gate:
+                def acquire_planned_route(route_plan: DataAcquisitionPlanV2) -> BarAcquisitionResult:
+                    if before_acquire is not None:
+                        route = route_plan.routes[0]
+                        if len(route_plan.routes) != 1 or route.max_external_calls != 1 or route.subscription_allowed:
+                            raise ValueError("durable bar admission requires one fetch route")
+                        # Owner must durably commit admission; denial raises before IO.
+                        before_acquire(route)
+                    return acquisition_port.acquire_bar_observations(acquire_requirement, route_plan)
+
                 def post_acquisition(
                     acquired: BarAcquisitionResult,
                 ) -> tuple[BarCandidateBatch, object]:
@@ -940,12 +960,7 @@ class MarketDataGateway:
                     resolution_requirement=requirement,
                     initial_batch=initial_batch,
                     initial_resolved=resolved,
-                    acquire_route=lambda route_plan: (
-                        acquisition_port.acquire_bar_observations(
-                            acquire_requirement,
-                            route_plan,
-                        )
-                    ),
+                    acquire_route=acquire_planned_route,
                     persist_route=lambda acquired: (
                         transaction_port.persist_bar_acquisition(
                             acquire_requirement,
@@ -1259,7 +1274,10 @@ class MarketDataGateway:
                         acquired,
                     )
                     self._validate_persistence_result(acquired, persistence)
-                    final_batch = reader.read_depth_candidates(requirement)
+                    reread_requirement = _post_acquisition_reread_requirement(
+                        requirement, acquired.receipts,
+                    )
+                    final_batch = reader.read_depth_candidates(reread_requirement)
                     if len(final_batch.candidates) > requirement.bounds.max_candidates:
                         raise ValueError(
                             "candidate reader exceeded bounds.max_candidates"
@@ -1267,11 +1285,11 @@ class MarketDataGateway:
                     resolved = resolve_depth(
                         final_batch.candidates,
                         policy=requirement.realtime_policy,
-                        now=requirement.requested_at,
+                        now=reread_requirement.requested_at,
                         max_age=timedelta(
                             seconds=requirement.freshness.max_age_seconds
                         ),
-                        requirement=requirement,
+                        requirement=reread_requirement,
                     )
                 elif acquisition.attempted:
                     persistence = _not_persisted(

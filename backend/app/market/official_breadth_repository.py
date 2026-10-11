@@ -41,9 +41,10 @@ class OfficialBreadthRead:
 class TaiwanOfficialBreadthRepository:
     """Aggregate one coherent canonical daily receipt over an active universe."""
 
-    def __init__(self, db: Session, *, available_at: datetime | None = None) -> None:
+    def __init__(self, db: Session, *, available_at: datetime | None = None, allow_universe_fallback: bool = True) -> None:
         self._db = db
         self._available_at = available_at or datetime.now(timezone.utc)
+        self._allow_universe_fallback = allow_universe_fallback
 
     def _load_published_breadth(self, trade_date: date) -> OfficialBreadthRead | None:
         """Reuse a release-qualified receipt committed by official daily acquisition.
@@ -115,6 +116,10 @@ class TaiwanOfficialBreadthRepository:
                 return published
             if published is not None:
                 published_limitations = published.limitations
+        if not self._allow_universe_fallback:
+            return OfficialBreadthRead(observation=None, limitations=(
+                *published_limitations, "OFFICIAL_BREADTH_PERSISTED_SUMMARY_UNAVAILABLE",
+            ))
         universe = TaiwanOfficialDailyBarRepository(self._db, available_at=self._available_at).load_market_universe(
             trade_date=trade_date,
             include_etf=False,

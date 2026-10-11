@@ -135,6 +135,7 @@ def read_taiwan_official_breadth(
     venue: str,
     trade_date: date | None = None,
     requested_at: datetime | None = None,
+    allow_universe_fallback: bool = True,
 ) -> MarketDataResultV1:
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
     effective_trade_date = trade_date or expected_daily_price_date(
@@ -150,7 +151,8 @@ def read_taiwan_official_breadth(
     return MarketDataGateway().resolve_market_breadth(
         requirement,
         reader=TaiwanOfficialBreadthCandidateReader(
-            TaiwanOfficialBreadthRepository(db, available_at=effective_requested_at)
+            TaiwanOfficialBreadthRepository(db, available_at=effective_requested_at,
+                                           allow_universe_fallback=allow_universe_fallback)
         ),
     )
 

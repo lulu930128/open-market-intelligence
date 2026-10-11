@@ -160,6 +160,7 @@ def _rolling_reference(
         if (
             sample_time is not None
             and sample_price is not None
+            and sample_price > 0
             and sample_time <= target
             and sample_time.date() == current_time.date()
             and (target - sample_time).total_seconds() <= ROLLING_REFERENCE_MAX_GAP_SECONDS
@@ -195,7 +196,7 @@ def _intraday_metric_projection(state: TaiwanIntradayStockState, *, current_usab
     trade_time = _aware_taipei(state.price_as_of)
     samples = _load_samples(state.samples_json, trade_date=state.trade_date)
     result: dict[str, Any] = {}
-    for label, minutes in (("five", 5), ("fifteen", 15)):
+    for label, minutes in (("one", 1), ("three", 3), ("five", 5), ("fifteen", 15)):
         reference = (
             _rolling_reference(samples, current_time=trade_time, minutes=minutes)
             if trade_time is not None else None
@@ -507,10 +508,10 @@ def attach_current_market_lineage_to_stock_rows(
         market = str(next_row.get("market") or "").strip().upper()
         breadth = lineage_by_market.get(market)
         if breadth is not None:
-            event_at = breadth.get("as_of") or breadth.get("snapshot_as_of")
+            event_at = next_row.get("as_of") or breadth.get("as_of") or breadth.get("snapshot_as_of")
             raw_result_id = breadth.get("raw_result_id")
             next_row["raw_result_id"] = raw_result_id
-            next_row["observation_received_at"] = breadth.get("observation_received_at") or (breadth.get("lineage") or {}).get("received_at")
+            next_row["observation_received_at"] = next_row.get("observation_received_at") or breadth.get("observation_received_at") or (breadth.get("lineage") or {}).get("received_at")
             next_row["component_raw_result_ids"] = [raw_result_id]
             next_row["component_event_times"] = [event_at] if event_at else []
             next_row["component_sources"] = [
@@ -582,6 +583,11 @@ def persist_taiwan_intraday_stock_states(
         component_lineage = _component_lineage(raw, event_time=event_time)
         identity_key = (provider, market, stock_id)
         existing = existing_by_identity.get(identity_key)
+        if existing is not None and (
+            existing_at := _aware_taipei(existing.event_time)
+        ) is not None and event_time < existing_at:
+            skipped.append(f"{market}:{stock_id}:out_of_order_observation")
+            continue
         samples = _load_samples(
             existing.samples_json if existing is not None else None,
             trade_date=trade_date,
@@ -605,7 +611,11 @@ def persist_taiwan_intraday_stock_states(
             or raw.get("session_phase")
             or taiwan_market_session_phase(event_time)
         )
-        received_at = _aware_taipei(raw.get("observation_received_at")) or event_time
+        receipt_times = [parsed for value in (
+            raw.get("observation_received_at"),
+            *(component.get("received_at") for component in component_lineage["components"]),
+        ) if (parsed := _aware_taipei(value)) is not None]
+        received_at = max(receipt_times) if receipt_times else event_time
         observation_time = price_as_of or event_time
         observation_age_seconds = _observation_age_seconds(
             observation_time,
@@ -631,9 +641,9 @@ def persist_taiwan_intraday_stock_states(
             current_sample = {
                 "time": minute_time.isoformat(),
                 "price": current_price,
-                "sample_contract_version": "tw.trade_sample.v1" if _aware_taipei(raw.get("price_as_of")) else "legacy_receipt_sample",
+                "sample_contract_version": "tw.trade_sample.v2" if receipt_times and _aware_taipei(raw.get("price_as_of")) else "legacy_receipt_sample",
                 "price_as_of": price_as_of.isoformat(),
-                "received_at": event_time.isoformat(),
+                "received_at": received_at.isoformat(),
                 "lineage_complete": True,
                 "raw_result_ids": component_lineage["raw_result_ids"],
             }
@@ -840,7 +850,7 @@ def _price_map_trade_samples(value: str | None, *, trade_date: date) -> list[dic
     """Reaction clocks require actual trade time, never the polling minute."""
     output: list[dict[str, Any]] = []
     for sample in _load_samples(value, trade_date=trade_date):
-        if sample.get("sample_contract_version") != "tw.trade_sample.v1" or sample.get("lineage_complete") is not True:
+        if sample.get("sample_contract_version") not in {"tw.trade_sample.v1", "tw.trade_sample.v2"} or sample.get("lineage_complete") is not True:
             continue
         stamp = _aware_taipei(sample.get("price_as_of"))
         received = _aware_taipei(sample.get("received_at"))
@@ -921,6 +931,32 @@ def _normalized_markets(value: Any) -> tuple[str, ...]:
     return markets or SUPPORTED_MARKETS
 
 
+def read_taiwan_intraday_stock_states(
+    db: Session, *, stocks: Iterable[StockMaster], trade_date: date,
+) -> list[tuple[TaiwanIntradayStockState, StockMaster]]:
+    """Shared lightweight state selection for screening and discovery.
+
+    This does not consult Tier-A, leases, holdings, watchlists or minute bars.
+    A latest-state store cannot reconstruct an overwritten historical snapshot.
+    """
+    masters = {stock.stock_id: stock for stock in stocks}
+    if not masters:
+        return []
+    with db.no_autoflush:
+        states = (db.query(TaiwanIntradayStockState)
+                  .filter(TaiwanIntradayStockState.stock_id.in_(masters))
+                  .filter(TaiwanIntradayStockState.trade_date == trade_date)
+                  .filter(TaiwanIntradayStockState.state_contract_version == INTRADAY_STATE_VERSION)
+                  .order_by(TaiwanIntradayStockState.event_time.desc(), TaiwanIntradayStockState.id.desc())
+                  .all())
+    latest = {}
+    for state in states:
+        stock = masters[state.stock_id]
+        if state.market == str(stock.market or "").upper():
+            latest.setdefault(state.stock_id, (state, stock))
+    return [latest[symbol] for symbol in sorted(latest)]
+
+
 def build_tw_intraday_screening_snapshot(
     db: Session,
     *,
@@ -960,42 +996,9 @@ def build_tw_intraday_screening_snapshot(
     universe_stocks = list_taiwan_stock_universe(
         db, markets=markets, stock_ids=requested_stock_ids,
     )
-    universe_ids = [stock.stock_id for stock in universe_stocks]
-    query = (
-        db.query(TaiwanIntradayStockState, StockMaster)
-        .join(
-            StockMaster,
-            StockMaster.stock_id == TaiwanIntradayStockState.stock_id,
-        )
-        .filter(TaiwanIntradayStockState.market.in_(markets))
-        .filter(
-            TaiwanIntradayStockState.state_contract_version
-            == INTRADAY_STATE_VERSION
-        )
-        .filter(TaiwanIntradayStockState.trade_date == expected_trade_date)
-        .filter(StockMaster.stock_id.in_(universe_ids))
+    pairs = read_taiwan_intraday_stock_states(
+        db, stocks=universe_stocks, trade_date=expected_trade_date,
     )
-    if requested_stock_ids:
-        query = query.filter(
-            TaiwanIntradayStockState.stock_id.in_(requested_stock_ids)
-        )
-    queried_pairs = query.all()
-    latest_pairs: dict[
-        tuple[str, str], tuple[TaiwanIntradayStockState, StockMaster]
-    ] = {}
-    for state, stock in queried_pairs:
-        if state.market != str(stock.market or "").upper():
-            continue
-        key = (state.market, state.stock_id)
-        previous = latest_pairs.get(key)
-        if previous is None or (
-            _aware_taipei(state.event_time) or datetime.min.replace(tzinfo=TAIWAN_TZ)
-        ) > (
-            _aware_taipei(previous[0].event_time)
-            or datetime.min.replace(tzinfo=TAIWAN_TZ)
-        ):
-            latest_pairs[key] = (state, stock)
-    pairs = list(latest_pairs.values())
     resolved_states = {state.stock_id: state for state, _ in pairs}
     if lane == "actual":
         resolved_states = _completed_ranking_states(db, stocks=universe_stocks,
@@ -2022,4 +2025,5 @@ __all__ = [
     "build_tw_intraday_screening_snapshot",
     "attach_current_market_lineage_to_stock_rows",
     "persist_taiwan_intraday_stock_states",
+    "read_taiwan_intraday_stock_states",
 ]

@@ -56,6 +56,109 @@ from app.market_data.policies import RealtimePolicy
 TAIPEI = timezone(timedelta(hours=8))
 
 
+@pytest.mark.parametrize("trial", [False, True])
+@pytest.mark.parametrize("receipt_age, expected", [(2, "fresh"), (60, "stale")])
+def test_snapshot_receipt_and_event_recency_are_independent(trial, receipt_age, expected):
+    from app.market import source_health
+    now = datetime(2026, 8, 26, 8 if trial else 10, 45, tzinfo=TAIPEI)
+    event = now - timedelta(seconds=60)
+    received = now - timedelta(seconds=receipt_age)
+    db, engine = _db()
+    try:
+        refresh_taiwan_realtime_snapshot(
+            db, stock_id="2330", requested_at=received,
+            acquisition=_adapter(_payload(trial=trial, event_time=event.strftime("%H:%M:%S")), received, []),
+        )
+        db.connection().exec_driver_sql("PRAGMA query_only=ON")
+        outward = get_taiwan_stock_quote_depth(db=db, stock_id="2330", now=now)
+        components = outward["data_core_components"]
+        for capability in (["quote.order_book", "quote.auction", "quote.snapshot"] if trial else ["quote.order_book"]):
+            component = components[capability]
+            assert component["freshness"]["status"] == expected
+            assert component["freshness"]["age_seconds"] == 60
+            assert component["freshness"]["receipt_age_seconds"] == receipt_age
+            assert not component["freshness"]["is_live"]
+            assert component["resolved_health"]["facts_usable"]
+            assert not component["resolved_health"]["research_usable"]
+        if trial:
+            assert outward["last_trade_available"] is False
+            assert outward["indicative_match_price"] == 1178
+            health = source_health.build_taiwan_source_health(
+                db, stock_id="2330", dataset="taiwan_stock_quote_snapshot", now=now,
+            )["entries"][0]
+            assert health["status"] == ("current" if expected == "fresh" else "stale")
+        else:
+            assert components["quote.snapshot"]["freshness"]["status"] == "stale"
+        assert outward["depth_live_available"] is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_old_last_trade_does_not_invalidate_current_depth():
+    now = datetime(2026, 8, 26, 10, 2, tzinfo=TAIPEI)
+    db, engine = _db()
+    try:
+        earlier = now - timedelta(seconds=120)
+        refresh_taiwan_realtime_snapshot(db, stock_id="2330", requested_at=earlier,
+            acquisition=_adapter(_payload(), earlier, []))
+        payload = json.loads(_payload(event_time="10:02:00"))
+        payload["msgArray"][0].update(z="-", tv="-")
+        refresh_taiwan_realtime_snapshot(db, stock_id="2330", requested_at=now,
+            acquisition=_adapter(json.dumps(payload), now, []))
+        result = get_taiwan_stock_quote_depth(db=db, stock_id="2330", now=now)
+        assert result["data_core_components"]["quote.snapshot"]["freshness"]["status"] == "stale"
+        depth = result["data_core_components"]["quote.order_book"]
+        assert depth["freshness"]["is_live"]
+        assert depth["resolved_health"]["research_usable"]
+        assert result["depth_live_available"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("event_time", ["08:59:59", "10:00:00"])
+def test_refetched_old_or_cross_session_event_never_becomes_live(event_time):
+    now = datetime(2026, 8, 26, 10, 2, tzinfo=TAIPEI)
+    db, engine = _db()
+    try:
+        for received in (now - timedelta(seconds=20), now):
+            refresh_taiwan_realtime_snapshot(db, stock_id="2330", requested_at=received,
+                acquisition=_adapter(_payload(event_time=event_time), received, []))
+        result = read_taiwan_depth(db, stock_id="2330", requested_at=now)
+        assert not result.resolved.health.research_usable
+        assert result.resolved.candidates[0].freshness.value == ("stale" if event_time == "08:59:59" else "fresh")
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_new_fetch_timestamp_cannot_renew_old_provider_receipt_or_failed_source():
+    from app.db.models import SourceRegistry
+    now = datetime(2026, 8, 26, 10, 0, tzinfo=TAIPEI)
+    db, engine = _db()
+    try:
+        refresh_taiwan_realtime_snapshot(db, stock_id="2330", requested_at=now,
+            acquisition=_adapter(_payload(), now, []))
+        row = db.query(TaiwanStockDepthSnapshot).one()
+        row.received_at = (now - timedelta(seconds=60)).astimezone(timezone.utc)
+        db.commit()
+        assert read_taiwan_depth(db, stock_id="2330", requested_at=now).resolved.health.status.value == "stale"
+        row.received_at = now.astimezone(timezone.utc)
+        source = db.get(SourceRegistry, row.source_id)
+        source.last_error_at = now.astimezone(timezone.utc)
+        source.last_error_message = "provider unavailable"
+        db.commit()
+        result = read_taiwan_depth(db, stock_id="2330", requested_at=now)
+        assert result.resolved.health.status.value == "stale"
+        assert not result.resolved.health.research_usable
+        assert "TW_REALTIME_PROVIDER_FAILED_AFTER_RECEIPT" in result.limitations
+        assert result.provider_health[0].operational.value == "failed"
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def _db() -> tuple[Session, object]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -116,6 +219,65 @@ def _adapter(raw_text: str, now: datetime, calls: list[tuple]) -> TwseMisRealtim
         )
 
     return TwseMisRealtimeAcquisitionAdapter(reader, clock=lambda: now)
+
+
+@pytest.mark.parametrize("event_time, ready", [("08:49:56", True), ("07:50:00", False)])
+def test_scheduler_capture_reads_the_completed_receipt_without_promoting_old_session(event_time, ready):
+    from app.market import quote_contract_capture
+    from app.market.quote_contract_health import build_taiwan_quote_scheduler_contract
+    from app.db.models import TaiwanQuoteContractSnapshot
+    from unittest.mock import patch
+    started = datetime(2026, 8, 26, 8, 50, tzinfo=TAIPEI)
+    received = started + timedelta(seconds=2)
+    db, engine = _db()
+    calls = []
+    try:
+        adapter = _adapter(_payload(trial=True, event_time=event_time), received, calls)
+        def acquire(db, **kwargs):
+            return refresh_taiwan_realtime_snapshot(db, acquisition=adapter, **kwargs)
+        with patch.object(quote_contract_capture, "refresh_taiwan_realtime_snapshot", acquire):
+            result = quote_contract_capture.capture_taiwan_quote_contract_snapshot(
+                db=db, stock_id="2330", capture_slot="08:50", now=started,
+            )
+        assert len(calls) == 1
+        assert result["captured_at"] == received
+        assert result["semantic_ready"] is ready
+        payload = json.loads(db.query(TaiwanQuoteContractSnapshot).one().payload_json)
+        for key in ("quote.snapshot", "quote.auction", "quote.order_book"):
+            component = payload["data_core_components"][key]
+            assert component["lineage"]["received_at"] == received.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            assert component["freshness"]["is_current"] is ready
+        health = build_taiwan_quote_scheduler_contract(db, trade_date=started.date(), current_time=received)
+        assert health["status"] == "partial"  # 08:30 is still truly missing.
+        assert health["transport_captured_count"] == 1
+        assert health["captured_count"] == int(ready)
+        assert not health["full_market"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("trial", [False, True])
+def test_regular_http_bundle_rereads_new_quote_even_without_auction(trial):
+    started = datetime(2026, 8, 26, 10, 0, tzinfo=TAIPEI)
+    received = started + timedelta(seconds=2)
+    db, engine = _db()
+    try:
+        bundle = acquire_taiwan_quote_evidence_bundle(
+            db, stock_id="2330", requested_at=started,
+            acquisition=_adapter(_payload(trial=trial, event_time="10:00:00"), received, []),
+        )
+        assert bundle.requested_at == received
+        assert bundle.quote.resolved.quote is not None
+        assert bundle.quote.resolved.quote.lineage.received_at == received
+        assert bundle.quote.resolved.quote.lineage.event_at == started
+        assert bundle.depth.resolved.depth.lineage.received_at == received
+        assert bundle.auction.resolved.auction is None
+        payload = project_taiwan_quote_evidence_bundle(db=db, stock_id="2330", bundle=bundle)
+        assert payload["data_core_components"]["quote.snapshot"]["freshness"]["is_current"]
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def _kgi_quote_adapter(now: datetime) -> KgiRealtimeAcquisitionAdapter:

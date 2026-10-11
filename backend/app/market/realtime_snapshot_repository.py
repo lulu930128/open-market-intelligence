@@ -172,7 +172,12 @@ class _RealtimeRepository:
             raw_receipt_id=f"raw_fetch_result:{raw.id}",
             content_hash=raw.content_hash,
         )
-        return lineage, binding.descriptor.priority, ()
+        limitations = ()
+        if raw.error_message or (raw.status_code is not None and not 200 <= raw.status_code < 300):
+            limitations = ("TW_REALTIME_RECEIPT_FAILED",)
+        elif source.last_error_at is not None and _as_utc(source.last_error_at) >= _as_utc(fetched_at):
+            limitations = ("TW_REALTIME_PROVIDER_FAILED_AFTER_RECEIPT",)
+        return lineage, binding.descriptor.priority, limitations
 
 
 class TaiwanDepthRepository(_RealtimeRepository):
@@ -256,6 +261,7 @@ class TaiwanDepthRepository(_RealtimeRepository):
             storage_row_id=row.id,
             raw_result_id=row.raw_result_id,
             market_session=market_session,
+            limitations=limitations,
         )
 
     def load_candidates(
@@ -427,6 +433,7 @@ class TaiwanAuctionRepository(_RealtimeRepository):
             provider_priority=priority,
             storage_row_id=row.id,
             raw_result_id=row.raw_result_id,
+            limitations=limitations,
         )
 
     def load_candidates(

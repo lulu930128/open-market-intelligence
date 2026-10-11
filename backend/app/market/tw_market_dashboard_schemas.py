@@ -5,9 +5,10 @@ from app.market_data.contracts import BreadthLimitObservation
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
 from app.market.schemas import MarketOhlcChartRead, TechnicalReportRead
+from app.market.tw_workspace_research import TaiwanWorkspaceResearchRead
 
 
 class TaiwanDashboardSessionRead(BaseModel):
@@ -328,6 +329,22 @@ class TaiwanDashboardIntradayChartPointRead(BaseModel):
     finalized: bool = False
 
 
+class TaiwanDashboardSeriesCoverageRead(BaseModel):
+    """Additive view of the canonical resolver metadata, never reclassified."""
+
+    model_config = ConfigDict(extra="allow")
+    contract_version: str | None = None
+    status: str | None = None
+    trade_date: date | None = None
+    session_completed: bool | None = None
+    expected_from: datetime | None = None
+    expected_to: datetime | None = None
+    expected_bucket_count: int | None = None
+    observed_bucket_count: int | None = None
+    missing_bucket_count: int | None = None
+    current_cumulative_volume_complete: bool | None = None
+
+
 class TaiwanDashboardIntradayChartRead(BaseModel):
     source: str
     interval: str
@@ -337,18 +354,20 @@ class TaiwanDashboardIntradayChartRead(BaseModel):
     cache_hit: bool
     volume_unit: str = "shares"
     volume_semantics: str
+    series_coverage: TaiwanDashboardSeriesCoverageRead | None = None
+    coverage_scope: Literal["resolver_series_before_display_slice"] = "resolver_series_before_display_slice"
+    cache_trade_date: date | None = None
+    cache_latest_time: datetime | None = None
+    resolved_health: dict[str, Any] | None = None
+    limitations: list[str] = Field(default_factory=list)
     points: list[TaiwanDashboardIntradayChartPointRead] = Field(
         default_factory=list
     )
 
 
-class TaiwanDashboardStockDetailRead(BaseModel):
-    kind: Literal["omi.tw_stock_dashboard_detail"] = (
-        "omi.tw_stock_dashboard_detail"
-    )
-    version: Literal["omi.tw_stock_dashboard_detail.v2"] = (
-        "omi.tw_stock_dashboard_detail.v2"
-    )
+class TaiwanStockChartRead(BaseModel):
+    kind: Literal["omi.tw_stock_chart"] = "omi.tw_stock_chart"
+    version: Literal["omi.tw_stock_chart.v1"] = "omi.tw_stock_chart.v1"
     stock_id: str
     stock_name: str | None = None
     instrument_type: Literal["stock", "etf", "unknown"] = "unknown"
@@ -361,6 +380,58 @@ class TaiwanDashboardStockDetailRead(BaseModel):
     moving_averages: list[TaiwanDashboardMovingAveragePointRead] = Field(
         default_factory=list
     )
+    warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class TaiwanDashboardStockDetailRead(TaiwanStockChartRead):
+    kind: Literal["omi.tw_stock_dashboard_detail"] = "omi.tw_stock_dashboard_detail"
+    version: Literal["omi.tw_stock_dashboard_detail.v2"] = "omi.tw_stock_dashboard_detail.v2"
     technical: TechnicalReportRead
+
+
+class TaiwanStockResearchRead(BaseModel):
+    kind: Literal["omi.tw_stock_research"] = "omi.tw_stock_research"
+    version: Literal["omi.tw_stock_research.v1"] = "omi.tw_stock_research.v1"
+    stock_id: str
+    timeframe: str
+    cache_only: Literal[True] = True
+    technical: TechnicalReportRead
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TaiwanStockResearchResponseRead(RootModel[TaiwanStockResearchRead | TaiwanWorkspaceResearchRead]):
+    """Preserve the full v1 envelope while exposing opt-in workspace v1."""
+
+
+class TaiwanWorkspaceHeaderRead(BaseModel):
+    kind: Literal["omi.tw_workspace_header"] = "omi.tw_workspace_header"
+    version: Literal["omi.tw_workspace_header.v1"] = "omi.tw_workspace_header.v1"
+    cache_only: Literal[True] = True
+    generated_at: datetime
+    session: TaiwanDashboardSessionRead
+    freshness: TaiwanDashboardFreshnessRead
+    resolved_indices: list[TaiwanDashboardResolvedIndexRead]
+    resolved_breadth: dict[str, TaiwanDashboardBreadthRead]
+    warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class TaiwanWorkspaceWatchlistRead(TaiwanDashboardWatchlistRead):
+    kind: Literal["omi.tw_workspace_watchlist"] = "omi.tw_workspace_watchlist"
+    version: Literal["omi.tw_workspace_watchlist.v1"] = "omi.tw_workspace_watchlist.v1"
+    cache_only: Literal[True] = True
+    generated_at: datetime
+
+
+class TaiwanWorkspaceHotGroupsRead(BaseModel):
+    kind: Literal["omi.tw_workspace_hot_groups"] = "omi.tw_workspace_hot_groups"
+    version: Literal["omi.tw_workspace_hot_groups.v1"] = "omi.tw_workspace_hot_groups.v1"
+    cache_only: Literal[True] = True
+    generated_at: datetime
+    status: str
+    lane: Literal["actual", "indicative"]
+    as_of: datetime | None = None
+    hot_groups: list[TaiwanDashboardGroupRead]
     warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)

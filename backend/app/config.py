@@ -248,6 +248,10 @@ class Settings(BaseSettings):
     scheduler_us_market_refresh_adjusted: bool = False
     scheduler_us_market_refresh_sleep_seconds: float = 12.0
     enable_us_intraday_materializer: bool = False
+    enable_us_intraday_reconciliation: bool = False
+    scheduler_us_intraday_reconciliation_symbols: str = ""
+    scheduler_us_intraday_reconciliation_max_symbols: int = Field(default=2, ge=1, le=2)
+    scheduler_us_intraday_reconciliation_max_external_calls: int = Field(default=2, ge=1, le=2)
     enable_us_dynamic_equity_materializer_universe: bool = False
     scheduler_us_intraday_materializer_symbols: str = "AAPL,TSM"
     scheduler_us_intraday_materializer_max_symbols: int = Field(default=2, ge=1, le=20)

@@ -1,4 +1,6 @@
 """Normal completed-session ingestion, residual handoff and lane isolation."""
+
+from r1d_test_support import isolated_job_lifecycle  # noqa: F401
 from datetime import datetime, timedelta
 from threading import Event, Lock
 from types import SimpleNamespace

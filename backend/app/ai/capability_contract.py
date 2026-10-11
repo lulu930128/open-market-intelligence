@@ -6897,6 +6897,7 @@ def _historical_intraday_fill_state(
     *, scope_type: str, capability_id: str, value: Any,
     realtime_policy: str = "prefer_live",
     current_state: dict[str, Any] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
     if scope_type in {"stock", "tw_stock"} and capability_id == "intraday.bars" and isinstance(value, dict):
         from app.market.tw_intraday_platform import completed_taiwan_intraday_repair_eligibility
@@ -6932,10 +6933,39 @@ def _historical_intraday_fill_state(
     if not isinstance(coverage, dict):
         coverage = {}
     scope = value.get("session_scope") or coverage.get("requested_scope") or "regular"
-    complete = coverage.get("coverage_status") == "complete" and value.get("is_partial") is False
+    # Consume canonical coverage, not the returned (possibly aggregated/limited)
+    # point count. Existing US producers prove regular coverage only; extended/all
+    # carry partial requested coverage plus separate regular_coverage_status.
+    # is_partial=False attests finalization on the historical reader;
+    # the completed-session projection additionally supplies unfinalized_count.
+    complete = (
+        coverage.get("coverage_status") == "complete"
+        and value.get("is_partial") is False
+        and coverage.get("trade_date") == requested_date
+        and coverage.get("requested_scope") == scope == "regular"
+        and all(type(coverage.get(key)) is int and coverage[key] == 0 for key in (
+            "missing_slot_count", "gap_count", "duplicate_count",
+            "non_monotonic_count", "off_grid_count",
+        ))
+        and ("unfinalized_count" not in coverage or (
+            type(coverage["unfinalized_count"]) is int and coverage["unfinalized_count"] == 0
+        ))
+    )
+    bar_quality = value.get("bar_source_status") or value.get("source_status") or {}
+    if isinstance(bar_quality, dict) and (
+        bar_quality.get("facts_usable") is False or bar_quality.get("has_usable_data") is False
+    ):
+        complete = False
     params = {"trade_date": requested_date, "session_scope": scope,
               "interval": value.get("requested_interval") or value.get("interval") or "1m"}
-    request = requested_us_intraday_scope(requested_date, now=datetime.now(timezone.utc), session_scope=scope)
+    try:
+        request = requested_us_intraday_scope(
+            requested_date, now=now if now is not None else datetime.now(timezone.utc), session_scope=scope,
+        )
+    except (TypeError, ValueError):
+        return {"satisfied": False, "refresh_required": True, "refresh_possible_now": False,
+                "reason_code": "US_INTRADAY_INVALID_REQUEST", "market_data_params": params,
+                "coverage_status": coverage.get("coverage_status", "missing")}
     if request.scope is USIntradayRequestedScope.CURRENT_SESSION:
         if current_state is None:
             return None
@@ -6945,7 +6975,10 @@ def _historical_intraday_fill_state(
                 "reason_code": "current_session_intraday", "market_data_params": params,
                 "coverage_status": coverage.get("coverage_status", "missing")}
     if request.scope is USIntradayRequestedScope.INELIGIBLE:
-        return {"satisfied": False, "refresh_required": True, "refresh_possible_now": False,
+        # This reason is emitted only after the calendar/session completion
+        # checks. Acquisition expiry must not invalidate complete stored evidence.
+        satisfied = complete and request.reason_code == "US_INTRADAY_HISTORY_OUTSIDE_BOUNDED_HORIZON"
+        return {"satisfied": satisfied, "refresh_required": not satisfied, "refresh_possible_now": False,
                 "reason_code": request.reason_code, "market_data_params": params,
                 "coverage_status": coverage.get("coverage_status", "missing")}
     reason = "historical_intraday_complete" if complete else "historical_intraday_coverage_partial"
@@ -6976,6 +7009,7 @@ def build_manifest(
     selection: dict[str, Any],
     projected_data: dict[str, Any],
     realtime_assessments: dict[str, dict[str, Any]] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     evidence = canonical.get("evidence") if isinstance(canonical.get("evidence"), dict) else {}
     target = canonical.get("target") if isinstance(canonical.get("target"), dict) else {}
@@ -7228,6 +7262,7 @@ def build_manifest(
             scope_type=scope_type, capability_id=capability_id, value=projected_value,
             realtime_policy=str(selection.get("realtime_policy") or "prefer_live"),
             current_state=capabilities[-1],
+            now=now,
         )
         if fill_state is not None:
             capabilities[-1].update(

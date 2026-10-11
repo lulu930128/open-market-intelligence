@@ -31,7 +31,7 @@ from app.market_data.integration_contracts import (
     SnapshotCapabilityRequest,
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
-from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2
+from app.market_data.provider_catalog import ProviderCapabilityDescriptorV2, ProviderResourceRouteV2
 from app.us_market.daily_market_state import USInstrumentIdentity, resolve_us_instrument_identity
 from app.us_market.intraday_acquisition import USIntradayAcquisitionExecutor
 from app.us_market.intraday_profiles import (
@@ -367,6 +367,7 @@ class USIntradayMarketPlatform:
                 end_at=end_at.astimezone(timezone.utc),
                 max_bars=bars,
                 completed_only=completed_only,
+                acquisition_window="dated" if completed_only else "relative",
                 coverage=(BarCoverageRequirement(minimum_bar_count=int((end_at - start_at).total_seconds() // 60)) if completed_only else None),
                 price_basis="raw",
             ),
@@ -503,6 +504,7 @@ class USIntradayMarketPlatform:
         bars: int = 1000,
         now: datetime | None = None,
         profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE,
+        completed_regular: bool = False,
     ) -> USIntradayPlatformResult:
         """Read one cache-only US trade date with extended-hours headroom."""
 
@@ -515,6 +517,11 @@ class USIntradayMarketPlatform:
             time.min,
             tzinfo=US_EASTERN,
         )
+        if completed_regular:
+            local_start, local_end = completed_intraday_window(
+                trade_date, now=requested_at, session_scope="regular",
+            )
+            bars = max(bars, int((local_end - local_start).total_seconds() // 60))
         requirement = self._bar_requirement(
             identity,
             now=requested_at,
@@ -525,9 +532,27 @@ class USIntradayMarketPlatform:
             max_provider_calls=0,
             profile=profile,
             start_at=local_start.astimezone(timezone.utc),
-            end_at=local_end.astimezone(timezone.utc) - timedelta(microseconds=1),
+            end_at=local_end.astimezone(timezone.utc),
+            completed_only=completed_regular,
         )
+        # Repository ranges are inclusive; the session end is exclusive.
+        requirement = requirement.model_copy(update={"request": requirement.request.model_copy(
+            update={"end_at": requirement.request.end_at - timedelta(microseconds=1)},
+        )})
+        if completed_regular:
+            requirement = requirement.model_copy(update={"request": requirement.request.model_copy(
+                update={"coverage": requirement.request.coverage.model_copy(
+                    update={"allow_partial_fallback": True},
+                )},
+            )})
         result = self._gateway.resolve_bars(requirement, reader=self._bar_reader)
+        if completed_regular and not result.resolved.bars:
+            # No finalized source is eligible. Keep provisional factual evidence
+            # visible without promoting it to completed-session quality.
+            requirement = requirement.model_copy(update={"request": requirement.request.model_copy(
+                update={"completed_only": False, "coverage": None},
+            )})
+            result = self._gateway.resolve_bars(requirement, reader=self._bar_reader)
         return self._platform_result(
             identity=identity,
             result=result,
@@ -556,7 +581,7 @@ class USIntradayMarketPlatform:
             max_sessions=max_sessions,
         )
 
-    def refresh_intraday_bars(self, *, symbol: str, bars: int = 500, now: datetime | None = None, require_live: bool = False, max_provider_calls: int = 2, profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE, trade_date: date | str | None = None, session_scope: str = "regular") -> USIntradayPlatformResult:
+    def refresh_intraday_bars(self, *, symbol: str, bars: int = 500, now: datetime | None = None, require_live: bool = False, max_provider_calls: int = 2, profile: USIntradayOperationProfile = US_RECURRING_INTRADAY_PROFILE, trade_date: date | str | None = None, session_scope: str = "regular", excluded_providers: tuple[str, ...] = (), before_acquire: Callable[[ProviderResourceRouteV2], None] | None = None) -> USIntradayPlatformResult:
         if max_provider_calls < 1 or max_provider_calls > 2:
             raise ValueError("max_provider_calls must be between 1 and 2")
         requested_at = now or datetime.now(timezone.utc)
@@ -604,12 +629,14 @@ class USIntradayMarketPlatform:
             transaction_port=self._bar_transaction,
             acquisition_requirement=acquisition_requirement,
             route_resolution_gate=True,
+            excluded_providers=excluded_providers,
+            before_acquire=before_acquire,
         )
         projection = project_resolved_us_bars(result.resolved, max_bars=bars)
         if is_historical:
             # Full-session acquisition can fail its coverage requirement while
             # committed partial evidence remains useful and must stay visible.
-            reread = self.read_intraday_bars_for_trade_date(symbol=symbol, trade_date=start.date(), bars=1000, now=requested_at)
+            reread = self.read_intraday_bars_for_trade_date(symbol=symbol, trade_date=start.date(), bars=1000, now=requested_at, completed_regular=session_scope == "regular")
             selected_bars = tuple(bar for bar in reread.result.resolved.bars if start <= bar.start_at < end)
             projection = project_resolved_us_bars(reread.result.resolved.model_copy(update={"bars": selected_bars}), max_bars=bars)
             coverage = regular_intraday_coverage([bar.start_at for bar in selected_bars], trade_date=start.date())

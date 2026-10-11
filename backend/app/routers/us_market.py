@@ -1126,6 +1126,7 @@ def get_us_ohlc_chart_data(
             timeframe=timeframe,
             bars=bars,
             to_date=to_date,
+            include_intraday_overlay=True,
         )
     except ValueError as exc:
         raise HTTPException(

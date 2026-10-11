@@ -222,6 +222,7 @@ def attach_taiwan_dashboard_data_core(
     payload: dict[str, Any],
     *,
     requested_at: datetime | None = None,
+    allow_universe_fallback: bool = True,
 ) -> dict[str, Any]:
     """Attach completed official components; provider IO is never allowed."""
 
@@ -255,6 +256,7 @@ def attach_taiwan_dashboard_data_core(
                     db,
                     venue=venue,
                     requested_at=effective_requested_at,
+                    allow_universe_fallback=allow_universe_fallback,
                 )
             )
         except Exception as exc:

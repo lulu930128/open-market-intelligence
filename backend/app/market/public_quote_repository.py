@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import and_, func, inspect, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only, defer
 
 from app.db.models import (
     RawFetchResult,
@@ -84,6 +84,110 @@ class TaiwanPublicQuoteRepository:
     def __init__(self, db: Session) -> None:
         self._db = db
         self._session_close_batch: dict[str, tuple[PersistedPublicQuoteRead, ...]] | None = None
+        self._quote_rows_batch: dict[str, list[TaiwanStockQuoteSnapshot]] | None = None
+        self._lineage_batch: dict[int, tuple | None] = {}
+        self._price_states_batch: dict[str, dict] = {}
+
+    def preload_quote_candidates(
+        self, instruments: tuple[InstrumentKey, ...], *, requested_at: datetime,
+    ) -> None:
+        """Load latest observations, last actual trades and lineage in bounded SQL.
+
+        Per-source and actual-trade roles are bounded separately so no-trade
+        receipts cannot erase a prior trade. The normal decoder and Gateway
+        retain ownership of qualification, freshness and provider selection.
+        """
+        if len(instruments) > 100:
+            raise ValueError("quote batch exceeds 100 instruments")
+        self._quote_rows_batch = {item.symbol: [] for item in instruments}
+        if not instruments:
+            return
+        model = TaiwanStockQuoteSnapshot
+        bindings = sorted((binding for binding in TW_REALTIME_SOURCE_BINDINGS
+                           if binding.descriptor.capability_id == TW_QUOTE_SNAPSHOT_CAPABILITY_ID),
+                          key=lambda binding: binding.descriptor.priority)
+        visible = self._db.query(model.id.label("id"), model.stock_id, model.market,
+            model.provider, model.source, model.trade_date,
+            func.row_number().over(
+                partition_by=(model.stock_id, model.market, model.provider, model.source),
+                order_by=(model.quote_time.desc(), model.id.desc()),
+            ).label("source_rank"),
+            func.row_number().over(
+                partition_by=(model.stock_id, model.market),
+                order_by=(model.quote_time.desc(), model.id.desc()),
+            ).label("global_rank"),
+        ).outerjoin(RawFetchResult, RawFetchResult.id == model.raw_result_id).filter(
+            model.stock_id.in_([item.symbol for item in instruments]),
+            or_(model.received_at.is_(None), model.received_at <= _as_utc(requested_at)),
+            or_(RawFetchResult.id.is_(None), RawFetchResult.fetched_at <= _as_utc(requested_at)),
+        ).subquery()
+        registered = or_(*(and_(visible.c.provider == b.descriptor.provider_key,
+                               visible.c.source == b.source) for b in bindings))
+        latest = self._db.query(visible).filter(
+            or_(and_(visible.c.source_rank == 1, registered), visible.c.global_rank <= 8),
+        ).subquery()
+        actual = self._db.query(model.id.label("id"),
+            func.row_number().over(
+                partition_by=(model.stock_id, model.market, model.provider, model.source),
+                order_by=(model.quote_time.desc(), model.id.desc()),
+            ).label("ordinal"),
+        ).join(latest, and_(model.stock_id == latest.c.stock_id, model.market == latest.c.market,
+            model.provider == latest.c.provider, model.source == latest.c.source,
+            model.trade_date == latest.c.trade_date, latest.c.source_rank == 1,
+        )).outerjoin(RawFetchResult, RawFetchResult.id == model.raw_result_id).filter(
+            model.trade_state == TradeObservationState.TRADE_OBSERVED.value, model.last_price.isnot(None),
+            or_(model.received_at.is_(None), model.received_at <= _as_utc(requested_at)),
+            or_(RawFetchResult.id.is_(None), RawFetchResult.fetched_at <= _as_utc(requested_at)),
+        ).subquery()
+        ids = self._db.query(latest.c.id).union(self._db.query(actual.c.id).filter(actual.c.ordinal == 1))
+        rows = self._db.query(model, RawFetchResult, SourceRegistry).options(
+            defer(model.raw_payload_json), defer(model.bid_levels_json), defer(model.ask_levels_json), load_only(
+            RawFetchResult.id, RawFetchResult.source_id, RawFetchResult.fetched_at,
+            RawFetchResult.content_hash, RawFetchResult.parser_version,
+        )).outerjoin(RawFetchResult, RawFetchResult.id == model.raw_result_id).outerjoin(
+            SourceRegistry, SourceRegistry.id == model.source_id,
+        ).filter(model.id.in_(ids)).order_by(model.quote_time.desc(), model.id.desc()).all()
+        by_symbol: dict[str, list] = {item.symbol: [] for item in instruments}
+        venues = {item.symbol: item.venue for item in instruments}
+        for row, raw, source in rows:
+            if row.market == venues[row.stock_id]:
+                by_symbol[row.stock_id].append(row)
+                self._lineage_batch[row.id] = (raw, source) if raw is not None and source is not None else None
+        self._quote_rows_batch = by_symbol
+        for venue in sorted({item.venue for item in instruments}):
+            self._price_states_batch.update(read_current_stock_price_states(
+                self._db, venue=venue, requested_at=requested_at,
+                symbols=tuple(item.symbol for item in instruments if item.venue == venue),
+            ))
+
+    @staticmethod
+    def _select_preloaded_quote_rows(pool: list[TaiwanStockQuoteSnapshot], max_candidates: int) -> tuple[list, dict]:
+        bindings = sorted((binding for binding in TW_REALTIME_SOURCE_BINDINGS
+                           if binding.descriptor.capability_id == TW_QUOTE_SNAPSHOT_CAPABILITY_ID),
+                          key=lambda binding: binding.descriptor.priority)
+        selected: dict[int, TaiwanStockQuoteSnapshot] = {}
+        latest_rows = {}
+        for binding in bindings:
+            row = next((row for row in pool if row.provider == binding.descriptor.provider_key
+                        and row.source == binding.source), None)
+            if row is None:
+                continue
+            latest_rows[(row.provider, row.source)] = row
+            if row.last_price is None and row.trade_state != TradeObservationState.INDICATIVE_OBSERVED.value:
+                row = next((actual for actual in pool if actual.provider == row.provider
+                    and actual.source == row.source and actual.trade_date == row.trade_date
+                    and actual.trade_state == TradeObservationState.TRADE_OBSERVED.value
+                    and actual.last_price is not None), row)
+            selected[row.id] = row
+        if len(selected) < max_candidates:
+            for row in pool[:max_candidates]:
+                if (row.provider, row.source) not in latest_rows:
+                    selected.setdefault(row.id, row)
+                if len(selected) >= max_candidates:
+                    break
+        return (
+            sorted(selected.values(), key=lambda row: (row.quote_time, row.id), reverse=True), latest_rows,
+        )
 
     def _decode_row(
         self,
@@ -134,6 +238,9 @@ class TaiwanPublicQuoteRepository:
                 rows_examined=1,
                 limitations=("PUBLIC_QUOTE_CANONICAL_STATE_MISSING",),
             )
+        if self._quote_rows_batch is not None and row.id in self._lineage_batch:
+            joined_lineage = self._lineage_batch[row.id]
+            lineage_preloaded = True
         joined = joined_lineage if lineage_preloaded else (
             self._db.query(RawFetchResult, SourceRegistry)
             .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
@@ -308,7 +415,12 @@ class TaiwanPublicQuoteRepository:
                 TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at),
                 RawFetchResult.fetched_at <= _as_utc(requested_at),
             ).subquery()
-            rows = self._db.query(TaiwanStockQuoteSnapshot, RawFetchResult, SourceRegistry).join(
+            rows = self._db.query(TaiwanStockQuoteSnapshot, RawFetchResult, SourceRegistry).options(
+                defer(TaiwanStockQuoteSnapshot.raw_payload_json),
+                defer(TaiwanStockQuoteSnapshot.bid_levels_json), defer(TaiwanStockQuoteSnapshot.ask_levels_json),
+                load_only(RawFetchResult.id, RawFetchResult.source_id, RawFetchResult.fetched_at,
+                          RawFetchResult.content_hash, RawFetchResult.parser_version),
+            ).join(
                 ranked, ranked.c.id == TaiwanStockQuoteSnapshot.id,
             ).outerjoin(RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id).outerjoin(
                 SourceRegistry, SourceRegistry.id == TaiwanStockQuoteSnapshot.source_id,
@@ -406,95 +518,100 @@ class TaiwanPublicQuoteRepository:
             raise ValueError("public quote max_candidates must be between 1 and 8")
         if self._session_close_batch is not None:
             return self._session_close_batch.get(instrument.symbol, ())[:max_candidates]
-        base_query = (
-            self._db.query(TaiwanStockQuoteSnapshot)
-            .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
-            .filter(TaiwanStockQuoteSnapshot.market == instrument.venue)
-        )
-        if trade_date is not None:
-            base_query = base_query.filter(
-                TaiwanStockQuoteSnapshot.trade_date == trade_date
+        if self._quote_rows_batch is not None:
+            rows, latest_rows = self._select_preloaded_quote_rows(
+                self._quote_rows_batch.get(instrument.symbol, []), max_candidates,
             )
-        if allowed_sessions:
-            base_query = base_query.filter(
-                TaiwanStockQuoteSnapshot.market_session.in_(
-                    tuple(session.value for session in allowed_sessions)
+        else:
+            base_query = (
+                self._db.query(TaiwanStockQuoteSnapshot)
+                .filter(TaiwanStockQuoteSnapshot.stock_id == instrument.symbol)
+                .filter(TaiwanStockQuoteSnapshot.market == instrument.venue)
+            )
+            if trade_date is not None:
+                base_query = base_query.filter(
+                    TaiwanStockQuoteSnapshot.trade_date == trade_date
                 )
-            )
-        if requested_at is not None:
-            # Visibility is a storage predicate, not a freshness override. A
-            # later receipt must not hide the candidate visible at request time.
-            base_query = base_query.outerjoin(
-                RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id,
-            ).filter(
-                or_(TaiwanStockQuoteSnapshot.received_at.is_(None),
-                    TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at)),
-                or_(RawFetchResult.id.is_(None), RawFetchResult.fetched_at <= _as_utc(requested_at)),
-            )
-        if trade_date is not None and allowed_sessions and requested_at is not None:
-            base_query = base_query.filter(*self._session_close_storage_predicates(trade_date))
-        quote_bindings = sorted(
-            (
-                binding
-                for binding in TW_REALTIME_SOURCE_BINDINGS
-                if binding.descriptor.capability_id
-                == TW_QUOTE_SNAPSHOT_CAPABILITY_ID
-            ),
-            key=lambda binding: binding.descriptor.priority,
-        )
-        rows_by_id: dict[int, TaiwanStockQuoteSnapshot] = {}
-        latest_rows: dict[tuple[str, str], TaiwanStockQuoteSnapshot] = {}
-        for binding in quote_bindings:
-            row = (
-                base_query.filter(
-                    TaiwanStockQuoteSnapshot.provider
-                    == binding.descriptor.provider_key
+            if allowed_sessions:
+                base_query = base_query.filter(
+                    TaiwanStockQuoteSnapshot.market_session.in_(
+                        tuple(session.value for session in allowed_sessions)
+                    )
                 )
-                .filter(TaiwanStockQuoteSnapshot.source == binding.source)
-                .order_by(
-                    TaiwanStockQuoteSnapshot.quote_time.desc(),
-                    TaiwanStockQuoteSnapshot.id.desc(),
+            if requested_at is not None:
+                # Visibility is a storage predicate, not a freshness override. A
+                # later receipt must not hide the candidate visible at request time.
+                base_query = base_query.outerjoin(
+                    RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id,
+                ).filter(
+                    or_(TaiwanStockQuoteSnapshot.received_at.is_(None),
+                        TaiwanStockQuoteSnapshot.received_at <= _as_utc(requested_at)),
+                    or_(RawFetchResult.id.is_(None), RawFetchResult.fetched_at <= _as_utc(requested_at)),
                 )
-                .limit(1)
-                .first()
+            if trade_date is not None and allowed_sessions and requested_at is not None:
+                base_query = base_query.filter(*self._session_close_storage_predicates(trade_date))
+            quote_bindings = sorted(
+                (
+                    binding
+                    for binding in TW_REALTIME_SOURCE_BINDINGS
+                    if binding.descriptor.capability_id
+                    == TW_QUOTE_SNAPSHOT_CAPABILITY_ID
+                ),
+                key=lambda binding: binding.descriptor.priority,
             )
-            if row is not None:
-                latest_rows[(row.provider, row.source)] = row
-                # A no-trade message is an observation, not a deletion of the
-                # last actual trade. Query by role before applying the bound.
-                if row.last_price is None and row.trade_state != TradeObservationState.INDICATIVE_OBSERVED.value:
-                    actual = base_query.filter(
-                        TaiwanStockQuoteSnapshot.provider == row.provider,
-                        TaiwanStockQuoteSnapshot.source == row.source,
-                        TaiwanStockQuoteSnapshot.trade_date == row.trade_date,
-                        TaiwanStockQuoteSnapshot.trade_state == TradeObservationState.TRADE_OBSERVED.value,
-                        TaiwanStockQuoteSnapshot.last_price.isnot(None),
-                    ).order_by(TaiwanStockQuoteSnapshot.quote_time.desc(), TaiwanStockQuoteSnapshot.id.desc()).first()
-                    if actual is not None:
-                        row = actual
-                rows_by_id[row.id] = row
-                # Inspect at most one role-qualified row per registered source.
-                # The outward candidate bound applies after semantic ranking.
-        if len(rows_by_id) < max_candidates:
-            fallback_rows = (
-                base_query.order_by(
-                    TaiwanStockQuoteSnapshot.quote_time.desc(),
-                    TaiwanStockQuoteSnapshot.id.desc(),
+            rows_by_id: dict[int, TaiwanStockQuoteSnapshot] = {}
+            latest_rows: dict[tuple[str, str], TaiwanStockQuoteSnapshot] = {}
+            for binding in quote_bindings:
+                row = (
+                    base_query.filter(
+                        TaiwanStockQuoteSnapshot.provider
+                        == binding.descriptor.provider_key
+                    )
+                    .filter(TaiwanStockQuoteSnapshot.source == binding.source)
+                    .order_by(
+                        TaiwanStockQuoteSnapshot.quote_time.desc(),
+                        TaiwanStockQuoteSnapshot.id.desc(),
+                    )
+                    .limit(1)
+                    .first()
                 )
-                .limit(max_candidates)
-                .all()
+                if row is not None:
+                    latest_rows[(row.provider, row.source)] = row
+                    # A no-trade message is an observation, not a deletion of the
+                    # last actual trade. Query by role before applying the bound.
+                    if row.last_price is None and row.trade_state != TradeObservationState.INDICATIVE_OBSERVED.value:
+                        actual = base_query.filter(
+                            TaiwanStockQuoteSnapshot.provider == row.provider,
+                            TaiwanStockQuoteSnapshot.source == row.source,
+                            TaiwanStockQuoteSnapshot.trade_date == row.trade_date,
+                            TaiwanStockQuoteSnapshot.trade_state == TradeObservationState.TRADE_OBSERVED.value,
+                            TaiwanStockQuoteSnapshot.last_price.isnot(None),
+                        ).order_by(TaiwanStockQuoteSnapshot.quote_time.desc(), TaiwanStockQuoteSnapshot.id.desc()).first()
+                        if actual is not None:
+                            row = actual
+                    rows_by_id[row.id] = row
+                    # Inspect at most one role-qualified row per registered source.
+                    # The outward candidate bound applies after semantic ranking.
+            if len(rows_by_id) < max_candidates:
+                fallback_rows = (
+                    base_query.order_by(
+                        TaiwanStockQuoteSnapshot.quote_time.desc(),
+                        TaiwanStockQuoteSnapshot.id.desc(),
+                    )
+                    .limit(max_candidates)
+                    .all()
+                )
+                for row in fallback_rows:
+                    if (row.provider, row.source) in latest_rows:
+                        continue
+                    rows_by_id.setdefault(row.id, row)
+                    if len(rows_by_id) >= max_candidates:
+                        break
+            rows = sorted(
+                rows_by_id.values(),
+                key=lambda row: (row.quote_time, row.id),
+                reverse=True,
             )
-            for row in fallback_rows:
-                if (row.provider, row.source) in latest_rows:
-                    continue
-                rows_by_id.setdefault(row.id, row)
-                if len(rows_by_id) >= max_candidates:
-                    break
-        rows = sorted(
-            rows_by_id.values(),
-            key=lambda row: (row.quote_time, row.id),
-            reverse=True,
-        )
         if not rows and requested_at is None:
             return (
                 PersistedPublicQuoteRead(
@@ -518,7 +635,7 @@ class TaiwanPublicQuoteRepository:
                     }))
             reads.append(read)
         if requested_at is not None:
-            state = read_current_stock_price_states(
+            state = self._price_states_batch.get(instrument.symbol) if self._quote_rows_batch is not None else read_current_stock_price_states(
                 self._db, venue=instrument.venue, requested_at=requested_at,
                 symbols=(instrument.symbol,), trade_date=trade_date,
             ).get(instrument.symbol)
@@ -583,7 +700,14 @@ def read_current_stock_price_states(
     if symbols is not None:
         query = query.filter(TaiwanStockQuoteSnapshot.stock_id.in_(symbols))
     latest = query.group_by(TaiwanStockQuoteSnapshot.stock_id).subquery()
-    rows = db.query(TaiwanStockQuoteSnapshot).join(latest,
+    rows = db.query(TaiwanStockQuoteSnapshot, RawFetchResult, SourceRegistry).options(
+        defer(TaiwanStockQuoteSnapshot.raw_payload_json),
+        defer(TaiwanStockQuoteSnapshot.bid_levels_json), defer(TaiwanStockQuoteSnapshot.ask_levels_json), load_only(
+        RawFetchResult.id, RawFetchResult.source_id, RawFetchResult.fetched_at,
+        RawFetchResult.content_hash, RawFetchResult.parser_version,
+    )).outerjoin(RawFetchResult, RawFetchResult.id == TaiwanStockQuoteSnapshot.raw_result_id).outerjoin(
+        SourceRegistry, SourceRegistry.id == TaiwanStockQuoteSnapshot.source_id,
+    ).join(latest,
         (TaiwanStockQuoteSnapshot.stock_id == latest.c.stock_id)
         & (TaiwanStockQuoteSnapshot.quote_time == latest.c.event_at),
     ).filter(TaiwanStockQuoteSnapshot.market == venue,
@@ -591,10 +715,13 @@ def read_current_stock_price_states(
              TaiwanStockQuoteSnapshot.provider == "twse_mis",
              TaiwanStockQuoteSnapshot.source == "twse_mis_quote_depth").all()
     repository = TaiwanPublicQuoteRepository(db)
-    for row in rows:
+    for row, raw, source in rows:
         instrument = InstrumentKey(market=Market.TW, venue=venue,
             symbol=row.stock_id, instrument_type=InstrumentType.STOCK)
-        quote = repository._decode_row(instrument, row).observation
+        quote = repository._decode_row(instrument, row,
+            joined_lineage=(raw, source) if raw is not None and source is not None else None,
+            lineage_preloaded=True,
+        ).observation
         if quote is None or quote.last_trade_price is None:
             continue
         prior = states.get(row.stock_id)

@@ -14,12 +14,21 @@ from sqlalchemy.orm import Session
 from app.market.daily_ohlcv_platform import (
     TaiwanLatestDailyEvidence,
     read_taiwan_latest_daily_evidence,
+    build_taiwan_daily_cache_requirement,
+    project_taiwan_latest_daily_evidence,
 )
+from app.db.models import StockMaster
+from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
+from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
+from app.market.public_quote_repository import TaiwanPublicQuoteRepository
 from app.market.public_quote_platform import (
     project_taiwan_public_last_trade_quote,
     project_taiwan_session_close,
     read_taiwan_quote_snapshot,
     read_taiwan_session_close,
+    read_taiwan_session_closes,
+    build_taiwan_public_quote_requirement,
+    TaiwanPublicQuoteCandidateReader,
 )
 from app.market.taiwan_rules import expected_daily_price_date
 from app.market.trading_calendar import (
@@ -27,8 +36,13 @@ from app.market.trading_calendar import (
     taiwan_market_session_phase,
     taiwan_presentation_session,
 )
-from app.market.tw_instrument import resolve_taiwan_instrument
+from app.market.tw_instrument import (
+    resolve_taiwan_instrument, project_taiwan_instrument,
+    normalize_taiwan_instrument_id, TaiwanInstrumentResolutionError,
+)
 from app.market_data.contracts import InstrumentKey
+from app.market_data.gateway import MarketDataGateway
+from app.market_data.policies import RealtimePolicy
 
 
 TW_WATCHLIST_STATE_VERSION = "omi.market.tw_watchlist_state.v1"
@@ -330,8 +344,69 @@ def read_taiwan_watchlist_instrument_state(
     )
 
 
+def read_taiwan_watchlist_instrument_states(
+    db: Session, *, instrument_ids: tuple[str, ...], requested_at: datetime,
+) -> dict[str, dict[str, object]]:
+    """Bounded request-local batch, using the same canonical resolvers as one read.
+
+    Unmapped identities are omitted for the outward caller's explicit missing
+    projection. No persistent cache, repair or provider acquisition is created.
+    """
+    if requested_at.tzinfo is None or requested_at.utcoffset() is None:
+        raise ValueError("requested_at must be timezone-aware")
+    if len(instrument_ids) > 100:
+        raise ValueError("watchlist batch exceeds 100 instruments")
+    ids = tuple(dict.fromkeys(normalize_taiwan_instrument_id(item) for item in instrument_ids))
+    if not ids:
+        return {}
+    with db.no_autoflush:
+        masters = {row.stock_id: row for row in db.query(StockMaster).filter(StockMaster.stock_id.in_(ids)).all()}
+        instruments = []
+        for symbol in ids:
+            try:
+                instruments.append(project_taiwan_instrument(symbol, masters.get(symbol)))
+            except TaiwanInstrumentResolutionError:
+                continue
+        active = tuple(item for item in instruments if masters[item.symbol].is_active)
+        daily_repository = TaiwanOfficialDailyBarRepository(db, available_at=requested_at)
+        released = expected_daily_price_date(now=requested_at)
+        daily_repository.preload_latest_stock_daily(active, end_date=released)
+        daily_reader = TaiwanCompletedDailyCandidateReader(daily_repository)
+        gateway = MarketDataGateway()
+        daily = {
+            item.symbol: project_taiwan_latest_daily_evidence(gateway.resolve_bars(
+                build_taiwan_daily_cache_requirement(
+                    instrument=item, from_date=daily_repository.latest_candidate_start_date(
+                        instrument=item, end_date=released, max_rows=1,
+                    ) or released, to_date=released, requested_at=requested_at, max_rows=1,
+                ), reader=daily_reader,
+            )) for item in active
+        }
+        quote_repository = TaiwanPublicQuoteRepository(db)
+        quote_repository.preload_quote_candidates(active, requested_at=requested_at)
+        quote_reader = TaiwanPublicQuoteCandidateReader(quote_repository)
+        phase = taiwan_market_session_phase(requested_at)
+        closes = read_taiwan_session_closes(db, instruments=active, requested_at=requested_at) if phase in {
+            "close_resolution", "post_close", "market_closed",
+        } else {}
+        return {
+            item.symbol: project_taiwan_watchlist_instrument_state(
+                item, requested_at=requested_at,
+                quote=project_taiwan_public_last_trade_quote(gateway.resolve_quote(
+                    build_taiwan_public_quote_requirement(
+                        instrument=item, policy=RealtimePolicy.CACHE_ONLY,
+                        requested_at=requested_at, require_actual_trade=False,
+                    ), reader=quote_reader,
+                )),
+                session_close=project_taiwan_session_close(closes[item.symbol]) if item.symbol in closes else None,
+                daily=daily.get(item.symbol),
+            ) for item in active
+        }
+
+
 __all__ = [
     "TW_WATCHLIST_STATE_VERSION",
     "project_taiwan_watchlist_instrument_state",
     "read_taiwan_watchlist_instrument_state",
+    "read_taiwan_watchlist_instrument_states",
 ]

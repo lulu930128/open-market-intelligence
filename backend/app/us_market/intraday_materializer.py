@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import date, datetime, timedelta, timezone
 import logging
+import json
+import re
+from contextlib import contextmanager
+from pathlib import Path
+import os
+from uuid import uuid4
+
+from sqlalchemy import inspect as inspect_database, text
+from app.db.models import JobRun
+from app.jobs import service as job_service
+from app.us_market.intraday_read_model_cache import (
+    invalidate_us_intraday_read_cache, us_intraday_cache_generation,
+)
 from threading import Lock
 import time
 from typing import Any, Callable, Literal
 
 from app.db.session import SessionLocal
-from app.market_data.contracts import MarketSession
+from app.market_data.contracts import BarFinalization, MarketSession, ResolvedEvidenceStatus
 from app.market_data.gateway import PostAcquisitionError
+from app.market_data.provider_catalog import ProviderResourceRouteV2
 from app.us_market.intraday_platform import USIntradayMarketPlatform
+from app.us_market.market_data.descriptors import (
+    US_QUOTE_REGISTERED_DESCRIPTORS, US_INTRADAY_REGISTERED_DESCRIPTORS,
+)
 from app.us_market.intraday_profiles import (
     US_BOOTSTRAP_INTRADAY_PROFILE,
     US_CURRENT_MARKET_BOOTSTRAP_DEFAULT_MAX_EXTERNAL_CALLS,
@@ -22,6 +40,7 @@ from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.symbols import US_INDEX_SYMBOLS, normalize_us_symbol
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE, is_us_trading_day
 from app.us_market.active_equity_targets import us_active_equity_viewer_summary
+from app.us_market.historical_intraday import completed_intraday_window, regular_intraday_coverage
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +64,457 @@ _MAX_MATERIALIZER_LOCKS = 64
 _LAST_RUNS_LOCK = Lock()
 _LAST_RUNS: dict[tuple[str, USMaterializerCapability], dict[str, Any]] = {}
 _RUN_COUNTERS: dict[tuple[str, USMaterializerCapability], dict[str, Any]] = {}
+
+# JobRun holds bounded operational obligations, never canonical coverage truth.
+_EOD_LOCK = Lock()
+_EOD_JOB_TYPE = "us.intraday_eod_obligation"
+_EOD_HISTORY_DAYS = 5
+_EOD_MAX_ATTEMPTS = 3
+_EOD_COOLDOWN = timedelta(minutes=15)
+
+
+def _eod_target(symbol: str, trade_date: date) -> str:
+    return f"us-eod:{symbol}:{trade_date.isoformat()}:NY:regular:1m"
+
+
+def resolve_us_eod_universe(configured_symbols: str, *, max_symbols: int = 2) -> dict[str, Any]:
+    universe = resolve_us_materializer_universe(
+        configured_symbols, max_symbols=20, lane_id="equity_eod",
+        owner="explicit_completed_session_reconciliation")
+    universe["configured_symbol_sample"] = universe["symbols"][:3]
+    valid = (1 <= max_symbols <= 2 and universe["configured_count"] <= max_symbols
+             and universe["rejected_count"] == 0)
+    universe.update(scope_valid=valid, max_symbols=max_symbols)
+    if not valid:
+        universe.update(symbols=[], selected_count=0, skipped_count=universe["configured_count"],
+                        reason="US_EOD_INVALID_EXPLICIT_SCOPE")
+    return universe
+
+
+def read_us_eod_job_snapshot(
+    *, configured_symbols: str, now: datetime, max_symbols: int = 2,
+    session_factory: Callable[[], Any] = SessionLocal,
+) -> dict[str, Any]:
+    """Startup/background-only bounded ledger read; no acquisition or mutation."""
+    universe = resolve_us_eod_universe(configured_symbols, max_symbols=max_symbols)
+    snapshot: dict[str, Any] = {
+        "source": "persisted_job_run", "loaded_at": now.isoformat(),
+        "snapshot_available": False, "jobs": [], "limit": 12,
+        "coverage_semantics": "last_recorded_canonical_reread_not_live_coverage",
+    }
+    if not universe["scope_valid"] or not universe["symbols"]:
+        return {**snapshot, "reason": "invalid_or_empty_scope"}
+    db = None
+    try:
+        db = session_factory()
+        # Two index range seeks, six most recent targets each; no ledger-wide scan.
+        rows = []
+        for symbol in universe["symbols"]:
+            prefix = f"us-eod:{symbol}:"
+            rows.extend(db.query(JobRun).filter(
+                JobRun.job_type == _EOD_JOB_TYPE,
+                JobRun.target >= prefix, JobRun.target < prefix + "~",
+            ).order_by(JobRun.target.desc()).limit(6).all())
+        for row in rows:
+            request = json.loads(row.request_json)
+            snapshot["jobs"].append({
+                "job_id": row.id, "job_status": row.status, "target": row.target,
+                "symbol": request["symbol"], "trade_date": request["trade_date"],
+                "attempt_count": len(request["attempts"]),
+                "attempts": request["attempts"],
+                "next_retry_at": request.get("next_retry_at"),
+                "last_recorded_result": json.loads(row.result_json or "{}"),
+            })
+        snapshot.update(snapshot_available=True, job_run_count=len(rows))
+    except Exception as exc:
+        snapshot.update(reason="durable_snapshot_unavailable", error_type=type(exc).__name__)
+    finally:
+        if db is not None:
+            db.close()
+    return snapshot
+
+
+def _eod_begin(db: Any) -> None:
+    """Short SQLite writer transaction; no lock may cross provider IO.
+
+    The scoped unique index protects enrollment. BEGIN IMMEDIATE serializes
+    read/check/reserve across processes, including a just-finished attempt.
+    Missing migration / unsupported dialect fails closed before acquisition.
+    """
+    db.rollback()
+    if db.get_bind().dialect.name != "sqlite":
+        raise RuntimeError("US_EOD_DURABLE_ADMISSION_UNSUPPORTED_DIALECT")
+    db.execute(text("BEGIN IMMEDIATE"))
+    try:
+        indexes = inspect_database(db.connection()).get_indexes("job_run")
+        valid = any(i["name"] == "uq_job_run_us_eod_obligation" and i["unique"]
+                    and i["column_names"] == ["job_type", "target"] for i in indexes)
+        definition = db.execute(text("SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_job_run_us_eod_obligation'")).scalar()
+        predicate = " ".join(definition.split("WHERE", 1)[-1].split()) if definition else ""
+        if not valid or predicate != "job_type = 'us.intraday_eod_obligation'":
+            raise RuntimeError("US_EOD_DURABLE_ADMISSION_MIGRATION_REQUIRED")
+    except Exception:
+        db.rollback()
+        raise
+
+
+@contextmanager
+def _eod_worker_lease(db: Any):
+    """One advisory file lock per SQLite DB; released by OS on process death.
+
+    No DB transaction spans IO. A live worker keeps this lock until its final
+    canonical reread/record. A successor can therefore reclaim an orphaned
+    running reservation without relying on timeouts or restarting the runtime.
+    This is local SQLite only, not a distributed/network-filesystem lease.
+    """
+    bind = db.get_bind()
+    if bind.dialect.name != "sqlite":
+        raise RuntimeError("US_EOD_DURABLE_ADMISSION_UNSUPPORTED_DIALECT")
+    database = bind.url.database
+    if not database or database == ":memory:":
+        # In-memory SQLite is fixture-only; the enclosing process lock owns it.
+        yield True
+        return
+    lock_path = Path(database).resolve().with_suffix(Path(database).suffix + ".us-eod.lock")
+    with lock_path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _eod_admit(db: Any, *, symbol: str, trade_date: date, now: datetime,
+               evidence: dict[str, Any], allow_call: bool, recover_orphan: bool = False,
+               planned_resource: ProviderResourceRouteV2 | None = None,
+               route_unavailable: bool = False) -> dict[str, Any]:
+    _eod_begin(db)
+    try:
+        target = _eod_target(symbol, trade_date)
+        job = db.query(JobRun).filter_by(job_type=_EOD_JOB_TYPE, target=target).one_or_none()
+        if job is None:
+            job = job_service.create_job_record(
+                db, _EOD_JOB_TYPE, target=target,
+                request={"symbol": symbol, "trade_date": trade_date.isoformat(),
+                         "session_scope": "regular", "interval": "1m", "attempts": []},
+            )
+            job.status = "error"  # enrolled, no provider reservation yet
+            db.flush()
+        request = json.loads(job.request_json)
+        attempts = request["attempts"]
+        next_retry = request.get("next_retry_at")
+        # Never infer historical provider identity from outcome or current catalog.
+        history_valid = isinstance(attempts, list) and all(
+            isinstance(a, dict) and isinstance(a.get("planned_resource"), dict)
+            and isinstance(a["planned_resource"].get("provider_key"), str)
+            and bool(a["planned_resource"]["provider_key"])
+            and isinstance(a["planned_resource"].get("resource_id"), str)
+            and bool(a["planned_resource"]["resource_id"])
+            and a.get("external_call_reservation") == 1
+            for a in attempts
+        )
+        excluded = tuple(a["planned_resource"]["provider_key"] for a in attempts) if history_valid else ()
+        if planned_resource is not None and (
+            planned_resource.capability_id != "intraday.bars"
+            or planned_resource.max_external_calls != 1
+            or not planned_resource.fetch_allowed or planned_resource.subscription_allowed
+        ):
+            raise RuntimeError("US_EOD_INVALID_PLANNED_RESOURCE")
+        active = job_service.find_active_job_by_target(db, _EOD_JOB_TYPE, target)
+        if active is not None and recover_orphan:
+            # Only the holder of the DB-scoped OS lease may reclaim an orphan.
+            job.status = "error"
+            job.message = "Recovered orphan; prior reserved calls remain consumed."
+            active = None
+        reason = (
+            "active_or_interrupted_reservation" if active is not None
+            else "canonical_cache_already_satisfied" if evidence["postcondition_satisfied"]
+            else "retry_budget_exhausted" if len(attempts) >= _EOD_MAX_ATTEMPTS
+            else "legacy_route_history_unknown" if not history_valid
+            else "cooldown" if next_retry and now < datetime.fromisoformat(next_retry)
+            else "external_call_budget_exhausted" if not allow_call
+            else "acquisition_plan_unfillable" if route_unavailable
+            else "route_pending" if planned_resource is None
+            else "provider_already_reserved" if planned_resource.provider_key in excluded
+            else "reserved"
+        )
+        if reason == "reserved":
+            next_retry = (now + _EOD_COOLDOWN).isoformat()
+            attempts.append({"reservation_id": uuid4().hex, "reserved_at": now.isoformat(), "external_call_reservation": 1,
+                             "outcome": "unknown", "next_retry_at": next_retry,
+                             "planned_resource": planned_resource.model_dump(mode="json")})
+            request["next_retry_at"] = next_retry
+            job.status = "running"
+            job.started_at = now
+            job.ended_at = None
+        elif active is None:
+            job.status = "success" if evidence["postcondition_satisfied"] else "error"
+        item = {**evidence, "job_id": job.id, "attempt_count": len(attempts),
+                "reason": reason, "next_retry_at": next_retry,
+                "acquisition_attempted": reason == "reserved",
+                "excluded_providers": list(excluded),
+                "planned_resource": planned_resource.model_dump(mode="json") if reason == "reserved" else None,
+                "reservation_id": attempts[-1]["reservation_id"] if attempts else None,
+                "checked_at": now.isoformat(),
+                "unfillable_reason": reason if reason in {"retry_budget_exhausted", "legacy_route_history_unknown", "acquisition_plan_unfillable", "provider_already_reserved"} else None}
+        if reason == "reserved":
+            job.request_json = json.dumps(request)
+        job.result_json = json.dumps(item)
+        job.updated_at = now
+        db.commit()
+        return item
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _eod_finish(db: Any, item: dict[str, Any], *, now: datetime) -> None:
+    _eod_begin(db)
+    try:
+        job = db.get(JobRun, item["job_id"])
+        request = json.loads(job.request_json)
+        # A lifecycle interruption must not let an old worker overwrite a new reservation.
+        if (len(request["attempts"]) != item["attempt_count"] or job.status != "running"
+                or request["attempts"][-1]["reservation_id"] != item["reservation_id"]):
+            raise RuntimeError("US_EOD_RESERVATION_LOST")
+        request["attempts"][-1]["outcome"] = item["reason"]
+        request["attempts"][-1]["error_type"] = item.get("error_type")
+        request["attempts"][-1]["acquisition_limitations"] = item.get("acquisition_limitations", [])
+        request["attempts"][-1]["selected_resources"] = item.get("selected_resources", [])
+        job.request_json = json.dumps(request)
+        job.status = "success" if item["postcondition_satisfied"] else "error"
+        job.result_json = json.dumps(item)
+        job.ended_at = now
+        job.updated_at = now
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def expire_us_intraday_obligations(
+    *, configured_symbols: str, now: datetime, max_symbols: int = 2,
+    session_factory: Callable[[], Any] = SessionLocal,
+) -> list[dict[str, Any]]:
+    """Bounded operational terminalization; never infer canonical completeness."""
+    universe = resolve_us_eod_universe(configured_symbols, max_symbols=max_symbols)
+    if not universe["scope_valid"]:
+        raise ValueError("US_EOD_INVALID_EXPLICIT_SCOPE")
+    symbols = universe["symbols"]
+    if not symbols:
+        return []
+    cutoff = (now.astimezone(US_MARKET_TIMEZONE).date() - timedelta(days=5)).isoformat()
+    db = session_factory()
+    try:
+        with _eod_worker_lease(db) as acquired:
+            if not acquired:
+                return []
+            _eod_begin(db)
+            rows = []
+            for symbol in symbols:
+                prefix = f"us-eod:{symbol}:"
+                # Bound both the range seek and returned rows. Old terminal rows
+                # do not cause an ever-growing scan on each tick.
+                rows.extend(db.query(JobRun).filter(
+                    JobRun.job_type == _EOD_JOB_TYPE,
+                    JobRun.target >= prefix, JobRun.target < prefix + cutoff,
+                ).order_by(JobRun.target.desc()).limit(6).all())
+            expired = []
+            for job in rows:
+                request = json.loads(job.request_json)
+                item = json.loads(job.result_json or "{}")
+                if job.status == "success" or item.get("unfillable_reason") == "retention_expired":
+                    continue
+                item.update(symbol=request["symbol"], trade_date=request["trade_date"],
+                            job_id=job.id, postcondition_satisfied=False,
+                            reason="retention_expired", unfillable_reason="retention_expired",
+                            next_retry_at=None, terminalized_at=now.isoformat())
+                request["next_retry_at"] = None
+                job.request_json = json.dumps(request)
+                job.result_json = json.dumps(item)
+                job.status = "error"
+                job.updated_at = now
+                expired.append(item)
+            db.commit()
+            return expired
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def reconcile_us_intraday_session(
+    *, configured_symbols: str, trade_date: date, max_symbols: int = 2,
+    max_external_calls: int = 2, now: datetime | None = None,
+    session_factory: Callable[[], Any] = SessionLocal,
+    platform_factory: Callable[[Any], Any] = USIntradayMarketPlatform,
+    publish: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Durably reserve bounded attempts, then acquire and canonical reread."""
+    requested_at = now or datetime.now(timezone.utc)
+    start, end = completed_intraday_window(trade_date, now=requested_at)
+    if (requested_at.astimezone(US_MARKET_TIMEZONE).date() - trade_date).days > _EOD_HISTORY_DAYS:
+        raise ValueError("US_EOD_RECONCILIATION_OUTSIDE_BOUNDED_HORIZON")
+    if not 1 <= max_symbols <= 2 or not 0 <= max_external_calls <= 2:
+        raise ValueError("US EOD permits at most two symbols and two calls per run")
+    universe = resolve_us_eod_universe(configured_symbols, max_symbols=max_symbols)
+    if not universe["scope_valid"]:
+        raise ValueError("US_EOD_INVALID_EXPLICIT_SCOPE")
+    started = time.monotonic()
+    result = _base_result(capability="intraday.bars", now=requested_at,
+                          phase=us_session_for_timestamp(requested_at), lane_id="equity_eod",
+                          profile=US_BOOTSTRAP_MATERIALIZER_PROFILE)
+    result.update(trade_date=trade_date.isoformat(), session_scope="regular", interval="1m",
+                  budget_scope="durable_job_run", max_attempts=_EOD_MAX_ATTEMPTS,
+                  cooldown_seconds=int(_EOD_COOLDOWN.total_seconds()), universe=universe,
+                  requested_count=len(universe["symbols"]), reserved_external_call_count=0)
+    if not _EOD_LOCK.acquire(blocking=False):
+        result.update(status="skipped", reason="materializer_run_in_flight")
+        return _finish_run("intraday.bars", result, started_monotonic=started)
+    try:
+        db = session_factory()
+        try:
+            with _eod_worker_lease(db) as owns_lease:
+                if not owns_lease:
+                    result.update(status="skipped", reason="durable_worker_in_flight")
+                    return _finish_run("intraday.bars", result, started_monotonic=started)
+                platform = platform_factory(db)
+
+                def inspect(symbol: str) -> dict[str, Any]:
+                    # Release any snapshot retained by the pre-acquisition read.
+                    db.rollback()
+                    read = platform.read_intraday_bars_for_trade_date(
+                        symbol=symbol, trade_date=trade_date, bars=1000, now=requested_at,
+                        completed_regular=True)
+                    bars = tuple(bar for bar in read.result.resolved.bars if start <= bar.start_at < end)
+                    coverage = regular_intraday_coverage([bar.start_at for bar in bars], trade_date=trade_date)
+                    coverage["unfinalized_count"] = sum(
+                        bar.finalization not in {BarFinalization.FINAL, BarFinalization.CORRECTED} for bar in bars)
+                    coverage["corrected_count"] = sum(bar.finalization == BarFinalization.CORRECTED for bar in bars)
+                    usable = bool(read.result.resolved.health.facts_usable)
+                    complete = coverage["coverage_status"] == "complete" and coverage["unfinalized_count"] == 0 and usable
+                    return {"coverage": coverage, "postcondition_satisfied": complete,
+                            "facts_usable": usable,
+                            "status": "complete" if complete else "partial" if bars else "missing"}
+
+                for symbol in universe["symbols"]:
+                    item: dict[str, Any] = {"symbol": symbol, "trade_date": trade_date.isoformat(),
+                                            "acquisition_attempted": False}
+                    result["results"].append(item)
+                    try:
+                        evidence = inspect(symbol)
+                        item.update(_eod_admit(db, symbol=symbol, trade_date=trade_date, now=requested_at,
+                                              evidence=evidence, allow_call=result["reserved_external_call_count"] < max_external_calls,
+                                              recover_orphan=True))
+                        if item["reason"] != "route_pending":
+                            continue
+
+                        def reserve_route(route: ProviderResourceRouteV2) -> None:
+                            admission = _eod_admit(
+                                db, symbol=symbol, trade_date=trade_date, now=requested_at,
+                                evidence=inspect(symbol),
+                                allow_call=result["reserved_external_call_count"] < max_external_calls,
+                                planned_resource=route,
+                            )
+                            item.update(admission)
+                            if not admission["acquisition_attempted"]:
+                                raise RuntimeError("US_EOD_ROUTE_ADMISSION_DENIED")
+                            result["reserved_external_call_count"] += 1
+
+                        generation = us_intraday_cache_generation(symbol)
+                        try:
+                            refreshed = platform.refresh_intraday_bars(
+                                symbol=symbol, trade_date=trade_date, session_scope="regular",
+                                bars=1000, now=requested_at, require_live=False,
+                                max_provider_calls=1, profile=US_BOOTSTRAP_MATERIALIZER_PROFILE,
+                                excluded_providers=tuple(item["excluded_providers"]),
+                                before_acquire=reserve_route)
+                            acquisition = getattr(refreshed.result, "acquisition", None)
+                            result["external_call_count"] += int(getattr(acquisition, "external_calls", 0) or 0)
+                            item["acquisition_limitations"] = list(getattr(acquisition, "limitations", ()) or ())
+                            item["selected_resources"] = [a.model_dump(mode="json") for a in getattr(acquisition, "resource_attempts", ())]
+                            item["acquisition_status"] = getattr(getattr(acquisition, "status", None), "value", None)
+                            persistence = getattr(refreshed.result, "persistence", None)
+                            item["persistence_committed"] = bool(getattr(persistence, "committed", False))
+                            item["observations_written"] = int(getattr(persistence, "observations_written", 0) or 0)
+                        except Exception as exc:
+                            db.rollback()
+                            item["error_type"] = type(exc).__name__
+                            if isinstance(exc, PostAcquisitionError):
+                                result["external_call_count"] += exc.acquisition.external_calls
+                                item["selected_resources"] = [a.model_dump(mode="json") for a in exc.acquisition.resource_attempts]
+                                item["acquisition_limitations"] = list(exc.acquisition.limitations)
+                            elif item["acquisition_attempted"]:
+                                item["external_call_count_unknown"] = True
+                                item["acquisition_limitations"] = ["PROVIDER_OUTCOME_UNKNOWN"]
+                            logger.warning("US EOD acquisition failed symbol=%s error_type=%s", symbol, type(exc).__name__)
+                        finally:
+                            # The transaction invalidates immediately after commit, even if
+                            # Gateway post-processing throws. Same-symbol concurrent commits
+                            # can conservatively schedule an extra cache-only publish.
+                            item["consumer_cache_invalidated"] = us_intraday_cache_generation(symbol) != generation
+                        try:
+                            item.update(inspect(symbol))
+                            item["reason"] = ("canonical_reread_complete" if item["postcondition_satisfied"]
+                                              else "provider_error" if item.get("error_type") or item.get("acquisition_status") == "failed"
+                                              else "canonical_reread_incomplete")
+                        except Exception as exc:
+                            db.rollback()
+                            item.update(status="error", postcondition_satisfied=False,
+                                        reason="canonical_reread_failed", error_type=type(exc).__name__)
+                        if item["consumer_cache_invalidated"] or item.get("observations_written", 0):
+                            invalidate_us_intraday_read_cache(symbol)
+                            item["consumer_cache_invalidated"] = True
+                            if publish is not None:
+                                try:
+                                    publication = publish({"results": [item]})
+                                    item["consumer_cache_publish_scheduled_count"] = publication.get("consumer_cache_publish_scheduled_count", 0)
+                                    item["consumer_cache_publish_deferred_symbols"] = publication.get("consumer_cache_publish_deferred_symbols", [])
+                                except Exception as exc:
+                                    item["consumer_cache_publish_error"] = type(exc).__name__
+                        if not item["postcondition_satisfied"] and item["attempt_count"] >= _EOD_MAX_ATTEMPTS:
+                            item["unfillable_reason"] = "retry_budget_exhausted"
+                        if item["acquisition_attempted"]:
+                            _eod_finish(db, item, now=requested_at)
+                        else:
+                            item.update(_eod_admit(
+                                db, symbol=symbol, trade_date=trade_date, now=requested_at,
+                                evidence=item, allow_call=True, route_unavailable=True,
+                            ))
+                    except Exception as exc:
+                        db.rollback()
+                        item.update(status="error", postcondition_satisfied=False,
+                                    reason="durable_admission_or_recording_failed", error_type=type(exc).__name__,
+                                    error_code=str(exc) if str(exc).startswith("US_EOD_") else None)
+                        logger.warning("US EOD failed closed symbol=%s error=%s", symbol, exc)
+                result["succeeded_count"] = sum(item.get("postcondition_satisfied", False) for item in result["results"])
+                result["failed_count"] = result["requested_count"] - result["succeeded_count"]
+                result["postconditions_by_symbol"] = {item["symbol"]: dict(item) for item in result["results"]}
+                result["status"] = "success" if result["results"] and not result["failed_count"] else "partial" if result["results"] else "skipped"
+        finally:
+            db.close()
+        return _finish_run("intraday.bars", result, started_monotonic=started)
+    finally:
+        _EOD_LOCK.release()
 
 
 def _materializer_lock_for(
@@ -136,6 +606,86 @@ def _base_result(
     }
 
 
+def _symbol_run_diagnostics(results: Any) -> list[dict[str, Any]]:
+    """Project at most two outcomes; never retain provider payloads or free text."""
+    if not isinstance(results, (list, tuple)):
+        return []
+    providers = {descriptor.provider_key for descriptor in (
+        *US_QUOTE_REGISTERED_DESCRIPTORS, *US_INTRADAY_REGISTERED_DESCRIPTORS,
+    )}
+    reasons = {
+        "canonical_cache_already_satisfied", "refresh_postcondition_unsatisfied",
+        "external_call_budget_exhausted", "post_acquisition_exception",
+        "pre_acquisition_exception",
+    }
+    # Deliberate disclosure allowlist, not a second source of postcondition policy.
+    postconditions = {
+        "REQUIRED_EVIDENCE_MISSING", "REQUIRED_FACTS_UNUSABLE",
+        "RESOLUTION_POLICY_UNSATISFIED", "FRESHNESS_POSTCONDITION_UNSATISFIED",
+        "LATEST_AVAILABLE_STALE_ACCEPTED", "HISTORICAL_SESSION_COVERAGE_INCOMPLETE",
+    }
+    projected = []
+    seen: set[str] = set()
+    for item in results[:20]:  # Existing materializer input bound.
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        if not isinstance(symbol, str) or not (
+            symbol in US_INDEX_SYMBOLS
+            or re.fullmatch(r"[A-Z0-9][A-Z0-9.$-]{0,31}", symbol)
+        ) or symbol in seen:
+            continue
+        seen.add(symbol)
+        diagnostic: dict[str, Any] = {"symbol": symbol}
+        for key, allowed in (
+            ("status", {"success", "failed", "skipped"}),
+            ("reason", reasons),
+            ("resolved_status", {status.value for status in ResolvedEvidenceStatus}),
+        ):
+            value = item.get(key)
+            if key in item and (value is None or isinstance(value, str) and value in allowed):
+                diagnostic[key] = value
+        failure_stages = {
+            "post_acquisition_exception": "post_acquisition",
+            # The generic catch also covers an acquisition port that raises
+            # before it returns accounting; do not claim zero provider IO.
+            "pre_acquisition_exception": "pre_acquisition_or_acquisition",
+        }
+        if diagnostic.get("reason") in failure_stages:
+            diagnostic["failure_stage"] = failure_stages[diagnostic["reason"]]
+            error_type = item.get("error_type")
+            if isinstance(error_type, str) and error_type in {
+                "OperationalError", "IntegrityError", "DatabaseError",
+                "TimeoutError", "Timeout", "ReadTimeout", "ConnectTimeout",
+                "ValidationError", "ValueError", "TypeError", "LookupError",
+                "RuntimeError", "PostAcquisitionError",
+            }:
+                diagnostic["error_type"] = error_type
+        for source, target in (
+            ("acquisition_attempted", "attempted"), ("persistence_committed", "persisted"),
+            ("cache_satisfied", "cache_satisfied"), ("facts_usable", "facts_usable"),
+        ):
+            if type(item.get(source)) is bool:
+                diagnostic[target] = item[source]
+        calls = item.get("external_calls")
+        if type(calls) is int and 0 <= calls <= 40:
+            diagnostic["external_calls"] = calls
+        provider = item.get("selected_provider")
+        if "selected_provider" in item and (
+            provider is None or isinstance(provider, str) and provider in providers
+        ):
+            diagnostic["provider"] = provider
+        codes = item.get("postcondition_reasons")
+        if isinstance(codes, (list, tuple)):
+            diagnostic["postcondition_reason_codes"] = list(dict.fromkeys(
+                code for code in codes[:20] if isinstance(code, str) and code in postconditions
+            ))
+        projected.append(diagnostic)
+        if len(projected) == 2:
+            break
+    return projected
+
+
 def _record_last_run(capability: USMaterializerCapability, result: dict[str, Any]) -> None:
     lane_id = str(result.get("lane_id") or "unknown")
     with _LAST_RUNS_LOCK:
@@ -144,6 +694,9 @@ def _record_last_run(capability: USMaterializerCapability, result: dict[str, Any
             for key, value in result.items()
             if key not in {"results", "universe"}
         }
+        _LAST_RUNS[(lane_id, capability)]["symbol_runs"] = _symbol_run_diagnostics(
+            result.get("results")
+        )
         counters = _RUN_COUNTERS.setdefault(
             (lane_id, capability),
             {
@@ -205,7 +758,7 @@ def _latest_run(capability: USMaterializerCapability) -> dict[str, Any]:
         for (_lane_id, stored_capability), value in _LAST_RUNS.items()
         if stored_capability == capability
     ]
-    return dict(max(matching, key=lambda item: str(item.get("started_at") or ""))) if matching else {}
+    return deepcopy(max(matching, key=lambda item: str(item.get("started_at") or ""))) if matching else {}
 
 
 def us_intraday_materializer_runtime_summary() -> dict[str, Any]:
@@ -216,7 +769,7 @@ def us_intraday_materializer_runtime_summary() -> dict[str, Any]:
             "last_intraday_run": _latest_run("intraday.bars"),
             "runs_by_lane": {
                 lane_id: {
-                    capability: dict(value)
+                    capability: deepcopy(value)
                     for (stored_lane, capability), value in _LAST_RUNS.items()
                     if stored_lane == lane_id
                 }
@@ -251,6 +804,7 @@ def materialize_us_intraday_capability(
     session_factory: Callable[[], Any] = SessionLocal,
     platform_factory: Callable[[Any], Any] = USIntradayMarketPlatform,
     run_lock: Any | None = None,
+    selection_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Refresh one capability for a bounded, explicitly named universe owner."""
 
@@ -280,6 +834,8 @@ def materialize_us_intraday_capability(
         lane_id=lane_id,
         profile=profile,
     )
+    if selection_metadata is not None:
+        result["selection"] = dict(selection_metadata)
     if (
         not profile.allow_outside_acquisition_window
         and (
@@ -496,6 +1052,7 @@ def materialize_us_intraday_capability(
                             "symbol": symbol,
                             "status": "failed",
                             "reason": "post_acquisition_exception",
+                            "acquisition_attempted": bool(exc.acquisition.attempted),
                             "error_type": (
                                 type(exc.__cause__).__name__
                                 if exc.__cause__

@@ -422,7 +422,7 @@ def _stock_quote_entry(
     selected_source = getattr(latest, "source", None)
     selected_received_at = getattr(latest, "fetched_at", None)
     selected = None
-    if stock_id is not None and calendar_status.get("phase") == "regular":
+    if stock_id is not None and calendar_status.get("phase") in {"preopen", "regular", "closing_auction"}:
         try:
             selected = read_taiwan_quote_snapshot(db, stock_id=stock_id, requested_at=current_time)
         except TaiwanInstrumentResolutionError:
@@ -431,11 +431,11 @@ def _stock_quote_entry(
             selected = None
         if selected is not None:
             projected = project_taiwan_public_last_trade_quote(selected)
-    if selected is not None and projected["actual_trade_occurred"] is True:
+    if selected is not None and selected.resolved.quote is not None:
         quote = selected.resolved.quote
         resolved_health = selected.resolved.health
         selected_freshness = projected["freshness"]["status"]
-        status_value = {"live": "current", "missing": "empty"}.get(
+        status_value = {"live": "current", "fresh": "current", "missing": "empty"}.get(
             selected_freshness, selected_freshness,
         )
         ok = status_value == "current" and resolved_health.facts_usable

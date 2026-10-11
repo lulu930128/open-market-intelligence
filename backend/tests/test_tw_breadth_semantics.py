@@ -263,7 +263,7 @@ def test_rescue_guard_rate_limit_and_timeout_do_not_start_retry_storm(rescue_sco
     provider.reset_twse_mis_current_breadth_provider()
     raw = provider._build_payload("TPEX", rescue_scope, [message(code, z="-") for code in rescue_scope], 0)
     with patch.object(provider, "_fetch_messages", side_effect=AssertionError("exhausted budget")):
-        payload, calls = provider._rescue_missing_z("TPEX", rescue_scope, [], raw, prior_states=None, remaining_seconds=0.8)
+        payload, calls = provider._rescue_missing_z("TPEX", rescue_scope, [], raw, prior_states=None, remaining_seconds=0)
     assert calls == 0
     assert payload["missing_z_rescue"]["status"] == "skipped"
 

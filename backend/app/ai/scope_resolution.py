@@ -1107,12 +1107,34 @@ def _resolve_us_stock_symbol_from_question(db: Session | None, question: str) ->
         if resolution is None:
             continue
 
+        if not explicit_marker and resolution.assumption is not None:
+            # Unverified prose is weaker evidence than a master-backed ticker.
+            # Keep ordinary share-class symbols, but do not infer arbitrary
+            # hyphenated command words as instruments. Explicit $/exchange
+            # markers and verified identities retain the full symbol grammar.
+            if symbol in US_SYMBOL_STOPWORDS:
+                continue
+            if "-" in symbol and not re.fullmatch(r"[A-Z][A-Z0-9]*-[A-Z]", symbol):
+                continue
+
         if explicit_marker or has_context or is_known_index:
             candidates.append((resolution, explicit_marker))
 
     if not candidates:
         return None
 
+    # Explicit markers win, then verified identities, then contextual unknowns.
+    # For unverified prose, "US stock XYZ" is stronger than a preceding verb.
+    # Stable sorting preserves mention order within each evidence tier.
+    context_prefix = "(?:" + "|".join(map(re.escape, US_SYMBOL_CONTEXT_HINTS)) + r")\s*[:：]?\s*"
+    candidates.sort(key=lambda candidate: (
+        not candidate[1], not candidate[1] and candidate[0].assumption is not None,
+        not candidate[1] and bool(candidate[0].assumption) and not bool(re.search(
+            context_prefix + re.escape(candidate[0].selected_scope_id or "")
+            + r"(?![A-Za-z0-9.$-])",
+            question, flags=re.IGNORECASE,
+        )),
+    ))
     selected, selected_explicit = candidates[0]
     all_candidates = tuple(
         _resolution_candidate(

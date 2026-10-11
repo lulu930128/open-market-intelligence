@@ -58,6 +58,11 @@ def _captured_payload() -> dict[str, object]:
             "is_live": True,
             "is_stale": False,
         },
+        "data_core_components": {
+            capability: {"freshness": {"is_current": True},
+                         "resolved_health": {"facts_usable": True}}
+            for capability in ("quote.snapshot", "quote.order_book", "quote.auction")
+        },
     }
 
 

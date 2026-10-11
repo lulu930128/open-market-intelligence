@@ -285,14 +285,21 @@ def test_dated_auction_history_filters_date_and_visibility_before_latest(db: Ses
 
 
 def test_trial_auction_stays_provisional_and_never_becomes_quote(db: Session) -> None:
+    now = NOW.replace(hour=13, minute=26)
+    quote = {**_quote(indicative=True), "datetime": "20260826132600",
+             "received_at": now.astimezone(timezone.utc).isoformat()}
+    adapter = KgiRealtimeAcquisitionAdapter(
+        lambda _symbol: KgiRealtimeProviderSnapshot(quote=quote, status="live"),
+        clock=lambda: now,
+    )
     result = acquire_taiwan_auction(
         db,
         stock_id="2330",
         policy=RealtimePolicy.REQUIRE_LIVE,
         descriptors=(KGI_AUCTION_DESCRIPTOR,),
-        acquisition=_adapter(indicative=True),
+        acquisition=adapter,
         provider_health=(_health(KGI_AUCTION_DESCRIPTOR.capability_id),),
-        requested_at=NOW,
+        requested_at=now,
         session=MarketSession.CLOSING_AUCTION,
     )
 
@@ -310,7 +317,7 @@ def test_trial_auction_stays_provisional_and_never_becomes_quote(db: Session) ->
     cached = read_taiwan_auction(
         db,
         stock_id="2330",
-        requested_at=NOW,
+        requested_at=now,
         session=MarketSession.CLOSING_AUCTION,
     )
     assert cached.acquisition.attempted is False

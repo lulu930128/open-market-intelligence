@@ -4737,6 +4737,7 @@ def _attach_completed_data_core_evidence(
     payload: dict,
     *,
     requested_at: datetime | None = None,
+    allow_universe_fallback: bool = True,
 ) -> dict:
     from app.market.tw_dashboard_data_core import attach_taiwan_dashboard_data_core
 
@@ -4745,6 +4746,7 @@ def _attach_completed_data_core_evidence(
             db,
             payload,
             requested_at=requested_at,
+            allow_universe_fallback=allow_universe_fallback,
         )
     )
 
@@ -4753,6 +4755,7 @@ def _shared_current_market_summary(
     db: Session,
     *,
     requested_at: datetime | None = None,
+    allow_universe_fallback: bool = True,
 ) -> dict:
     from app.market.tw_current_market_platform import (
         project_taiwan_current_breadth,
@@ -4936,6 +4939,7 @@ def _shared_current_market_summary(
             "acquisition_policy": "cache_only",
         },
         requested_at=now,
+        allow_universe_fallback=allow_universe_fallback,
     )
     resolved_items: list[dict] = []
     for raw_item in payload.get("indices") or []:
@@ -5065,12 +5069,14 @@ def get_market_index_summary(
     force_refresh: bool = False,
     *,
     requested_at: datetime | None = None,
+    allow_universe_fallback: bool = True,
 ) -> dict:
     if force_refresh:
         logger.warning(
             "Deprecated force_refresh on GET market index summary was ignored; use the explicit POST refresh route."
         )
-    return _shared_current_market_summary(db, requested_at=requested_at)
+    return _shared_current_market_summary(db, requested_at=requested_at,
+                                          allow_universe_fallback=allow_universe_fallback)
 
 
 def refresh_market_index_summary(

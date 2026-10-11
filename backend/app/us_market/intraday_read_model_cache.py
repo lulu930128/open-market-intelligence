@@ -24,6 +24,22 @@ _US_INTRADAY_CACHE: OrderedDict[
     USIntradayReadCacheKey, tuple[float, dict]
 ] = OrderedDict()
 _US_INTRADAY_CACHE_LOCK = RLock()
+_US_INTRADAY_CACHE_GENERATION = 0
+_US_INTRADAY_SYMBOL_GENERATIONS: OrderedDict[str, int] = OrderedDict()
+
+
+def us_intraday_cache_generation(symbol: str) -> int:
+    """Bounded per-symbol fencing; evicted tokens are never reused."""
+    global _US_INTRADAY_CACHE_GENERATION
+    symbol = normalize_us_symbol(symbol)
+    with _US_INTRADAY_CACHE_LOCK:
+        if symbol not in _US_INTRADAY_SYMBOL_GENERATIONS:
+            _US_INTRADAY_CACHE_GENERATION += 1
+            _US_INTRADAY_SYMBOL_GENERATIONS[symbol] = _US_INTRADAY_CACHE_GENERATION
+        _US_INTRADAY_SYMBOL_GENERATIONS.move_to_end(symbol)
+        while len(_US_INTRADAY_SYMBOL_GENERATIONS) > US_INTRADAY_CACHE_MAX_ENTRIES:
+            _US_INTRADAY_SYMBOL_GENERATIONS.popitem(last=False)
+        return _US_INTRADAY_SYMBOL_GENERATIONS[symbol]
 
 
 def get_us_intraday_read_cache(cache_key: USIntradayReadCacheKey) -> dict | None:
@@ -75,8 +91,11 @@ def get_us_intraday_read_cache(cache_key: USIntradayReadCacheKey) -> dict | None
 def set_us_intraday_read_cache(
     cache_key: USIntradayReadCacheKey,
     payload: dict,
+    *, expected_generation: int | None = None,
 ) -> dict:
     with _US_INTRADAY_CACHE_LOCK:
+        if expected_generation is not None and expected_generation != us_intraday_cache_generation(cache_key[1]):
+            return payload
         _US_INTRADAY_CACHE[cache_key] = (time.monotonic(), deepcopy(payload))
         _US_INTRADAY_CACHE.move_to_end(cache_key)
         while len(_US_INTRADAY_CACHE) > US_INTRADAY_CACHE_MAX_ENTRIES:
@@ -85,8 +104,12 @@ def set_us_intraday_read_cache(
 
 
 def invalidate_us_intraday_read_cache(symbol: str) -> None:
+    global _US_INTRADAY_CACHE_GENERATION
     normalized_symbol = normalize_us_symbol(symbol)
     with _US_INTRADAY_CACHE_LOCK:
+        _US_INTRADAY_CACHE_GENERATION += 1
+        _US_INTRADAY_SYMBOL_GENERATIONS[normalized_symbol] = _US_INTRADAY_CACHE_GENERATION
+        us_intraday_cache_generation(normalized_symbol)
         for cache_key in tuple(_US_INTRADAY_CACHE):
             if cache_key[1] == normalized_symbol:
                 _US_INTRADAY_CACHE.pop(cache_key, None)

@@ -1458,6 +1458,7 @@ def read_us_historical_intraday_trend(
     start, _ = completed_intraday_window(trade_date, now=evaluated_at, session_scope=session_scope)
     read = USIntradayMarketPlatform(db).read_intraday_bars_for_trade_date(
         symbol=symbol, trade_date=start.date(), bars=1000, now=evaluated_at,
+        completed_regular=session_scope == "regular",
     )
     resolved = read.result.resolved
     regular_coverage = regular_intraday_coverage([bar.start_at for bar in resolved.bars], trade_date=start.date())

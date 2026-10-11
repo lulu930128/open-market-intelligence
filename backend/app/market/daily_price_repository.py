@@ -227,6 +227,73 @@ class TaiwanOfficialDailyBarRepository:
             if available_at is not None
             else None
         )
+        self._latest_batch: dict[str, list] | None = None
+        self._latest_batch_dates: dict[str, date] = {}
+
+    def preload_latest_stock_daily(
+        self, instruments: tuple[InstrumentKey, ...], *, end_date: date,
+    ) -> None:
+        """Batch latest-date discovery and bounded rows; decoding stays canonical.
+
+        The SQL release predicate is the existing stock/ETF receipt gate. A
+        malformed latest-day row does not cause an invented older fallback.
+        """
+        if len(instruments) > 100 or any(
+            item.instrument_type not in {InstrumentType.STOCK, InstrumentType.ETF}
+            for item in instruments
+        ):
+            raise ValueError("latest daily batch requires at most 100 stocks/ETFs")
+        self._latest_batch = {item.symbol: [] for item in instruments}
+        for venue in sorted({item.venue for item in instruments}):
+            members = [item for item in instruments if item.venue == venue]
+            bindings = _bindings_for_instrument(members[0])
+            sources = tuple(item.source_name for item in bindings)
+            latest_query = self._db.query(
+                MarketDailyPrice.stock_id.label("symbol"),
+                func.max(MarketDailyPrice.trade_date).label("trade_date"),
+            ).join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id).join(
+                SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id,
+            ).filter(
+                MarketDailyPrice.stock_id.in_([item.symbol for item in members]),
+                MarketDailyPrice.trade_date <= end_date,
+                SourceRegistry.source_name.in_(sources),
+                taiwan_official_daily_release_qualified_filter(),
+            )
+            if self._available_at is not None:
+                latest_query = latest_query.filter(RawFetchResult.fetched_at <= self._available_at)
+            latest = latest_query.group_by(MarketDailyPrice.stock_id).subquery()
+            ranked_query = self._db.query(
+                MarketDailyPrice.id.label("id"),
+                latest.c.trade_date.label("latest_date"),
+                func.row_number().over(
+                    partition_by=MarketDailyPrice.stock_id,
+                    order_by=MarketDailyPrice.id.asc(),
+                ).label("ordinal"),
+            ).join(latest, and_(
+                MarketDailyPrice.stock_id == latest.c.symbol,
+                MarketDailyPrice.trade_date >= latest.c.trade_date,
+            )).join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id).outerjoin(
+                RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id,
+            ).filter(MarketDailyPrice.trade_date <= end_date, SourceRegistry.source_name.in_(sources))
+            if self._available_at is not None:
+                ranked_query = ranked_query.filter(or_(
+                    RawFetchResult.fetched_at <= self._available_at,
+                    and_(RawFetchResult.id.is_(None), MarketDailyPrice.updated_at <= self._available_at),
+                ))
+            ranked = ranked_query.subquery()
+            rows = self._db.query(
+                MarketDailyPrice, RawFetchResult, SourceRegistry, MarketDailyPriceLineage,
+                ranked.c.latest_date,
+            ).options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS)).join(
+                ranked, ranked.c.id == MarketDailyPrice.id,
+            ).outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id).join(
+                SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id,
+            ).outerjoin(MarketDailyPriceLineage, MarketDailyPriceLineage.daily_price_id == MarketDailyPrice.id).filter(
+                ranked.c.ordinal <= len(bindings) + 129,
+            ).order_by(MarketDailyPrice.trade_date.asc(), MarketDailyPrice.id.asc()).all()
+            for row, raw, source, lineage, latest_date in rows:
+                self._latest_batch[row.stock_id].append((row, raw, source, lineage))
+                self._latest_batch_dates[row.stock_id] = latest_date
 
     def latest_candidate_start_date(
         self,
@@ -245,6 +312,10 @@ class TaiwanOfficialDailyBarRepository:
 
         if max_rows < 1 or max_rows > 5000:
             raise ValueError("Taiwan daily read max_rows must be between 1 and 5000")
+        if self._latest_batch is not None:
+            if max_rows != 1:
+                raise ValueError("preloaded latest daily supports max_rows=1 only")
+            return self._latest_batch_dates.get(instrument.symbol)
         bindings = _bindings_for_instrument(instrument)
         source_names = tuple(item.source_name for item in bindings)
         binding_by_source = {item.source_name: item for item in bindings}
@@ -391,7 +462,7 @@ class TaiwanOfficialDailyBarRepository:
                     ),
                 )
             )
-        rows = (
+        rows = self._latest_batch.get(instrument.symbol, []) if self._latest_batch is not None else (
             stored_query.order_by(MarketDailyPrice.trade_date.asc(), MarketDailyPrice.id.asc())
             .limit(query.max_rows * len(bindings) + 129)
             .all()

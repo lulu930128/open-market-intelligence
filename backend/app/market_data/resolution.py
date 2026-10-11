@@ -293,6 +293,7 @@ def _resolve(
     max_age: timedelta,
     official_first: bool = False,
     requirement: DataRequirementV2 | None = None,
+    coverage_rank: dict[int, int] | None = None,
 ) -> tuple[
     ObservationT | None,
     ResolvedEvidenceHealth,
@@ -314,7 +315,7 @@ def _resolve(
     ]
     eligible = [item for item in evaluated if item.eligible]
 
-    def rank(item: _EvaluatedCandidate[ObservationT]) -> tuple[int, int, int, int]:
+    def rank(item: _EvaluatedCandidate[ObservationT]) -> tuple[int, ...]:
         currentness_rank = 0
         official_rank = 0
         if official_first:
@@ -326,6 +327,7 @@ def _resolve(
             )
             official_rank = 0 if getattr(item.candidate.observation, "official", False) else 1
         return (
+            (coverage_rank or {}).get(id(item.candidate.observation), 0),
             currentness_rank,
             official_rank,
             _freshness_rank(item.freshness),
@@ -1049,6 +1051,7 @@ def resolve_bar_series(
         )
     projected: list[ResolutionCandidate[BarObservation]] = []
     series_by_identity: dict[int, tuple[BarObservation, ...]] = {}
+    coverage_rank: dict[int, int] = {}
     for candidate in candidates:
         latest = candidate.bars[-1]
         if parsed_policy is RealtimePolicy.COMPLETED_SESSION and any(
@@ -1075,8 +1078,8 @@ def resolve_bar_series(
                 and len(candidate.bars)
                 < requirement.request.coverage.minimum_bar_count
             ):
-                quality = QualityEvaluation(
-                    eligible=False,
+                coverage_quality = QualityEvaluation(
+                    eligible=requirement.request.coverage.allow_partial_fallback,
                     reason_code=QualityReasonCode.BAR_COVERAGE_INSUFFICIENT,
                     reason_codes=(QualityReasonCode.BAR_COVERAGE_INSUFFICIENT,),
                     facts_usable=True,
@@ -1084,6 +1087,17 @@ def resolve_bar_series(
                     limitations=(
                         "Candidate bar series does not satisfy the explicit minimum history depth.",
                     ),
+                )
+                quality = combine_quality_evaluations((quality, coverage_quality))
+            if (
+                isinstance(requirement.request, BarCapabilityRequest)
+                and requirement.request.coverage is not None
+                and requirement.request.coverage.allow_partial_fallback
+            ):
+                # Explicit coverage only: rank whole eligible series by depth.
+                # Equal/full depth retains normal freshness and priority.
+                coverage_rank[id(latest)] = -min(
+                    len(candidate.bars), requirement.request.coverage.minimum_bar_count,
                 )
         projected_candidate = ResolutionCandidate(
             observation=latest,
@@ -1103,6 +1117,7 @@ def resolve_bar_series(
         # Each bar was already evaluated above so the series can carry one
         # combined quality result without evaluating the latest bar twice.
         requirement=None,
+        coverage_rank=coverage_rank,
     )
     bars = series_by_identity.get(id(selected), ()) if selected is not None else ()
     return ResolvedBarSeries(bars=bars, health=health, candidates=summaries)

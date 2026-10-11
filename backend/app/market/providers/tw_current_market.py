@@ -553,6 +553,8 @@ class CurrentBreadthAdapter:
                 classification_diagnostics=raw.get("classification_diagnostics") or {},
                 auction=auction,
                 acquisition_diagnostics=BreadthAcquisitionDiagnostics(
+                    receipt_evidence_id=(attempt_diagnostics.get("acquisition_diagnostics") or {}).get("acquisition_id"),
+                    receipt_evidence_version=(attempt_diagnostics.get("acquisition_diagnostics") or {}).get("version"),
                     missing_z_rescue=raw.get("missing_z_rescue"),
                     auction_error_code=auction_error_code,
                     attempted_batch_count=attempt_diagnostics.get("attempted_batch_count"),

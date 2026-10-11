@@ -1,4 +1,6 @@
 """Negative and lifecycle acceptance for the single Base-1m command owner."""
+
+from r1d_test_support import isolated_job_lifecycle  # noqa: F401
 from datetime import date, datetime, timedelta
 import json
 from types import SimpleNamespace

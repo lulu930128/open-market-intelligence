@@ -185,10 +185,8 @@ def test_current_fill_preserves_date_without_historical_completion(satisfied):
                "session_coverage": {"coverage_status": "partial"}}
     realtime = {"intraday.bars": {"state": "live" if satisfied else "missing", "status_class": "ready" if satisfied else "blocked",
                 "decision_usable": satisfied, "refresh_recommended": not satisfied, "refresh_possible_now": True}}
-    with patch.object(capability_contract, "datetime") as clock:
-        clock.now.return_value = NOW
-        manifest = capability_contract.build_manifest(canonical=canonical, selection=selection,
-            projected_data={"intraday.bars": payload}, realtime_assessments=realtime)
+    manifest = capability_contract.build_manifest(canonical=canonical, selection=selection,
+        projected_data={"intraday.bars": payload}, realtime_assessments=realtime, now=NOW)
     item = manifest["capabilities"][0]
     assert item["fill_state"]["satisfied"] is satisfied
     assert item["historical_fill_required"] is False

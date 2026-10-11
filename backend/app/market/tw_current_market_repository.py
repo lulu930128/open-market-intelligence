@@ -60,6 +60,35 @@ from app.market_data.resolution import ResolutionCandidate
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
 logger = logging.getLogger(__name__)
+
+
+def inspect_breadth_acquisition_receipt(db: Session, *, raw_result_id: int) -> dict | None:
+    """Explicit internal, cache-only inspect seam, including failed attempts.
+
+RawResult owns durable evidence. No new table, provider IO or market readiness
+policy. Selecting by receipt identity avoids mistaking last-good data for a failed
+attempt; unknown/legacy receipt versions have no M0.5 evidence.
+    """
+    from app.market.tw_breadth_acquisition_contract import BreadthAcquisitionEvidence
+
+    with db.no_autoflush:
+        raw = db.query(RawFetchResult).filter(RawFetchResult.id == raw_result_id).one_or_none()
+        if raw is None:
+            return None
+        try:
+            payload = json.loads(raw.raw_text or "{}")
+            evidence = payload.get("acquisition_diagnostics")
+            # Failed attempts use CurrentMarketProviderPayload.diagnostics envelope.
+            if isinstance(evidence, dict) and "acquisition_diagnostics" in evidence:
+                evidence = evidence["acquisition_diagnostics"]
+            if not isinstance(evidence, dict) or evidence.get("version") != "tw.mis.breadth.acquisition.v1":
+                return None
+            parsed = BreadthAcquisitionEvidence.model_validate(evidence)
+        except (TypeError, ValueError):
+            logger.warning("Invalid breadth acquisition evidence for raw_result_id=%s", raw_result_id)
+            return None
+        return parsed.model_copy(update={"raw_result_id": raw.id,
+            "raw_receipt_id": f"raw_fetch_result:{raw.id}", "content_hash": raw.content_hash}).model_dump(mode="json")
 CURRENT_INDEX_MAX_ABS_CHANGE_RATIO = TW_CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
 
 _RAW_FETCH_LINEAGE_COLUMNS = (
@@ -946,12 +975,19 @@ def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime
     if not schema.has_table(table) or "price_states_json" not in {c["name"] for c in schema.get_columns(table)}:
         return {}
     single_symbol = symbols[0] if symbols is not None and len(symbols) == 1 else None
+    batch_symbols = symbols if symbols is not None and 1 < len(symbols) <= 100 else None
     column = TaiwanCurrentBreadthSnapshot.price_states_json
     projection = func.json_extract(column, '$.' + json.dumps(single_symbol)) if single_symbol else column
-    row = (db.query(projection)
+    if batch_symbols:
+        projection = func.json_extract(column, *('$.' + json.dumps(symbol) for symbol in batch_symbols))
+    # Keep receipt/session visibility ahead of large JSON reads. SQLite may
+    # evaluate json_valid before the other WHERE terms, decoding historical or
+    # not-yet-visible universe payloads even when no eligible receipt exists.
+    # The ordered, unlimited subquery is a non-flattening metadata boundary;
+    # it preserves every candidate (including malformed-latest fallback).
+    visible = (db.query(TaiwanCurrentBreadthSnapshot.id, TaiwanCurrentBreadthSnapshot.event_at)
            .select_from(TaiwanCurrentBreadthSnapshot)
            .join(RawFetchResult, RawFetchResult.id == TaiwanCurrentBreadthSnapshot.raw_result_id)
-           .filter(func.json_valid(column) == 1)
            .filter(TaiwanCurrentBreadthSnapshot.venue == venue)
            .filter(TaiwanCurrentBreadthSnapshot.provider == "twse_mis")
            .filter(TaiwanCurrentBreadthSnapshot.source == "twse_mis_live_breadth")
@@ -961,11 +997,19 @@ def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime
                    TaiwanCurrentBreadthSnapshot.fetched_at <= visible_at,
                    RawFetchResult.fetched_at <= visible_at)
            .order_by(TaiwanCurrentBreadthSnapshot.event_at.desc(), TaiwanCurrentBreadthSnapshot.id.desc())
+           .limit(-1).subquery())
+    row = (db.query(projection)
+           .select_from(visible)
+           .join(TaiwanCurrentBreadthSnapshot, TaiwanCurrentBreadthSnapshot.id == visible.c.id)
+           .filter(func.json_valid(column) == 1)
+           .order_by(visible.c.event_at.desc(), visible.c.id.desc())
            .first())
     if row is None or not row[0]:
         return {}
     try:
         raw_states = {single_symbol: json.loads(row[0])} if single_symbol else json.loads(row[0])
+        if batch_symbols:
+            raw_states = {symbol: value for symbol, value in zip(batch_symbols, raw_states) if value is not None}
         if not isinstance(raw_states, dict):
             raise ValueError("price states must be an object")
     except (ValueError, TypeError):

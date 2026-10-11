@@ -103,6 +103,7 @@ class BarCoverageRequirement(CanonicalModel):
 
     contract_version: str = "omi.market.bar_coverage_requirement.v1"
     minimum_bar_count: int = Field(ge=1, le=5000)
+    allow_partial_fallback: bool = False
 
 
 class BarCapabilityRequest(CanonicalModel):
@@ -258,6 +259,13 @@ class DataRequirementV2(CanonicalModel):
         ):
             raise ValueError("completed_session bar requests require completed_only=true")
         if isinstance(self.request, BarCapabilityRequest):
+            if self.request.coverage is not None and self.request.coverage.allow_partial_fallback:
+                if (
+                    not self.request.completed_only
+                    or self.request.series_resolution is not BarSeriesResolutionMode.SINGLE_CANDIDATE
+                    or self.realtime_policy not in {RealtimePolicy.CACHE_ONLY, RealtimePolicy.COMPLETED_SESSION}
+                ):
+                    raise ValueError("partial coverage fallback requires a completed single-source read")
             if self.request.max_bars > self.bounds.max_rows:
                 raise ValueError("bar max_bars cannot exceed bounds.max_rows")
             if (

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from app.us_market.session_summary import USSessionSummaryRead
+from app.us_market.market_truth_contracts import USRegularSessionCoverage
 
 
 class USStockMasterRead(BaseModel):
@@ -131,6 +133,24 @@ class USOhlcPointRead(BaseModel):
     volume: int | None = None
 
 
+class USProvisionalDailyOverlayRead(BaseModel):
+    contract_version: Literal["omi.us.provisional_daily.v1"] = "omi.us.provisional_daily.v1"
+    trade_date: date
+    point: USOhlcPointRead
+    finalization: Literal["provisional"] = "provisional"
+    authority: Literal["derived"] = "derived"
+    release_status: Literal["pending_release", "unavailable"]
+    market_session: str
+    freshness: str
+    coverage: USRegularSessionCoverage
+    source_interval: Literal["1m"] = "1m"
+    event_at: datetime
+    selected_provider: str | None
+    selected_source: str | None
+    decision_usable: Literal[False] = False
+    limitations: list[str]
+
+
 class USOhlcChartRead(BaseModel):
     symbol: str
     timeframe: str
@@ -144,7 +164,7 @@ class USOhlcChartRead(BaseModel):
     volume_semantics: str | None = None
     volume_status: str = "not_provided"
     backfill: dict | None = None
-    intraday_overlay: dict | None = None
+    intraday_overlay: USProvisionalDailyOverlayRead | None = None
     latest_data_date: date | None = None
     latest_trade_date: date | None = None
     latest_finalized_data_date: date | None = None

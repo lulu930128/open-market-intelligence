@@ -32,6 +32,10 @@ _INDEX_VENUES = {
 }
 
 
+class USInstrumentIdentityUnavailableError(LookupError):
+    """The local master cannot supply a canonical US instrument identity."""
+
+
 class USInstrumentIdentity(CanonicalModel):
     contract_version: str = "omi.market.us_instrument_identity.v1"
     instrument: InstrumentKey
@@ -69,7 +73,9 @@ def resolve_us_instrument_identity(db: Session, symbol: str) -> USInstrumentIden
     )
     venue = str(getattr(stock, "exchange", None) or "").strip().upper()
     if stock is None or not venue:
-        raise LookupError(f"US instrument identity is unavailable: {normalized}")
+        raise USInstrumentIdentityUnavailableError(
+            f"US instrument identity is unavailable: {normalized}"
+        )
     return USInstrumentIdentity(
         instrument=InstrumentKey(
             market=Market.US,

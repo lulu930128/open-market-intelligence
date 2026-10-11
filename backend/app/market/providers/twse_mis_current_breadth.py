@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from math import isfinite
 
-import math
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta, timezone
 from threading import Lock
 from time import monotonic
+from uuid import uuid4
 
 from app.market.index_parsers import as_float, as_int, parse_trade_date, regular_stock_code
 from app.market.providers import http_get, twse_mis
 from app.market.providers.tw_current_market import CurrentMarketProviderPayload
+from app.market.providers.twse_mis_breadth_evidence import (
+    bounded_fetch, original_message_evidence, distribution,
+    AcquisitionInFlight, reset_io_slots,
+)
+from app.market.tw_breadth_acquisition_contract import BreadthAcquisitionEvidence
 from app.market.providers.twse_mis_guard import (
     TWSE_MIS_PROVIDER_GUARD,
     TwseMisGuardDecision,
@@ -24,6 +29,7 @@ from app.market.tw_market_breadth_contract import (
     classify_twse_mis_breadth_coverage,
     breadth_classification_diagnostics,
     resolve_twse_mis_breadth_price_state,
+    taiwan_breadth_market_session,
 )
 from app.market_data.contracts import OperationalStatus
 from app.market.trading_calendar import TAIWAN_SESSION_CLOSE_TIME, TAIWAN_CLOSE_RESOLUTION_TIME
@@ -138,6 +144,7 @@ def _classify_message(
         "market": market,
         "trade_date": trade_date,
         "as_of": snapshot_at,
+        "observation_received_at": message.get("_omi_received_at"),
         **price_state,
         "price_lineage": cached_state.get("lineage") if cached_state and price_state["price_source"] == "session_cache" else None,
         "current_price": latest_price,
@@ -162,10 +169,12 @@ def _classify_message(
 def _fetch_messages(
     codes: list[str],
     market: str,
-    timeout_seconds: int,
+    timeout_seconds: float,
     *,
     initial_decision: TwseMisGuardDecision | None = None,
     diagnostics: dict[str, object] | None = None,
+    phase: str = "scan",
+    deadline: float | None = None,
 ) -> tuple[list[dict[str, object]], int, int]:
     batches = list(_chunks(codes, _BATCH_SIZE))
     messages: list[dict[str, object]] = []
@@ -174,36 +183,77 @@ def _fetch_messages(
     failures = []
     external_calls = 0
     started_at = monotonic()
+    deadline = started_at + timeout_seconds if deadline is None else deadline
+    batch_evidence = []
+    event_delays = []
+    stop_reason = None
     for index, batch in enumerate(batches):
+        batch_started = monotonic()
+        remaining_seconds = deadline - batch_started
+        evidence = dict(batch_index=index + 1, phase=phase, requested=len(batch), returned=0,
+                        eligible_stock_rows=0, actual_z=0, missing_z=0, verified_no_trade=0,
+                        duration_ms=0, receipt_at=None, event_min=None, event_max=None,
+                        attempted=False, error=None, timeout=False)
+        batch_evidence.append(evidence)
+        if stop_reason or remaining_seconds <= 0:
+            if index == 0 and initial_decision and initial_decision.attempt:
+                TWSE_MIS_PROVIDER_GUARD.cancel_attempt(initial_decision.attempt)
+            reason = stop_reason or "budget_exhausted"
+            evidence["error"] = reason
+            skipped += 1
+            failures.append({"batch_ordinal": index + 1, "reason": reason, "attempted": False})
+            continue
         decision = (
             initial_decision
             if index == 0 and initial_decision is not None
             else TWSE_MIS_PROVIDER_GUARD.before_request()
         )
         if not decision.allowed:
-            skipped += len(batches) - index
+            skipped += 1
+            evidence["error"] = stop_reason = "guard_open"
             failures.append({"batch_ordinal": index + 1, "reason": "guard_open", "attempted": False})
-            break
+            continue
         attempt = decision.attempt
         if attempt is None:
             raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
-        remaining_seconds = timeout_seconds - (monotonic() - started_at)
-        if remaining_seconds <= 0:
-            TWSE_MIS_PROVIDER_GUARD.cancel_attempt(attempt)
-            skipped += len(batches) - index
-            failures.append({"batch_ordinal": index + 1, "reason": "budget_exhausted", "attempted": False})
-            break
         external_calls += 1
+        evidence["attempted"] = True
         try:
-            batch_messages = twse_mis.fetch_stock_messages(
+            remaining_seconds = max(0.0, deadline - monotonic())
+            batch_messages = bounded_fetch(
+                twse_mis.fetch_stock_messages, remaining_seconds,
                 batch,
                 exchange="otc" if market == "TPEX" else "tse",
-                timeout_seconds=max(1, math.ceil(remaining_seconds)),
+                timeout_seconds=max(0.001, remaining_seconds),
                 request=http_get,
             )
+            received_at = datetime.now(TAIPEI_TZ)
+            evidence["receipt_at"] = received_at.isoformat()
+            eligible = [message for message in batch_messages if str(message.get("c")) in batch]
+            rows = [row for message in eligible if (row := _classify_message(message, market))]
+            missing = [message for message in eligible
+                       if not ((z := as_float(message.get("z"))) is not None and isfinite(z) and z > 0)]
+            times = [at for message in eligible if (at := _snapshot_time(message)) is not None]
+            event_delays.extend((received_at - at).total_seconds() for at in times)
+            evidence.update(original_message_evidence(batch_messages, missing))
+            evidence.update(returned=len(batch_messages), eligible_stock_rows=len(rows),
+                            actual_z=sum(bool(row.get("has_actual_trade")) for row in rows),
+                            missing_z=len(missing),
+                            verified_no_trade=classify_twse_mis_breadth_coverage(rows, universe_count=len(rows))["valid_no_trade"],
+                            event_min=min(times).isoformat() if times else None,
+                            event_max=max(times).isoformat() if times else None)
+            # A transport that returns after its allocation cannot backfill this acquisition.
+            if monotonic() > deadline:
+                raise TimeoutError("TWSE_MIS_ACQUISITION_DEADLINE")
         except Exception as exc:
             status_code, headers = response_failure_metadata(exc)
-            if status_code is not None:
+            if isinstance(exc, AcquisitionInFlight):
+                TWSE_MIS_PROVIDER_GUARD.cancel_attempt(attempt)
+                external_calls -= 1
+                skipped += 1
+                evidence["attempted"] = False
+                stop_reason = "transport_in_flight"
+            elif status_code is not None:
                 TWSE_MIS_PROVIDER_GUARD.record_http_failure(
                     attempt,
                     status_code,
@@ -214,22 +264,26 @@ def _fetch_messages(
                     attempt,
                     detail_code=f"TWSE_MIS_{type(exc).__name__.upper()}"
                 )
-            failed += 1
-            failures.append({"batch_ordinal": index + 1, "attempted": True,
+            failed += int(not isinstance(exc, AcquisitionInFlight))
+            failures.append({"batch_ordinal": index + 1, "attempted": evidence["attempted"],
                 "reason": "rate_limited" if status_code == 429 else "http_error" if status_code else
+                          "transport_in_flight" if isinstance(exc, AcquisitionInFlight) else
                           "timeout" if "timeout" in type(exc).__name__.lower() else
                           "parse_error" if isinstance(exc, (ValueError, TypeError)) else "transport_error",
                 "http_status": status_code,
             })
+            evidence.update(error=failures[-1]["reason"], timeout=failures[-1]["reason"] == "timeout")
             if status_code == 429 or not TWSE_MIS_PROVIDER_GUARD.snapshot().allowed:
-                skipped += len(batches) - index - 1
-                break
+                stop_reason = "guard_open"
         else:
-            messages.extend(batch_messages)
+            messages.extend({**message, "_omi_received_at": received_at.isoformat()} for message in eligible)
             TWSE_MIS_PROVIDER_GUARD.record_success(attempt)
+        finally:
+            evidence["duration_ms"] = round((monotonic() - batch_started) * 1000, 3)
     if diagnostics is not None:
         diagnostics.update(attempted_batch_count=external_calls, failed_batch_count=failed, skipped_batch_count=skipped,
-            batch_failures=failures, elapsed_ms=round((monotonic() - started_at) * 1000))
+            batch_failures=failures, elapsed_ms=round((monotonic() - started_at) * 1000),
+            batches=batch_evidence, _event_delays=event_delays)
     return messages, failed, external_calls
 
 
@@ -253,11 +307,21 @@ def _label(market: str) -> str:
     return f"{'上市' if market == 'TWSE' else '上櫃'}即時廣度（註冊範圍）"
 
 
-def _cache(market: str, payload: dict[str, object] | None) -> None:
+def _cache(
+    market: str, payload: dict[str, object] | None,
+    *, provider_result: CurrentMarketProviderPayload | None = None,
+) -> None:
     _CACHE[market] = {
         **_CACHE.get(market, {}),
         "expires_at": monotonic() + _CACHE_TTL_SECONDS,
         "payload": payload,
+        # A cache hit is not a successful new provider attempt. Preserve the
+        # health of this receipt, including rescue failures and rate limits.
+        "provider_health": {
+            key: getattr(provider_result, key)
+            for key in ("operational_status", "detail_code", "status_code",
+                        "retry_after_seconds", "cooldown_until")
+        } if provider_result is not None else {},
     }
     if payload is not None and payload.get("failed_batch_count", 0) == 0 and not payload.get("skipped_batch_count"):
         _LAST_GOOD[market] = payload
@@ -516,8 +580,10 @@ def _rescue_missing_z(
     market: str, codes: list[str], messages: list[dict[str, object]],
     payload: dict[str, object], *, prior_states: dict[str, dict] | None,
     remaining_seconds: float,
+    evidence: dict | None = None,
 ) -> tuple[dict[str, object], int]:
     """Bounded second pass within the existing refresh, using the same guard/receipt."""
+    rescue_deadline = monotonic() + min(_RESCUE_TIMEOUT_SECONDS, remaining_seconds)
     today = datetime.now(TAIPEI_TZ).date()
     candidates = {
         str(row["code"]): row for row in payload["component_stock_rows"]
@@ -534,15 +600,22 @@ def _rescue_missing_z(
         timeout_seconds=_RESCUE_TIMEOUT_SECONDS, backoff_seconds=_RESCUE_BACKOFF_SECONDS,
     )
     payload["missing_z_rescue"] = diagnostics
+    rescue = dict(candidate_count=len(candidates), attempted_count=0, succeeded_count=0,
+                  failed_count=0, skipped_count=len(candidates), skip_reasons={})
+    if evidence is not None:
+        evidence["rescue"] = rescue
     if not candidates:
         return payload, 0
     state = _CACHE.setdefault(market, {})
     if monotonic() < float(state.get("rescue_next_at", 0)):
         diagnostics["status"] = "backoff"
+        diagnostics["backoff_seconds"] = state.get("rescue_backoff_seconds", _RESCUE_BACKOFF_SECONDS)
+        rescue["skip_reasons"] = {"RESCUE_SKIPPED_BACKOFF": len(candidates)}
         return payload, 0
-    budget = min(_RESCUE_TIMEOUT_SECONDS, math.floor(remaining_seconds))
-    if payload.get("failed_batch_count") or payload.get("skipped_batch_count") or budget < 1:
+    budget = rescue_deadline - monotonic()
+    if budget <= 0:
         diagnostics["status"] = "skipped"
+        rescue["skip_reasons"] = {"RESCUE_SKIPPED_BUDGET": len(candidates)}
         return payload, 0
     # Rotate over current candidates; persistent missing-z symbols cannot starve
     # the rest of the universe. This is cadence metadata, not another price store.
@@ -550,10 +623,11 @@ def _rescue_missing_z(
     ordered = sorted(candidates)
     ordered = [code for code in ordered if code > cursor] + [code for code in ordered if code <= cursor]
     selected = ordered[:min(_RESCUE_MAX_SYMBOLS, _BATCH_SIZE * _RESCUE_MAX_BATCHES)]
-    state.update(rescue_next_at=monotonic() + _RESCUE_BACKOFF_SECONDS, rescue_cursor=selected[-1])
+    state.update(rescue_next_at=monotonic() + _RESCUE_BACKOFF_SECONDS, rescue_cursor=selected[-1],
+                 rescue_backoff_seconds=_RESCUE_BACKOFF_SECONDS)
     batch_diagnostics: dict[str, object] = {}
     rescued_messages, failed, calls = _fetch_messages(
-        selected, market, budget, diagnostics=batch_diagnostics,
+        selected, market, budget, diagnostics=batch_diagnostics, phase="rescue", deadline=rescue_deadline,
     )
     accepted = {}
     for message in rescued_messages:
@@ -572,6 +646,7 @@ def _rescue_missing_z(
     blocked = bool(failed or batch_diagnostics.get("skipped_batch_count"))
     if blocked:
         state["rescue_next_at"] = monotonic() + _RESCUE_FAILURE_BACKOFF_SECONDS
+        state["rescue_backoff_seconds"] = _RESCUE_FAILURE_BACKOFF_SECONDS
         diagnostics["backoff_seconds"] = _RESCUE_FAILURE_BACKOFF_SECONDS
     diagnostics.update(
         status="blocked" if blocked else "complete" if len(accepted) == len(selected) else "partial",
@@ -581,11 +656,24 @@ def _rescue_missing_z(
         skipped_batch_count=batch_diagnostics.get("skipped_batch_count", 0),
         batch_failures=batch_diagnostics.get("batch_failures", []),
     )
+    attempted = len(selected) if calls else 0
+    rescue.update(attempted_count=attempted, succeeded_count=len(accepted),
+                  failed_count=attempted - len(accepted), skipped_count=len(candidates) - attempted)
+    if len(candidates) > len(selected):
+        rescue["skip_reasons"]["RESCUE_SKIPPED_SYMBOL_CAP"] = len(candidates) - len(selected)
+    if not calls:
+        reason = (batch_diagnostics.get("batch_failures") or [{}])[0].get("reason", "unknown")
+        rescue["skip_reasons"][f"RESCUE_SKIPPED_{reason.upper()}"] = len(selected)
+    if evidence is not None:
+        evidence.setdefault("batches", []).extend(batch_diagnostics.get("batches", []))
+        evidence.setdefault("_event_delays", []).extend(batch_diagnostics.get("_event_delays", []))
     if accepted:
         refreshed = _build_payload(
             market, codes,
             [message for message in messages if str(message.get("c") or "") not in accepted]
-            + list(accepted.values()), 0, prior_states=prior_states,
+            + list(accepted.values()),
+            int(payload.get("failed_batch_count", 0)) + int(payload.get("skipped_batch_count", 0)),
+            prior_states=prior_states,
         )
         if refreshed is not None:
             # Full acquisition diagnostics stay independent of the rescue pass.
@@ -595,6 +683,43 @@ def _rescue_missing_z(
             payload = refreshed
     payload["missing_z_rescue"] = diagnostics
     return payload, calls
+
+
+def _finish_acquisition(evidence: dict, *, market: str, codes: list[str], payload: dict | None,
+                        started: float, started_wall: datetime, timeout_seconds: float,
+                        acquisition_id: str, error: str | None = None) -> dict:
+    batches = evidence.get("batches", [])
+    scan = [batch for batch in batches if batch["phase"] == "scan"]
+    rows = (payload or {}).get("component_stock_rows", [])
+    elapsed = max(0.0, monotonic() - started)
+    return BreadthAcquisitionEvidence(
+        acquisition_id=acquisition_id, market=market,
+        source="twse_mis_tpex_live_breadth" if market == "TPEX" else "twse_mis_live_breadth",
+        trade_date=(payload or {}).get("trade_date") or started_wall.date(),
+        session=(payload or {}).get("market_session") or taiwan_breadth_market_session(started_wall),
+        started_at=started_wall, finished_at=datetime.now(TAIPEI_TZ),
+        universe_count=len(codes), requested_symbol_count=sum(b["requested"] for b in scan if b["attempted"]),
+        returned_row_count=sum(b["returned"] for b in scan), eligible_stock_row_count=len(rows),
+        actual_trade_price_count=sum(bool(row.get("has_actual_trade")) for row in rows),
+        count_ratios={key: value / len(codes) if codes else 0.0 for key, value in {
+            "requested": sum(b["requested"] for b in scan if b["attempted"]),
+            "observed": len(rows), "actual_price": sum(bool(row.get("has_actual_trade")) for row in rows),
+            "missing_z": sum(b["missing_z"] for b in scan),
+            "verified_no_trade": (payload or {}).get("coverage_reason_counts", {}).get("valid_no_trade", 0),
+        }.items()},
+        missing_z_count=sum(b["missing_z"] for b in scan),
+        verified_no_trade_count=(payload or {}).get("coverage_reason_counts", {}).get("valid_no_trade", 0),
+        batch_count=len(batches), batches=batches,
+        batch_duration_ms=distribution([b["duration_ms"] for b in batches if b["attempted"]]),
+        event_to_receipt_seconds=distribution(evidence.get("_event_delays", [])),
+        budget_total_seconds=timeout_seconds, budget_elapsed_seconds=elapsed,
+        budget_remaining_seconds=max(0.0, timeout_seconds - elapsed),
+        scan_budget_seconds=timeout_seconds, rescue_max_budget_seconds=_RESCUE_TIMEOUT_SECONDS,
+        total_hard_deadline_seconds=timeout_seconds,
+        deadline_exceeded=elapsed > timeout_seconds,
+        rescue=evidence.get("rescue", dict(candidate_count=0, attempted_count=0, succeeded_count=0,
+                                           failed_count=0, skipped_count=0, skip_reasons={})), error=error,
+    ).model_dump(mode="json")
 
 
 def read_twse_mis_current_breadth(
@@ -621,6 +746,7 @@ def read_twse_mis_current_breadth(
             status="cached" if isinstance(payload, dict) else "missing",
             url=twse_mis.STOCK_INFO_URL,
             external_calls=0,
+            **cached.get("provider_health", {}),
         )
     with _REFRESH_LOCK:
         cached = _CACHE.get(market)
@@ -631,10 +757,15 @@ def read_twse_mis_current_breadth(
                 status="cached" if isinstance(payload, dict) else "missing",
                 url=twse_mis.STOCK_INFO_URL,
                 external_calls=0,
+                **cached.get("provider_health", {}),
             )
         decision = TWSE_MIS_PROVIDER_GUARD.before_request()
         if not decision.allowed:
             stale = _stale(market, circuit_open=True)
+            blocked_evidence = _finish_acquisition(
+                {}, market=market, codes=[], payload=None, started=monotonic(),
+                started_wall=datetime.now(TAIPEI_TZ), timeout_seconds=timeout_seconds,
+                acquisition_id=uuid4().hex, error="PROVIDER_GUARD_BLOCKED")
             return CurrentMarketProviderPayload(
                 payload=stale,
                 status="stale" if stale else "failed",
@@ -650,6 +781,7 @@ def read_twse_mis_current_breadth(
                 retry_after_seconds=decision.retry_after_seconds,
                 cooldown_until=decision.cooldown_until,
                 external_calls=0,
+                diagnostics={"acquisition_diagnostics": blocked_evidence},
             )
         initial_attempt = decision.attempt
         if initial_attempt is None:
@@ -658,6 +790,10 @@ def read_twse_mis_current_breadth(
         provider_io_started = False
         batch_diagnostics: dict[str, object] = {}
         started_at = monotonic()
+        started_wall = datetime.now(TAIPEI_TZ)
+        acquisition_id = uuid4().hex
+        codes = []
+        evidence = {}
         try:
             codes = list(dict.fromkeys(universe_reader(market)))
             minimum = 500 if market == "TWSE" else 250
@@ -672,9 +808,12 @@ def read_twse_mis_current_breadth(
             messages, failed_batches, external_calls = _fetch_messages(
                 codes,
                 market,
-                timeout_seconds,
+                max(0.0, timeout_seconds - (monotonic() - started_at)),
                 initial_decision=decision, diagnostics=batch_diagnostics,
+                deadline=started_at + timeout_seconds,
             )
+            evidence["batches"] = batch_diagnostics.pop("batches", [])
+            evidence["_event_delays"] = batch_diagnostics.pop("_event_delays", [])
             provider_io_started = True
             incomplete_batches = failed_batches + int(batch_diagnostics.get("skipped_batch_count", 0))
             payload = _build_payload(market, codes, messages, incomplete_batches, prior_states=prior_states)
@@ -684,11 +823,16 @@ def read_twse_mis_current_breadth(
             payload, rescue_calls = _rescue_missing_z(
                 market, codes, messages, payload, prior_states=prior_states,
                 remaining_seconds=timeout_seconds - (monotonic() - started_at),
+                evidence=evidence,
             )
             external_calls += rescue_calls
-            _cache(market, payload)
+            payload["acquisition_diagnostics"] = _finish_acquisition(
+                evidence, market=market, codes=codes, payload=payload, started=started_at,
+                started_wall=started_wall, timeout_seconds=timeout_seconds,
+                acquisition_id=acquisition_id)
             guard = TWSE_MIS_PROVIDER_GUARD.snapshot()
-            return CurrentMarketProviderPayload(
+            rescue_failed = bool((payload.get("missing_z_rescue") or {}).get("failed_batch_count"))
+            result = CurrentMarketProviderPayload(
                 payload=payload,
                 status="available" if incomplete_batches == 0 else "partial",
                 url=twse_mis.STOCK_INFO_URL,
@@ -697,12 +841,14 @@ def read_twse_mis_current_breadth(
                     OperationalStatus.RATE_LIMITED
                     if guard.status == "rate_limited"
                     else OperationalStatus.HEALTHY
-                    if incomplete_batches == 0 and guard.allowed
+                    if incomplete_batches == 0 and guard.allowed and not rescue_failed
                     else OperationalStatus.DEGRADED
                 ),
                 detail_code=(
                     guard.detail_code
                     if not guard.allowed
+                    else "TWSE_MIS_BREADTH_RESCUE_FAILED"
+                    if rescue_failed
                     else "TWSE_MIS_BREADTH_AVAILABLE"
                     if incomplete_batches == 0
                     else "TWSE_MIS_BREADTH_PARTIAL"
@@ -713,6 +859,8 @@ def read_twse_mis_current_breadth(
                 cooldown_until=(guard.cooldown_until if not guard.allowed else None),
                 external_calls=external_calls,
             )
+            _cache(market, payload, provider_result=result)
+            return result
         except Exception as exc:
             # Rows belong to the latest attempt, not the last successful batch.
             _STOCK_ROWS[market] = []
@@ -726,6 +874,10 @@ def read_twse_mis_current_breadth(
                 market,
                 circuit_open=not TWSE_MIS_PROVIDER_GUARD.snapshot().allowed,
             )
+            batch_diagnostics["acquisition_diagnostics"] = _finish_acquisition(
+                evidence, market=market, codes=codes if len(codes) <= _MAX_CODES else [], payload=None,
+                started=started_at, started_wall=started_wall, timeout_seconds=timeout_seconds,
+                acquisition_id=acquisition_id, error=type(exc).__name__)
             return CurrentMarketProviderPayload(
                 payload=stale,
                 status="stale" if stale else "failed",
@@ -757,6 +909,7 @@ def get_cached_current_breadth_stock_rows(
 
 
 def reset_twse_mis_current_breadth_provider() -> None:
+    reset_io_slots()
     _CACHE.clear()
     _LAST_GOOD.clear()
     _STOCK_ROWS.clear()

@@ -147,6 +147,10 @@ class JobRun(Base):
     __tablename__ = "job_run"
     __table_args__ = (
         Index(
+            "uq_job_run_us_eod_obligation", "job_type", "target", unique=True,
+            sqlite_where=text("job_type = 'us.intraday_eod_obligation'"),
+        ).ddl_if(dialect="sqlite"),
+        Index(
             "uq_job_run_tw_intraday_active_demand",
             "job_type", "target", unique=True,
             sqlite_where=text(

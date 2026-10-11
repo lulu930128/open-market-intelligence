@@ -113,6 +113,7 @@ from app.us_market.intraday_read_model_cache import (
     _US_INTRADAY_CACHE,
     get_us_intraday_read_cache as _get_us_intraday_cache,
     invalidate_us_intraday_read_cache,
+    us_intraday_cache_generation,
     set_us_intraday_read_cache as _set_us_intraday_cache,
 )
 from app.us_market.sources import (
@@ -2695,6 +2696,7 @@ def _get_us_intraday_trend_legacy(
         interval,
         market_phase,
     )
+    cache_generation = us_intraday_cache_generation(normalized_symbol)
     cached_payload = _get_us_intraday_cache(cache_key)
     if cached_payload is not None:
         return _project_us_intraday_revision_response(
@@ -3058,7 +3060,7 @@ def _get_us_intraday_trend_legacy(
         coverage_points=all_current_points,
         date_selection=date_selection,
     )
-    _set_us_intraday_cache(cache_key, full_payload)
+    _set_us_intraday_cache(cache_key, full_payload, expected_generation=cache_generation)
     return _project_us_intraday_revision_response(
         full_payload,
         since_revision=since_revision,
@@ -3507,6 +3509,7 @@ def get_us_intraday_trend(
         market_phase,
         requested_at.astimezone(US_MARKET_TIMEZONE).date(),
     )
+    cache_generation = us_intraday_cache_generation(normalized_symbol)
     cached_payload = None if bypass_read_cache else _get_us_intraday_cache(cache_key)
     if cached_payload is None:
         bundle = read_us_market_truth_bundle(
@@ -3521,7 +3524,7 @@ def get_us_intraday_trend(
             session_scope=session_scope,
             interval=interval,
         )
-        _set_us_intraday_cache(cache_key, cached_payload)
+        _set_us_intraday_cache(cache_key, cached_payload, expected_generation=cache_generation)
     payload = _project_us_intraday_revision_response(
         cached_payload,
         since_revision=since_revision,

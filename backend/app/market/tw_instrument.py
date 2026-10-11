@@ -63,6 +63,11 @@ def resolve_taiwan_instrument(
         .filter(StockMaster.stock_id == normalized)
         .one_or_none()
     )
+    return project_taiwan_instrument(normalized, stock)
+
+
+def project_taiwan_instrument(normalized: str, stock: StockMaster | None) -> InstrumentKey:
+    """Apply canonical master identity rules to an already loaded row."""
     if stock is None:
         raise TaiwanInstrumentResolutionError(
             f"Taiwan instrument is not registered: {normalized}"

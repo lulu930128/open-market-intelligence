@@ -52,6 +52,7 @@ from app.us_market.providers.canonical import (
     canonical_yahoo_chart_payload,
 )
 from app.us_market.providers.errors import USProviderDataError
+from app.observability.provider_http import provider_http_failure
 from app.us_market.providers.massive import (
     fetch_massive_index_aggregates_payload,
     fetch_massive_index_snapshot_payload,
@@ -454,6 +455,10 @@ class USIntradayAcquisitionExecutor:
                 failure_health, code = _failure_health(route, checked_at=checked_at, error=exc)
                 health.append(failure_health)
                 limitations.append(code)
+                if not quote:
+                    http_failure = provider_http_failure(exc)
+                    if isinstance(exc, TimeoutError) or (http_failure is not None and http_failure.status == "timeout"):
+                        limitations.append("INTRADAY_PROVIDER_TIMEOUT")
         status = AcquisitionStatus.PARTIAL if observations and failures else AcquisitionStatus.COMPLETED if observations else AcquisitionStatus.FAILED if attempts else AcquisitionStatus.NOT_ATTEMPTED
         summary = AcquisitionSummary(
             attempted=bool(attempts),

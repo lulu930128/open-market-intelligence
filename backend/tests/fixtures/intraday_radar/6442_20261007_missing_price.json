@@ -1,0 +1,59 @@
+{
+  "kind": "persisted_parsed_breadth_component",
+  "raw_receipt_id": 621552,
+  "parser_version": "twse_mis.breadth.current.v1",
+  "limitations": [
+    "Receipt stores classified components, not original MIS msgArray; cannot prove wire-level z value."
+  ],
+  "row": {
+    "actual_trade_reason_code": "ACTUAL_TRADE_PRICE_MISSING",
+    "as_of": "2026-10-07T09:43:34+08:00",
+    "cache_rejection_reason": null,
+    "code": "6442",
+    "cumulative_volume_lots": 2489,
+    "current_price": null,
+    "direction": null,
+    "estimated_trade_value": null,
+    "has_actual_trade": false,
+    "high_price": 1815.0,
+    "indicative_match_available": false,
+    "indicative_match_price": null,
+    "indicative_match_volume_lots": null,
+    "indicative_price_source": null,
+    "is_limit_down": null,
+    "is_limit_up": null,
+    "low_price": 1715.0,
+    "market": "TWSE",
+    "market_session": "regular",
+    "open_price": 1715.0,
+    "previous_close": 1650.0,
+    "price_as_of": null,
+    "price_lineage": null,
+    "price_semantics": "unavailable",
+    "price_source": null,
+    "snapshot_as_of": "2026-10-07T09:43:34+08:00",
+    "state_contract_version": "tw.market_breadth.stock_state.v2",
+    "trade_date": "2026-10-07"
+  },
+  "missing_z_rescue": {
+    "attempted_batch_count": 0,
+    "backoff_seconds": 60,
+    "batch_failures": [],
+    "candidate_count": 899,
+    "failed_batch_count": 0,
+    "max_batches": 1,
+    "max_symbols": 32,
+    "resolved_count": 0,
+    "selected_count": 0,
+    "skipped_batch_count": 0,
+    "status": "skipped",
+    "timeout_seconds": 4,
+    "unresolved_count": 0
+  },
+  "batch_diagnostics": {
+    "attempted_batch_count": 11,
+    "failed_batch_count": 0,
+    "skipped_batch_count": 0,
+    "elapsed_ms": 19184
+  }
+}
