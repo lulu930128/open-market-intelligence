@@ -1,9 +1,17 @@
 import type {
   IntradayTrendPoint,
   IntradayTrendResponse,
+  USOhlcChartRead,
   StockIndicatorPoint,
 } from "@/types/market";
 import type { USMarketTruthRead } from "@/types/usMarketTruth";
+
+/** Display-only series. Never mutate the finalized points consumed by research/tape. */
+export function projectUSVisibleDailyChartPoints(chart: USOhlcChartRead) {
+  return chart.timeframe === "daily" && chart.intraday_overlay
+    ? [...chart.points, chart.intraday_overlay.point]
+    : chart.points;
+}
 
 export type USCurrentSessionHeadline = {
   latestPrice: number | null;

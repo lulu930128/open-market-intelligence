@@ -2845,6 +2845,9 @@
         "default_fields": [
           "analysis",
           "as_of",
+          "requested_trade_date",
+          "temporal_semantics",
+          "request_status",
           "trade_date",
           "latest_price",
           "current_price",
@@ -2915,6 +2918,9 @@
         "fields": [
           "analysis",
           "as_of",
+          "requested_trade_date",
+          "temporal_semantics",
+          "request_status",
           "trade_date",
           "latest_price",
           "current_price",
@@ -3029,6 +3035,9 @@
           "status",
           "stock_id",
           "as_of",
+          "requested_trade_date",
+          "temporal_semantics",
+          "request_status",
           "price_basis",
           "methods",
           "timeframes",
@@ -3062,6 +3071,9 @@
           "status",
           "stock_id",
           "as_of",
+          "requested_trade_date",
+          "temporal_semantics",
+          "request_status",
           "price_basis",
           "currency",
           "price_unit",
@@ -8190,10 +8202,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "01f8db464f1ffddc44b608ba56796bb30c6b302eaef7b46da2a811dc25e93d5f",
+    "x-omi-capability-registry-digest": "e557cd226ebf0bb3a57a99a25647ebc8f49010b1aff27bc3c151abee27c19dfc",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "01f8db464f1ffddc44b608ba56796bb30c6b302eaef7b46da2a811dc25e93d5f",
+    "x-omi-public-contract-digest": "e557cd226ebf0bb3a57a99a25647ebc8f49010b1aff27bc3c151abee27c19dfc",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -8536,7 +8548,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "01f8db464f1ffddc44b608ba56796bb30c6b302eaef7b46da2a811dc25e93d5f",
+  "digest": "e557cd226ebf0bb3a57a99a25647ebc8f49010b1aff27bc3c151abee27c19dfc",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

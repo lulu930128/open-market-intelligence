@@ -3126,6 +3126,12 @@ export const zhTW = {
     },
   },
   usStockDetail: {
+    requestState: {
+      retainedSnapshot: "保留上次快照，本次讀取失敗",
+      revalidating: "正在重新驗證上次快照",
+      revalidate: "重新驗證",
+      provisionalDaily: "盤中暫定日 K · 尚未定稿",
+    },
     session: {
       volume: "總量（股）",
       last_volume: "單筆成交（股）",

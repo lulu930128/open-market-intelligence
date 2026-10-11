@@ -257,15 +257,14 @@ export function WatchlistRankingPanel({
               key={row.key}
               href={row.href ?? "#"}
               data-ranking-symbol={row.symbol}
-              onPointerUp={(event) => {
-                if (event.button !== 0) return;
-                row.onSelect();
-              }}
-              onMouseDown={(event) => {
-                if (event.button !== 0) return;
-                row.onSelect();
-              }}
               onClick={(event) => {
+                if (
+                  event.button !== 0 ||
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.shiftKey ||
+                  event.altKey
+                ) return;
                 event.preventDefault();
                 row.onSelect();
               }}

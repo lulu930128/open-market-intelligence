@@ -2860,6 +2860,12 @@ export const enUS = {
     },
   },
   usStockDetail: {
+    requestState: {
+      retainedSnapshot: "Showing the previous snapshot; this read failed",
+      revalidating: "Revalidating the previous snapshot",
+      revalidate: "Revalidate",
+      provisionalDaily: "Provisional daily candle ? not finalized",
+    },
     session: {
       volume: "Volume (shares)",
       last_volume: "Last trade (shares)",

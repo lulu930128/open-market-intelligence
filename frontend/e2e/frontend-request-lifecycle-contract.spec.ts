@@ -259,7 +259,7 @@ test("US detail chart, intraday, and supplemental resources have separate owners
   expect(chartLoader).toContain("/api/us-market/ohlc/");
   expect(chartLoader).not.toContain("fetchUsIntradayTrend");
   expect(chartLoader).not.toContain("fetchUsSupplementalData");
-  expect(supplementalLoader).toContain("fetchUsSupplementalData(symbol, tab)");
+  expect(supplementalLoader).toContain("fetchUsSupplementalData(symbol, tab, controller.signal)");
   expect(contents).toContain('if (tab === "financials")');
   expect(contents).toContain("institutional-holdings");
   expect(contents).toContain("!chartMatchesSelection");
@@ -282,12 +282,13 @@ test("US detail chart, intraday, and supplemental resources have separate owners
   );
   expect(contents).toContain('chartLoadState === "loading" && timeframe !== "today"');
   expect(contents).toContain(
-    'const todayIntradayLoading = timeframe === "today" && !todayMatchesSelection;'
+    'todayRequestState !== "error"'
   );
   expect(contents).toContain('t("usStockDetail.extendedHours.loadingCache")');
   expect(contents).not.toContain("response.bar_source_status ?? response.source_status");
-  expect(contents).toContain('if (timeframe === "today" && !todayMatchesSelection) return;');
-  expect(contents).toContain("visibleMarketResearch !== null ||");
+  expect(contents).not.toContain('if (timeframe === "today" && !todayMatchesSelection) return;');
+  expect(contents).not.toContain("finalIntradayRefreshDate");
+  expect(contents).toContain('setTodayRequest({ key: requestKey, state: "error" })');
   expect(contents).toContain("canonicalIndicatorAuthority=\"backend\"");
   expect(contents).toContain("indicatorData={technicalIndicatorSeries}");
   expect(contents).toContain("indicatorData={professionalIndicatorData}");

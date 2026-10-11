@@ -2159,6 +2159,12 @@ export const jaJP = {
   },
   usStockDetail: {
     ...zhTW.usStockDetail,
+    requestState: {
+      retainedSnapshot: "前回のスナップショットを表示中。今回の取得は失敗しました",
+      revalidating: "前回のスナップショットを再検証中",
+      revalidate: "再検証",
+      provisionalDaily: "暫定日足・未確定",
+    },
     session: {
       volume: "出来高（株）",
       last_volume: "直近約定（株）",

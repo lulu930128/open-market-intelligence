@@ -4194,7 +4194,20 @@ export type USOhlcChartRead = {
   volume_semantics: string | null;
   volume_status: "available" | "not_applicable" | "not_provided" | string;
   backfill: Record<string, unknown> | null;
-  intraday_overlay: Record<string, unknown> | null;
+  intraday_overlay: {
+    contract_version: "omi.us.provisional_daily.v1";
+    trade_date: string;
+    point: USOhlcPointRead;
+    finalization: "provisional";
+    authority: "derived";
+    release_status: "pending_release" | "unavailable";
+    market_session: string;
+    freshness: string;
+    coverage: { coverage_status: string; point_count: number; expected_point_count: number; missing_slot_count: number };
+    event_at: string;
+    decision_usable: false;
+    limitations: string[];
+  } | null;
   latest_data_date: string | null;
   latest_trade_date: string | null;
   latest_finalized_data_date: string | null;

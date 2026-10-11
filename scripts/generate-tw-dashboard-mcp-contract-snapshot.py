@@ -38,6 +38,37 @@ def _load_snapshot() -> dict[str, Any]:
         TaiwanDashboardSymbolSearchRead,
         TaiwanMarketDashboardRead,
     )
+    from fastapi import FastAPI
+    from app.routers.tw_market_dashboard import router
+
+    # No lifespan/startup or DB connection: derive input bounds and output
+    # schemas from the same executable routes used by HTTP consumers.
+    schema_app = FastAPI()
+    prefix = "/api/market/tw-dashboard"
+    schema_app.include_router(router, prefix=prefix)
+    openapi = schema_app.openapi()
+    workspace_tools = []
+    for route in router.routes:
+        if route.name not in {
+            "read_tw_workspace_header", "read_tw_workspace_watchlist", "read_tw_workspace_hot_groups",
+            "read_tw_stock_chart", "read_tw_stock_research",
+        }:
+            continue
+        operation = openapi["paths"][prefix + route.path]["get"]
+        parameters = operation.get("parameters", [])
+        workspace_tools.append({
+            "name": "omi." + route.name,
+            "description": "Cache-only Taiwan workspace read. Preserve backend evidence status and warnings.",
+            "method": "GET", "path": prefix + route.path,
+            "path_parameters": [p["name"] for p in parameters if p["in"] == "path"],
+            "inputSchema": {
+                "type": "object", "additionalProperties": False,
+                "properties": {p["name"]: p["schema"] for p in parameters},
+                "required": [p["name"] for p in parameters if p.get("required")],
+            },
+            "outputSchema": route.response_model.model_json_schema(),
+            "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        })
 
     payload = {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -55,6 +86,7 @@ def _load_snapshot() -> dict[str, Any]:
         "stock_detail_output_schema": (
             TaiwanDashboardStockDetailRead.model_json_schema()
         ),
+        "workspace_tools": workspace_tools,
     }
     return {**payload, "digest": _canonical_digest(payload)}
 

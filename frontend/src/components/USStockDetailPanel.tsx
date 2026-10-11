@@ -29,6 +29,7 @@ import TechnicalIndicatorMenu, {
 import {
   projectUSCurrentSessionHeadline,
   projectUSIntradayIndicatorPoint,
+  projectUSVisibleDailyChartPoints,
   usDailySnapshotRevision,
 } from "@/components/stock-detail/usStockDetailCanonicalProjection";
 import USFundamentalWorkspace, {
@@ -116,7 +117,15 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
+
+function subscribeDetailVisibility(onChange: () => void) {
+  document.addEventListener("visibilitychange", onChange);
+  return () => document.removeEventListener("visibilitychange", onChange);
+}
+const detailIsVisible = () => document.visibilityState === "visible";
+const detailServerVisible = () => true;
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type SuccessMessage = { text: string } | null;
@@ -208,7 +217,8 @@ async function fetchUsIntradayTrend(
   symbol: string,
   sessionScope: USIntradaySessionScope,
   interval: USProfessionalIntradayTimeframe = "1m",
-  sinceRevision?: string | null
+  sinceRevision?: string | null,
+  signal?: AbortSignal
 ) {
   return fetchJson<IntradayTrendResponse>(
     `/api/us-market/intraday/${encodeURIComponent(symbol)}`,
@@ -216,7 +226,8 @@ async function fetchUsIntradayTrend(
       session_scope: sessionScope,
       interval,
       ...(sinceRevision ? { since_revision: sinceRevision } : {}),
-    }
+    },
+    { signal }
   );
 }
 
@@ -357,10 +368,11 @@ function corporateEventTone(eventType: string) {
 
 async function fetchOptionalJson<T>(
   path: string,
-  params?: Record<string, string | number | boolean>
+  params?: Record<string, string | number | boolean>,
+  options?: { signal?: AbortSignal }
 ) {
   try {
-    return await fetchJson<T>(path, params);
+    return await fetchJson<T>(path, params, options);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("API 404:")) {
       return null;
@@ -371,6 +383,7 @@ async function fetchOptionalJson<T>(
 }
 
 type USSupplementalData = {
+  requestErrors?: unknown[];
   factData?: USSecCompanyFactRead[];
   fundamentalData?: USSecFundamentalSummaryRead | null;
   financialData?: USSecFinancialContractRead | null;
@@ -646,30 +659,37 @@ function intradaySourcePresentation(
 
 async function fetchUsSupplementalData(
   symbol: string,
-  tab: USFundamentalTab
+  tab: USFundamentalTab,
+  signal?: AbortSignal
 ): Promise<USSupplementalData> {
   const encodedSymbol = encodeURIComponent(symbol);
+  const requestErrors: unknown[] = [];
+  const recordError = (error: unknown) => {
+    requestErrors.push(error);
+    return undefined;
+  };
   if (tab === "financials") {
     const [factData, fundamentalData, financialData, eventSummaryResult] =
       await Promise.all([
         fetchJson<USSecCompanyFactRead[]>(`/api/us-market/sec/${encodedSymbol}/facts`, {
           limit: 24,
           offset: 0,
-        }).catch(() => []),
+        }, { signal }).catch(recordError),
         fetchOptionalJson<USSecFundamentalSummaryRead>(
-          `/api/us-market/sec/${encodedSymbol}/fundamentals`
-        ).catch(() => null),
+          `/api/us-market/sec/${encodedSymbol}/fundamentals`, undefined, { signal }
+        ).catch(recordError),
         fetchOptionalJson<USSecFinancialContractRead>(
           `/api/us-market/sec/${encodedSymbol}/financials`,
-          { periods: 8 }
-        ).catch(() => null),
+          { periods: 8 }, { signal }
+        ).catch(recordError),
         fetchJson<USCorporateEventSummaryRead>(
-          `/api/us-market/corporate-events/${encodedSymbol}/summary`
+          `/api/us-market/corporate-events/${encodedSymbol}/summary`, undefined, { signal }
         )
           .then((data) => ({ data, error: null }))
-          .catch((error: unknown) => ({ data: null, error })),
+          .catch((error: unknown) => ({ data: undefined, error })),
       ]);
     return {
+      requestErrors,
       factData,
       fundamentalData,
       financialData,
@@ -680,19 +700,20 @@ async function fetchUsSupplementalData(
   if (tab === "overview") {
     const [profileData, actionData, eventSummaryResult] = await Promise.all([
       fetchOptionalJson<USCompanyProfileRead>(
-        `/api/us-market/profiles/${encodedSymbol}`
-      ).catch(() => null),
+        `/api/us-market/profiles/${encodedSymbol}`, undefined, { signal }
+      ).catch(recordError),
       fetchJson<USCorporateActionRead[]>(
         `/api/us-market/corporate-actions/${encodedSymbol}`,
-        { limit: 8, offset: 0 }
-      ).catch(() => []),
+        { limit: 8, offset: 0 }, { signal }
+      ).catch(recordError),
       fetchJson<USCorporateEventSummaryRead>(
-        `/api/us-market/corporate-events/${encodedSymbol}/summary`
+        `/api/us-market/corporate-events/${encodedSymbol}/summary`, undefined, { signal }
       )
         .then((data) => ({ data, error: null }))
-        .catch((error: unknown) => ({ data: null, error })),
+        .catch((error: unknown) => ({ data: undefined, error })),
     ]);
     return {
+      requestErrors,
       profileData,
       actionData,
       eventSummaryData: eventSummaryResult.data,
@@ -704,18 +725,19 @@ async function fetchUsSupplementalData(
       fetchJson<USSecCompanyFactRead[]>(`/api/us-market/sec/${encodedSymbol}/facts`, {
         limit: 24,
         offset: 0,
-      }).catch(() => []),
+      }, { signal }).catch(recordError),
       fetchJson<USCorporateActionRead[]>(
         `/api/us-market/corporate-actions/${encodedSymbol}`,
-        { limit: 8, offset: 0 }
-      ).catch(() => []),
+        { limit: 8, offset: 0 }, { signal }
+      ).catch(recordError),
       fetchJson<USCorporateEventSummaryRead>(
-        `/api/us-market/corporate-events/${encodedSymbol}/summary`
+        `/api/us-market/corporate-events/${encodedSymbol}/summary`, undefined, { signal }
       )
         .then((data) => ({ data, error: null }))
-        .catch((error: unknown) => ({ data: null, error })),
+        .catch((error: unknown) => ({ data: undefined, error })),
     ]);
     return {
+      requestErrors,
       factData,
       actionData,
       eventSummaryData: eventSummaryResult.data,
@@ -724,27 +746,28 @@ async function fetchUsSupplementalData(
   }
   if (tab === "short") {
     return {
+      requestErrors,
       shortVolumeData: await fetchJson<USShortVolumeDailyRead[]>(
         `/api/us-market/short-volume/${encodedSymbol}/history`,
-        { limit: 8, offset: 0 }
-      ).catch(() => []),
+        { limit: 8, offset: 0 }, { signal }
+      ).catch(recordError),
     };
   }
   if (tab === "insider") {
     const insiderResult = await fetchJson<USSecInsiderTransactionsRead>(
       `/api/us-market/sec/${encodedSymbol}/insider-transactions`,
-      { limit: 100 }
+      { limit: 100 }, { signal }
     )
       .then((data) => ({ data, error: null }))
-      .catch((error: unknown) => ({ data: null, error }));
+      .catch((error: unknown) => ({ data: undefined, error }));
     return { insiderData: insiderResult.data, insiderError: insiderResult.error };
   }
   const institutionalResult = await fetchJson<USSec13FInstitutionalHoldingsRead>(
     `/api/us-market/sec/${encodedSymbol}/institutional-holdings`,
-    { manager_limit: 100 }
+    { manager_limit: 100 }, { signal }
   )
     .then((data) => ({ data, error: null }))
-    .catch((error: unknown) => ({ data: null, error }));
+    .catch((error: unknown) => ({ data: undefined, error }));
   return {
     institutionalData: institutionalResult.data,
     institutionalError: institutionalResult.error,
@@ -1067,6 +1090,17 @@ export default function USStockDetailPanel({
 }: Props) {
   const t = useT();
   const tRef = useRef(t);
+  const pageVisible = useSyncExternalStore(subscribeDetailVisibility, detailIsVisible, detailServerVisible);
+  const identityControllerRef = useRef<AbortController | null>(null);
+  const chartControllerRef = useRef<AbortController | null>(null);
+  const chartReadInFlightRef = useRef(false);
+  const [chartCompletion, setChartCompletion] = useState(0);
+  const supplementalControllerRef = useRef<AbortController | null>(null);
+  const [chartRequestScope, setChartRequestScope] = useState("");
+  const [researchRequest, setResearchRequest] = useState<{ key: string; state: LoadState }>({ key: "", state: "idle" });
+  const [researchRetry, setResearchRetry] = useState(0);
+  const [professionalRequest, setProfessionalRequest] = useState<{ key: string; state: LoadState }>({ key: "", state: "idle" });
+  const [professionalRetry, setProfessionalRetry] = useState(0);
   const [timeframe, setTimeframe] = useState<USChartTimeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [chartFocusMode, setChartFocusMode] = useState(false);
@@ -1096,7 +1130,7 @@ export default function USStockDetailPanel({
   const [selectedStock, setSelectedStock] = useState<USStockMasterRead | null>(null);
   const [chart, setChart] = useState<(USOhlcChartRead & { snapshotRevision: string | null }) | null>(null);
   const [marketTruth, setMarketTruth] = useState<USMarketTruthRead | null>(null);
-  const [marketResearch, setMarketResearch] = useState<USMarketResearchRead | null>(null);
+  const [marketResearch, setMarketResearch] = useState<(USMarketResearchRead & { snapshotRevision: string | null }) | null>(null);
   const [professionalIntraday, setProfessionalIntraday] =
     useState<IntradayTrendResponse | null>(null);
   const [companyProfile, setCompanyProfile] = useState<USCompanyProfileRead | null>(null);
@@ -1120,6 +1154,8 @@ export default function USStockDetailPanel({
     useState<USIntradaySessionScope>(() => defaultUsIntradaySessionScope());
   const [todayInterval, setTodayInterval] = useState<IntradayInterval>(1);
   const [todayEffectiveInterval, setTodayEffectiveInterval] = useState<string | null>(null);
+  const [todayRequest, setTodayRequest] = useState<{ key: string; state: LoadState }>({ key: "", state: "idle" });
+  const [todayRetry, setTodayRetry] = useState(0);
   const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [factRows, setFactRows] = useState<USSecCompanyFactRead[]>([]);
@@ -1138,7 +1174,6 @@ export default function USStockDetailPanel({
   const chartRequestSeq = useRef(0);
   const supplementalRequestSeq = useRef(0);
   const supplementalLoadedKeysRef = useRef(new Set<string>());
-  const finalIntradayRefreshDate = useRef<string | null>(null);
   const todayIntradaySnapshotRef = useRef(
     new Map<string, USTodaySnapshotCacheEntry>()
   );
@@ -1168,6 +1203,7 @@ export default function USStockDetailPanel({
   const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
   const ohlcCoverageEventStateRef = useRef<Map<string, string>>(new Map());
   const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
+  const onCompanyProfileChangeRef = useRef(onCompanyProfileChange);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const chartDrawingLocalRevisionRef = useRef(0);
 
@@ -1217,6 +1253,9 @@ export default function USStockDetailPanel({
   useEffect(() => {
     onDailyPricesChangedRef.current = onDailyPricesChanged;
   }, [onDailyPricesChanged]);
+  useEffect(() => {
+    onCompanyProfileChangeRef.current = onCompanyProfileChange;
+  }, [onCompanyProfileChange]);
 
   const chartDrawingKey = chartDrawingStorageKey(selectedSymbol, professionalTimeframe);
   const storedChartDrawings = useMemo(
@@ -1246,8 +1285,9 @@ export default function USStockDetailPanel({
       usSymbolKey(chart.symbol) === usSymbolKey(selectedSymbol) &&
       chart.timeframe === expectedChartTimeframe
   );
+  const historicalRequestKey = `${usSymbolKey(selectedSymbol)}:${expectedChartTimeframe}`;
   const chartLoadState: LoadState =
-    selectedSymbol && !chartMatchesSelection && loadState !== "error"
+    selectedSymbol && (chartRequestScope !== historicalRequestKey || (!chartMatchesSelection && loadState !== "error"))
       ? "loading"
       : loadState;
   const visibleSelectedStock =
@@ -1257,13 +1297,19 @@ export default function USStockDetailPanel({
   const chartData = useMemo(() => {
     return chartMatchesSelection ? chart?.points.map(toChartPoint) ?? [] : [];
   }, [chart, chartMatchesSelection]);
+  const visibleDailyChartData = useMemo(() => (
+    chartMatchesSelection && chart
+      ? projectUSVisibleDailyChartPoints(chart).map(toChartPoint) : []
+  ), [chart, chartMatchesSelection]);
   const todayMatchesSelection = Boolean(
     selectedSymbol &&
       usSymbolKey(todaySymbol) === usSymbolKey(selectedSymbol) &&
       todaySessionScope === intradaySessionScope &&
       todayEffectiveInterval === `${todayInterval}m`
   );
-  const todayIntradayLoading = timeframe === "today" && !todayMatchesSelection;
+  const todayRequestKey = `${usSymbolKey(selectedSymbol)}:${intradaySessionScope}:${todayInterval}m`;
+  const todayRequestState = todayRequest.key === todayRequestKey ? todayRequest.state : "idle";
+  const todayIntradayLoading = timeframe === "today" && !todayMatchesSelection && todayRequestState !== "error";
   const visibleTodayTrend = useMemo(
     () => (todayMatchesSelection ? todayTrend : []),
     [todayMatchesSelection, todayTrend]
@@ -1276,22 +1322,26 @@ export default function USStockDetailPanel({
   const visibleMarketTruth =
     usSymbolKey(marketTruth?.instrument.symbol) === usSymbolKey(selectedSymbol)
       ? marketTruth : null;
-  const dailySnapshotRevision = usDailySnapshotRevision(visibleMarketTruth);
+  const dailyRevision = usDailySnapshotRevision(visibleMarketTruth);
+  const dailySnapshotRevision = dailyRevision && timeframe === "daily"
+    ? `${dailyRevision}:${visibleMarketTruth?.component_revisions.intraday_revision ?? "missing"}`
+    : dailyRevision;
   const professionalIsIntraday = isUsProfessionalIntradayTimeframe(professionalTimeframe);
   const professionalIntradayMatchesSelection = Boolean(
     selectedSymbol &&
       professionalIntraday &&
       usSymbolKey(professionalIntraday.symbol ?? professionalIntraday.stock_id) ===
         usSymbolKey(selectedSymbol) &&
+      professionalIntraday.session_scope === intradaySessionScope &&
       professionalIntraday.effective_interval === professionalTimeframe
   );
   const professionalChartData = useMemo<ChartPoint[]>(() => {
-    if (!isUsProfessionalIntradayTimeframe(professionalTimeframe)) return chartData;
+    if (!isUsProfessionalIntradayTimeframe(professionalTimeframe)) return visibleDailyChartData;
 
     if (!professionalIntradayMatchesSelection) return [];
     return professionalIntraday?.points.map(intradayToChartPoint) ?? [];
   }, [
-    chartData,
+    visibleDailyChartData,
     professionalIntraday,
     professionalIntradayMatchesSelection,
     professionalTimeframe,
@@ -1319,6 +1369,17 @@ export default function USStockDetailPanel({
     marketResearch?.timeframe === researchTimeframe
       ? marketResearch
       : null;
+  const researchRequestKey = `${usSymbolKey(selectedSymbol)}:${researchTimeframe}:${dailyRevision}`;
+  const researchLoadState = researchRequest.key === researchRequestKey ? researchRequest.state : "idle";
+  const professionalRequestKey = `${usSymbolKey(selectedSymbol)}:${intradaySessionScope}:${professionalTimeframe}`;
+  const professionalLoadState = professionalRequest.key === professionalRequestKey ? professionalRequest.state : "idle";
+  // This gates optional IO on the selected chart's first attempt, including error.
+  // Headline/identity and the selected chart never await Research or SEC.
+  const visibleChartSettled = chartFocusMode && professionalIsIntraday
+    ? professionalIntradayMatchesSelection || professionalLoadState === "success" || professionalLoadState === "error"
+    : timeframe === "today"
+      ? todayMatchesSelection || todayRequestState === "success" || todayRequestState === "error"
+      : chartMatchesSelection || (chartRequestScope === historicalRequestKey && (loadState === "success" || loadState === "error"));
   const technicalIndicators = visibleMarketResearch?.technical_indicators ?? null;
   const technicalIndicatorSeries = useMemo(
     () => technicalIndicators?.series ?? [],
@@ -1458,8 +1519,13 @@ export default function USStockDetailPanel({
     ? [selectedDisplaySymbol, dataStatusDisplayName].filter(Boolean).join(" ")
     : t("watchlist.usHeader");
   const dataStatusSource = t("usStockDetail.statusSource");
+  const dataStatusContextRef = useRef({ selectedSymbol, dataStatusSource, dataStatusContextKey, dataStatusContextLabel });
+  useEffect(() => {
+    dataStatusContextRef.current = { selectedSymbol, dataStatusSource, dataStatusContextKey, dataStatusContextLabel };
+  }, [selectedSymbol, dataStatusSource, dataStatusContextKey, dataStatusContextLabel]);
   const publishDetailDataStatus = useCallback(
     (title: string, error: unknown) => {
+      const { selectedSymbol, dataStatusSource, dataStatusContextKey, dataStatusContextLabel } = dataStatusContextRef.current;
       if (!selectedSymbol) return;
 
       emitDataStatusEvent({
@@ -1473,7 +1539,7 @@ export default function USStockDetailPanel({
         dedupeKey: `${dataStatusContextKey}:${title}:error`,
       });
     },
-    [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]
+    []
   );
   const publishIntradaySourceStatus = useCallback(
     (symbol: string, response: IntradayTrendResponse) => {
@@ -1594,8 +1660,7 @@ export default function USStockDetailPanel({
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode &&
-    professionalChartData.length > 0 &&
-    chartLoadState !== "loading";
+    professionalChartData.length > 0;
   const professionalLatestClose =
     chartFocusMode && professionalIsIntraday
       ? latestProfessionalPoint?.close ?? latestClose
@@ -1825,27 +1890,35 @@ export default function USStockDetailPanel({
     setFundamentalSummary(null);
     setFinancialContract(null);
     setCompanyProfile(null);
-    onCompanyProfileChange?.(null);
+    onCompanyProfileChangeRef.current?.(null);
     setCorporateActions([]);
     setCorporateEventSummary(null);
     setShortVolumeRows([]);
     setInsiderTransactions(null);
     setInstitutionalHoldings(null);
-  }, [onCompanyProfileChange]);
+  }, []);
 
   const loadStockIdentity = useCallback(
     async (symbol: string, generation: number) => {
+      identityControllerRef.current?.abort();
+      const controller = new AbortController();
+      identityControllerRef.current = controller;
       if (getUsMarketIndexConfig(symbol)) {
         if (requestSeq.current === generation) setSelectedStock(null);
         return;
       }
       try {
         const stockData = await fetchJson<USStockMasterRead>(
-          `/api/us-market/stocks/${encodeURIComponent(symbol)}`
+          `/api/us-market/stocks/${encodeURIComponent(symbol)}`,
+          undefined, { signal: controller.signal }
         );
-        if (requestSeq.current === generation) setSelectedStock(stockData);
+        if (controller.signal.aborted || requestSeq.current !== generation) return;
+        if (usSymbolKey(stockData.symbol) !== usSymbolKey(symbol)) {
+          throw new Error("US identity response does not match the requested symbol");
+        }
+        setSelectedStock(stockData);
       } catch (error) {
-        if (requestSeq.current !== generation) return;
+        if (controller.signal.aborted || requestSeq.current !== generation) return;
         setSelectedStock(null);
         publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
       }
@@ -1855,6 +1928,10 @@ export default function USStockDetailPanel({
 
   const loadChartData = useCallback(
     async (symbol: string, nextTimeframe: USChartTimeframe, snapshotRevision: string | null = null) => {
+      chartControllerRef.current?.abort();
+      const controller = new AbortController();
+      chartControllerRef.current = controller;
+      chartReadInFlightRef.current = true;
       const generation = requestSeq.current;
       const requestId = chartRequestSeq.current + 1;
       chartRequestSeq.current = requestId;
@@ -1865,12 +1942,7 @@ export default function USStockDetailPanel({
       const indexConfig = getUsMarketIndexConfig(symbol);
       const requestedBars =
         indexConfig && nextTimeframe === "today" ? 90 : barsByTimeframe[historicalTimeframe];
-      const outputsize =
-        indexConfig && nextTimeframe !== "today"
-          ? "full"
-          : historicalTimeframe === "monthly"
-            ? "full"
-            : "compact";
+      setChartRequestScope(`${usSymbolKey(symbol)}:${historicalTimeframe}`);
 
       try {
         const chartDataResponse = await fetchJson<USOhlcChartRead>(
@@ -1878,29 +1950,34 @@ export default function USStockDetailPanel({
           {
             timeframe: historicalTimeframe,
             bars: requestedBars,
-            ensure_history: false,
-            outputsize,
-          }
+          },
+          { signal: controller.signal }
         );
         if (
           requestSeq.current !== generation ||
-          chartRequestSeq.current !== requestId
+          chartRequestSeq.current !== requestId || controller.signal.aborted
         ) {
           return;
+        }
+        if (usSymbolKey(chartDataResponse.symbol) !== usSymbolKey(symbol)
+          || chartDataResponse.timeframe !== historicalTimeframe) {
+          throw new Error("US chart response does not match the requested symbol/timeframe");
         }
         if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
         setChart({ ...chartDataResponse, snapshotRevision });
         setLoadState("success");
+        setChartCompletion((value) => value + 1);
       } catch (error) {
         if (
           requestSeq.current !== generation ||
-          chartRequestSeq.current !== requestId
+          chartRequestSeq.current !== requestId || controller.signal.aborted
         ) {
           return;
         }
-        setChart(null);
         setLoadState("error");
         publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
+      } finally {
+        if (chartControllerRef.current === controller) chartReadInFlightRef.current = false;
       }
     },
     [publishDetailDataStatus]
@@ -1908,6 +1985,10 @@ export default function USStockDetailPanel({
 
   const loadSupplementalData = useCallback(
     async (symbol: string, generation: number, tab: USFundamentalTab) => {
+      if (requestSeq.current !== generation) return;
+      supplementalControllerRef.current?.abort();
+      const controller = new AbortController();
+      supplementalControllerRef.current = controller;
       const requestId = supplementalRequestSeq.current + 1;
       supplementalRequestSeq.current = requestId;
       const loadKey = `${usSymbolKey(symbol)}:${tab}`;
@@ -1919,10 +2000,10 @@ export default function USStockDetailPanel({
 
       setFactLoadState("loading");
       try {
-        const supplementalData = await fetchUsSupplementalData(symbol, tab);
+        const supplementalData = await fetchUsSupplementalData(symbol, tab, controller.signal);
         if (
           requestSeq.current !== generation ||
-          supplementalRequestSeq.current !== requestId
+          supplementalRequestSeq.current !== requestId || controller.signal.aborted
         ) {
           return;
         }
@@ -1935,7 +2016,7 @@ export default function USStockDetailPanel({
         }
         if (supplementalData.profileData !== undefined) {
           setCompanyProfile(supplementalData.profileData);
-          onCompanyProfileChange?.(supplementalData.profileData);
+          onCompanyProfileChangeRef.current?.(supplementalData.profileData);
         }
         if (supplementalData.actionData !== undefined) {
           setCorporateActions(supplementalData.actionData);
@@ -1970,12 +2051,23 @@ export default function USStockDetailPanel({
             supplementalData.institutionalError
           );
         }
-        supplementalLoadedKeysRef.current.add(loadKey);
-        setFactLoadState("success");
+        const requestError = supplementalData.requestErrors?.[0]
+          ?? supplementalData.eventSummaryError ?? supplementalData.insiderError
+          ?? supplementalData.institutionalError;
+        if (requestError) {
+          supplementalLoadedKeysRef.current.delete(loadKey);
+          setFactLoadState("error");
+          if (supplementalData.requestErrors?.length) {
+            publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), requestError);
+          }
+        } else {
+          supplementalLoadedKeysRef.current.add(loadKey);
+          setFactLoadState("success");
+        }
       } catch (error) {
         if (
           requestSeq.current !== generation ||
-          supplementalRequestSeq.current !== requestId
+          supplementalRequestSeq.current !== requestId || controller.signal.aborted
         ) {
           return;
         }
@@ -1984,16 +2076,16 @@ export default function USStockDetailPanel({
         publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
       }
     },
-    [clearSupplementalData, onCompanyProfileChange, publishDetailDataStatus]
+    [clearSupplementalData, publishDetailDataStatus]
   );
 
   useEffect(() => {
+    const generation = requestSeq.current + 1;
+    requestSeq.current = generation;
+    chartRequestSeq.current += 1;
+    supplementalRequestSeq.current += 1;
+    supplementalLoadedKeysRef.current.clear();
     const timer = window.setTimeout(() => {
-      const generation = requestSeq.current + 1;
-      requestSeq.current = generation;
-      chartRequestSeq.current += 1;
-      supplementalRequestSeq.current += 1;
-      supplementalLoadedKeysRef.current.clear();
       const cachedTodaySnapshot =
         selectedSymbol && timeframeRef.current === "today"
           ? todayIntradaySnapshotRef.current.get(
@@ -2027,11 +2119,27 @@ export default function USStockDetailPanel({
         return;
       }
 
-      void loadStockIdentity(selectedSymbol, generation);
     }, 0);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      requestSeq.current += 1;
+      identityControllerRef.current?.abort();
+      chartControllerRef.current?.abort();
+      supplementalControllerRef.current?.abort();
+      window.clearTimeout(timer);
+    };
   }, [applyCachedTodaySnapshot, clearSupplementalData, loadStockIdentity, selectedSymbol]);
+
+  useEffect(() => {
+    if (!selectedSymbol || !pageVisible) return;
+    const timer = window.setTimeout(() => {
+      void loadStockIdentity(selectedSymbol, requestSeq.current);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      identityControllerRef.current?.abort();
+    };
+  }, [loadStockIdentity, pageVisible, selectedSymbol]);
 
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today") return;
@@ -2054,46 +2162,43 @@ export default function USStockDetailPanel({
   ]);
 
   useEffect(() => {
-    if (
-      !selectedSymbol ||
-      selectedIndexConfig ||
-      !chartMatchesSelection ||
-      factLoadState === "loading"
-    ) {
-      return;
-    }
+    if (!selectedSymbol || selectedIndexConfig || !pageVisible || chartFocusMode || !visibleChartSettled) return;
     const loadKey = `${usSymbolKey(selectedSymbol)}:${activeDataTab}`;
-    if (supplementalLoadedKeysRef.current.has(loadKey)) return;
     const timer = window.setTimeout(() => {
+      if (supplementalLoadedKeysRef.current.has(loadKey)) {
+        setFactLoadState("success");
+        return;
+      }
       void loadSupplementalData(selectedSymbol, requestSeq.current, activeDataTab);
-    }, 200);
-    return () => window.clearTimeout(timer);
-  }, [
-    activeDataTab,
-    chartMatchesSelection,
-    factLoadState,
-    loadSupplementalData,
-    selectedIndexConfig,
-    selectedSymbol,
-  ]);
+    }, 150);
+    return () => {
+      window.clearTimeout(timer);
+      supplementalControllerRef.current?.abort();
+    };
+  }, [activeDataTab, chartFocusMode, loadSupplementalData, pageVisible,
+    selectedIndexConfig, selectedSymbol, timeframe, visibleChartSettled]);
+
+  // Scope/finalized-history changes invalidate the read. Intraday-only changes
+  // coalesce behind it: aborting every revision can starve a slow 180-bar read.
+  useEffect(() => {
+    return () => {
+      chartControllerRef.current?.abort();
+      chartReadInFlightRef.current = false;
+    };
+  }, [dailyRevision, pageVisible, selectedSymbol, timeframe]);
 
   useEffect(() => {
+    if (!pageVisible || !selectedSymbol || timeframe === "today") return;
     const timer = window.setTimeout(() => {
-      if (!selectedSymbol) return;
+      if (chartReadInFlightRef.current) return;
       if (chartMatchesSelection && (!dailySnapshotRevision || chart?.snapshotRevision === dailySnapshotRevision)) return;
-      if (timeframe === "today" && !todayMatchesSelection) return;
       void loadChartData(selectedSymbol, timeframe, dailySnapshotRevision);
     }, 0);
-    return () => window.clearTimeout(timer);
-  }, [
-    chartMatchesSelection,
-    chart?.snapshotRevision,
-    dailySnapshotRevision,
-    loadChartData,
-    selectedSymbol,
-    timeframe,
-    todayMatchesSelection,
-  ]);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [chartCompletion, chartMatchesSelection, chart?.snapshotRevision, dailySnapshotRevision,
+    loadChartData, pageVisible, selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (!selectedSymbol || !chartMatchesSelection || !chart) return;
@@ -2184,7 +2289,7 @@ export default function USStockDetailPanel({
   ]);
 
   useEffect(() => {
-    if (!selectedSymbol) return;
+    if (!selectedSymbol || !pageVisible) return;
     let cancelled = false;
     let timer: number | undefined;
     let inFlight = false;
@@ -2206,6 +2311,9 @@ export default function USStockDetailPanel({
           { signal: controller.signal }
         );
         if (!cancelled) {
+          if (usSymbolKey(snapshot.instrument.symbol) !== usSymbolKey(symbol)) {
+            throw new Error("US truth response does not match the requested symbol");
+          }
           setMarketTruth(snapshot);
           // Preserve active-session cadence using the backend phase, not a
           // browser trading calendar. Closed-session reads remain bounded.
@@ -2239,15 +2347,20 @@ export default function USStockDetailPanel({
       window.removeEventListener("focus", revalidate);
       document.removeEventListener("visibilitychange", revalidate);
     };
-  }, [publishDetailDataStatus, selectedSymbol]);
+  }, [pageVisible, publishDetailDataStatus, selectedSymbol]);
 
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today") return;
+    if (!pageVisible || chartFocusMode) return;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
     let intradayRequestInFlight = false;
     const symbol = selectedSymbol;
+    const controller = new AbortController();
+    const requestKey = `${usSymbolKey(symbol)}:${intradaySessionScope}:${todayInterval}m`;
+    let consecutiveFailures = 0;
+    let pollDelay = 30_000;
 
     function clearIntradayTimer() {
       if (intradayTimer !== undefined) {
@@ -2258,7 +2371,9 @@ export default function USStockDetailPanel({
 
     async function refreshTodayTrend() {
       if (intradayRequestInFlight) return;
+      if (cancelled) return;
       intradayRequestInFlight = true;
+      setTodayRequest({ key: requestKey, state: "loading" });
 
       try {
         const requestedInterval = `${todayInterval}m` as USProfessionalIntradayTimeframe;
@@ -2268,10 +2383,17 @@ export default function USStockDetailPanel({
           symbol,
           intradaySessionScope,
           requestedInterval,
-          cachedSnapshot?.revision
+          cachedSnapshot?.revision,
+          controller.signal
         );
 
         if (cancelled) return;
+
+        if ((today.effective_interval && today.effective_interval !== requestedInterval)
+          || (today.session_scope && today.session_scope !== intradaySessionScope)
+          || (today.symbol && usSymbolKey(today.symbol) !== usSymbolKey(symbol))) {
+          throw new Error("US intraday response does not match the requested symbol/scope/interval");
+        }
 
         const safeTodayPoints =
           today.response_mode === "unchanged" &&
@@ -2306,16 +2428,20 @@ export default function USStockDetailPanel({
         setTodaySessionScope(intradaySessionScope);
         setTodayEffectiveInterval(today.effective_interval ?? requestedInterval);
         publishIntradaySourceStatus(symbol, today);
-        const marketState = getUsMarketRefreshState();
-        if (marketState.isAfterClose) {
-          finalIntradayRefreshDate.current = marketState.dateKey;
-        }
+        setTodayRequest({ key: requestKey, state: "success" });
+        // Cadence consumes backend phase; completion is never inferred from a
+        // local clock or from a successful HTTP request. Keep low-frequency closed
+        // reads alive across the background owner's 15-minute reconciliation cycle.
+        const active = ["pre_market", "regular", "after_hours"].includes(today.market_phase ?? "");
+        consecutiveFailures = 0;
+        pollDelay = active ? US_INTRADAY_REFRESH_MS : 60_000;
       } catch (error) {
         if (cancelled) return;
-
+        consecutiveFailures += 1;
+        pollDelay = 30_000;
+        setTodayRequest({ key: requestKey, state: "error" });
         publishDetailDataStatus(
-          tRef.current("usStockDetail.errors.intradayRefreshFailed"),
-          error
+          tRef.current("usStockDetail.errors.intradayRefreshFailed"), error
         );
       } finally {
         intradayRequestInFlight = false;
@@ -2323,33 +2449,24 @@ export default function USStockDetailPanel({
     }
 
     function scheduleTodayRefresh() {
-      if (cancelled) return;
-
-      const marketState = getUsMarketRefreshState();
-
-      if (marketState.isLiveWindow) {
-        intradayTimer = window.setTimeout(() => {
+      if (cancelled || consecutiveFailures >= 6) return;
+      intradayTimer = window.setTimeout(() => {
+        if (document.visibilityState === "visible") {
           void refreshTodayTrend().finally(scheduleTodayRefresh);
-        }, US_INTRADAY_REFRESH_MS);
-        return;
-      }
-
-      if (
-        marketState.isAfterClose &&
-        finalIntradayRefreshDate.current !== marketState.dateKey
-      ) {
-        finalIntradayRefreshDate.current = marketState.dateKey;
-        intradayTimer = window.setTimeout(() => {
-          void refreshTodayTrend().finally(scheduleTodayRefresh);
-        }, 0);
-        return;
-      }
-
-      intradayTimer = window.setTimeout(
-        scheduleTodayRefresh,
-        Math.min(marketState.msUntilNextPollingStart, 60_000)
-      );
+        } else {
+          scheduleTodayRefresh();
+        }
+      }, pollDelay);
     }
+
+    const revalidate = () => {
+      if (document.visibilityState !== "visible" || intradayRequestInFlight) return;
+      consecutiveFailures = 0;
+      clearIntradayTimer();
+      void refreshTodayTrend().finally(scheduleTodayRefresh);
+    };
+    window.addEventListener("focus", revalidate);
+    document.addEventListener("visibilitychange", revalidate);
 
     intradayTimer = window.setTimeout(() => {
       void refreshTodayTrend().finally(scheduleTodayRefresh);
@@ -2357,7 +2474,10 @@ export default function USStockDetailPanel({
 
     return () => {
       cancelled = true;
+      controller.abort();
       clearIntradayTimer();
+      window.removeEventListener("focus", revalidate);
+      document.removeEventListener("visibilitychange", revalidate);
     };
   }, [
     intradaySessionScope,
@@ -2365,88 +2485,74 @@ export default function USStockDetailPanel({
     publishIntradaySourceStatus,
     selectedSymbol,
     todayInterval,
+    todayRetry,
     timeframe,
-  ]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (
-      !selectedSymbol ||
-      visibleMarketResearch !== null ||
-      (timeframe === "today" && !todayMatchesSelection)
-    ) {
-      return;
-    }
-    const symbol = selectedSymbol;
-
-    void fetchJson<USMarketResearchRead>(
-      `/api/us-market/research/${encodeURIComponent(symbol)}`,
-      { bars: 260, timeframe: researchTimeframe }
-    )
-      .then((research) => {
-        if (cancelled) return;
-        setMarketResearch(research);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        publishDetailDataStatus(
-          tRef.current("usStockDetail.errors.technicalResearchLoadFailed"),
-          error
-        );
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    publishDetailDataStatus,
-    selectedSymbol,
-    researchTimeframe,
-    timeframe,
-    todayMatchesSelection,
-    visibleMarketResearch,
-  ]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (
-      !selectedSymbol ||
-      !chartFocusMode ||
-      !isUsProfessionalIntradayTimeframe(professionalTimeframe)
-    ) {
-      return;
-    }
-    const symbol = selectedSymbol;
-
-    void fetchUsIntradayTrend(
-      symbol,
-      intradaySessionScope,
-      professionalTimeframe
-    )
-      .then((response) => {
-        if (cancelled) return;
-        setProfessionalIntraday(response);
-        publishIntradaySourceStatus(symbol, response);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        publishDetailDataStatus(
-          tRef.current("usStockDetail.errors.intradayAggregationFailed"),
-          error
-        );
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
+    pageVisible,
     chartFocusMode,
-    intradaySessionScope,
-    professionalTimeframe,
-    publishDetailDataStatus,
-    publishIntradaySourceStatus,
-    selectedSymbol,
   ]);
+
+  useEffect(() => {
+    if (!selectedSymbol || !pageVisible || !visibleChartSettled
+      || (visibleMarketResearch !== null && visibleMarketResearch.snapshotRevision === dailyRevision)) return;
+    const controller = new AbortController();
+    const symbol = selectedSymbol;
+    const generation = requestSeq.current;
+    const timer = window.setTimeout(() => {
+      setResearchRequest({ key: researchRequestKey, state: "loading" });
+      void fetchJson<USMarketResearchRead>(
+        `/api/us-market/research/${encodeURIComponent(symbol)}`,
+        { bars: 260, timeframe: researchTimeframe },
+        { signal: controller.signal }
+      ).then((research) => {
+        if (controller.signal.aborted || requestSeq.current !== generation) return;
+        if (usSymbolKey(research.symbol) !== usSymbolKey(symbol) || research.timeframe !== researchTimeframe) {
+          throw new Error("US research response does not match the requested symbol/timeframe");
+        }
+        setMarketResearch({ ...research, snapshotRevision: dailyRevision });
+        setResearchRequest({ key: researchRequestKey, state: "success" });
+      }).catch((error) => {
+        if (controller.signal.aborted || requestSeq.current !== generation) return;
+        setResearchRequest({ key: researchRequestKey, state: "error" });
+        publishDetailDataStatus(tRef.current("usStockDetail.errors.technicalResearchLoadFailed"), error);
+      });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [dailyRevision, pageVisible, publishDetailDataStatus, selectedSymbol, researchTimeframe,
+    researchRequestKey, researchRetry, visibleChartSettled, visibleMarketResearch]);
+
+  useEffect(() => {
+    if (!selectedSymbol || !pageVisible || !chartFocusMode
+      || !isUsProfessionalIntradayTimeframe(professionalTimeframe)) return;
+    const controller = new AbortController();
+    const symbol = selectedSymbol;
+    const generation = requestSeq.current;
+    const timer = window.setTimeout(() => {
+      setProfessionalRequest({ key: professionalRequestKey, state: "loading" });
+      void fetchUsIntradayTrend(symbol, intradaySessionScope, professionalTimeframe, undefined, controller.signal)
+        .then((response) => {
+          if (controller.signal.aborted || requestSeq.current !== generation) return;
+          if (usSymbolKey(response.symbol ?? response.stock_id) !== usSymbolKey(symbol)
+            || response.session_scope !== intradaySessionScope || response.effective_interval !== professionalTimeframe) {
+            throw new Error("US professional chart response does not match the requested symbol/scope/interval");
+          }
+          setProfessionalIntraday(response);
+          setProfessionalRequest({ key: professionalRequestKey, state: "success" });
+          publishIntradaySourceStatus(symbol, response);
+        }).catch((error) => {
+          if (controller.signal.aborted || requestSeq.current !== generation) return;
+          setProfessionalRequest({ key: professionalRequestKey, state: "error" });
+          publishDetailDataStatus(tRef.current("usStockDetail.errors.intradayAggregationFailed"), error);
+        });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [chartFocusMode, intradaySessionScope, pageVisible, professionalTimeframe,
+    professionalRequestKey, professionalRetry, publishDetailDataStatus, publishIntradaySourceStatus, selectedSymbol]);
 
   const queueChartDrawingRemoteSave = useCallback((
     drawingsToSave: ChartDrawing[],
@@ -2514,6 +2620,7 @@ export default function USStockDetailPanel({
 
     let cancelled = false;
     const remoteSymbol = selectedSymbol;
+    const controller = new AbortController();
     const loadRevision = chartDrawingLocalRevisionRef.current;
     const hasLocalSnapshot = hasChartDrawingSnapshot(chartDrawingKey);
     const localDrawings = loadChartDrawings(chartDrawingKey);
@@ -2545,7 +2652,8 @@ export default function USStockDetailPanel({
     async function loadRemoteChartDrawings() {
       try {
         const snapshot = await fetchJson<ChartDrawingSnapshotRead>(
-          chartDrawingApiPath("US", remoteSymbol, professionalTimeframe)
+          chartDrawingApiPath("US", remoteSymbol, professionalTimeframe),
+          undefined, { signal: controller.signal }
         );
 
         if (cancelled || chartDrawingLocalRevisionRef.current !== loadRevision) return;
@@ -2580,6 +2688,7 @@ export default function USStockDetailPanel({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     activeSelectedChartDrawingId,
@@ -3704,6 +3813,18 @@ export default function USStockDetailPanel({
         .join(" ")}
     >
       <div className={["min-w-0 self-start", chartFocusMode ? "space-y-0" : "space-y-4"].join(" ")}>
+        {selectedSymbol && (!visibleMarketResearch || researchLoadState === "loading" || researchLoadState === "error") ? (
+          <div data-testid="us-research-request-state" role={researchLoadState === "error" ? "alert" : "status"} className="px-3 py-1 text-xs text-omi-text-muted">
+            {t("usStockDetail.sections.technical")} · {researchLoadState === "error" ? t("usStockDetail.errors.technicalResearchLoadFailed") : t("common.loading")}
+            {researchLoadState === "error" ? <button type="button" className="ml-3 underline" onClick={() => setResearchRetry((value) => value + 1)}>{t("common.retry")}</button> : null}
+          </div>
+        ) : null}
+        {chartFocusMode && (professionalIsIntraday ? professionalLoadState === "error" : chartLoadState === "error") ? (
+          <div data-testid="us-professional-request-error" role="alert" className="p-3 text-sm text-omi-warning">
+            {t("usStockDetail.errors.loadFailed")}
+            <button type="button" className="ml-3 underline" onClick={() => professionalIsIntraday ? setProfessionalRetry((value) => value + 1) : selectedSymbol && void loadChartData(selectedSymbol, timeframe, dailySnapshotRevision)}>{t("common.retry")}</button>
+          </div>
+        ) : null}
         {chartFocusMode ? (
           <ProfessionalChartPanel
             title={`${selectedDisplaySymbol} ${selectedDisplayName}`}
@@ -3756,8 +3877,15 @@ export default function USStockDetailPanel({
             }}
             message={
               successMessage ||
+              (chartMatchesSelection && chart?.intraday_overlay && professionalTimeframe === "daily") ||
               (professionalIsIntraday && visibleBarSourcePresentation) ? (
                 <>
+                  {chartMatchesSelection && chart?.intraday_overlay && professionalTimeframe === "daily" ? (
+                    <div data-testid="us-provisional-daily-focus" className="p-3 text-xs text-omi-warning">
+                      {t("usStockDetail.requestState.provisionalDaily")} · {chart.intraday_overlay.trade_date}
+                      {` · ${chart.intraday_overlay.coverage.point_count}/${chart.intraday_overlay.coverage.expected_point_count} · ${chart.intraday_overlay.coverage.coverage_status} · ${chart.intraday_overlay.freshness}`}
+                    </div>
+                  ) : null}
                   {successMessage ? (
                     <div className="border-b border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
                       {successMessage.text}
@@ -3782,9 +3910,13 @@ export default function USStockDetailPanel({
             emptyState={
               <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
                 <StateSurface
-                  title={t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
-                  tone="loading"
-                  busy
+                  title={(professionalIsIntraday ? professionalLoadState === "error" : chartLoadState === "error")
+                    ? t("usStockDetail.errors.loadFailed")
+                    : (professionalIsIntraday ? professionalLoadState === "success" : chartLoadState === "success")
+                      ? t("usStockDetail.noKline") : t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
+                  tone={(professionalIsIntraday ? professionalLoadState === "error" : chartLoadState === "error") ? "danger"
+                    : (professionalIsIntraday ? professionalLoadState === "success" : chartLoadState === "success") ? "empty" : "loading"}
+                  busy={professionalIsIntraday ? professionalLoadState === "idle" || professionalLoadState === "loading" : chartLoadState === "loading"}
                   className="w-full max-w-xl"
                 />
               </div>
@@ -4052,7 +4184,20 @@ export default function USStockDetailPanel({
             </div>
           ) : null}
 
-          {chartLoadState === "loading" && timeframe !== "today" ? (
+          {timeframe !== "today" && chartLoadState === "error" ? (
+            <div role="alert" data-testid="us-chart-request-error" className="p-3 text-sm text-omi-warning">
+              {t("usStockDetail.errors.loadFailed")}
+              {chartData.length > 0 ? ` · ${t("usStockDetail.requestState.retainedSnapshot")}` : null}
+              <button type="button" className="ml-3 underline" onClick={() => selectedSymbol && void loadChartData(selectedSymbol, timeframe, dailySnapshotRevision)}>{t("common.retry")}</button>
+            </div>
+          ) : null}
+          {timeframe === "daily" && chartMatchesSelection && chart?.intraday_overlay ? (
+            <div data-testid="us-provisional-daily" className="p-3 text-xs text-omi-warning">
+              {t("usStockDetail.requestState.provisionalDaily")} · {chart.intraday_overlay.trade_date}
+              {` · ${chart.intraday_overlay.coverage.point_count}/${chart.intraday_overlay.coverage.expected_point_count} · ${chart.intraday_overlay.coverage.coverage_status} · ${chart.intraday_overlay.freshness}`}
+            </div>
+          ) : null}
+          {chartLoadState === "loading" && timeframe !== "today" && visibleDailyChartData.length === 0 ? (
             <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
               <StateSurface
                 title={t("usStockDetail.loadingKlineShort")}
@@ -4116,6 +4261,18 @@ export default function USStockDetailPanel({
                   </div>
                 ) : null}
               </div>
+              {todayRequestState === "loading" && todayMatchesSelection ? (
+                <div role="status" className="p-2 text-xs text-omi-text-muted">{t("usStockDetail.requestState.revalidating")}</div>
+              ) : null}
+              {todayRequestState === "error" ? (
+                <div role="alert" data-testid="us-today-request-error" className="border border-omi-border-subtle p-3 text-sm text-omi-warning">
+                  {t("usStockDetail.errors.intradayRefreshFailed")}
+                  {visibleTodayTrend.length > 0 ? ` · ${t("usStockDetail.requestState.retainedSnapshot")}` : null}
+                  <button type="button" className="ml-3 underline" onClick={() => setTodayRetry((value) => value + 1)}>
+                    {t("common.retry")}
+                  </button>
+                </div>
+              ) : null}
               {todayIntradayLoading ? (
                 <div className="border-x border-b border-omi-border-subtle bg-omi-surface p-4">
                   <StateSurface
@@ -4131,6 +4288,15 @@ export default function USStockDetailPanel({
                   data-reference-price={todayHistoricalReferencePrice ?? ""}
                   data-reference-trade-date={todayPreviousCloseReferenceDate ?? ""}
                 >
+                  {todayRequestState === "success" && visibleTodayTrend.length === 0 ? (
+                    <div role="status" data-testid="us-today-empty" className="p-3 text-sm text-omi-text-muted">
+                      {t("common.noData")}
+                      <button type="button" className="ml-3 underline" onClick={() => setTodayRetry((value) => value + 1)}>{t("common.retry")}</button>
+                    </div>
+                  ) : null}
+                  {todayRequestState === "success" && visibleTodayTrend.length > 0 && visibleTodayIntradayMeta.sessionCoverage?.coverage_status !== "complete" ? (
+                    <button type="button" className="m-2 text-xs underline" onClick={() => setTodayRetry((value) => value + 1)}>{t("usStockDetail.requestState.revalidate")}</button>
+                  ) : null}
                   <IntradayTrendChart
                     detailsTarget={intradayDetailsTarget}
                     points={visibleTodayTrend}
@@ -4161,15 +4327,15 @@ export default function USStockDetailPanel({
                 </div>
               )}
             </>
-          ) : chartData.length > 0 ? (
+          ) : visibleDailyChartData.length > 0 ? (
             <StockKLineChart
-              chartData={chartData}
+              chartData={visibleDailyChartData}
               indicatorData={technicalIndicatorSeries}
               canonicalIndicatorAuthority="backend"
               label={selectedDisplaySymbol}
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}
-              revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${chartData.length}`}
+              revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${visibleDailyChartData.length}`}
               volumePanelLabel={t("usStockDetail.metrics.volume")}
               volumeTooltipLabel={t("usStockDetail.metrics.volume")}
               volumeValueFormatter={formatVolume}
@@ -4369,6 +4535,12 @@ export default function USStockDetailPanel({
             onTabChange={setActiveDataTab}
             action={renderDataPanelAction()}
           >
+            {factLoadState === "error" ? (
+              <div role="alert" data-testid="us-supplemental-request-error" className="p-3 text-sm text-omi-warning">
+                {t("usStockDetail.errors.loadFailed")}
+                <button type="button" className="ml-3 underline" onClick={() => selectedSymbol && void loadSupplementalData(selectedSymbol, requestSeq.current, activeDataTab)}>{t("common.retry")}</button>
+              </div>
+            ) : null}
             {renderActiveDataTab()}
           </USFundamentalWorkspace>
         )}

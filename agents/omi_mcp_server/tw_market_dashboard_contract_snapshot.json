@@ -1826,7 +1826,7 @@
     "title": "TaiwanMarketDashboardRead",
     "type": "object"
   },
-  "digest": "70c6175882e7f3cbaf185dea45c8caf3c695f6c321bfa569b7057e7853bfd4d6",
+  "digest": "cba20a7777a277a328954b03c72fb45a105ed80740384b172473f2b1ae7f2e43",
   "schema_version": "omi.mcp.tw_market_dashboard_snapshot.v1",
   "stock_detail_contract_version": "omi.tw_stock_dashboard_detail.v2",
   "stock_detail_output_schema": {
@@ -2308,13 +2308,52 @@
             "title": "Cache Hit",
             "type": "boolean"
           },
+          "cache_latest_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cache Latest Time"
+          },
           "cache_status": {
             "title": "Cache Status",
+            "type": "string"
+          },
+          "cache_trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cache Trade Date"
+          },
+          "coverage_scope": {
+            "const": "resolver_series_before_display_slice",
+            "default": "resolver_series_before_display_slice",
+            "title": "Coverage Scope",
             "type": "string"
           },
           "interval": {
             "title": "Interval",
             "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
           },
           "point_count": {
             "title": "Point Count",
@@ -2326,6 +2365,30 @@
             },
             "title": "Points",
             "type": "array"
+          },
+          "resolved_health": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Resolved Health"
+          },
+          "series_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TaiwanDashboardSeriesCoverageRead"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "source": {
             "title": "Source",
@@ -2412,6 +2475,137 @@
           "time"
         ],
         "title": "TaiwanDashboardMovingAveragePointRead",
+        "type": "object"
+      },
+      "TaiwanDashboardSeriesCoverageRead": {
+        "additionalProperties": true,
+        "description": "Additive view of the canonical resolver metadata, never reclassified.",
+        "properties": {
+          "contract_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Contract Version"
+          },
+          "current_cumulative_volume_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Current Cumulative Volume Complete"
+          },
+          "expected_bucket_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Bucket Count"
+          },
+          "expected_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected From"
+          },
+          "expected_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected To"
+          },
+          "missing_bucket_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Missing Bucket Count"
+          },
+          "observed_bucket_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observed Bucket Count"
+          },
+          "session_completed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Completed"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "trade_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Trade Date"
+          }
+        },
+        "title": "TaiwanDashboardSeriesCoverageRead",
         "type": "object"
       },
       "TechnicalReportBadgeRead": {
@@ -2832,5 +3026,3485 @@
     ],
     "title": "TaiwanDashboardSymbolSearchRead",
     "type": "object"
-  }
+  },
+  "workspace_tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Cache-only Taiwan workspace read. Preserve backend evidence status and warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "omi.read_tw_workspace_header",
+      "outputSchema": {
+        "$defs": {
+          "BreadthLimitObservation": {
+            "additionalProperties": false,
+            "properties": {
+              "basis": {
+                "const": "actual_trade_vs_exchange_threshold",
+                "default": "actual_trade_vs_exchange_threshold",
+                "title": "Basis",
+                "type": "string"
+              },
+              "contract_version": {
+                "default": "omi.market.breadth.limits.v1",
+                "title": "Contract Version",
+                "type": "string"
+              },
+              "down": {
+                "$ref": "#/$defs/BreadthLimitSide"
+              },
+              "universe_count": {
+                "minimum": 0,
+                "title": "Universe Count",
+                "type": "integer"
+              },
+              "up": {
+                "$ref": "#/$defs/BreadthLimitSide"
+              }
+            },
+            "required": [
+              "universe_count",
+              "up",
+              "down"
+            ],
+            "title": "BreadthLimitObservation",
+            "type": "object"
+          },
+          "BreadthLimitSide": {
+            "additionalProperties": false,
+            "description": "Observed threshold hits; an exact total requires full evaluable coverage.",
+            "properties": {
+              "evaluated_count": {
+                "minimum": 0,
+                "title": "Evaluated Count",
+                "type": "integer"
+              },
+              "observed_count": {
+                "minimum": 0,
+                "title": "Observed Count",
+                "type": "integer"
+              },
+              "unknown_count": {
+                "minimum": 0,
+                "title": "Unknown Count",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "observed_count",
+              "evaluated_count",
+              "unknown_count"
+            ],
+            "title": "BreadthLimitSide",
+            "type": "object"
+          },
+          "TaiwanDashboardBreadthRead": {
+            "properties": {
+              "acquisition_diagnostics": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Acquisition Diagnostics"
+              },
+              "advance": {
+                "title": "Advance",
+                "type": "integer"
+              },
+              "as_of": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "As Of"
+              },
+              "auction_breadth": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Auction Breadth"
+              },
+              "canonical_ref": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Canonical Ref"
+              },
+              "classification_diagnostics": {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "title": "Classification Diagnostics",
+                "type": "object"
+              },
+              "classification_reason_counts": {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "title": "Classification Reason Counts",
+                "type": "object"
+              },
+              "classification_summary": {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "title": "Classification Summary",
+                "type": "object"
+              },
+              "classified_coverage_ratio": {
+                "anyOf": [
+                  {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Classified Coverage Ratio"
+              },
+              "coverage": {
+                "title": "Coverage",
+                "type": "integer"
+              },
+              "coverage_ratio": {
+                "title": "Coverage Ratio",
+                "type": "number"
+              },
+              "coverage_reason_counts": {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "title": "Coverage Reason Counts",
+                "type": "object"
+              },
+              "decision_usable": {
+                "title": "Decision Usable",
+                "type": "boolean"
+              },
+              "decline": {
+                "title": "Decline",
+                "type": "integer"
+              },
+              "deprecated": {
+                "default": false,
+                "title": "Deprecated",
+                "type": "boolean"
+              },
+              "directional_coverage_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Directional Coverage Count"
+              },
+              "directional_coverage_ratio": {
+                "anyOf": [
+                  {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Directional Coverage Ratio"
+              },
+              "directional_coverage_status": {
+                "default": "unknown",
+                "title": "Directional Coverage Status",
+                "type": "string"
+              },
+              "directional_unavailable_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Directional Unavailable Count"
+              },
+              "failed_batch_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Failed Batch Count"
+              },
+              "last_trade_recency": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Trade Recency"
+              },
+              "limit_down_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Limit Down Count"
+              },
+              "limit_up_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Limit Up Count"
+              },
+              "limits": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BreadthLimitObservation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "market": {
+                "title": "Market",
+                "type": "string"
+              },
+              "observation_coverage_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Coverage Count"
+              },
+              "observation_coverage_ratio": {
+                "anyOf": [
+                  {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Coverage Ratio"
+              },
+              "observation_coverage_status": {
+                "default": "unknown",
+                "title": "Observation Coverage Status",
+                "type": "string"
+              },
+              "observation_received_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Received At"
+              },
+              "observation_received_freshness": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Received Freshness"
+              },
+              "price_semantics": {
+                "title": "Price Semantics",
+                "type": "string"
+              },
+              "provisional": {
+                "title": "Provisional",
+                "type": "boolean"
+              },
+              "raw_unknown_reason_counts": {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "title": "Raw Unknown Reason Counts",
+                "type": "object"
+              },
+              "received_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Received Count"
+              },
+              "received_coverage_ratio": {
+                "anyOf": [
+                  {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Received Coverage Ratio"
+              },
+              "scope": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Scope"
+              },
+              "session_phase": {
+                "title": "Session Phase",
+                "type": "string"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Date"
+              },
+              "trade_state_resolution_status": {
+                "default": "unknown",
+                "title": "Trade State Resolution Status",
+                "type": "string"
+              },
+              "unchanged": {
+                "title": "Unchanged",
+                "type": "integer"
+              },
+              "universe": {
+                "title": "Universe",
+                "type": "integer"
+              },
+              "unknown": {
+                "title": "Unknown",
+                "type": "integer"
+              },
+              "valid_no_trade_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Valid No Trade Count"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "market",
+              "status",
+              "session_phase",
+              "price_semantics",
+              "provisional",
+              "decision_usable",
+              "universe",
+              "coverage",
+              "advance",
+              "decline",
+              "unchanged",
+              "unknown",
+              "coverage_ratio"
+            ],
+            "title": "TaiwanDashboardBreadthRead",
+            "type": "object"
+          },
+          "TaiwanDashboardFreshnessRead": {
+            "properties": {
+              "basis": {
+                "default": "producer_cadence",
+                "title": "Basis",
+                "type": "string"
+              },
+              "cache_only": {
+                "const": true,
+                "default": true,
+                "title": "Cache Only",
+                "type": "boolean"
+              },
+              "max_age_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Max Age Seconds"
+              },
+              "newest_as_of": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Newest As Of"
+              },
+              "oldest_as_of": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Oldest As Of"
+              },
+              "producer_cadence_seconds": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Producer Cadence Seconds"
+              },
+              "source": {
+                "title": "Source",
+                "type": "string"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "source"
+            ],
+            "title": "TaiwanDashboardFreshnessRead",
+            "type": "object"
+          },
+          "TaiwanDashboardResolvedIndexRead": {
+            "properties": {
+              "acquisition_policy": {
+                "const": "cache_only",
+                "default": "cache_only",
+                "title": "Acquisition Policy",
+                "type": "string"
+              },
+              "authority": {
+                "enum": [
+                  "official_exchange",
+                  "provider",
+                  "derived_proxy",
+                  "unknown"
+                ],
+                "title": "Authority",
+                "type": "string"
+              },
+              "change": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Change"
+              },
+              "change_pct": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Change Pct"
+              },
+              "compatibility_fallback": {
+                "default": false,
+                "title": "Compatibility Fallback",
+                "type": "boolean"
+              },
+              "compatibility_fallback_reason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Compatibility Fallback Reason"
+              },
+              "decision_usable": {
+                "title": "Decision Usable",
+                "type": "boolean"
+              },
+              "delivery_status": {
+                "title": "Delivery Status",
+                "type": "string"
+              },
+              "event_time": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Event Time"
+              },
+              "finalization": {
+                "enum": [
+                  "intraday",
+                  "provisional",
+                  "final",
+                  "unknown"
+                ],
+                "title": "Finalization",
+                "type": "string"
+              },
+              "index_id": {
+                "title": "Index Id",
+                "type": "string"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Limitations",
+                "type": "array"
+              },
+              "market": {
+                "title": "Market",
+                "type": "string"
+              },
+              "official": {
+                "title": "Official",
+                "type": "boolean"
+              },
+              "official_close_confirmed": {
+                "title": "Official Close Confirmed",
+                "type": "boolean"
+              },
+              "official_close_status": {
+                "title": "Official Close Status",
+                "type": "string"
+              },
+              "official_source": {
+                "title": "Official Source",
+                "type": "boolean"
+              },
+              "previous_close": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Previous Close"
+              },
+              "provider": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Provider"
+              },
+              "provisional": {
+                "title": "Provisional",
+                "type": "boolean"
+              },
+              "provisional_estimate": {
+                "title": "Provisional Estimate",
+                "type": "boolean"
+              },
+              "quote_semantics": {
+                "title": "Quote Semantics",
+                "type": "string"
+              },
+              "resolution_id": {
+                "title": "Resolution Id",
+                "type": "string"
+              },
+              "resolution_version": {
+                "title": "Resolution Version",
+                "type": "string"
+              },
+              "selected_candidate": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Selected Candidate"
+              },
+              "selection_reason": {
+                "title": "Selection Reason",
+                "type": "string"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Date"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Value"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "index_id",
+              "market",
+              "status",
+              "authority",
+              "finalization",
+              "official_source",
+              "official_close_confirmed",
+              "provisional_estimate",
+              "selection_reason",
+              "resolution_version",
+              "resolution_id",
+              "official_close_status",
+              "official",
+              "provisional",
+              "decision_usable",
+              "quote_semantics",
+              "delivery_status"
+            ],
+            "title": "TaiwanDashboardResolvedIndexRead",
+            "type": "object"
+          },
+          "TaiwanDashboardSessionRead": {
+            "properties": {
+              "is_current_trading_day": {
+                "title": "Is Current Trading Day",
+                "type": "boolean"
+              },
+              "next_transition_at": {
+                "format": "date-time",
+                "title": "Next Transition At",
+                "type": "string"
+              },
+              "phase": {
+                "title": "Phase",
+                "type": "string"
+              },
+              "presentation_state": {
+                "title": "Presentation State",
+                "type": "string"
+              },
+              "trade_date": {
+                "format": "date",
+                "title": "Trade Date",
+                "type": "string"
+              }
+            },
+            "required": [
+              "phase",
+              "presentation_state",
+              "trade_date",
+              "is_current_trading_day",
+              "next_transition_at"
+            ],
+            "title": "TaiwanDashboardSessionRead",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "cache_only": {
+            "const": true,
+            "default": true,
+            "title": "Cache Only",
+            "type": "boolean"
+          },
+          "freshness": {
+            "$ref": "#/$defs/TaiwanDashboardFreshnessRead"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "omi.tw_workspace_header",
+            "default": "omi.tw_workspace_header",
+            "title": "Kind",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "resolved_breadth": {
+            "additionalProperties": {
+              "$ref": "#/$defs/TaiwanDashboardBreadthRead"
+            },
+            "title": "Resolved Breadth",
+            "type": "object"
+          },
+          "resolved_indices": {
+            "items": {
+              "$ref": "#/$defs/TaiwanDashboardResolvedIndexRead"
+            },
+            "title": "Resolved Indices",
+            "type": "array"
+          },
+          "session": {
+            "$ref": "#/$defs/TaiwanDashboardSessionRead"
+          },
+          "version": {
+            "const": "omi.tw_workspace_header.v1",
+            "default": "omi.tw_workspace_header.v1",
+            "title": "Version",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "session",
+          "freshness",
+          "resolved_indices",
+          "resolved_breadth"
+        ],
+        "title": "TaiwanWorkspaceHeaderRead",
+        "type": "object"
+      },
+      "path": "/api/market/tw-dashboard/header",
+      "path_parameters": []
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Cache-only Taiwan workspace read. Preserve backend evidence status and warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_watchlist_children": {
+            "default": true,
+            "title": "Include Watchlist Children",
+            "type": "boolean"
+          },
+          "watchlist_group_id": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Watchlist Group Id"
+          },
+          "watchlist_limit": {
+            "default": 40,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Watchlist Limit",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "omi.read_tw_workspace_watchlist",
+      "outputSchema": {
+        "$defs": {
+          "TaiwanDashboardWatchlistGroupRead": {
+            "properties": {
+              "group_id": {
+                "title": "Group Id",
+                "type": "integer"
+              },
+              "group_name": {
+                "title": "Group Name",
+                "type": "string"
+              },
+              "parent_id": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Parent Id"
+              },
+              "sort_order": {
+                "title": "Sort Order",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "group_id",
+              "group_name",
+              "sort_order"
+            ],
+            "title": "TaiwanDashboardWatchlistGroupRead",
+            "type": "object"
+          },
+          "TaiwanDashboardWatchlistItemRead": {
+            "properties": {
+              "as_of": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "As Of"
+              },
+              "change_pct": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Change Pct"
+              },
+              "expected_trade_date": {
+                "format": "date",
+                "title": "Expected Trade Date",
+                "type": "string"
+              },
+              "freshness_status": {
+                "title": "Freshness Status",
+                "type": "string"
+              },
+              "instrument_type": {
+                "title": "Instrument Type",
+                "type": "string"
+              },
+              "market": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Market"
+              },
+              "previous_close": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Previous Close"
+              },
+              "price": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Price"
+              },
+              "price_semantics": {
+                "title": "Price Semantics",
+                "type": "string"
+              },
+              "provider": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Provider"
+              },
+              "reason_code": {
+                "title": "Reason Code",
+                "type": "string"
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Source"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "stock_id": {
+                "title": "Stock Id",
+                "type": "string"
+              },
+              "stock_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Stock Name"
+              },
+              "trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Date"
+              },
+              "warning": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Warning"
+              }
+            },
+            "required": [
+              "stock_id",
+              "instrument_type",
+              "status",
+              "price_semantics",
+              "expected_trade_date",
+              "freshness_status",
+              "reason_code"
+            ],
+            "title": "TaiwanDashboardWatchlistItemRead",
+            "type": "object"
+          },
+          "TaiwanDashboardWatchlistSelectionRead": {
+            "properties": {
+              "enabled_only": {
+                "title": "Enabled Only",
+                "type": "boolean"
+              },
+              "group_id": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Group Id"
+              },
+              "group_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Group Name"
+              },
+              "include_children": {
+                "title": "Include Children",
+                "type": "boolean"
+              },
+              "limit": {
+                "title": "Limit",
+                "type": "integer"
+              },
+              "selection_policy": {
+                "title": "Selection Policy",
+                "type": "string"
+              },
+              "truncated": {
+                "title": "Truncated",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "selection_policy",
+              "include_children",
+              "enabled_only",
+              "limit",
+              "truncated"
+            ],
+            "title": "TaiwanDashboardWatchlistSelectionRead",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "cache_only": {
+            "const": true,
+            "default": true,
+            "title": "Cache Only",
+            "type": "boolean"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/$defs/TaiwanDashboardWatchlistGroupRead"
+            },
+            "title": "Groups",
+            "type": "array"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/TaiwanDashboardWatchlistItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "kind": {
+            "const": "omi.tw_workspace_watchlist",
+            "default": "omi.tw_workspace_watchlist",
+            "title": "Kind",
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/$defs/TaiwanDashboardWatchlistSelectionRead"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "const": "omi.tw_workspace_watchlist.v1",
+            "default": "omi.tw_workspace_watchlist.v1",
+            "title": "Version",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "status",
+          "selection",
+          "generated_at"
+        ],
+        "title": "TaiwanWorkspaceWatchlistRead",
+        "type": "object"
+      },
+      "path": "/api/market/tw-dashboard/watchlist",
+      "path_parameters": []
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Cache-only Taiwan workspace read. Preserve backend evidence status and warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "group_limit": {
+            "default": 8,
+            "maximum": 30,
+            "minimum": 1,
+            "title": "Group Limit",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "omi.read_tw_workspace_hot_groups",
+      "outputSchema": {
+        "$defs": {
+          "TaiwanDashboardGroupRead": {
+            "properties": {
+              "advance_ratio": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Advance Ratio"
+              },
+              "as_of": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "As Of"
+              },
+              "breadth_usable": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Breadth Usable"
+              },
+              "coverage": {
+                "title": "Coverage",
+                "type": "integer"
+              },
+              "coverage_ratio": {
+                "title": "Coverage Ratio",
+                "type": "number"
+              },
+              "coverage_reason_counts": {
+                "anyOf": [
+                  {
+                    "additionalProperties": {
+                      "type": "integer"
+                    },
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Coverage Reason Counts"
+              },
+              "decision_usable": {
+                "title": "Decision Usable",
+                "type": "boolean"
+              },
+              "delayed_member_count": {
+                "default": 0,
+                "title": "Delayed Member Count",
+                "type": "integer"
+              },
+              "directional_coverage_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Directional Coverage Count"
+              },
+              "directional_coverage_ratio": {
+                "anyOf": [
+                  {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Directional Coverage Ratio"
+              },
+              "directional_unavailable_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Directional Unavailable Count"
+              },
+              "dispersion_pct": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Dispersion Pct"
+              },
+              "execution_grade_usable": {
+                "default": false,
+                "title": "Execution Grade Usable",
+                "type": "boolean"
+              },
+              "facts_usable_for_ranking": {
+                "default": false,
+                "title": "Facts Usable For Ranking",
+                "type": "boolean"
+              },
+              "freshness_member_counts": {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "title": "Freshness Member Counts",
+                "type": "object"
+              },
+              "group_id": {
+                "title": "Group Id",
+                "type": "string"
+              },
+              "group_key": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Group Key"
+              },
+              "intraday_research_usable": {
+                "default": false,
+                "title": "Intraday Research Usable",
+                "type": "boolean"
+              },
+              "label": {
+                "title": "Label",
+                "type": "string"
+              },
+              "lane": {
+                "default": "actual",
+                "enum": [
+                  "actual",
+                  "indicative"
+                ],
+                "title": "Lane",
+                "type": "string"
+              },
+              "last_trade_recency": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Last Trade Recency"
+              },
+              "lineage": {
+                "additionalProperties": true,
+                "title": "Lineage",
+                "type": "object"
+              },
+              "market": {
+                "title": "Market",
+                "type": "string"
+              },
+              "mean_change_pct": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Mean Change Pct"
+              },
+              "median_change_pct": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Median Change Pct"
+              },
+              "observation_coverage_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Coverage Count"
+              },
+              "observation_coverage_ratio": {
+                "anyOf": [
+                  {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Coverage Ratio"
+              },
+              "observation_freshness": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Freshness"
+              },
+              "observation_received_freshness": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observation Received Freshness"
+              },
+              "price_semantics": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Price Semantics"
+              },
+              "provisional": {
+                "title": "Provisional",
+                "type": "boolean"
+              },
+              "stale_member_count": {
+                "default": 0,
+                "title": "Stale Member Count",
+                "type": "integer"
+              },
+              "status": {
+                "title": "Status",
+                "type": "string"
+              },
+              "universe": {
+                "title": "Universe",
+                "type": "integer"
+              },
+              "unknown": {
+                "title": "Unknown",
+                "type": "integer"
+              },
+              "valid_no_trade_count": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Valid No Trade Count"
+              }
+            },
+            "required": [
+              "group_id",
+              "label",
+              "market",
+              "status",
+              "universe",
+              "coverage",
+              "unknown",
+              "coverage_ratio",
+              "provisional",
+              "decision_usable"
+            ],
+            "title": "TaiwanDashboardGroupRead",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "As Of"
+          },
+          "cache_only": {
+            "const": true,
+            "default": true,
+            "title": "Cache Only",
+            "type": "boolean"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "hot_groups": {
+            "items": {
+              "$ref": "#/$defs/TaiwanDashboardGroupRead"
+            },
+            "title": "Hot Groups",
+            "type": "array"
+          },
+          "kind": {
+            "const": "omi.tw_workspace_hot_groups",
+            "default": "omi.tw_workspace_hot_groups",
+            "title": "Kind",
+            "type": "string"
+          },
+          "lane": {
+            "enum": [
+              "actual",
+              "indicative"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "const": "omi.tw_workspace_hot_groups.v1",
+            "default": "omi.tw_workspace_hot_groups.v1",
+            "title": "Version",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "status",
+          "lane",
+          "hot_groups"
+        ],
+        "title": "TaiwanWorkspaceHotGroupsRead",
+        "type": "object"
+      },
+      "path": "/api/market/tw-dashboard/hot-groups",
+      "path_parameters": []
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Cache-only Taiwan workspace read. Preserve backend evidence status and warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "bars": {
+            "default": 90,
+            "maximum": 500,
+            "minimum": 20,
+            "title": "Bars",
+            "type": "integer"
+          },
+          "stock_id": {
+            "title": "Stock Id",
+            "type": "string"
+          },
+          "timeframe": {
+            "default": "daily",
+            "pattern": "^(today|daily|weekly|monthly)$",
+            "title": "Timeframe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stock_id"
+        ],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "omi.read_tw_stock_chart",
+      "outputSchema": {
+        "$defs": {
+          "MarketDailyChartRead": {
+            "properties": {
+              "close": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Close"
+              },
+              "high": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "High"
+              },
+              "low": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Low"
+              },
+              "open": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Open"
+              },
+              "time": {
+                "format": "date",
+                "title": "Time",
+                "type": "string"
+              },
+              "trade_value": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Value"
+              },
+              "transaction_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Transaction Count"
+              },
+              "volume": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Volume"
+              }
+            },
+            "required": [
+              "time"
+            ],
+            "title": "MarketDailyChartRead",
+            "type": "object"
+          },
+          "MarketOhlcChartRead": {
+            "properties": {
+              "available_bar_count": {
+                "title": "Available Bar Count",
+                "type": "integer"
+              },
+              "backfill": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Backfill"
+              },
+              "bars": {
+                "title": "Bars",
+                "type": "integer"
+              },
+              "bars_legacy_count": {
+                "title": "Bars Legacy Count",
+                "type": "integer"
+              },
+              "bootstrap_recommended": {
+                "title": "Bootstrap Recommended",
+                "type": "boolean"
+              },
+              "coverage_status": {
+                "title": "Coverage Status",
+                "type": "string"
+              },
+              "currency": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Currency"
+              },
+              "data_quality": {
+                "default": "ok",
+                "title": "Data Quality",
+                "type": "string"
+              },
+              "deprecated_fields": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Deprecated Fields",
+                "type": "array"
+              },
+              "earliest_available_trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Earliest Available Trade Date"
+              },
+              "expected_data_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Expected Data Date"
+              },
+              "expected_minimum_bar_count": {
+                "title": "Expected Minimum Bar Count",
+                "type": "integer"
+              },
+              "freshness_status": {
+                "default": "missing",
+                "title": "Freshness Status",
+                "type": "string"
+              },
+              "from_date": {
+                "format": "date",
+                "title": "From Date",
+                "type": "string"
+              },
+              "intraday_overlay": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Intraday Overlay"
+              },
+              "is_current": {
+                "default": false,
+                "title": "Is Current",
+                "type": "boolean"
+              },
+              "latest_available_trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Latest Available Trade Date"
+              },
+              "latest_data_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Latest Data Date"
+              },
+              "latest_finalized_data_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Latest Finalized Data Date"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Limitations",
+                "type": "array"
+              },
+              "lookback_days": {
+                "title": "Lookback Days",
+                "type": "integer"
+              },
+              "missing_session_count": {
+                "title": "Missing Session Count",
+                "type": "integer"
+              },
+              "point_count": {
+                "title": "Point Count",
+                "type": "integer"
+              },
+              "points": {
+                "items": {
+                  "$ref": "#/$defs/MarketDailyChartRead"
+                },
+                "title": "Points",
+                "type": "array"
+              },
+              "refresh_recommended": {
+                "default": true,
+                "title": "Refresh Recommended",
+                "type": "boolean"
+              },
+              "requested_bar_count": {
+                "title": "Requested Bar Count",
+                "type": "integer"
+              },
+              "requested_to_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Requested To Date"
+              },
+              "returned_point_count": {
+                "title": "Returned Point Count",
+                "type": "integer"
+              },
+              "stock_id": {
+                "title": "Stock Id",
+                "type": "string"
+              },
+              "timeframe": {
+                "title": "Timeframe",
+                "type": "string"
+              },
+              "to_date": {
+                "format": "date",
+                "title": "To Date",
+                "type": "string"
+              },
+              "trade_value_unit": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Value Unit"
+              },
+              "volume_semantics": {
+                "default": "not_provided",
+                "title": "Volume Semantics",
+                "type": "string"
+              },
+              "volume_status": {
+                "default": "not_provided",
+                "title": "Volume Status",
+                "type": "string"
+              },
+              "volume_unit": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Volume Unit"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "stock_id",
+              "timeframe",
+              "bars",
+              "requested_bar_count",
+              "available_bar_count",
+              "returned_point_count",
+              "expected_minimum_bar_count",
+              "missing_session_count",
+              "coverage_status",
+              "bootstrap_recommended",
+              "bars_legacy_count",
+              "lookback_days",
+              "from_date",
+              "to_date",
+              "point_count",
+              "points"
+            ],
+            "title": "MarketOhlcChartRead",
+            "type": "object"
+          },
+          "TaiwanDashboardIntradayChartPointRead": {
+            "properties": {
+              "close": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Close"
+              },
+              "finalized": {
+                "default": false,
+                "title": "Finalized",
+                "type": "boolean"
+              },
+              "high": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "High"
+              },
+              "is_partial": {
+                "default": false,
+                "title": "Is Partial",
+                "type": "boolean"
+              },
+              "low": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Low"
+              },
+              "open": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Open"
+              },
+              "time": {
+                "format": "date-time",
+                "title": "Time",
+                "type": "string"
+              },
+              "volume": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Volume"
+              },
+              "volume_status": {
+                "default": "not_provided",
+                "title": "Volume Status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "time"
+            ],
+            "title": "TaiwanDashboardIntradayChartPointRead",
+            "type": "object"
+          },
+          "TaiwanDashboardIntradayChartRead": {
+            "properties": {
+              "cache_hit": {
+                "title": "Cache Hit",
+                "type": "boolean"
+              },
+              "cache_latest_time": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Cache Latest Time"
+              },
+              "cache_status": {
+                "title": "Cache Status",
+                "type": "string"
+              },
+              "cache_trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Cache Trade Date"
+              },
+              "coverage_scope": {
+                "const": "resolver_series_before_display_slice",
+                "default": "resolver_series_before_display_slice",
+                "title": "Coverage Scope",
+                "type": "string"
+              },
+              "interval": {
+                "title": "Interval",
+                "type": "string"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Limitations",
+                "type": "array"
+              },
+              "point_count": {
+                "title": "Point Count",
+                "type": "integer"
+              },
+              "points": {
+                "items": {
+                  "$ref": "#/$defs/TaiwanDashboardIntradayChartPointRead"
+                },
+                "title": "Points",
+                "type": "array"
+              },
+              "resolved_health": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Resolved Health"
+              },
+              "series_coverage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaiwanDashboardSeriesCoverageRead"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "source": {
+                "title": "Source",
+                "type": "string"
+              },
+              "trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Date"
+              },
+              "volume_semantics": {
+                "title": "Volume Semantics",
+                "type": "string"
+              },
+              "volume_unit": {
+                "default": "shares",
+                "title": "Volume Unit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "interval",
+              "point_count",
+              "cache_status",
+              "cache_hit",
+              "volume_semantics"
+            ],
+            "title": "TaiwanDashboardIntradayChartRead",
+            "type": "object"
+          },
+          "TaiwanDashboardMovingAveragePointRead": {
+            "properties": {
+              "ma20": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Ma20"
+              },
+              "ma5": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Ma5"
+              },
+              "ma60": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Ma60"
+              },
+              "time": {
+                "title": "Time",
+                "type": "string"
+              }
+            },
+            "required": [
+              "time"
+            ],
+            "title": "TaiwanDashboardMovingAveragePointRead",
+            "type": "object"
+          },
+          "TaiwanDashboardSeriesCoverageRead": {
+            "additionalProperties": true,
+            "description": "Additive view of the canonical resolver metadata, never reclassified.",
+            "properties": {
+              "contract_version": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Contract Version"
+              },
+              "current_cumulative_volume_complete": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Current Cumulative Volume Complete"
+              },
+              "expected_bucket_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Expected Bucket Count"
+              },
+              "expected_from": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Expected From"
+              },
+              "expected_to": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Expected To"
+              },
+              "missing_bucket_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Missing Bucket Count"
+              },
+              "observed_bucket_count": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Observed Bucket Count"
+              },
+              "session_completed": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Session Completed"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Status"
+              },
+              "trade_date": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Trade Date"
+              }
+            },
+            "title": "TaiwanDashboardSeriesCoverageRead",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "bars": {
+            "title": "Bars",
+            "type": "integer"
+          },
+          "cache_only": {
+            "const": true,
+            "default": true,
+            "title": "Cache Only",
+            "type": "boolean"
+          },
+          "chart": {
+            "$ref": "#/$defs/MarketOhlcChartRead"
+          },
+          "instrument_type": {
+            "default": "unknown",
+            "enum": [
+              "stock",
+              "etf",
+              "unknown"
+            ],
+            "title": "Instrument Type",
+            "type": "string"
+          },
+          "intraday_chart": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TaiwanDashboardIntradayChartRead"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "kind": {
+            "const": "omi.tw_stock_chart",
+            "default": "omi.tw_stock_chart",
+            "title": "Kind",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "market": {
+            "title": "Market",
+            "type": "string"
+          },
+          "moving_averages": {
+            "items": {
+              "$ref": "#/$defs/TaiwanDashboardMovingAveragePointRead"
+            },
+            "title": "Moving Averages",
+            "type": "array"
+          },
+          "stock_id": {
+            "title": "Stock Id",
+            "type": "string"
+          },
+          "stock_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Stock Name"
+          },
+          "timeframe": {
+            "title": "Timeframe",
+            "type": "string"
+          },
+          "version": {
+            "const": "omi.tw_stock_chart.v1",
+            "default": "omi.tw_stock_chart.v1",
+            "title": "Version",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stock_id",
+          "market",
+          "timeframe",
+          "bars",
+          "chart"
+        ],
+        "title": "TaiwanStockChartRead",
+        "type": "object"
+      },
+      "path": "/api/market/tw-dashboard/stocks/{stock_id}/chart",
+      "path_parameters": [
+        "stock_id"
+      ]
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Cache-only Taiwan workspace read. Preserve backend evidence status and warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "projection": {
+            "default": "full",
+            "pattern": "^(full|workspace)$",
+            "title": "Projection",
+            "type": "string"
+          },
+          "stock_id": {
+            "title": "Stock Id",
+            "type": "string"
+          },
+          "timeframe": {
+            "default": "daily",
+            "pattern": "^(today|daily|weekly|monthly)$",
+            "title": "Timeframe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stock_id"
+        ],
+        "type": "object"
+      },
+      "method": "GET",
+      "name": "omi.read_tw_stock_research",
+      "outputSchema": {
+        "$defs": {
+          "TaiwanStockResearchRead": {
+            "properties": {
+              "cache_only": {
+                "const": true,
+                "default": true,
+                "title": "Cache Only",
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "omi.tw_stock_research",
+                "default": "omi.tw_stock_research",
+                "title": "Kind",
+                "type": "string"
+              },
+              "stock_id": {
+                "title": "Stock Id",
+                "type": "string"
+              },
+              "technical": {
+                "$ref": "#/$defs/TechnicalReportRead"
+              },
+              "timeframe": {
+                "title": "Timeframe",
+                "type": "string"
+              },
+              "version": {
+                "const": "omi.tw_stock_research.v1",
+                "default": "omi.tw_stock_research.v1",
+                "title": "Version",
+                "type": "string"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "stock_id",
+              "timeframe",
+              "technical"
+            ],
+            "title": "TaiwanStockResearchRead",
+            "type": "object"
+          },
+          "TaiwanWorkspaceResearchRead": {
+            "properties": {
+              "cache_only": {
+                "const": true,
+                "default": true,
+                "title": "Cache Only",
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "omi.tw_stock_research",
+                "default": "omi.tw_stock_research",
+                "title": "Kind",
+                "type": "string"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Limitations",
+                "type": "array"
+              },
+              "max_bytes": {
+                "const": 131072,
+                "default": 131072,
+                "title": "Max Bytes",
+                "type": "integer"
+              },
+              "projection": {
+                "const": "workspace",
+                "default": "workspace",
+                "title": "Projection",
+                "type": "string"
+              },
+              "stock_id": {
+                "title": "Stock Id",
+                "type": "string"
+              },
+              "technical": {
+                "$ref": "#/$defs/WorkspaceTechnicalReportRead"
+              },
+              "technical_summary": {
+                "$ref": "#/$defs/WorkspaceIndicatorSummary"
+              },
+              "timeframe": {
+                "enum": [
+                  "today",
+                  "daily",
+                  "weekly",
+                  "monthly"
+                ],
+                "title": "Timeframe",
+                "type": "string"
+              },
+              "version": {
+                "const": "omi.tw_stock_research.workspace.v1",
+                "default": "omi.tw_stock_research.workspace.v1",
+                "title": "Version",
+                "type": "string"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "stock_id",
+              "timeframe",
+              "technical",
+              "technical_summary"
+            ],
+            "title": "TaiwanWorkspaceResearchRead",
+            "type": "object"
+          },
+          "TechnicalReportBadgeRead": {
+            "properties": {
+              "label": {
+                "title": "Label",
+                "type": "string"
+              },
+              "tone": {
+                "title": "Tone",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "tone"
+            ],
+            "title": "TechnicalReportBadgeRead",
+            "type": "object"
+          },
+          "TechnicalReportRead": {
+            "properties": {
+              "badges": {
+                "items": {
+                  "$ref": "#/$defs/TechnicalReportBadgeRead"
+                },
+                "title": "Badges",
+                "type": "array"
+              },
+              "confidence": {
+                "title": "Confidence",
+                "type": "string"
+              },
+              "data": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              },
+              "decision_usable": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Decision Usable"
+              },
+              "generated_at": {
+                "format": "date-time",
+                "title": "Generated At",
+                "type": "string"
+              },
+              "kind": {
+                "title": "Kind",
+                "type": "string"
+              },
+              "missing": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Missing",
+                "type": "array"
+              },
+              "phase": {
+                "title": "Phase",
+                "type": "string"
+              },
+              "rows": {
+                "items": {
+                  "$ref": "#/$defs/TechnicalReportRowRead"
+                },
+                "title": "Rows",
+                "type": "array"
+              },
+              "score": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Score"
+              },
+              "source_refs": {
+                "items": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "title": "Source Refs",
+                "type": "array"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Status"
+              },
+              "stock_id": {
+                "title": "Stock Id",
+                "type": "string"
+              },
+              "summary": {
+                "title": "Summary",
+                "type": "string"
+              },
+              "timeframe": {
+                "title": "Timeframe",
+                "type": "string"
+              },
+              "title": {
+                "title": "Title",
+                "type": "string"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Value"
+              },
+              "value_label": {
+                "title": "Value Label",
+                "type": "string"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "stock_id",
+              "timeframe",
+              "phase",
+              "confidence",
+              "generated_at",
+              "title",
+              "summary",
+              "score",
+              "value_label",
+              "rows"
+            ],
+            "title": "TechnicalReportRead",
+            "type": "object"
+          },
+          "TechnicalReportRowRead": {
+            "properties": {
+              "basis": {
+                "title": "Basis",
+                "type": "string"
+              },
+              "description": {
+                "title": "Description",
+                "type": "string"
+              },
+              "direction": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Direction"
+              },
+              "display_value": {
+                "title": "Display Value",
+                "type": "string"
+              },
+              "key": {
+                "title": "Key",
+                "type": "string"
+              },
+              "label": {
+                "title": "Label",
+                "type": "string"
+              },
+              "source": {
+                "title": "Source",
+                "type": "string"
+              },
+              "tone": {
+                "default": "neutral",
+                "title": "Tone",
+                "type": "string"
+              },
+              "value": {
+                "default": null,
+                "title": "Value"
+              }
+            },
+            "required": [
+              "key",
+              "label",
+              "description",
+              "display_value",
+              "basis",
+              "source"
+            ],
+            "title": "TechnicalReportRowRead",
+            "type": "object"
+          },
+          "WorkspaceIndicatorSummary": {
+            "properties": {
+              "basis": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "daily_indicator",
+                      "indicator",
+                      "daily_background"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Basis"
+              },
+              "change_pct": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Change Pct"
+              },
+              "close": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Close"
+              },
+              "kd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkspaceKdRead"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "macd": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkspaceMacdRead"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rsi": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkspaceRsiRead"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "time": {
+                "anyOf": [
+                  {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Time"
+              }
+            },
+            "title": "WorkspaceIndicatorSummary",
+            "type": "object"
+          },
+          "WorkspaceKdRead": {
+            "additionalProperties": true,
+            "properties": {
+              "d9": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "D9"
+              },
+              "k9": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "K9"
+              }
+            },
+            "title": "WorkspaceKdRead",
+            "type": "object"
+          },
+          "WorkspaceMacdRead": {
+            "additionalProperties": true,
+            "properties": {
+              "histogram": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Histogram"
+              },
+              "macd": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Macd"
+              },
+              "signal": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Signal"
+              }
+            },
+            "title": "WorkspaceMacdRead",
+            "type": "object"
+          },
+          "WorkspaceRsiRead": {
+            "additionalProperties": true,
+            "properties": {
+              "rsi14": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Rsi14"
+              }
+            },
+            "title": "WorkspaceRsiRead",
+            "type": "object"
+          },
+          "WorkspaceTechnicalReportRead": {
+            "additionalProperties": true,
+            "properties": {
+              "algorithm_version": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Algorithm Version"
+              },
+              "badges": {
+                "items": {
+                  "$ref": "#/$defs/TechnicalReportBadgeRead"
+                },
+                "title": "Badges",
+                "type": "array"
+              },
+              "confidence": {
+                "title": "Confidence",
+                "type": "string"
+              },
+              "data": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              },
+              "decision_usable": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Decision Usable"
+              },
+              "evidence_passport": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Evidence Passport"
+              },
+              "generated_at": {
+                "format": "date-time",
+                "title": "Generated At",
+                "type": "string"
+              },
+              "indicator_engine": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Indicator Engine"
+              },
+              "kind": {
+                "title": "Kind",
+                "type": "string"
+              },
+              "limitations": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Limitations",
+                "type": "array"
+              },
+              "missing": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Missing",
+                "type": "array"
+              },
+              "phase": {
+                "title": "Phase",
+                "type": "string"
+              },
+              "rows": {
+                "items": {
+                  "$ref": "#/$defs/TechnicalReportRowRead"
+                },
+                "title": "Rows",
+                "type": "array"
+              },
+              "score": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Score"
+              },
+              "source_refs": {
+                "items": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "title": "Source Refs",
+                "type": "array"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Status"
+              },
+              "stock_id": {
+                "title": "Stock Id",
+                "type": "string"
+              },
+              "summary": {
+                "title": "Summary",
+                "type": "string"
+              },
+              "timeframe": {
+                "title": "Timeframe",
+                "type": "string"
+              },
+              "title": {
+                "title": "Title",
+                "type": "string"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Value"
+              },
+              "value_label": {
+                "title": "Value Label",
+                "type": "string"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Warnings",
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "stock_id",
+              "timeframe",
+              "phase",
+              "confidence",
+              "generated_at",
+              "title",
+              "summary",
+              "score",
+              "value_label",
+              "rows"
+            ],
+            "title": "WorkspaceTechnicalReportRead",
+            "type": "object"
+          }
+        },
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TaiwanStockResearchRead"
+          },
+          {
+            "$ref": "#/$defs/TaiwanWorkspaceResearchRead"
+          }
+        ],
+        "description": "Preserve the full v1 envelope while exposing opt-in workspace v1.",
+        "title": "TaiwanStockResearchResponseRead"
+      },
+      "path": "/api/market/tw-dashboard/stocks/{stock_id}/research",
+      "path_parameters": [
+        "stock_id"
+      ]
+    }
+  ]
 }

@@ -6,6 +6,7 @@ export type USMarketTruthRead = {
   truth_revision: string;
   market_phase: string;
   component_revisions: {
+    intraday_revision?: string | null;
     daily_revision: string | null;
     calendar_revision: string;
   };

@@ -1,6 +1,344 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { usTruthResponse } from "./fixtures/usMarketTruth";
 
+// Shared G4 synthetic fixture: the same timing and payloads run against the
+// saved pre-G4 component and current component in separate local builds.
+async function mockG4Detail(page: Page, responder?: MockOmiApiOptions["apiResponder"]) {
+  const symbols = ["SSO", "AAPL", "AMD"];
+  await mockOmiApi(page, {
+    usWatchlistTree: seededUsWatchlistTree(),
+    usWatchlistItems: symbols.map((symbol, index) => ({ ...seededUsWatchlistItems()[0], id: 170 + index, symbol, security_name: symbol })),
+    usRankingRows: symbols.map((symbol, index) => ({ ...seededUsRankingRows()[0], rank: index + 1, symbol, security_name: symbol })),
+    apiResponder: responder,
+  });
+}
+
+test.describe("G4 source browser", () => {
+  for (const slowSymbol of ["AAPL", "SSO"]) {
+  test(`G4 slow daily read ${slowSymbol} commits under changing intraday revisions`, async ({ page }, info) => {
+    test.setTimeout(30_000);
+    let chartReads = 0;
+    let truthReads = 0;
+    const cancelled: string[] = [];
+    page.on("requestfailed", (r) => { if (r.url().includes(`/ohlc/${slowSymbol}`)) cancelled.push(r.url()); });
+    await mockG4Detail(page, ({ path }) => {
+      if (path.endsWith(`/truth/${slowSymbol}`)) {
+        truthReads++;
+        const truth = usTruthResponse(slowSymbol);
+        return { body: { ...truth, market_phase: "regular", component_revisions: {
+          ...truth.component_revisions, intraday_revision: String(truthReads),
+        } } };
+      }
+      if (path.endsWith(`/ohlc/${slowSymbol}`)) {
+        chartReads++;
+        return { body: usOhlcResponse(slowSymbol), delayMs: 8000 };
+      }
+      return null;
+    });
+    const start = Date.now();
+    await page.goto(`/?market=us&group_id=17&symbol=${slowSymbol}`, { waitUntil: "domcontentloaded" });
+    try {
+      await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible({ timeout: 18_000 });
+      expect(chartReads).toBeLessThanOrEqual(4);
+      expect(truthReads).toBeGreaterThan(1);
+    } finally {
+      await info.attach("slow-chart-revision-evidence", { contentType: "application/json", body: JSON.stringify({
+        symbol: slowSymbol, chartReads, truthReads, cancelled: cancelled.length, elapsedMs: Date.now() - start, latencyMs: 8000,
+      }) });
+    }
+  });
+  }
+
+  test("G4 diagnostic mouse callback trace is separate from acceptance", async ({ page }, info) => {
+    await mockG4Detail(page, ({ path, url }) => {
+      const symbol = path.split("/").at(-1)!;
+      if (/\/ohlc\//.test(path)) return { body: usOhlcResponse(symbol), delayMs: 300 };
+      if (/\/truth\//.test(path)) return { body: usTruthResponse(symbol), delayMs: 60 };
+      if (/\/research\//.test(path)) return { body: usMarketResearchResponse(symbol, url.searchParams.get("timeframe") ?? "daily"), delayMs: 1800 };
+      if (/\/sec\//.test(path)) return { body: {}, status: 503, delayMs: 1800 };
+      return null;
+    });
+    await page.goto("/?market=us&group_id=17&symbol=SSO", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible();
+    await page.evaluate(() => {
+      // Read-only source; transient browser instrumentation wraps the actual
+      // row.onSelect callback reached through this development diagnostic hook.
+      type Row = { symbol: string; onSelect: (() => void) & { g4Wrapped?: boolean } };
+      type Fiber = { memoizedProps?: { rows?: Row[] }; return?: Fiber };
+      const events: Array<Record<string, unknown>> = [];
+      const diagnostics = window as typeof window & { g4MouseTrace?: typeof events };
+      diagnostics.g4MouseTrace = events;
+      const stamp = (entry: Record<string, unknown>) => events.push({ at: performance.now(), url: location.search, ...entry });
+      const wrap = () => {
+        document.querySelectorAll<HTMLElement>("[data-ranking-symbol]").forEach((element) => {
+          const propsKey = Object.keys(element).find((name) => name.startsWith("__reactProps$"));
+          if (propsKey) {
+            type Handler = ((event: { button: number }) => void) & { g4Wrapped?: boolean };
+            const props = (element as unknown as Record<string, Record<string, Handler>>)[propsKey];
+            for (const name of ["onMouseDown", "onPointerUp", "onClick"]) {
+              const original = props[name];
+              if (!original || original.g4Wrapped) continue;
+              const symbol = element.dataset.rankingSymbol;
+              props[name] = Object.assign((event: { button: number }) => {
+                stamp({ kind: "selection-handler", type: name, symbol, button: event.button });
+                original(event);
+              }, { g4Wrapped: true });
+            }
+          }
+          const key = Object.keys(element).find((name) => name.startsWith("__reactFiber$"));
+          let fiber = key ? (element as unknown as Record<string, Fiber>)[key] : undefined;
+          while (fiber) {
+            for (const row of fiber.memoizedProps?.rows ?? []) {
+              if (row.onSelect.g4Wrapped) continue;
+              const original = row.onSelect;
+              row.onSelect = Object.assign(() => { stamp({ kind: "row.onSelect", symbol: row.symbol }); original(); }, { g4Wrapped: true });
+            }
+            fiber = fiber.return;
+          }
+        });
+      };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        document.addEventListener(type, (event) => {
+          const target = (event.target as Element)?.closest<HTMLElement>("[data-ranking-symbol]");
+          if (!target) return;
+          wrap();
+          const mouse = event as MouseEvent;
+          stamp({ kind: "dom", type, symbol: target.dataset.rankingSymbol, x: mouse.clientX, y: mouse.clientY,
+            rows: [...document.querySelectorAll<HTMLElement>("[data-ranking-symbol]")].map((row) => ({ symbol: row.dataset.rankingSymbol, top: row.getBoundingClientRect().top })) });
+        }, true);
+      }
+      new MutationObserver(wrap).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+      wrap();
+    });
+    const observations = [];
+    for (const symbol of ["AAPL", "AMD", "SSO"]) {
+      await page.locator(`[data-ranking-symbol="${symbol}"]`).click();
+      await page.waitForTimeout(700);
+      observations.push({ requested: symbol, actualUrl: page.url(), actualHeading: await page.getByTestId("us-stock-kline-panel").locator("h2").innerText() });
+    }
+    const events = await page.evaluate(() => (window as typeof window & { g4MouseTrace?: unknown[] }).g4MouseTrace);
+    expect(events?.length).toBeGreaterThan(0);
+    await info.attach("mouse-diagnostic-not-acceptance", { contentType: "application/json", body: JSON.stringify({ observations, events }, null, 2) });
+    await info.attach("mouse-end-state", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  test("G4 mount coalesces repeated effects and intraday revision keeps backend overlay current", async ({ page }) => {
+    const requests: string[] = [];
+    let revision = 0;
+    await mockG4Detail(page, ({ path, url }) => {
+      requests.push(path);
+      if (path.endsWith("/truth/AAPL")) {
+        const truth = usTruthResponse("AAPL");
+        return { body: { ...truth, component_revisions: { ...truth.component_revisions, intraday_revision: String(revision) } } };
+      }
+      if (path.endsWith("/ohlc/AAPL")) {
+        expect(url.searchParams.has("ensure_history")).toBe(false);
+        expect(url.searchParams.has("outputsize")).toBe(false);
+      }
+      return null;
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible();
+    await expect(page.getByTestId("us-research-request-state")).toHaveCount(0);
+    await expect.poll(() => requests.filter((p) => p.endsWith("/sec/AAPL/financials")).length).toBe(1);
+    expect(requests.filter((p) => p.endsWith("/stocks/AAPL"))).toHaveLength(1);
+    const researchReads = requests.filter((p) => p.endsWith("/research/AAPL")).length;
+    expect(researchReads).toBeLessThanOrEqual(2); // null -> first backend daily revision may supersede bootstrap.
+    const before = requests.filter((p) => p.endsWith("/ohlc/AAPL")).length;
+    // This is the explicitly deferred seam: retain the full backend read until
+    // a revision-bound lightweight overlay is available. Do not freeze the bar.
+    revision++;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect.poll(() => requests.filter((p) => p.endsWith("/ohlc/AAPL")).length).toBe(before + 1);
+    expect(requests.filter((p) => p.endsWith("/research/AAPL"))).toHaveLength(researchReads);
+  });
+
+  test("G4 changing optional tab aborts pending SEC without replacing chart", async ({ page }) => {
+    const failed: string[] = [];
+    let started = false;
+    page.on("requestfailed", (r) => failed.push(r.url()));
+    await mockG4Detail(page, ({ path }) => {
+      if (!path.endsWith("/sec/AAPL/financials")) return null;
+      started = true;
+      return { status: 500, body: { detail: "old tab failure" }, delayMs: 2500 };
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const chart = page.getByTestId("us-stock-kline-panel").getByRole("img");
+    await expect(chart).toBeVisible();
+    await expect.poll(() => started).toBe(true);
+    await page.getByRole("tab", { name: "概況", exact: true }).click();
+    await expect.poll(() => failed.some((url) => url.includes("/sec/AAPL/financials"))).toBe(true);
+    await expect(chart).toBeVisible();
+    await expect(page.getByTestId("us-supplemental-request-error")).toHaveCount(0);
+  });
+
+  test("G4 synthetic waterfall and symbol switch samples", async ({ page }, info) => {
+    test.setTimeout(90_000);
+    const waterfall: Array<{ url: string; event: string; at: number }> = [];
+    const epoch = Date.now();
+    const record = (event: string) => (request: import("@playwright/test").Request) => {
+        if (/\/us-market\/(ohlc|research|stocks|truth|sec|intraday)\//.test(request.url())) {
+          waterfall.push({ url: request.url(), event, at: Date.now() - epoch });
+        }
+    };
+    page.on("request", record("request"));
+    page.on("requestfinished", record("requestfinished"));
+    page.on("requestfailed", record("requestfailed"));
+    await mockG4Detail(page, ({ path, url }) => {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SSO");
+      if (/\/ohlc\//.test(path)) return { body: usOhlcResponse(symbol), delayMs: 300 };
+      if (/\/truth\//.test(path)) return { body: usTruthResponse(symbol), delayMs: 60 };
+      if (/\/research\//.test(path)) return { body: usMarketResearchResponse(symbol, url.searchParams.get("timeframe") ?? "daily"), delayMs: 1800 };
+      if (/\/sec\//.test(path)) return { status: 503, body: { detail: "synthetic slow optional" }, delayMs: 1800 };
+      return null;
+    });
+    const started = Date.now();
+    await page.goto("/?market=us&group_id=17&symbol=SSO", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await expect(panel.getByRole("img")).toBeVisible();
+    const firstChartMs = Date.now() - started;
+    await info.attach("first-chart", { body: await page.screenshot(), contentType: "image/png" });
+    const samples: number[] = [];
+    for (const symbol of ["AAPL", "AMD", "SSO", "AAPL", "AMD", "SSO", "AAPL", "AMD", "SSO", "AAPL", "AMD", "SSO"]) {
+      const start = Date.now();
+      // Keyboard selection isolates request latency from the pre-existing
+      // multi-handler pointer/scroll instability (saved in both A/B traces).
+      await page.locator(`[data-ranking-symbol="${symbol}"]`).press("Enter");
+      await expect(page).toHaveURL(new RegExp(`symbol=${symbol}`));
+      await expect(panel.locator("h2")).toContainText(symbol);
+      await expect(panel.getByRole("img")).toBeVisible();
+      samples.push(Date.now() - start);
+    }
+    const sorted = [...samples].sort((a, b) => a - b);
+    await panel.getByRole("button", { name: "今日", exact: true }).click();
+    await expect(page.getByTestId("intraday-trend-chart")).toBeVisible();
+    const todayStart = waterfall.length;
+    await page.locator('[data-ranking-symbol="AAPL"]').press("Enter");
+    await expect(panel.locator("h2")).toContainText("AAPL");
+    await expect(page.getByTestId("intraday-trend-chart")).toBeVisible();
+    // Fixed observation window, identical in A/B; includes 300ms Daily fixture.
+    await page.waitForTimeout(500);
+    const todayHistoricalReads = waterfall.slice(todayStart).filter((r) => r.event === "request" && r.url.includes("/ohlc/AAPL")).length;
+    const requests = waterfall.filter((item) => item.event === "request");
+    await info.attach("g4-synthetic-metrics", { contentType: "application/json", body: JSON.stringify({
+      fixture: "G4 fixed chart300/truth60/research1800/sec1800ms; no production SLA",
+      firstChartMs, samples, todayHistoricalReads, p50: sorted[Math.ceil(sorted.length * 0.50) - 1], p95: sorted[Math.ceil(sorted.length * 0.95) - 1],
+      counts: { all: requests.length, ohlc: requests.filter((r) => r.url.includes("/ohlc/")).length,
+        research: requests.filter((r) => r.url.includes("/research/")).length,
+        sec: requests.filter((r) => r.url.includes("/sec/")).length,
+        cancelled: waterfall.filter((r) => r.event === "requestfailed").length }, waterfall,
+    }, null, 2) });
+  });
+
+  test("G4 fast SSO AAPL AMD cancels obsolete chart and optional requests", async ({ page }) => {
+    const failed: string[] = [];
+    page.on("requestfailed", (request) => failed.push(request.url()));
+    const requests: string[] = [];
+    await mockG4Detail(page, ({ path }) => {
+      requests.push(path);
+      const symbol = path.split("/").at(-1)!;
+      if (/\/ohlc\//.test(path)) return { body: usOhlcResponse(symbol), delayMs: symbol === "SSO" ? 100 : 1400 };
+      if (/\/research\//.test(path)) return { body: usMarketResearchResponse(symbol), delayMs: 3000 };
+      if (/\/sec\//.test(path)) return { status: 500, body: { detail: "late optional" }, delayMs: 3000 };
+      return null;
+    });
+    await page.goto("/?market=us&group_id=17&symbol=SSO", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await expect(panel.getByRole("img")).toBeVisible();
+    await expect.poll(() => requests.some((p) => p.endsWith("/sec/SSO/financials"))).toBe(true);
+    await page.locator('[data-ranking-symbol="AAPL"]').click();
+    await expect.poll(() => requests.some((p) => p.endsWith("/ohlc/AAPL"))).toBe(true);
+    await page.locator('[data-ranking-symbol="AMD"]').click();
+    await expect(panel.locator("h2")).toContainText("AMD");
+    await expect(panel.getByRole("img")).toBeVisible();
+    for (const suffix of ["/ohlc/AAPL", "/research/SSO", "/sec/SSO/financials"]) {
+      await expect.poll(() => failed.some((url) => url.includes(suffix))).toBe(true);
+    }
+    await expect(page.getByTestId("us-chart-request-error")).toHaveCount(0);
+  });
+
+  test("G4 optional timeout and scope mismatch retain the visible chart and permit retry", async ({ page }) => {
+    await page.clock.install();
+    let mode: "held" | "mismatch" | "success" = "held";
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await mockG4Detail(page, async ({ path }) => {
+      if (!path.endsWith("/research/AAPL")) return null;
+      const requestedMode = mode;
+      if (requestedMode === "held") await held;
+      return { body: usMarketResearchResponse(requestedMode === "mismatch" ? "SSO" : "AAPL") };
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await expect(panel.getByRole("img")).toBeVisible();
+    const state = page.getByTestId("us-research-request-state");
+    await expect(state).toHaveAttribute("role", "status");
+    await page.clock.fastForward(21_000);
+    await expect(state).toHaveAttribute("role", "alert");
+    await expect(panel.getByRole("img")).toBeVisible();
+    mode = "mismatch";
+    await state.getByRole("button", { name: "重試", exact: true }).click();
+    await expect(state).toHaveAttribute("role", "alert");
+    mode = "success";
+    await state.getByRole("button", { name: "重試", exact: true }).click();
+    await expect(state).toHaveCount(0);
+    release();
+    await expect(panel.getByRole("img")).toBeVisible();
+  });
+
+  test("G4 hidden panel suspends reads and focus events do not duplicate in-flight HTTP", async ({ page }) => {
+    await page.clock.install();
+    const requests: string[] = [];
+    await mockG4Detail(page, ({ path }) => {
+      requests.push(path);
+      if (path.endsWith("/truth/AAPL")) return { body: usTruthResponse("AAPL"), delayMs: 300 };
+      return null;
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible();
+    await expect(page.getByTestId("us-research-request-state")).toHaveCount(0);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const count = requests.filter((p) => /\/(truth|ohlc|research|sec)\//.test(p)).length;
+    await page.clock.fastForward(120_000);
+    expect(requests.filter((p) => /\/(truth|ohlc|research|sec)\//.test(p))).toHaveLength(count);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect.poll(() => requests.filter((p) => p.endsWith("/truth/AAPL")).length).toBeGreaterThan(1);
+    const before = requests.filter((p) => p.endsWith("/truth/AAPL")).length;
+    await page.evaluate(() => { for (let i = 0; i < 10; i++) window.dispatchEvent(new Event("focus")); });
+    expect(requests.filter((p) => p.endsWith("/truth/AAPL"))).toHaveLength(before);
+  });
+
+  test("G4 professional chart owns scope cancellation and exposes errors", async ({ page }) => {
+    const intraday: string[] = [];
+    let mismatch = true;
+    await mockG4Detail(page, ({ path, url }) => {
+      if (!path.endsWith("/intraday/AAPL")) return null;
+      intraday.push(url.search);
+      return { body: { ...usIntradayResponse("AAPL"), session_scope: url.searchParams.get("session_scope"),
+        effective_interval: mismatch ? "15m" : url.searchParams.get("interval") } };
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await expect(panel.getByRole("img")).toBeVisible();
+    await panel.getByRole("button", { name: "放大", exact: true }).click();
+    const professional = page.getByTestId("professional-chart-panel");
+    await professional.getByRole("button", { name: "1分", exact: true }).click();
+    await expect(page.getByTestId("us-professional-request-error")).toBeVisible();
+    await expect(professional.locator('[aria-busy="true"]')).toHaveCount(0);
+    expect(intraday).toHaveLength(1);
+    mismatch = false;
+    await page.getByTestId("us-professional-request-error").getByRole("button", { name: "重試", exact: true }).click();
+    await expect(page.getByTestId("us-professional-request-error")).toHaveCount(0);
+    await expect(professional.locator("canvas").first()).toBeVisible();
+  });
+});
+
 function chartPoints() {
   return Array.from({ length: 72 }, (_, index) => {
     const date = new Date(Date.UTC(2026, 2, 2 + index));
@@ -1304,7 +1642,7 @@ function quoteDepthResponse(stockId: string) {
   };
 }
 
-function usMarketResearchResponse(symbol: string) {
+function usMarketResearchResponse(symbol: string, timeframe = "daily") {
   const quality = {
     status: "partial",
     facts_usable: true,
@@ -1322,6 +1660,7 @@ function usMarketResearchResponse(symbol: string) {
     schema_version: "omi.us_market.research.v1",
     market: "US",
     symbol,
+    timeframe,
     status: "partial",
     as_of: "2026-08-21",
     technical_indicators: {
@@ -4050,7 +4389,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     if (usMarketResearchMatch) {
       await fulfillJson(
         route,
-        usMarketResearchResponse(decodeURIComponent(usMarketResearchMatch[1]))
+        usMarketResearchResponse(decodeURIComponent(usMarketResearchMatch[1]), url.searchParams.get("timeframe") ?? "daily")
       );
       return;
     }
@@ -4681,6 +5020,193 @@ test.describe("OMI dashboard smoke", () => {
     await expect(sp500).not.toContainText("+20");
   });
 
+  test("US convergence Today HTTP failure terminates loading and retries", async ({ page }) => {
+    let fail = true;
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path }) => path.endsWith("/us-market/intraday/AAPL") && fail
+        ? { status: 503, body: { detail: "fixture unavailable" } } : null,
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await panel.getByRole("button", { name: "今日", exact: true }).click();
+    const error = page.getByTestId("us-today-request-error");
+    await expect(error).toBeVisible();
+    await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
+    fail = false;
+    await error.getByRole("button", { name: "重試", exact: true }).click();
+    await expect(error).toHaveCount(0);
+    await expect(page.getByTestId("intraday-trend-chart")).toBeVisible();
+  });
+
+  test("US convergence Today timeout is terminal and late response cannot replace a new symbol", async ({ page }) => {
+    await page.clock.install();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let started = false;
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(), usRankingRows: seededUsRankingRows(),
+      apiResponder: async ({ path }) => {
+        if (!path.endsWith("/us-market/intraday/AAPL")) return null;
+        started = true;
+        await held;
+        return { body: { ...usIntradayResponse("AAPL"), source: "late-aapl-fixture" } };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await panel.getByRole("button", { name: "今日", exact: true }).click();
+    await expect.poll(() => started).toBe(true);
+    await page.clock.fastForward(20_100);
+    await expect(page.getByTestId("us-today-request-error")).toBeVisible();
+    await page.locator('[data-ranking-symbol="MSFT"]').click();
+    await expect(page).toHaveURL(/symbol=MSFT/);
+    await expect(page.getByTestId("us-today-request-error")).toHaveCount(0);
+    await expect(page.getByTestId("intraday-trend-chart")).toBeVisible();
+    release();
+    await expect(panel).not.toContainText("late-aapl-fixture");
+    await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
+  });
+
+  test("US convergence slow Today prioritizes identity and defers optional reads", async ({ page }) => {
+    const requests: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(), usRankingRows: seededUsRankingRows(),
+      apiResponder: async ({ path }) => {
+        requests.push(path);
+        if (path.endsWith("/us-market/intraday/MSFT")) {
+          await held;
+          return { body: usIntradayResponse("MSFT") };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await panel.getByRole("button", { name: "今日", exact: true }).click();
+    await page.locator('[data-ranking-symbol="MSFT"]').click();
+    for (const suffix of ["intraday/MSFT", "stocks/MSFT"]) {
+      await expect.poll(() => requests.some((path) => path.endsWith(`/us-market/${suffix}`))).toBe(true);
+    }
+    await expect(panel.locator('[aria-busy="true"]')).toBeVisible();
+    expect(requests.some((path) => path.endsWith("/us-market/ohlc/MSFT"))).toBe(false);
+    expect(requests.some((path) => path.endsWith("/us-market/research/MSFT"))).toBe(false);
+    release();
+    await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
+    for (const suffix of ["research/MSFT", "sec/MSFT/financials"]) {
+      await expect.poll(() => requests.some((path) => path.endsWith(`/us-market/${suffix}`))).toBe(true);
+    }
+  });
+
+  test("US convergence closed partial session revalidates and retains data on transient failure", async ({ page }) => {
+    await page.clock.install();
+    let reads = 0;
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path }) => {
+        if (!path.endsWith("/us-market/intraday/AAPL")) return null;
+        reads += 1;
+        if (reads === 2) return { status: 503, body: { detail: "fixture timeout" } };
+        const body = usIntradayResponse("AAPL");
+        return { body: { ...body, market_phase: "market_closed", session_coverage: {
+          trade_date: "2026-08-31", requested_scope: "regular", regular_point_count: 236,
+          extended_point_count: 0, has_extended_hours: false, requested_point_count: 236,
+          coverage_status: reads > 2 ? "complete" : "partial", point_count: reads > 2 ? 390 : 236,
+          expected_point_count: 390, missing_slot_count: reads > 2 ? 0 : 154,
+        } } };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await panel.getByRole("button", { name: "今日", exact: true }).click();
+    await expect(page.getByTestId("us-completed-session-coverage")).toContainText("236");
+    await page.clock.fastForward(60_100);
+    await expect(page.getByTestId("us-today-request-error")).toContainText("保留上次快照");
+    await expect(page.getByTestId("intraday-trend-chart")).toBeVisible();
+    await page.clock.fastForward(30_100);
+    await expect(page.getByTestId("us-completed-session-coverage")).toContainText("390");
+    await expect(page.getByTestId("us-today-request-error")).toHaveCount(0);
+    for (let minute = 0; minute < 16; minute += 1) {
+      const previous = reads;
+      const finished = page.waitForEvent("requestfinished", (request) => request.url().includes("/intraday/AAPL"));
+      await page.clock.fastForward(60_100);
+      await finished;
+      await expect.poll(() => reads).toBeGreaterThan(previous);
+      // The mock server increments at request start; let the browser consume the
+      // body and schedule its next timeout before advancing another full minute.
+      await page.clock.runFor(100);
+    }
+  });
+
+  test("US convergence mismatched interval terminates loading and can retry", async ({ page }) => {
+    let mismatch = true;
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path, url }) => path.endsWith("/us-market/intraday/AAPL")
+        ? { body: { ...usIntradayResponse("AAPL"), effective_interval: mismatch ? "15m" : url.searchParams.get("interval") } } : null,
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await panel.getByRole("button", { name: "今日", exact: true }).click();
+    await expect(page.getByTestId("us-today-request-error")).toBeVisible();
+    await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
+    mismatch = false;
+    await page.getByTestId("us-today-request-error").getByRole("button", { name: "重試", exact: true }).click();
+    await expect(page.getByTestId("us-today-request-error")).toHaveCount(0);
+    await expect(page.getByTestId("intraday-trend-chart")).toBeVisible();
+  });
+
+  test("US convergence failed supplemental request permits explicit retry", async ({ page }) => {
+    let fail = true;
+    let reads = 0;
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path }) => {
+        if (!path.endsWith("/us-market/sec/AAPL/financials")) return null;
+        reads += 1;
+        return fail ? { status: 503, body: { detail: "fixture unavailable" } } : null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const error = page.getByTestId("us-supplemental-request-error");
+    await expect(error).toBeVisible();
+    expect(reads).toBe(1);
+    fail = false;
+    await error.getByRole("button", { name: "重試", exact: true }).click();
+    await expect(error).toHaveCount(0);
+    expect(reads).toBe(2);
+  });
+
+  test("US convergence provisional daily marker disappears on finalized revision", async ({ page }) => {
+    let finalized = false;
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/truth/AAPL")) {
+          const truth = usTruthResponse("AAPL");
+          return { body: { ...truth, component_revisions: { ...truth.component_revisions, daily_revision: (finalized ? "f" : "a").repeat(64) } } };
+        }
+        if (!path.endsWith("/us-market/ohlc/AAPL")) return null;
+        const chart = usOhlcResponse("AAPL");
+        return { body: { ...chart, intraday_overlay: finalized ? null : {
+          contract_version: "omi.us.provisional_daily.v1", trade_date: "2026-10-08", finalization: "provisional",
+          point: { time: "2026-10-08", open: 200, high: 202, low: 199, close: 201, volume: 1000 },
+          authority: "derived", release_status: "pending_release", freshness: "stale",
+          coverage: { point_count: 236, expected_point_count: 390, missing_slot_count: 154, coverage_status: "partial" },
+        } } };
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("us-provisional-daily")).toContainText("尚未定稿");
+    await expect(page.getByTestId("us-provisional-daily")).toContainText("partial · stale");
+    finalized = true;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(page.getByTestId("us-provisional-daily")).toHaveCount(0);
+    await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible();
+  });
+
   test("US default Daily entry uses finalized headline without loading Today", async ({ page }) => {
     const requests: string[] = [];
     await mockOmiApi(page, {
@@ -4766,6 +5292,8 @@ test.describe("OMI dashboard smoke", () => {
   });
 
   test("US Daily rejects an older in-flight chart after a newer revision", async ({ page }) => {
+    const cancelled: string[] = [];
+    page.on("requestfailed", (request) => cancelled.push(request.url()));
     let revision = 0;
     let held = false;
     let releaseOld = () => {};
@@ -4799,9 +5327,8 @@ test.describe("OMI dashboard smoke", () => {
     revision = 2;
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     await expect(detail).toContainText("516.18");
-    const oldFinished = page.waitForResponse((response) => response.url().includes("/ohlc/MSFT"));
     releaseOld();
-    await oldFinished;
+    await expect.poll(() => cancelled.some((url) => url.includes("/ohlc/MSFT"))).toBe(true);
     await expect(detail).toContainText("516.18");
     await expect(detail).not.toContainText("500.59");
   });

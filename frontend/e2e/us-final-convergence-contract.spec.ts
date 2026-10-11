@@ -1,9 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 
 import {
   projectUSCurrentSessionHeadline,
   projectUSIntradayIndicatorPoint,
   usDailySnapshotRevision,
+  projectUSVisibleDailyChartPoints,
 } from "../src/components/stock-detail/usStockDetailCanonicalProjection";
 import { usTruthResponse } from "./fixtures/usMarketTruth";
 import { projectUSMarketTapeSnapshot } from "../src/components/market-dashboard/tape/usMarketTapeCanonicalProjection";
@@ -11,7 +15,87 @@ import type {
   IntradayTrendPoint,
   IntradayTrendResponse,
   USMarketIndexItemRead,
+  USOhlcChartRead,
 } from "../src/types/market";
+
+test("provisional Daily is display-only and the actual Tape reader ignores it", async () => {
+  const chart = {
+    timeframe: "daily", point_count: 2,
+    points: [{ time: "2026-10-06", close: 100 }, { time: "2026-10-07", close: 120 }],
+    intraday_overlay: { point: { time: "2026-10-08", close: 10000 }, finalization: "provisional" },
+  } as USOhlcChartRead;
+  const visible = projectUSVisibleDailyChartPoints(chart);
+  expect(visible.map((point) => point.close)).toEqual([100, 120, 10000]);
+  expect(chart.points.map((point) => point.close)).toEqual([100, 120]);
+  expect(chart.point_count).toBe(2);
+  const source = readFileSync("src/components/market-dashboard/tape/useRegionalMarketTapeState.ts", "utf8");
+  const reader = source.slice(source.indexOf("async function fetchUsMarketTapeReferenceSnapshot"), source.indexOf("async function fetchJpMarketTapeSnapshot"));
+  const average = source.slice(source.indexOf("function averageLastNumbers"), source.indexOf("function sumJpIntradayVolume"));
+  const script = ts.transpileModule(`${average}\n${reader}\nfetchUsMarketTapeReferenceSnapshot({symbol: "^GSPC"});`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+  const result = await runInNewContext(script, { fetchJson: async () => chart });
+  expect(result).toMatchObject({ close: 120, previousClose: 100, change: 20, ma20: 110, pointCount: 2, asOf: "2026-10-07" });
+  chart.intraday_overlay = null;
+  expect(projectUSVisibleDailyChartPoints(chart)).toBe(chart.points);
+});
+
+test("supplemental partial failure preserves successful fields and a later retry can succeed", async () => {
+  const source = readFileSync("src/components/USStockDetailPanel.tsx", "utf8");
+  const loader = source.slice(source.indexOf("async function fetchUsSupplementalData("), source.indexOf("const usIntradaySession:"));
+  let fail = true;
+  const requests: string[] = [];
+  const fetch = async (path: string) => {
+    requests.push(path);
+    if (path.endsWith("/financials") && fail) throw new Error("fixture 503");
+    return path.endsWith("/facts") ? [{ metric: "revenue" }] : { fixture: path };
+  };
+  const script = ts.transpileModule(`${loader}\nfetchUsSupplementalData("AAPL", "financials");`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+  const partial = await runInNewContext(script, { fetchJson: fetch, fetchOptionalJson: fetch });
+  expect(partial.factData).toEqual([{ metric: "revenue" }]);
+  expect(partial.fundamentalData).toBeTruthy();
+  expect(partial.financialData).toBeUndefined();
+  expect(partial.requestErrors).toHaveLength(1);
+  fail = false;
+  const retried = await runInNewContext(script, { fetchJson: fetch, fetchOptionalJson: fetch });
+  expect(retried.financialData).toBeTruthy();
+  expect(retried.requestErrors).toHaveLength(0);
+  expect(requests.filter((path) => path.endsWith("/financials"))).toHaveLength(2);
+});
+
+test("diagnostic metadata updates keep callback identity stable and use the latest label", () => {
+  const source = readFileSync("src/components/USStockDetailPanel.tsx", "utf8").replace(/\r\n/g, "\n");
+  const owner = source.slice(source.indexOf("  const dataStatusContextRef ="), source.indexOf("  const publishIntradaySourceStatus ="));
+  const script = ts.transpileModule(`
+    function render(selectedSymbol, dataStatusSource, dataStatusContextKey, dataStatusContextLabel) {
+      ${owner}
+      return publishDetailDataStatus;
+    }
+    render;
+  `, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+  // Minimal hook host: test the actual callback/dependency contract, not DOM behavior.
+  let ref: { current: unknown } | undefined;
+  let callback: ((...args: unknown[]) => void) | undefined;
+  const events: Array<{ contextLabel: string }> = [];
+  const render = runInNewContext(script, {
+    useRef: (value: unknown) => (ref ??= { current: value }),
+    useEffect: (effect: () => void) => effect(),
+    useCallback: (fn: (...args: unknown[]) => void, dependencies: unknown[]) => {
+      expect(dependencies).toHaveLength(0);
+      return callback ??= fn;
+    },
+    emitDataStatusEvent: (event: { contextLabel: string }) => events.push(event),
+  });
+  const before = render("AAPL", "detail", "us:AAPL", "AAPL");
+  const after = render("AAPL", "detail", "us:AAPL", "AAPL Apple Inc.");
+  expect(after).toBe(before);
+  after("request failed", "fixture error");
+  expect(events[0].contextLabel).toBe("AAPL Apple Inc.");
+  const selectionStart = source.indexOf("    const generation = requestSeq.current + 1;");
+  const selectionEnd = source.indexOf("  useEffect(() => {\n    if (!selectedSymbol || timeframe !== \"today\") return;", selectionStart);
+  expect(selectionStart).toBeGreaterThan(0);
+  expect(selectionEnd).toBeGreaterThan(selectionStart);
+  const selection = source.slice(selectionStart, selectionEnd);
+  expect(selection).not.toContain("dataStatusContextLabel");
+});
 
 test("US headline presents backend selected close and linked metrics without rebuilding price truth", () => {
   const truth = usTruthResponse("MSFT");

@@ -215,3 +215,24 @@ canonical envelope。
 只有設定 `OMI_MCP_EXPOSE_INTERNAL_TOOLS=true` 才公開 direct internal tools。
 這是 trusted local debug 能力，不是一般 consumer contract。Internal memory
 tools只處理 AI research memory；不得修改 market、watchlist 或 source data。
+# Taiwan progressive workspace
+
+The repo adapter exposes the cache-only workspace tools generated in
+`tw_market_dashboard_contract_snapshot.json` under `workspace_tools`. Each entry
+contains the exact GET path, path parameters, input bounds, output schema and
+read-only annotations. Regenerate from the repository root with:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/generate-tw-dashboard-mcp-contract-snapshot.py
+```
+
+Standalone adapters can mechanically map these entries; they must preserve the
+backend response, warnings and HTTP business errors. Backend validation remains
+authoritative. Do not reconstruct freshness or fetch missing market data.
+
+Load header and selected watchlist independently, request the selected stock's
+chart immediately, and load research/hot groups on their own cadence. Discard
+late responses for an obsolete selection. These reads are independently timed,
+not an atomic workspace snapshot. Hot-group ranking still scans the canonical
+universe; the chart read does not wait for a technical report. The old dashboard
+v1 and stock detail v2 HTTP contracts remain compatible.

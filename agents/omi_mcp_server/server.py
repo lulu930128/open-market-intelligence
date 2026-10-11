@@ -1429,6 +1429,19 @@ def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, An
     return tool
 
 
+def _load_workspace_tools() -> list[dict[str, Any]]:
+    path = Path(__file__).with_name("tw_market_dashboard_contract_snapshot.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload.get("workspace_tools", [])
+
+
+WORKSPACE_ROUTES = {tool["name"]: tool for tool in _load_workspace_tools()}
+WORKSPACE_TOOLS = [
+    {key: value for key, value in tool.items() if key not in {"path", "method", "path_parameters"}}
+    for tool in WORKSPACE_ROUTES.values()
+]
+
+
 PUBLIC_TOOLS = [
     _augment_market_payload_control_schema(tool)
     for tool in [
@@ -1438,6 +1451,7 @@ PUBLIC_TOOLS = [
         READ_TAIWAN_BARS_TOOL,
         READ_TAIWAN_TECHNICAL_TOOL,
         READ_TAIWAN_CHART_TOOL,
+        *WORKSPACE_TOOLS,
     ]
 ]
 INTERNAL_TOOLS = [_augment_market_payload_control_schema(tool) for tool in INTERNAL_TOOLS]
@@ -1637,6 +1651,7 @@ def _backend_public_tools() -> list[dict[str, Any]]:
         READ_TAIWAN_BARS_TOOL,
         READ_TAIWAN_TECHNICAL_TOOL,
         READ_TAIWAN_CHART_TOOL,
+        *WORKSPACE_TOOLS,
     ]
     return (
         [*public_tools, *INTERNAL_TOOLS]
@@ -2191,6 +2206,18 @@ def _summarize_ask_response(response: Any) -> Any:
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if name in WORKSPACE_ROUTES:
+        route = WORKSPACE_ROUTES[name]
+        properties = route["inputSchema"]["properties"]
+        if set(arguments) - set(properties):
+            raise ValueError("Unknown workspace argument.")
+        path = route["path"]
+        for parameter in route["path_parameters"]:
+            path = path.replace("{" + parameter + "}", quote(str(_require(arguments, parameter)), safe=""))
+        # HTTP is the validation authority for bounds/types and business errors.
+        return _api_get(path, {key: value for key, value in arguments.items()
+                              if key not in route["path_parameters"]})
+
     if name == "omi.ask":
         response = _api_post("/api/ai/ask", payload=_ask_payload(arguments))
         if not isinstance(response, dict) or response.get("contract_version") != "omi.decision.v4":
