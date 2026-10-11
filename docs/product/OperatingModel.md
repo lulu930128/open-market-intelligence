@@ -145,6 +145,15 @@ Frontend 要求即時資料時，對 backend 表達 `require_live` / viewer inte
 
 ## 7. MCP / External Adapter
 
+Taiwan workspace 提供漸進式資料載入：header、selected watchlist、hot groups、stock
+chart 與 research 可分別讀取。Chart 的 first paint 不等待 technical report；UI 對各面板
+保留獨立 loading、missing、warning 與 retry，選股變更時丟棄舊 selection 的晚到結果。
+Backend response 擁有 session、freshness、price semantics 與 source lineage；consumer
+不自行補算市場狀態。不同 request 的 evidence time 可以不同，不宣稱跨面板 atomic snapshot。
+既有全包 dashboard／detail 仍支援既有 Web consumer；新的 MCP Apps／交易前端應使用
+generated workspace mappings。交易 execution 仍是獨立 plane，這些 GET 不授權 refresh 或下單。
+目前交付屬 source capability，實際 consumer/runtime adoption 與延遲驗收另行進行。
+
 `agents/` 保持 thin。
 
 MCP / external adapter：

@@ -24,6 +24,18 @@
 
 ## State matrix
 
+2026-10-07 Taiwan progressive workspace checkpoint：Source `accepted`；Runtime
+`not_reverified`；Live `not_applicable`（本次 cache-only source slice）；Product `pending`。
+Header／selected watchlist／hot groups／stock chart／stock research 的 typed routes 與 generated
+MCP relay 已有 source evidence。Safe backend profile 的 targeted regression 147 passed、
+architecture tests 35 passed、checker 與 compileall 通過；最後 batch-bound／多來源補測的
+workspace suite 25 passed。隔離 SQLite 的 1／20／100 檔 watchlist 均為 16 次 SQL，
+query_only 與外部 IO negative checks 通過；不是 production latency 數據。Header 不讀
+StockMaster universe，published breadth summary 缺失保持 unavailable；hot groups 仍有
+universe scan。詳見 [完成紀錄](../exec-plans/completed/tw-progressive-workspace/Progress.md)。
+本次未 restart、refresh provider、改 production DB、commit 或 push；standalone MCP Apps／
+Web runtime adoption 與 first-paint 實測仍需另外驗收。
+
 2026-09-14 台股 close-truth source checkpoint：Source `accepted`；Runtime `not_reverified`；Live `pending`；Product `partial`。Quote candidate qualification／原 receipt confirmation、index-specific close evaluation、bar phase、volume／breadth qualification、canonical auction history 與注入式 Daily coverage 已有 source regression。主驗證 486 tests／20 subtests、32 architecture tests、compileall 通過，另有 historical companion／authority 補測與 frontend typecheck。依唯讀現存 DB 回查可讀 2330／3711／3042 正確價格與 2330 試撮，EOD 保留 1931／1973；不可等同 runtime 採用或兩個正式 sessions 已驗收。Temporal 邊界見 [MarketTemporalContract](MarketTemporalContract.md)。
 
 | Surface | Source | Runtime | Live | Product | Last verified at | Evidence | Limitations |

@@ -1,5 +1,41 @@
 # OMI Backend Architecture
 
+## Taiwan 漸進式 workspace reads
+
+`market/tw_workspace.py` 與 `market/tw_market_dashboard.py` 提供 backend-owned、cache-only
+的 header、selected watchlist、hot groups、stock chart、stock research。Router 與 typed
+schema 是 executable outward truth；`generate-tw-dashboard-mcp-contract-snapshot.py`
+從 FastAPI parameters／Pydantic response models 生成 MCP input/output schema、GET mapping
+與 read-only annotations，repo adapter 只 relay。它們是資料呈現 contract，不取代
+`omi.decision.v4`。既有 dashboard v1、detail v2 與 Web routes 保留。
+
+Header 的 intraday-state freshness 用 SQL window＋aggregate 取得每檔最新 state 的
+min/max 與 completed-session evidence，再沿用原 freshness policy。它不載入 StockMaster
+或 state ORM universe；resolved index／breadth 仍由原 index summary、Gateway 與
+index resolver 擁有。新 header 明示 `allow_universe_fallback=false`，completed breadth
+只接受 persisted published summary；summary 缺失時保留 unavailable／limitation，不由
+GET 重建 daily universe。此選項是 canonical breadth repository 的讀取預算，既有 routes
+保留原 fallback。Freshness aggregate 描述 intraday state，不代表每個 index／breadth 已 current。
+
+Selected watchlist 限 1–100 檔，selection 以 bounded WatchlistItem／StockMaster join
+保留 priority、dedupe、truncation、active root 與 descendant semantics。Canonical master
+identity 共用 pure projector；quote repository 以 per-source latest／last-actual role window
+批次取資料與 receipt lineage，daily repository 以既有 SQL release gate 找各檔 latest
+eligible date，再 bounded preload。所有 candidate 仍交給原 CandidateReader／Gateway，
+outward selection 共用 `project_taiwan_watchlist_instrument_state`。Session-close 沿用
+既有 batch reader；selected breadth companion 只投影指定 symbols。無 persistent read
+cache、provider acquisition 或 transaction；missing／unsupported／inactive identity 在列表
+保留 missing item，不推定停牌、未成交或零價格。
+
+Chart 只組 canonical OHLC、cached intraday 與 MA；不建立 technical report。Research
+獨立呼叫 canonical technical report。舊 detail 由相同 chart helper 組合原 report，保留
+today report 完整 session 的 intraday override。Consumer 可先顯示 header／watchlist／chart，
+research 與 hot groups 各自完成後更新；不可把不同 request 當同一 atomic snapshot。
+
+性能限制：SQL window／aggregate 仍需處理符合條件的 persisted rows，fixed-index summary
+仍解析 canonical bars；hot groups 仍執行原 universe ranking，research 仍有原技術運算成本。
+分拆不構成 runtime latency SLO。正式 runtime／MCP Apps adoption 需另行驗收。
+
 ## 台股 current-session snapshot revision
 
 Canonical intraday persistence 重用 `TaiwanTechnicalInputRevision` 的獨立
@@ -171,6 +207,75 @@ Market Data Resolver / FX
 - background leader lock、scheduler、collector ownership 由 runtime/job boundary 管理。
 - follower process 不應重複執行 background collector。
 - shutdown 只停止本 process 實際持有的 runtime resource。
+
+US intraday cache-only publisher 的 Thread／Session 由既有
+`jobs/us_intraday_materializer_scheduler.py` 持有；symbol 去重及最多四個 retained
+owners 共用同一 admission lock。Runtime stop 在第一個 await 前與 job admission
+一同關閉 publisher admission；延後進入的已註冊 thread 不再建立 Session。
+SessionLocal 的 lazy Session 建構與 Thread.start 在短鎖內，query／rollback／close
+在鎖外；此建構邊界不得加入 connection、SQL 或 provider IO。
+Runtime 與 scheduler startup 都拒絕 terminal fence 後的同 process rearm。
+
+`RuntimeDrainResult.publisher` 回傳 bounded deadline 的實際 thread exit／join 與
+Session close receipt。只有 close 成功且已退出的 thread 才可回收；close 失敗、
+未完成或未知 identity/start outcome 保留 Thread／Session reference，禁止強殺或
+重設 ownership。歷史讀取／rollback failure 只記 task outcome telemetry；若 close
+成功、thread 已退出，不阻擋 quiescence。沒有啟動證據的 start failure 保留可觀測
+orphan 阻塞；稍後觀察到退出不能升格已到期的 Runtime receipt。
+`REGISTERED_DRAINED` 必須包含 publisher drained；它不證明所有 DB writer／OS
+handle 已退出，`all_writers_drained` 仍為 false，正式 runtime adoption 另行驗收。
+
+### 明示 Session scope 的私有 drain seam
+
+`db/session.py` 在既有 Session owner 中提供 `owned_session` 與
+`get_draining_db`；預設 `get_db`、`SessionLocal` 與 application lifespan 不啟用。
+Disposable API 以 dependency override 接入；同一 fixture 的
+`RuntimeCoordinator(drain_owned_sessions=True)` 在第一個 await 前 fence admission，
+並與 jobs／publisher 使用同一 monotonic deadline。Startup 只有 interrupted-job 與
+dispatch reconciliation 的兩個明確 Session boundary 接入此 opt-in；migration、
+bootstrap、其他 direct factory／maintenance、SDK 與外部 process 不因此被涵蓋。
+
+Reservation 在 lazy Session 建構前取得，涵蓋 owner 中的所有 transaction，直到 close
+成功才釋放。它是 active transaction 的保守 lifetime 上界，不是全 process transaction
+inventory；原 caller 保有 commit／rollback，query helper 與 GET 不增加 persistence。
+Constructor、SQL 與 close 不在 admission lock 內執行；stop 前 admitted 的 owner 可以完成
+交易，stop 後新 owner 被拒絕。Close 失敗保留實際 Session reference，不自動重試或 rearm。
+
+取消 request／提前關閉 dependency generator 不證明 sync worker 已退出；此時保留 unknown
+ownership，避免在仍運作的 worker 上強行 close。即使 fixture 後來證明 worker 已退出，也不
+升格既有 timeout／unknown receipt。正常成功與 business exception 維持原 close 語意。
+Borrowed Session／Connection 脫離 owner scope、Session.close 後再使用、detached background
+work 均未建立 ownership proof；不新增 SQLAlchemy 全域攔截來偽造覆蓋。
+
+`RuntimeDrainResult.sessions` 僅為 opt-in scope receipt；預設為 null，表示未啟用。
+`REGISTERED_DRAINED` 在 opt-in 時必須包含 session scope drained，但
+`all_writers_drained` 始終 false，API/direct／其他 process／external runtime unknown 保留。
+此 seam 的下一個 adoption gate 是 disposable uvicorn request cancellation 與 runner ACK；
+正式啟用仍需完整 caller／escape coverage、B1/B3 證據與維護授權。
+
+### Runner graceful transport 的私有演練邊界
+
+`scripts/run-service-logged.ps1` 保持 service process 的唯一 runner owner。
+`-GracefulStopFixture` 預設關閉，只接受 `r1e-fixture`、零 launcher PID、
+repo `.tmp` 下全新且無 reparse ancestor 的 protected DACL 目錄，以及固定的
+stdlib disposable child。Launcher 與 `RuntimeCoordinator` 未接此開關；
+`omi-graceful-stop-fixture.ps1` 只是 runner 內部 helper，不是另一個 service manager。
+
+演練先 latch terminal stop intent 並落下 receipt，再透過 private file IPC 發送
+cooperative stop request。Runner instance、runner/child exact PID 與 Windows creation
+FILETIME、request nonce、UTC deadline 必須一致。成功只表示 fixture worker 真正
+join、ACK 有效且持有的 child process handle 證明正常 exit；UTC 與 monotonic
+deadline 任一到期、missing/mismatched ACK、crash、forced 或 incomplete 都不得成功，
+也不得 force fallback／respawn。既有 IPC 目錄拒絕 recovery/rearm。IPC 信任目前
+Windows SID，不防禦同 SID 或管理員入侵；child lease 到期不能當成 graceful ACK。
+
+這個 private seam 只驗證 Windows transport 可行性。移除／替換 gate 是：沿同一
+runner/launcher owner 證明 production descendant identity、uvicorn lifespan handoff、
+全 writer drain、外部 owner、restart fencing 與 previous loaded release recovery，
+並另行取得 runtime adoption 授權。未達 gate 前不得將 fixture receipt 投影成
+全 writer quiescence、正式 stop capability、backup permission 或 R1 PASS。
+邊界由 `backend/tests/architecture/test_r1e_fixture_boundary.py` 保護；沒有新增
+canonical owner、market outward contract 或 accepted architecture debt。
 
 ## 4. Router
 

@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+## [4.9.0] - 2026-10-11
+
+### Changed
+
+- 台股：整合 canonical quote／daily／breadth 證據、資料品質與漸進式 workspace reads，加入盤中 discovery／radar、唯讀 MCP contract 及相關隔離回歸。
+- 美股與共用資料層：收斂 EOD obligation、quote diagnostics、completed-session projection、盤中 materializer 排程與快取，同步 AI capability、canonical contract 及 migration 0092 source。
+- 獨立 execution：加入 SYNTHETIC ONLY domain、temporary sandbox 持久化與結算、test-only ASGI gateway、LOCAL MOCK 手動流程及 broker preflight mapping；保留人工確認與 fail-closed 邊界。
+- 前端：對齊美股 detail／canonical projection、排行選股、outward types 與三語文案，補上 mock request／UI contract 測試。
+- Lifecycle source：補齊 launcher／runner、graceful drain 與 disposable backup／identity／stop fixtures；同步架構文件與 4.9.0 版本 metadata。
+
+### Notes
+
+- 本版僅為 Source／Tests／Docs baseline，未部署或宣告 Runtime／Live release；US RC2 仍限 Source Gate。
+- 正式 R1／G2 B1–B4 維持 BLOCKED，G3／G4 的 Runtime／Live／Product acceptance 未因此完成。未執行正式 DB migration、服務重啟、provider refresh、broker authentication 或下單。
+- Execution 的 broker／live adoption 與 M2A.2 Scale Gate 仍 BLOCKED；synthetic／mock 測試不構成正式帳戶或券商驗收。
+
+## [4.8.0] - 2026-10-06
+
+### Changed
+
+- 台股盤中 snapshot cache 以 canonical storage revision 驗證與失效，同 revision 的 1m bars 可跨分鐘重用，並持續重算 coverage、保留缺值與修復限制。
+- Discord 市場報告加入專用 runtime 事件記錄，改善派報流程的可觀測性；runtime log 檔案仍由 launcher 管理。
+- 台股報告加入 Technology Pulse、族群 participation 與日期明確的相對族群證據，增強市場、個股與科技圖表，保留既有選股順序及資料限制。
+- 對齊 VERSION、Frontend package／lockfile 與三語 README 的版本標示為 4.8.0。
+
+### Notes
+
+- 本次版本 metadata／文件同步與 runtime 採用、live provider、Discord 實際發送及正式交易時段驗收分開記錄。
+
 ## [4.7.0] - 2026-10-04
 
 ### Changed

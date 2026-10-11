@@ -8,12 +8,14 @@
 - [Operating Model](../product/OperatingModel.md)：各 plane 的責任與互動方式。
 - [Quality Bar](../product/QualityBar.md)：資料、架構、AI、UX 與驗證品質門檻。
 - [Backend Architecture](BackendArchitecture.md)：dependency direction、ownership、transaction、health 與 migration 原則。
+- [Execution Simulator Qualification](ExecutionSimulatorQualification.md)：獨立 SDK 檢查、LOCAL MOCK command boundary 與真實模擬環境封鎖條件。
 - [OMI Decision Contract](OmiDecisionContract.md)：唯一 outward AI decision contract。
 - [Atlas Company News](AtlasCompanyNews.md)：OLA 個股新聞 Document 的唯讀 API 與 omi.ask 整合。
 - [Financial Date Semantics](FinancialDateSemantics.md)：財務期間與日期語意。
 - [Market Temporal Contract](MarketTemporalContract.md)：Market Session、item finalization、authority、release、reconciliation 與 freshness 的正交 axes。
 - [Taiwan Technical Research](TaiwanTechnicalResearch.md)：技術參數、Price Map 結構、背景 snapshot 與唯讀 Scanner 的責任與驗收。
 - [Radar v2](RadarV2.md)：Radar contract、evaluation 與 legacy audit boundary。
+- [Intraday Radar v1](IntradayRadarV1.md)：全市場輕量 discovery、coverage 與 deterministic candidate source seam；runtime／live 尚未驗收。
 
 ## Planned Direction
 

@@ -62,6 +62,15 @@ Reconciliation 比較兩份已具 identity 的 evidence，例如 session close �
 
 Freshness 回答 evidence 相對需求與時間是否仍可用。`current`／`fresh`／`live` 不代表 official final；official evidence 也可能 stale。Freshness 必須考慮 requested policy、instrument eligibility、event time、received／fetched time與 market session。
 
+台股 order book／auction 使用既有 `FreshnessBasis.RECEIVED_TIME`，並獨立驗證
+event 的交易日與 session。近期 receipt、同 session 舊 event 可保留為 `fresh`
+snapshot facts，但不宣稱 `live`；缺少獨立 feed activity 證據時，無法區分穩定
+掛單與 frozen／replayed feed，保留 `TW_QUOTE_EVENT_RECENCY_UNVERIFIED` 並限制
+research／decision usability。新 fetched_at 不會更新舊 received_at 的 currency。
+Quote 的實際成交仍以原 event recency 判斷；indicative snapshot 可使用 receipt
+currency，但始終不是 actual trade。各 component 保留自己的 lineage、時間基準
+與 resolved health，parent quote 的 stale 不傳染 depth／auction。
+
 Completed-session evidence 使用 market-specific expected trade date 驗證，不用
 固定 wall-clock 秒數決定跨週末／休市日後是否仍有效。台股 session close 的
 candidate 必須對齊 `taiwan_presentation_session()` 所給 expected trade date；新一個
