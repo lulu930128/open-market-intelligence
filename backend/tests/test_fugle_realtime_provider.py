@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from r1d_test_support import offline_asyncio  # noqa: F401
+
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import asyncio

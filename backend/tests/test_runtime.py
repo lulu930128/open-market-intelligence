@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from r1d_test_support import isolated_job_lifecycle, offline_asyncio  # noqa: F401
+
 from types import SimpleNamespace
+from concurrent.futures import Future
+from threading import Event
+from app.jobs.scheduler import SchedulerDrain
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -12,6 +17,14 @@ def runtime_lock(*, acquired: bool = True) -> Mock:
     lock = Mock()
     lock.acquire.return_value = acquired
     return lock
+
+
+def scheduler_receipt():
+    done = Future()
+    done.set_result(None)
+    paused = Event()
+    paused.set()
+    return SchedulerDrain(done, paused)
 
 
 class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -84,7 +97,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ) as enqueue_stock_master_bootstrap,
             patch("app.runtime.stop_crypto_realtime_collectors", new=AsyncMock()) as stop_collectors,
             patch("app.runtime.stop_crypto_auto_refresh", new=AsyncMock()) as stop_auto_refresh,
-            patch("app.runtime.job_scheduler.stop_scheduler") as stop_scheduler,
+            patch("app.runtime.job_scheduler.stop_scheduler", return_value=scheduler_receipt()) as stop_scheduler,
             patch("app.runtime.job_service.shutdown_job_executor") as shutdown_executor,
         ):
             coordinator = RuntimeCoordinator(
@@ -109,7 +122,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(coordinator.background_leader)
         self.assertFalse(coordinator.started)
 
-    async def test_stop_runs_every_leader_shutdown_step_and_releases_lock(self) -> None:
+    async def test_stop_runs_every_leader_shutdown_step_and_retains_lock_until_exit(self) -> None:
         background_lock = runtime_lock()
         coordinator = RuntimeCoordinator(
             schema_lock=runtime_lock(),
@@ -122,18 +135,18 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("app.runtime.stop_crypto_realtime_collectors", new=AsyncMock()) as stop_collectors,
             patch("app.runtime.stop_crypto_auto_refresh", new=AsyncMock()) as stop_auto_refresh,
-            patch("app.runtime.job_scheduler.stop_scheduler") as stop_scheduler,
+            patch("app.runtime.job_scheduler.stop_scheduler", return_value=scheduler_receipt()) as stop_scheduler,
             patch("app.runtime.job_service.shutdown_job_executor") as shutdown_executor,
         ):
             await coordinator.stop()
 
-        stop_collectors.assert_awaited_once_with()
-        stop_auto_refresh.assert_awaited_once_with()
+        stop_collectors.assert_awaited_once_with(drain=True)
+        stop_auto_refresh.assert_awaited_once_with(drain=True)
         stop_scheduler.assert_called_once_with("scheduler")
-        background_lock.release.assert_called_once_with()
+        background_lock.release.assert_not_called()
         shutdown_executor.assert_called_once_with(wait=False)
-        self.assertIsNone(coordinator.scheduler)
-        self.assertFalse(coordinator.background_leader)
+        self.assertEqual(coordinator.scheduler, "scheduler")
+        self.assertTrue(coordinator.background_leader)
         self.assertFalse(coordinator.started)
 
     async def test_start_cleans_up_started_components_after_late_failure(self) -> None:
@@ -154,7 +167,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("app.runtime.stop_crypto_realtime_collectors", new=AsyncMock()) as stop_collectors,
             patch("app.runtime.stop_crypto_auto_refresh", new=AsyncMock()) as stop_auto_refresh,
-            patch("app.runtime.job_scheduler.stop_scheduler") as stop_scheduler,
+            patch("app.runtime.job_scheduler.stop_scheduler", return_value=scheduler_receipt()) as stop_scheduler,
             patch("app.runtime.job_service.shutdown_job_executor") as shutdown_executor,
         ):
             coordinator = RuntimeCoordinator(
@@ -164,13 +177,13 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await coordinator.start()
 
-        stop_collectors.assert_awaited_once_with()
-        stop_auto_refresh.assert_awaited_once_with()
+        stop_collectors.assert_awaited_once_with(drain=True)
+        stop_auto_refresh.assert_awaited_once_with(drain=True)
         stop_scheduler.assert_called_once_with("scheduler")
-        background_lock.release.assert_called_once_with()
+        background_lock.release.assert_not_called()
         shutdown_executor.assert_called_once_with(wait=False)
-        self.assertIsNone(coordinator.scheduler)
-        self.assertFalse(coordinator.background_leader)
+        self.assertEqual(coordinator.scheduler, "scheduler")
+        self.assertTrue(coordinator.background_leader)
         self.assertFalse(coordinator.started)
 
     async def test_stop_attempts_remaining_steps_after_shutdown_error(self) -> None:
@@ -189,19 +202,19 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(side_effect=RuntimeError("collector failed")),
             ) as stop_collectors,
             patch("app.runtime.stop_crypto_auto_refresh", new=AsyncMock()) as stop_auto_refresh,
-            patch("app.runtime.job_scheduler.stop_scheduler") as stop_scheduler,
+            patch("app.runtime.job_scheduler.stop_scheduler", return_value=scheduler_receipt()) as stop_scheduler,
             patch("app.runtime.job_service.shutdown_job_executor") as shutdown_executor,
         ):
             with self.assertRaises(RuntimeError):
                 await coordinator.stop()
 
-        stop_collectors.assert_awaited_once_with()
-        stop_auto_refresh.assert_awaited_once_with()
+        stop_collectors.assert_awaited_once_with(drain=True)
+        stop_auto_refresh.assert_awaited_once_with(drain=True)
         stop_scheduler.assert_called_once_with("scheduler")
-        background_lock.release.assert_called_once_with()
+        background_lock.release.assert_not_called()
         shutdown_executor.assert_called_once_with(wait=False)
-        self.assertIsNone(coordinator.scheduler)
-        self.assertFalse(coordinator.background_leader)
+        self.assertEqual(coordinator.scheduler, "scheduler")
+        self.assertTrue(coordinator.background_leader)
         self.assertFalse(coordinator.started)
 
 

@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import PROJECT_ROOT, settings
-from app.db.session import get_db
+from app.db.session import database_binding_metadata, get_db
 from app.observability.provider_health import (
     list_provider_events,
     list_source_health_snapshots,
@@ -18,6 +18,7 @@ from app.us_market.intraday_materializer import (
     US_RECURRING_MATERIALIZER_PROFILE,
     us_intraday_materializer_runtime_summary,
 )
+from app.jobs.us_intraday_materializer_scheduler import us_eod_runtime_summary
 from app.us_market.ohlc_priority import PRIORITY_US_INDEX_SYMBOLS
 from app.jobs.us_index_data_repair_gate import (
     us_index_data_repair_runtime_summary,
@@ -50,6 +51,7 @@ def health_check():
         "app_name": settings.app_name,
         "environment": settings.app_env,
         "runtime": {
+            "database_binding": database_binding_metadata(),
             "project_root": str(PROJECT_ROOT),
             "backend_dir": str(PROJECT_ROOT / "backend"),
             "python_executable": sys.executable,
@@ -90,6 +92,7 @@ def health_check():
             "us_daily_acquisition_limitations": us_daily_rollout["limitations"],
             "us_daily_full_market_acquisition_enabled": us_daily_rollout["full_market_acquisition_enabled"],
             "us_daily_full_market_acquisition_reason": us_daily_rollout["full_market_acquisition_reason"],
+            "us_intraday_reconciliation": us_eod_runtime_summary(),
             "us_intraday_materializer": {
                 "enabled": settings.enable_us_intraday_materializer,
                 "configured_symbols": [

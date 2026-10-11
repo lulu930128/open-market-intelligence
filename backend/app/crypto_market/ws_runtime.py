@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -69,6 +70,8 @@ class CryptoRealtimeCollectorManager:
         self.stream_specs = stream_specs or build_crypto_realtime_stream_specs()
         self._tasks: list[asyncio.Task] = []
         self._running = False
+        self._draining = False
+        self._stop_task: asyncio.Task | None = None
         self._reload_lock = asyncio.Lock()
         self._reloading = False
         self._last_started_at: datetime | None = None
@@ -128,6 +131,12 @@ class CryptoRealtimeCollectorManager:
             return self.status()
 
     async def start(self) -> None:
+        if self._draining:
+            raise RuntimeError("Crypto collector drain is terminal")
+        if self._stop_task is not None:
+            if not self._stop_task.done() or self._stop_task.cancelled() or self._stop_task.exception() is not None:
+                raise RuntimeError("Crypto collector previous stop incomplete")
+            self._stop_task = None
         if self._running:
             return
         if not settings.enable_crypto_market_ws_collector:
@@ -158,16 +167,23 @@ class CryptoRealtimeCollectorManager:
         ]
         logger.info("Started %s crypto realtime collector task(s).", len(self._tasks))
 
-    async def stop(self) -> None:
-        if not self._tasks and not self._running:
-            return
+    async def stop(self, *, drain: bool = False, timeout_seconds: float = 30.0) -> None:
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("Stop timeout must be finite and non-negative")
+        self._draining = self._draining or drain
         self._running = False
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._finish_stop(drain=drain))
+            self._stop_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        await asyncio.wait_for(asyncio.shield(self._stop_task), timeout=timeout_seconds)
+
+    async def _finish_stop(self, *, drain: bool) -> None:
         for task in self._tasks:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
-        await crypto_realtime_persistence_manager.stop()
+        await crypto_realtime_persistence_manager.stop(drain=drain)
         self._last_stopped_at = _now()
         logger.info("Stopped crypto realtime collectors.")
 
@@ -234,8 +250,8 @@ async def start_crypto_realtime_collectors() -> CryptoRealtimeCollectorManager:
     return crypto_realtime_collector_manager
 
 
-async def stop_crypto_realtime_collectors() -> None:
-    await crypto_realtime_collector_manager.stop()
+async def stop_crypto_realtime_collectors(*, drain: bool = False) -> None:
+    await crypto_realtime_collector_manager.stop(drain=drain)
 
 
 def crypto_realtime_collector_status() -> dict[str, Any]:

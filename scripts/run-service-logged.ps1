@@ -8,10 +8,57 @@ param(
     [ValidateRange(0, 20)][int]$MaxRestartAttempts = 3,
     [string]$RestartBackoffSecondsCsv = "2,10,30",
     [ValidateRange(1, 86400)][int]$StableRunResetSeconds = 600,
-    [ValidateRange(1, 255)][int]$BindFailureExitCode = 78
+    [ValidateRange(1, 255)][int]$BindFailureExitCode = 78,
+    [switch]$GracefulStopFixture,
+    [switch]$UvicornLifespanFixture,
+    [ValidateSet('normal','double-signal','wrong-pid','wrong-start','wrong-instance','wrong-deadline','wrong-request','wrong-runner','missing-ack','timeout','child-crash','runner-crash','parent-disappearance','partial-drain','stuck-worker','cancel-worker','unknown-session','borrowed-escape','fake-ack','ack-without-exit','source-drift','ready-wrong-start','request-wrong-pid','request-wrong-start','request-wrong-token','request-expired','request-wrong-runner','orphan','ack-session-type','ack-publisher-type','ack-unknown-type','ack-pending-constructor','ack-close-failure','ack-uncertain-owner','ack-unknown-publisher','ack-incomplete-jobs','ack-global-drained','ack-null-owners','ack-unknown-scheduler','ack-active-collector')]
+    [string]$LifespanScenario = 'normal',
+    [ValidateSet('normal', 'wrong-pid', 'wrong-start', 'wrong-instance', 'wrong-deadline', 'missing-ack', 'timeout', 'child-crash', 'runner-crash', 'double-signal', 'incomplete-drain', 'invalid-drain-receipt', 'forced-receipt', 'ready-wrong-start', 'ack-without-exit')]
+    [string]$FixtureScenario = 'normal'
 )
 
 $ErrorActionPreference = "Stop"
+
+# The B4 seam is a bounded extension of the R1E owner, never production startup.
+if ($UvicornLifespanFixture) {
+    try {
+        if ($GracefulStopFixture -or $ServiceName -cne 'r1-b4-disposable' -or $LauncherPid -ne 0 -or
+            [IO.Path]::GetFullPath($WorkingDirectory) -cne [IO.Path]::GetFullPath($RepoRoot)) {
+            throw 'Disposable B4 fixture identity required'
+        }
+        $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgumentsJsonBase64))
+        if ($json -cne '[]') { throw 'Only empty JSON argv accepted; fixed fixture child required' }
+        $venvConfig = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../.venv/pyvenv.cfg')
+        $basePython = @($venvConfig | Where-Object { $_ -match '^executable = ' })
+        if ($basePython.Count -ne 1 -or [IO.Path]::GetFullPath($FilePath) -ine $basePython[0].Substring(13)) {
+            throw 'Verified base interpreter required; redirectors refused'
+        }
+        . (Join-Path $PSScriptRoot 'omi-graceful-stop-fixture.ps1')
+        $code = Invoke-OmiGracefulStopFixture -OutputRoot $RepoRoot -Python $FilePath -Scenario $LifespanScenario -Uvicorn
+        exit $code
+    }
+    catch {
+        Write-Error "B4 BLOCKED: $($_.Exception.Message)" -ErrorAction Continue
+        exit 79
+    }
+}
+
+# Explicit rehearsal only. Never fall through to the legacy force/restart loop,
+# and never accept a production command or an existing IPC directory here.
+if ($GracefulStopFixture) {
+    try {
+        if ($ServiceName -ne 'r1e-fixture' -or $LauncherPid -ne 0) {
+            throw 'Disposable fixture identity required'
+        }
+        . (Join-Path $PSScriptRoot 'omi-graceful-stop-fixture.ps1')
+        $code = Invoke-OmiGracefulStopFixture -OutputRoot $RepoRoot -Python $FilePath -Scenario $FixtureScenario
+        exit $code
+    }
+    catch {
+        Write-Error "R1E BLOCKED: $($_.Exception.Message)" -ErrorAction Continue
+        exit 79
+    }
+}
 
 $logRoot = Join-Path $RepoRoot "logs"
 

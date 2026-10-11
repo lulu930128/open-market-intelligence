@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, closing
+from dataclasses import dataclass
+import math
+import time
 import logging
 from typing import Any, AsyncIterator, Protocol
 
@@ -13,11 +17,13 @@ from app.crypto_market.ws_runtime import (
 )
 from app.db.migrations import run_database_migrations
 from app.db.session import SessionLocal
+from app.db import session as session_owner
 from app.market.providers.fugle_realtime_runtime import (
     start_fugle_realtime,
     stop_fugle_realtime,
 )
 from app.jobs import scheduler as job_scheduler, service as job_service
+from app.jobs import us_intraday_materializer_scheduler as intraday_publisher
 from app.config import settings
 from app.runtime_lock import ProcessFileLock
 from app.stocks.bootstrap import enqueue_stock_master_bootstrap_if_needed
@@ -37,12 +43,38 @@ class RuntimeLock(Protocol):
     def release(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class RuntimeDrainResult:
+    state: str
+    background_leader: bool
+    scheduler_admission_stopped: bool | None
+    scheduler_state: str
+    jobs: job_service.JobDrainResult
+    collectors: dict[str, str]
+    background_ownership_retained: bool
+    publisher: intraday_publisher.PublisherDrainResult
+    job_executor_state: str = "drained"
+    sessions: session_owner.SessionDrainResult | None = None
+    collector_data_completeness: str = "NOT_ATTESTED"
+    all_writers_drained: bool = False
+    unknown_writers: tuple[str, ...] = (
+        "API/direct transactions", "other processes/checkout/scripts", "external provider runtimes",
+    )
+
+
+class RuntimeDrainError(RuntimeError):
+    def __init__(self, result: RuntimeDrainResult) -> None:
+        super().__init__("Runtime registered-owner drain incomplete; ownership retained")
+        self.result = result
+
+
 class RuntimeCoordinator:
     def __init__(
         self,
         *,
         schema_lock: RuntimeLock | None = None,
         background_lock: RuntimeLock | None = None,
+        drain_owned_sessions: bool = False,
     ) -> None:
         lock_dir = settings.runtime_lock_dir
         self.schema_lock = schema_lock or ProcessFileLock(lock_dir / "schema.lock")
@@ -50,8 +82,21 @@ class RuntimeCoordinator:
         self.scheduler: Any | None = None
         self.started = False
         self.background_leader = False
+        self._stop_task: asyncio.Task | None = None
+        self._collector_stops: dict[str, asyncio.Task] = {}
+        self._scheduler_drain: job_scheduler.SchedulerDrain | None = None
+        self.drain_result: RuntimeDrainResult | None = None
+        # Private opt-in seam, paired with get_draining_db in disposable fixtures.
+        # Default lifespan does not enable it or replace the API dependency.
+        self._drain_owned_sessions = drain_owned_sessions
 
     async def start(self) -> None:
+        if self._stop_task is not None:
+            raise RuntimeError("Runtime drain is terminal; new process lifecycle required")
+        job_service.require_job_admission()
+        intraday_publisher.require_intraday_publisher_admission()
+        if self._drain_owned_sessions:
+            session_owner.require_session_scope_admission()
         if self.started:
             return
 
@@ -96,57 +141,118 @@ class RuntimeCoordinator:
                 logger.exception("Runtime cleanup after startup failure also failed.")
             raise
 
-    async def stop(self) -> None:
-        errors: list[BaseException] = []
+    async def stop(self, *, timeout_seconds: float = 30.0) -> RuntimeDrainResult:
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("Drain timeout must be finite and non-negative")
+        if self._stop_task is None:
+            # Close admission synchronously, before any await or collector stop.
+            job_service.begin_job_drain()
+            intraday_publisher.begin_intraday_publisher_drain()
+            if self._drain_owned_sessions:
+                session_owner.begin_session_scope_drain()
+            self._stop_task = asyncio.create_task(
+                self._drain(time.monotonic() + timeout_seconds), name="omi-runtime-drain",
+            )
+        # Caller cancellation must not cancel the actual owner shutdown.
+        result = await asyncio.shield(self._stop_task)
+        self.drain_result = result
+        if result.state != "REGISTERED_DRAINED":
+            raise RuntimeDrainError(result)
+        return result
 
+    async def _drain(self, deadline: float) -> RuntimeDrainResult:
+        scheduler_state = "not_owned"
+        scheduler_admission = None
         if self.background_leader:
+            try:
+                self._scheduler_drain = job_scheduler.stop_scheduler(self.scheduler)
+                while (
+                    not self._scheduler_drain.admission_stopped.is_set()
+                    and not self._scheduler_drain.completion.done()
+                    and time.monotonic() < deadline
+                ):
+                    await asyncio.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+            except Exception:
+                scheduler_state = "error"
+                logger.exception("Failed to initiate scheduler drain.")
             for name, stop_step in (
                 ("Fugle realtime", stop_fugle_realtime),
                 ("crypto realtime collectors", stop_crypto_realtime_collectors),
                 ("crypto auto refresh", stop_crypto_auto_refresh),
             ):
                 try:
-                    await stop_step()
+                    self._collector_stops[name] = asyncio.create_task(stop_step(drain=True))
                 except Exception as exc:
-                    errors.append(exc)
-                    logger.exception("Failed to stop %s.", name)
+                    async def failed_stop(error=exc):
+                        raise error
+                    self._collector_stops[name] = asyncio.create_task(failed_stop())
 
-            try:
-                job_scheduler.stop_scheduler(self.scheduler)
-            except Exception as exc:
-                errors.append(exc)
-                logger.exception("Failed to stop job scheduler.")
-            finally:
-                self.scheduler = None
-
-            try:
-                self.background_lock.release()
-            except Exception as exc:
-                errors.append(exc)
-                logger.exception("Failed to release background runtime ownership.")
-            finally:
-                self.background_leader = False
-        else:
-            self.scheduler = None
-
+        job_state = "drained"
         try:
-            job_service.shutdown_job_executor(wait=False)
-        except Exception as exc:
-            errors.append(exc)
-            logger.exception("Failed to shut down job executor.")
-
+            jobs = await job_service.drain_job_executor(deadline=deadline)
+            if not jobs.drained:
+                job_state = "incomplete"
+        except Exception:
+            job_state = "error"
+            jobs = job_service.job_drain_status()
+            logger.exception("Job executor drain failed.")
+        pending = {task for task in self._collector_stops.values() if not task.done()}
+        if pending:
+            await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
+        if self._scheduler_drain is not None:
+            while not self._scheduler_drain.completion.done() and time.monotonic() < deadline:
+                await asyncio.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+            scheduler_admission = self._scheduler_drain.admission_stopped.is_set()
+            if not self._scheduler_drain.completion.done():
+                scheduler_state = "timeout"
+            elif self._scheduler_drain.completion.exception() is not None:
+                scheduler_state = "error"
+            else:
+                scheduler_state = "drained"
+        collectors = {}
+        for name, task in self._collector_stops.items():
+            if not task.done():
+                collectors[name] = "timeout"
+                # Retrieve later exceptions without discarding the owner reference.
+                task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            elif task.cancelled() or task.exception() is not None:
+                collectors[name] = "error"
+            else:
+                collectors[name] = "drained"
+        try:
+            publisher = await intraday_publisher.drain_intraday_publishers(deadline=deadline)
+        except Exception:
+            logger.exception("US intraday publisher drain failed.")
+            publisher = intraday_publisher.PublisherDrainResult(
+                "unknown", True, (), (), (), 0, 0, 0,
+            )
+        sessions = None
+        if self._drain_owned_sessions:
+            try:
+                sessions = await session_owner.drain_session_scopes(deadline=deadline)
+            except Exception:
+                logger.exception("Explicit Session owner drain failed.")
+                sessions = session_owner.SessionDrainResult("unknown", True, (), 0, 0)
+        complete = (
+            job_state == "drained" and jobs.drained and scheduler_state in {"not_owned", "drained"}
+            and all(value == "drained" for value in collectors.values())
+            and publisher.drained
+            and (not self._drain_owned_sessions or sessions.drained)
+        )
         self.started = False
-
-        if errors:
-            raise RuntimeError("One or more runtime shutdown steps failed.") from errors[0]
+        # Even a registered-owner success is not process exit or API quiescence.
+        # Keep the OS-backed background lock until process exit. No same-process rearm.
+        result = RuntimeDrainResult(
+            "REGISTERED_DRAINED" if complete else "INCOMPLETE",
+            self.background_leader, scheduler_admission, scheduler_state, jobs,
+            collectors, self.background_leader, publisher, job_state, sessions,
+        )
+        self.drain_result = result
+        return result
 
     def _mark_interrupted_jobs(self) -> None:
-        db = SessionLocal()
-
-        try:
+        with self._startup_session() as db:
             interrupted_count = job_service.mark_interrupted_jobs(db)
-        finally:
-            db.close()
 
         if interrupted_count:
             logger.warning(
@@ -163,12 +269,9 @@ class RuntimeCoordinator:
 
         from app.dispatch import schedule_runs, service as dispatch_service
 
-        db = SessionLocal()
-        try:
+        with self._startup_session() as db:
             initialized_count = schedule_runs.initialize_next_runs(db)
             result = dispatch_service.reconcile_schedule_runs(db=db)
-        finally:
-            db.close()
 
         if initialized_count or any(
             result.get(key)
@@ -188,6 +291,11 @@ class RuntimeCoordinator:
                 result.get("unknown_count", 0),
                 result.get("error_count", 0),
             )
+
+    def _startup_session(self):
+        if self._drain_owned_sessions:
+            return session_owner.owned_session("runtime_startup", session_factory=SessionLocal)
+        return closing(SessionLocal())
 
     def _enqueue_stock_master_bootstrap(self) -> None:
         try:

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import logging
+import math
 from threading import Lock
 from typing import Any, Protocol
 
@@ -302,6 +303,9 @@ class FugleRealtimeRuntime:
         self._runner: asyncio.Task[None] | None = None
         self._materializer_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._draining = False
+        self._stop_task: asyncio.Task | None = None
+        self._final_flush_task: asyncio.Task | None = None
         self.connection_status = "stopped"
         self.entitlement_status = "unknown"
         self.last_message_at: datetime | None = None
@@ -311,8 +315,17 @@ class FugleRealtimeRuntime:
         self._pending_unsubscribe_ids: set[str] = set()
 
     async def start(self) -> None:
+        if self._stop_task is not None:
+            if not self._stop_task.done() or self._stop_task.cancelled() or self._stop_task.exception() is not None:
+                raise RuntimeError("Fugle previous stop incomplete")
+            self._stop_task = None
+        if self._draining:
+            raise RuntimeError("Fugle drain is terminal")
+        if self._stop_event.is_set() and self._materializer_task is not None:
+            raise RuntimeError("Fugle stop still pending")
         if self._runner is not None:
             return
+        self._final_flush_task = None
         self._stop_event.clear()
         self._runner = asyncio.create_task(self._run(), name="fugle-realtime")
         self._materializer_task = asyncio.create_task(
@@ -320,17 +333,30 @@ class FugleRealtimeRuntime:
             name="fugle-materializer",
         )
 
-    async def stop(self) -> None:
+    async def stop(self, *, drain: bool = False, timeout_seconds: float = 30.0) -> None:
+        # Normal reload is bounded too; timeout cannot detach an active DB owner.
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("Stop timeout must be finite and non-negative")
+        self._draining = self._draining or drain
         self._stop_event.set()
-        tasks = tuple(
-            task
-            for task in (self._runner, self._materializer_task)
-            if task is not None
-        )
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._finish_stop(drain=drain))
+            self._stop_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        await asyncio.wait_for(asyncio.shield(self._stop_task), timeout=timeout_seconds)
+
+    async def _finish_stop(self, *, drain: bool) -> None:
+        self._draining = self._draining or drain
+        self._stop_event.set()
+        if self._runner is not None:
+            self._runner.cancel()
+            await asyncio.gather(self._runner, return_exceptions=True)
+        # Never cancel a coroutine awaiting a persistence thread.
+        if self._materializer_task is not None:
+            await asyncio.shield(self._materializer_task)
+        if self._final_flush_task is None and self._materializer_task is not None:
+            self._final_flush_task = asyncio.create_task(asyncio.to_thread(self._materialize_once))
+        if self._final_flush_task is not None:
+            await asyncio.shield(self._final_flush_task)
         self._runner = None
         self._materializer_task = None
         self.connection_status = "stopped"
@@ -609,12 +635,17 @@ class FugleRealtimeRuntime:
         except Exception:
             db.rollback()
             logger.exception("Fugle canonical materialization failed.")
+            raise
         finally:
             db.close()
 
     async def _materialize_loop(self) -> None:
         while not self._stop_event.is_set():
-            await asyncio.to_thread(self._materialize_once)
+            try:
+                await asyncio.to_thread(self._materialize_once)
+            except Exception:
+                # Retry on the next normal cadence; final stop flush propagates failure.
+                logger.exception("Fugle materializer iteration failed.")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
@@ -665,12 +696,13 @@ async def start_fugle_realtime() -> FugleRealtimeRuntime | None:
     return _FUGLE_RUNTIME
 
 
-async def stop_fugle_realtime() -> None:
+async def stop_fugle_realtime(*, drain: bool = False) -> None:
     global _FUGLE_RUNTIME
     runtime = _FUGLE_RUNTIME
-    _FUGLE_RUNTIME = None
     if runtime is not None:
-        await runtime.stop()
+        await runtime.stop(drain=drain)
+        if not drain:
+            _FUGLE_RUNTIME = None
 
 
 def get_fugle_realtime_runtime() -> FugleRealtimeRuntime | None:

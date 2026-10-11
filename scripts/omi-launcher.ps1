@@ -1,9 +1,107 @@
 param(
-    [ValidateSet("Run", "Activate", "Exit", "RestartServices")]
-    [string]$LauncherAction = "Run"
+    [ValidateSet("Run", "Activate", "Exit", "RestartServices", "Diagnose")]
+    [string]$LauncherAction = "Run",
+    [ValidateRange(1, 65535)][int[]]$DiagnosticPorts = @(8400, 3000)
 )
 
 $ErrorActionPreference = "Stop"
+
+# This branch must precede GUI initialization, dotenv reads, event signaling,
+# log creation and all lifecycle actions. Failure never falls through to Run.
+function Get-OmiStopDiagnostic {
+    param([string]$Root, [int[]]$Ports)
+    $unknown = [System.Collections.Generic.List[string]]::new()
+    $rows = @()
+    $inventoryStatus = "UNKNOWN"
+    try {
+        $rows = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine -OperationTimeoutSec 5 -ErrorAction Stop)
+        $inventoryStatus = "OBSERVED_NOT_ATOMIC"
+    }
+    catch { $unknown.Add("process_inventory_unavailable") }
+    $matched = @()
+    $unclassified = 0
+    foreach ($row in $rows) {
+        # Inspect locally; never emit raw command lines, arguments or environment.
+        if (-not $row.CommandLine) { $unclassified += 1; continue }
+        if ($row.CommandLine.IndexOf($Root, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $role = "repo_process_candidate"
+            if ($row.CommandLine -match 'omi-launcher\.ps1') { $role = "launcher_candidate" }
+            elseif ($row.CommandLine -match 'run-service-logged\.ps1') { $role = "runner_candidate" }
+            $matched += [pscustomobject]@{ pid=[int]$row.ProcessId; parent_pid=[int]$row.ParentProcessId; role=$role; created_at=$row.CreationDate }
+        }
+    }
+    if ($unclassified -gt 0) { $unknown.Add("process_command_line_unavailable") }
+    $listeners = @()
+    try {
+        $lines = @(& "$env:SystemRoot\System32\netstat.exe" -ano -p tcp)
+        if ($LASTEXITCODE -ne 0) { throw "netstat failed" }
+        foreach ($line in $lines) {
+            if ($line -match '^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$') {
+                $port = [int]$Matches[1]
+                if ($port -in $Ports) { $listeners += [pscustomobject]@{ port=$port; pid=[int]$Matches[2] } }
+            }
+        }
+    }
+    catch { $unknown.Add("listener_inventory_unavailable") }
+    $listenerProcesses = @()
+    foreach ($listener in $listeners) {
+        try {
+            $process = Get-Process -Id $listener.pid -ErrorAction Stop
+            $started = $process.StartTime.ToUniversalTime().ToString("o")
+            if (-not $started) { throw "Missing start time" }
+            $listenerProcesses += [pscustomobject]@{
+                pid=$process.Id; name=$process.ProcessName; started_at=$started
+                scope="listener_only_not_parent_or_writer_coverage"
+            }
+        }
+        catch { $unknown.Add("listener_process_identity_unavailable") }
+    }
+    $services = @()
+    $serviceStatus = "UNKNOWN"
+    try {
+        $serviceRows = @(Get-CimInstance Win32_Service -Property ProcessId,State,PathName -OperationTimeoutSec 5 -ErrorAction Stop)
+        foreach ($row in $serviceRows) {
+            if ($row.PathName -and $row.PathName.IndexOf($Root, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $services += [pscustomobject]@{ pid=[int]$row.ProcessId; state=$row.State; role="repo_service_candidate" }
+            }
+        }
+        $serviceStatus = "OBSERVED_PATH_MATCH_ONLY"
+    }
+    catch { $unknown.Add("service_inventory_unavailable") }
+    $unknown.Add("scheduled_tasks_and_other_checkouts_unverified")
+    $unknown.Add("db_wal_shm_handle_inventory_unverified")
+    $unknown.Add("background_writer_ownership_and_respawn_unverified")
+    $mode = "UNKNOWN"
+    try {
+        $mode = if (Test-Path -LiteralPath (Join-Path $Root "release-manifest.json") -ErrorAction Stop) { "packaged_candidate" } else { "source_candidate" }
+    }
+    catch { $unknown.Add("launcher_mode_unavailable") }
+    return [pscustomobject]@{
+        contract="omi.launcher-stop-diagnostic.v1"; observed_at=[DateTime]::UtcNow.ToString("o")
+        verdict="BLOCKED"; dry_run=$true; lifecycle_actions=0
+        launcher_mode=$mode; mode_basis="on_disk_marker_only_not_loaded_launcher_identity"
+        requested_ports=$Ports; port_basis="explicit_or_default_not_effective_settings"
+        listeners=$listeners; listener_processes=$listenerProcesses; process_inventory=$inventoryStatus
+        processes_observed=$(if ($inventoryStatus -eq "UNKNOWN") { $null } else { $rows.Count })
+        unclassified_processes=$(if ($inventoryStatus -eq "UNKNOWN") { $null } else { $unclassified }); repo_candidates=$matched
+        service_inventory=$serviceStatus; service_candidates=$services
+        handle_coverage="UNKNOWN"; stop_coverage="UNKNOWN"; writers_drained=$false
+        stop_semantics="taskkill_tree_force"; graceful_shutdown_proven=$false
+        loaded_launcher_identity="UNATTESTED"; unknown_reasons=@($unknown)
+    }
+}
+
+if ($LauncherAction -eq "Diagnose") {
+    try {
+        $diagnosticRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+        Get-OmiStopDiagnostic -Root $diagnosticRoot -Ports $DiagnosticPorts | ConvertTo-Json -Depth 6
+    }
+    catch {
+        # Deliberately exclude exception text, which can contain raw OS arguments.
+        '{"contract":"omi.launcher-stop-diagnostic.v1","verdict":"BLOCKED","dry_run":true,"lifecycle_actions":0,"reason":"diagnostic_failed"}'
+    }
+    exit 2
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

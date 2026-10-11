@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Callable
@@ -47,6 +48,11 @@ class CryptoRealtimePersistenceManager:
         self._max_pending_keys_override = max_pending_keys
         self._task: asyncio.Task | None = None
         self._running = False
+        self._accepting = True
+        self._draining = False
+        self._stop_task: asyncio.Task | None = None
+        self._stop_event = asyncio.Event()
+        self._flush_task: asyncio.Task | None = None
         self._lock = RLock()
         self._pending: dict[tuple[Any, ...], CryptoRealtimeUpdate] = {}
         self._enqueued_count = 0
@@ -113,6 +119,8 @@ class CryptoRealtimePersistenceManager:
             return False
         key = self._pending_key(update)
         with self._lock:
+            if not self._accepting:
+                return False
             if key not in self._pending and len(self._pending) >= self.max_pending_keys:
                 self._dropped_count += 1
                 return False
@@ -128,26 +136,64 @@ class CryptoRealtimePersistenceManager:
         return accepted
 
     async def start(self) -> None:
+        if self._stop_task is not None:
+            if not self._stop_task.done() or self._stop_task.cancelled() or self._stop_task.exception() is not None:
+                raise RuntimeError("Crypto persistence previous stop incomplete")
+            self._stop_task = None
+        if self._draining:
+            raise RuntimeError("Crypto persistence drain is terminal")
+        if self._task is not None and not self._task.done():
+            if not self._running:
+                raise RuntimeError("Crypto persistence stop still pending")
+            return
         if self._running or not self.enabled:
             return
         self._running = True
+        self._accepting = True
+        self._stop_event.clear()
         self._last_error = None
         self._task = asyncio.create_task(self._run_loop(), name="crypto-ws-persistence")
         logger.info("Started crypto realtime persistence manager.")
 
-    async def stop(self) -> None:
-        if not self._task and not self._running:
-            return
+    async def stop(self, *, drain: bool = False, timeout_seconds: float = 30.0) -> None:
+        # Normal reload is bounded too; timeout cannot detach an active DB owner.
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("Stop timeout must be finite and non-negative")
+        self._draining = self._draining or drain
+        with self._lock:
+            self._accepting = False
+        self._stop_event.set()
         self._running = False
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._finish_stop(drain=drain))
+            self._stop_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        await asyncio.wait_for(asyncio.shield(self._stop_task), timeout=timeout_seconds)
+
+    async def _finish_stop(self, *, drain: bool) -> None:
+        with self._lock:
+            self._draining = self._draining or drain
+            self._accepting = False
+        self._running = False
+        self._stop_event.set()
         task = self._task
-        self._task = None
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        if task is not None:
+            await asyncio.shield(task)
+        # flush_once retains the actual to_thread owner on caller cancellation.
         await self.flush_once()
+        # A caller may have queued a newer update while the previous flush ran.
+        if self._pending and not self._last_error:
+            await self.flush_once()
+        if self._pending or self._last_error:
+            raise RuntimeError("Crypto persistence drain has unpersisted updates")
+        self._task = None
         logger.info("Stopped crypto realtime persistence manager.")
 
     async def flush_once(self) -> dict[str, Any] | None:
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_pending())
+        return await asyncio.shield(self._flush_task)
+
+    async def _flush_pending(self) -> dict[str, Any] | None:
         updates = self._take_pending()
         if not updates:
             return None
@@ -158,6 +204,9 @@ class CryptoRealtimePersistenceManager:
         except Exception as exc:
             self._error_count += len(updates)
             self._last_error = str(exc)
+            with self._lock:
+                for update in updates:
+                    self._pending.setdefault(self._pending_key(update), update)
             logger.warning("Crypto realtime persistence flush failed: %s", exc)
             return {
                 "status": "error",
@@ -169,6 +218,11 @@ class CryptoRealtimePersistenceManager:
         self._flush_count += 1
         self._last_flush_completed_at = _now()
         self._last_error = None
+        if int(result.get("error_count") or 0) or result.get("status") in {"error", "partial", "partial_success"}:
+            self._last_error = "Persistence reported incomplete updates"
+            with self._lock:
+                for update in updates:
+                    self._pending.setdefault(self._pending_key(update), update)
         self._last_result = result
         self._persisted_count += int(result.get("persisted_count") or 0)
         self._skipped_count += int(result.get("skipped_count") or 0)
@@ -177,8 +231,11 @@ class CryptoRealtimePersistenceManager:
 
     async def _run_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self.flush_interval_seconds)
-            await self.flush_once()
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.flush_interval_seconds)
+            except asyncio.TimeoutError:
+                if self._running:
+                    await self.flush_once()
 
     def _take_pending(self) -> list[CryptoRealtimeUpdate]:
         with self._lock:
@@ -188,10 +245,14 @@ class CryptoRealtimePersistenceManager:
 
     def _persist_updates(self, updates: list[CryptoRealtimeUpdate]) -> dict[str, Any]:
         with self._session_factory() as db:
-            return run_with_sqlite_write_retry(
-                db,
-                lambda: self._persist_func(db, updates),
-            )
+            try:
+                return run_with_sqlite_write_retry(
+                    db,
+                    lambda: self._persist_func(db, updates),
+                )
+            except Exception:
+                db.rollback()
+                raise
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -214,6 +275,9 @@ class CryptoRealtimePersistenceManager:
             "ok": ok,
             "status": status,
             "pending_count": pending_count,
+            "admission_closed": not self._accepting,
+            "draining": self._draining,
+            "flush_in_flight": self._flush_task is not None and not self._flush_task.done(),
             "max_pending_keys": self.max_pending_keys,
             "flush_interval_seconds": self.flush_interval_seconds,
             "last_batch_size": self._last_batch_size,
