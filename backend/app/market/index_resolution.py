@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from app.market.trading_calendar import previous_taiwan_trading_day
+from app.market.live_snapshot import LIVE_MAX_AGE_SECONDS, classify_market_snapshot
 from app.market_data.contracts import CanonicalModel
 
 
@@ -364,6 +365,24 @@ def _selection_reason(candidate: dict[str, Any]) -> str:
     }.get(candidate_kind, "same_trade_date_candidate_selected")
 
 
+def _active_candidate_key(candidate: dict[str, Any]) -> tuple[int, int, int, int, bool]:
+    """Rank only eligible same-session observations, never completed closes.
+
+    Direct observations outrank estimates. Live evidence outranks delayed
+    evidence; within that tier prefer authority, then event recency.
+    Intraday is only a deterministic tie-break, not an unconditional priority.
+    """
+    authority = str(candidate.get("authority") or "").casefold()
+    return (
+        int(authority not in {"derived", "derived_proxy"}),
+        int(candidate["age_seconds"] <= LIVE_MAX_AGE_SECONDS),
+        {"exchange": 3, "official_exchange": 3, "provider": 2,
+         "vendor": 2, "broker": 2, "derived_proxy": 0, "derived": 0}.get(authority, 1),
+        -candidate["age_seconds"],
+        candidate["candidate"] == "intraday_last_trade",
+    )
+
+
 def _index_candidate_authority(
     *,
     source: Any,
@@ -682,6 +701,26 @@ def resolve_taiwan_index_quote_state(
         ),
     }
 
+    # Keep source semantics at the market owner. A current timestamp cannot
+    # turn a completed close, explicit stale evidence, or a future event into
+    # an eligible active-session observation.
+    for candidate, payload, observed_at in (
+        (intraday_candidate, intraday or {}, intraday_observed_at),
+        (summary_candidate, snapshot, summary_observed_at),
+    ):
+        candidate["authority"] = payload.get("authority") or _index_candidate_authority(
+            source=candidate["source"], provider=candidate["provider"],
+        )
+        candidate["finalization"] = payload.get("finalization") or "intraday"
+        if active_session_phase:
+            candidate["eligible"] = bool(
+                candidate["eligible"]
+                and observed_at is not None
+                and -5 <= (checked_at - observed_at).total_seconds() <= 240
+                and candidate["finalization"] not in {"final", "corrected"}
+                and payload.get("freshness_status") not in {"stale", "missing", "unavailable"}
+            )
+
     completed_trade_date = index_candidate_date(
         snapshot.get("completed_daily_trade_date"),
         timezone_name=timezone_name,
@@ -885,14 +924,11 @@ def resolve_taiwan_index_quote_state(
         selected_candidate = completed_daily_candidate
         selection_reason = "qualified_completed_daily_bar"
     elif phase in {"regular", "regular_live", "closing_auction"}:
-        if intraday_candidate["eligible"]:
-            selected_candidate = intraday_candidate
-            selection_reason = "active_session_prefers_intraday_last_trade"
-        elif summary_candidate["eligible"]:
-            selected_candidate = summary_candidate
-            selection_reason = (
-                "active_session_intraday_unavailable_summary_fallback"
-            )
+        eligible = [candidate for candidate in (intraday_candidate, summary_candidate)
+                    if candidate["eligible"]]
+        if eligible:
+            selected_candidate = max(eligible, key=_active_candidate_key)
+            selection_reason = "active_session_freshness_authority_event_time"
     else:
         eligible = [
             candidate
@@ -1072,6 +1108,17 @@ def resolve_taiwan_index_quote_state(
         selected_finalization == "provisional"
         or selected_authority == "derived_proxy"
     )
+    if active_session_phase:
+        snapshot_freshness = classify_market_snapshot(
+            calendar_status=calendar_status,
+            quote_time=(selected_candidate or {}).get("event_time"),
+            delayed_max_age_seconds=240,
+        )
+        delivery_status = (
+            snapshot_freshness["delivery_status"]
+            if selected_candidate is not None
+            else "unavailable"
+        )
     freshness_status = (
         "current"
         if decision_usable and active_session_phase
@@ -1080,6 +1127,7 @@ def resolve_taiwan_index_quote_state(
         and (
             selected_candidate is not None
             or intraday_candidate.get("value") is not None
+            or summary_candidate.get("value") is not None
         )
         else "latest_completed_session"
         if selected_candidate is not None
@@ -1268,6 +1316,22 @@ def resolve_taiwan_index_quote_state(
         ],
         "warnings": warnings,
     }
+
+
+def project_taiwan_index_freshness(
+    truth: ResolvedTaiwanIndexTruth, *, calendar_status: dict[str, Any],
+) -> dict[str, Any]:
+    """Project canonical selection; source names never grant live status."""
+    freshness = classify_market_snapshot(
+        calendar_status=calendar_status,
+        quote_time=truth.selected_event_time or truth.last_trade_time,
+        delayed_max_age_seconds=240,
+    )
+    if truth.selected_candidate is None:
+        freshness.update(status=truth.freshness_status, is_live=False,
+                         is_realtime=False, is_stale=True, is_latest_session_quote=False)
+    freshness["delivery_status"] = truth.delivery_status
+    return freshness
 
 
 def resolve_taiwan_index_truth(

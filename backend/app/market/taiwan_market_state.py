@@ -380,6 +380,7 @@ def persist_taiwan_market_minute_state(
     payload: dict[str, Any],
     finalized: bool = False,
     now: datetime | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     inserted_count = 0
     updated_count = 0
@@ -643,7 +644,7 @@ def persist_taiwan_market_minute_state(
             }
         )
 
-    if inserted_count or updated_count:
+    if commit and (inserted_count or updated_count):
         db.commit()
     return {
         "kind": "taiwan_market_minute_state_persist",

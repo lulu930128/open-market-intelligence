@@ -1458,6 +1458,7 @@ def collect_taiwan_market_breadth_summary() -> None:
             payload=payload,
             finalized=False,
             now=now,
+            commit=False,
         )
         stock_state_persistence = persist_taiwan_intraday_stock_states(
             db,
@@ -1466,7 +1467,11 @@ def collect_taiwan_market_breadth_summary() -> None:
                 summary=payload,
             ),
             now=now,
+            commit=False,
         )
+        # These two derived views describe the same acquisition. A stock-state
+        # failure must not publish only the market-minute half of this update.
+        db.commit()
         logger.debug(
             "Taiwan market breadth cache refreshed as_of=%s minute_rows=%s "
             "stock_state_rows=%s.",

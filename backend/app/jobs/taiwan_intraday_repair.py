@@ -425,14 +425,28 @@ def _summary(db, row, state, target, now):
         TaiwanIntradayRepairItem.trade_date == target)
     if "universe_revision" in state:
         query = query.filter(TaiwanIntradayRepairItem.stock_id.in_(members))
-    items = query.all()
+    item = TaiwanIntradayRepairItem
+    # Aggregate in SQL, including queued lineage. Never hydrate/expire every
+    # obligation and then issue one JobRun SELECT per active member.
+    groups = query.with_entities(item.status, item.acquisition_lane, func.count(),
+        func.count(item.scanned_at), func.count(item.normal_attempted_at),
+        func.sum(item.attempt_count)).group_by(item.status, item.acquisition_lane).all()
     counts = {}
-    for item in items:
-        counts[item.status] = counts.get(item.status, 0) + 1
+    repair_counts = {}
+    scanned = normal_submitted = normal_succeeded = normal_failed = repair_retry = 0
+    for status, lane, count, scan_count, normal_count, attempts in groups:
+        counts[status] = counts.get(status, 0) + count
+        scanned += scan_count
+        normal_submitted += normal_count
+        if lane == "repair":
+            repair_counts[status] = repair_counts.get(status, 0) + count
+            normal_failed += normal_count
+            repair_retry += attempts or 0
+        elif status == "complete":
+            normal_succeeded += normal_count
     pending = counts.get("pending", 0)
     active = counts.get("active", 0)
     unfillable = counts.get("unfillable", 0)
-    scanned = sum(item.scanned_at is not None for item in items)
     if "universe_revision" in state:
         state["coverage_scan_complete"] = scanned == len(members)
     closed = bool(state.get("coverage_scan_complete") and pending + active == 0)
@@ -440,19 +454,22 @@ def _summary(db, row, state, target, now):
     # Old daily-budget diagnostics are not the active admission policy.
     state.pop("daily_admissions_reserved", None)
     state.pop("budget_execution_date", None)
-    repair_items = [item for item in items if item.acquisition_lane == "repair"]
-    queued = 0
-    for item in items:
-        if item.status == "active" and item.last_job_id:
-            job = db.get(JobRun, item.last_job_id)
-            queued += bool(job and job.status == "queued")
+    queued = query.join(JobRun, JobRun.id == item.last_job_id).filter(
+        item.status == "active", JobRun.status == "queued").count()
     complete = counts.get("complete", 0)
     terminal = unfillable + counts.get("not_applicable", 0)
-    results = [json.loads(result or "{}") for (result,) in db.query(JobRun.result_json).filter(
+    result_json = func.coalesce(func.nullif(JobRun.result_json, ""), "{}")
+    metric = lambda key: func.coalesce(func.json_extract(result_json, "$." + key), 0)
+    failures, backoffs, retries, unknown = db.query(
+        func.coalesce(func.sum(metric("provider_failure_count")), 0),
+        func.coalesce(func.sum(metric("provider_backoff_count")), 0),
+        func.coalesce(func.sum(func.max(0, metric("attempt_count") - 1)), 0),
+        func.count(case((func.json_type(result_json, "$.provider_failure_count").is_(None), 1))),
+    ).filter(
         JobRun.job_type == JOB_TYPE, JobRun.target.like(PREFIX + "%"),
         func.json_extract(JobRun.request_json, "$.trade_date") == target.isoformat(),
         func.json_extract(JobRun.request_json, "$.consumer").in_(("completed_session", "completed_session_repair")),
-    ).all()]
+    ).one()
     if complete and not state.get("first_completion_at"):
         state["first_completion_at"] = now.isoformat()
     if closed and not state.get("lifecycle_completed_at"):
@@ -462,24 +479,20 @@ def _summary(db, row, state, target, now):
     state.update(trade_date=target.isoformat(), audited_count=scanned,
         scanned_count=scanned, complete_count=complete, pending_count=pending,
         queued_count=queued, active_count=active - queued,
-        failed_retryable_count=sum(item.status in {"pending", "active"} for item in repair_items),
+        failed_retryable_count=repair_counts.get("pending", 0) + repair_counts.get("active", 0),
         terminal_count=terminal, remaining_count=pending + active,
-        normal_submitted_count=sum(item.normal_attempted_at is not None for item in items),
-        normal_succeeded_count=sum(item.normal_attempted_at is not None and item.acquisition_lane == "normal" and item.status == "complete" for item in items),
-        normal_failed_count=sum(item.normal_attempted_at is not None for item in repair_items),
-        repair_retry_count=sum(item.attempt_count for item in repair_items),
-        provider_failure_count=sum(result.get("provider_failure_count", 0) for result in results),
-        provider_backoff_count=sum(result.get("provider_backoff_count", 0) for result in results),
-        provider_retry_count=sum(max(0, result.get("attempt_count", 0) - 1) for result in results),
-        provider_metrics_unknown_jobs=sum("provider_failure_count" not in result for result in results),
-        completion_ratio=complete / len(items) if items else 0,
-        terminal_ratio=terminal / len(items) if items else 0,
+        normal_submitted_count=normal_submitted, normal_succeeded_count=normal_succeeded,
+        normal_failed_count=normal_failed, repair_retry_count=repair_retry,
+        provider_failure_count=failures, provider_backoff_count=backoffs,
+        provider_retry_count=retries, provider_metrics_unknown_jobs=unknown,
+        completion_ratio=complete / sum(counts.values()) if counts else 0,
+        terminal_ratio=terminal / sum(counts.values()) if counts else 0,
         duration_seconds=duration, throughput_symbols_per_minute=complete * 60 / duration if duration else 0,
-        pending_repair_count=sum(item.status == "pending" for item in repair_items),
-        active_repair_count=sum(item.status == "active" for item in repair_items),
-        completed_repair_count=sum(item.status == "complete" for item in repair_items), unfillable_count=unfillable,
+        pending_repair_count=repair_counts.get("pending", 0),
+        active_repair_count=repair_counts.get("active", 0),
+        completed_repair_count=repair_counts.get("complete", 0), unfillable_count=unfillable,
         not_applicable_count=counts.get("not_applicable", 0),
-        repair_backlog_empty=all(item.status not in {"pending", "active"} for item in repair_items), lifecycle_complete=closed,
+        repair_backlog_empty=repair_counts.get("pending", 0) + repair_counts.get("active", 0) == 0, lifecycle_complete=closed,
         repair_complete=closed and unfillable == 0, data_complete=closed and unfillable == 0,
         admission_window_start=budget["window_start"], admission_window_end=budget["window_end"],
         admissions_reserved=budget.get("reserved", 0),
@@ -498,17 +511,16 @@ def audit_completed_sessions(db, *, now, reread, enqueuer, background_slots, bud
         latest = latest_completed_taiwan_session_date(now)
         if latest == now.date() and now.time().replace(tzinfo=None) < time(13, 35):
             latest = previous_taiwan_trading_day(latest, include_value=False)
-        checkpoint(db, f"{AUDIT_PREFIX}{latest}", initial={"trade_date": latest.isoformat()})
-        states = db.query(TaiwanIntradaySchedulerState).filter(
-            TaiwanIntradaySchedulerState.key.like(AUDIT_PREFIX + "%")
-        ).order_by(TaiwanIntradaySchedulerState.key).all()
-        unresolved = [row for row in states if (not json.loads(row.state_json).get("lifecycle_complete")
-                      or "universe_revision" not in json.loads(row.state_json))
-                      and date.fromisoformat(row.key[len(AUDIT_PREFIX):]) <= latest]
+        newest, _ = checkpoint(db, f"{AUDIT_PREFIX}{latest}", initial={"trade_date": latest.isoformat()})
+        state_model = TaiwanIntradaySchedulerState
+        unresolved = db.query(state_model).filter(
+            state_model.key.like(AUDIT_PREFIX + "%"), state_model.key < newest.key,
+            or_(func.coalesce(func.json_extract(state_model.state_json, "$.lifecycle_complete"), 0) != 1,
+                func.json_type(state_model.state_json, "$.universe_revision").is_(None)),
+        ).order_by(state_model.key).limit(1).all()
         # Latest normal ingestion takes the current-date provider opportunity;
         # the oldest unresolved session still advances toward terminalization.
-        newest = next(row for row in states if row.key == f"{AUDIT_PREFIX}{latest}")
-        selected = [newest] + [row for row in unresolved[:1] if row is not newest]
+        selected = [newest] + unresolved
         summaries = []
         for row in selected:
             budget.check()

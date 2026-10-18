@@ -380,6 +380,8 @@ class TaiwanPublicQuoteCandidateReader:
                         observation.lineage, now=requirement.requested_at,
                         max_age_seconds=requirement.freshness.max_age_seconds,
                     )
+                elif observation.state is ObservationState.STALE:
+                    freshness = EvidenceFreshness.STALE
                 elif (
                     requirement.session in _ACTIVE_SESSIONS
                     and same_trade_date
@@ -825,25 +827,8 @@ def project_taiwan_session_close(
     health = result.resolved.health
     presentation = taiwan_presentation_session(result.requirement.requested_at)
     event_at = quote.lineage.event_at if quote is not None else None
-    confirmed_at = (
-        max(
-            value
-            for value in (
-                quote.lineage.received_at,
-                quote.lineage.fetched_at,
-            )
-            if value is not None
-        )
-        if quote is not None
-        and any(
-            value is not None
-            for value in (
-                quote.lineage.received_at,
-                quote.lineage.fetched_at,
-            )
-        )
-        else None
-    )
+    # Match the repository's confirmation evidence, not the latest fetch attempt.
+    confirmed_at = quote.lineage.received_at if quote is not None else None
     candidate_freshness = (
         result.resolved.candidates[0].freshness
         if result.resolved.candidates

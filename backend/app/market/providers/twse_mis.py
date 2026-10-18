@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from time import monotonic
 
 from ._http import DEFAULT_HEADERS, ResponseGetter, get, json_from_response
 
@@ -21,31 +22,36 @@ def _fetch_payload(
     target: str,
     timeout_seconds: int,
     request: ResponseGetter | None = None,
+    phase_timing: dict | None = None,
 ) -> Any:
     params = {
         "ex_ch": channel,
         "json": "1",
         "delay": "0",
     }
-    if request is not None:
-        response = request(
-            STOCK_INFO_URL,
-            params=params,
-            headers=_headers(),
-            timeout=timeout_seconds,
-        )
+    transport_started = monotonic()
+    try:
+        if request is not None:
+            response = request(
+                STOCK_INFO_URL,
+                params=params,
+                headers=_headers(),
+                timeout=timeout_seconds,
+            )
+        else:
+            response = get(
+                STOCK_INFO_URL, provider=PROVIDER, resource=resource, target=target,
+                params=params, headers=_headers(), timeout_seconds=timeout_seconds,
+            )
+    finally:
+        transport_finished = monotonic()
+        if phase_timing is not None:
+            phase_timing["transport_seconds"] = transport_finished - transport_started
+    try:
         return json_from_response(response)
-
-    response = get(
-        STOCK_INFO_URL,
-        provider=PROVIDER,
-        resource=resource,
-        target=target,
-        params=params,
-        headers=_headers(),
-        timeout_seconds=timeout_seconds,
-    )
-    return json_from_response(response)
+    finally:
+        if phase_timing is not None:
+            phase_timing["decode_seconds"] = monotonic() - transport_finished
 
 
 def fetch_stock_messages(
@@ -54,6 +60,7 @@ def fetch_stock_messages(
     exchange: str = "tse",
     timeout_seconds: int = 20,
     request: ResponseGetter | None = None,
+    phase_timing: dict | None = None,
 ) -> list[dict]:
     normalized_exchange = str(exchange or "").strip().lower()
     if normalized_exchange not in {"tse", "otc"}:
@@ -66,6 +73,7 @@ def fetch_stock_messages(
         target=f"count:{len(codes)}",
         timeout_seconds=timeout_seconds,
         request=request,
+        phase_timing=phase_timing,
     )
     if not isinstance(payload, dict) or str(payload.get("rtcode") or "") not in {"", "0000"}:
         raise ValueError("TWSE MIS live stock quote payload is unavailable.")

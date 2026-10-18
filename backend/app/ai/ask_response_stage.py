@@ -109,6 +109,7 @@ def assemble_response_analysis(
         position_math = decision_engine.build_position_math(
             position_context=position_context,
             result=result,
+            target=response_target,
         )
     position_decision = {}
     if (

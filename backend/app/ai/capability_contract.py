@@ -7334,7 +7334,7 @@ def _fill_resolution_without_operation(
             else "scheduler_owned",
         )
     if refresh_strategy == "reader_fetch":
-        return "already_attempted", "reader_fetch_on_primary_request"
+        return "deferred_action", "reader_fetch_without_acquisition_receipt"
     if refresh_strategy == "cache_only":
         if resolution_mode == "private":
             return "deferred_action", "server_trust_required"
@@ -7446,6 +7446,7 @@ def build_fill_plan(
     manifest: dict[str, Any],
     scope_type: str,
     tool_runs: list[dict[str, Any]] | None = None,
+    primary_reader_acquisitions: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     target = canonical.get("target") if isinstance(canonical.get("target"), dict) else {}
     actions: list[dict[str, Any]] = []
@@ -7508,6 +7509,10 @@ def build_fill_plan(
             scope_type=scope_type,
         )
     }
+    attempted_capabilities.update(
+        capability for capability, receipt in (primary_reader_acquisitions or {}).items()
+        if receipt.get("attempted") is True
+    )
     background_jobs_by_capability: dict[str, dict[str, Any]] = {}
     for run in tool_runs or []:
         if not isinstance(run, dict):
@@ -7947,6 +7952,7 @@ def build_refresh_reconciliation(
     scope_type: str,
     request_policy: dict[str, Any] | None = None,
     primary_reader_provider_attempts: dict[str, list[dict[str, Any]]] | None = None,
+    primary_reader_acquisitions: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     policy = request_policy if isinstance(request_policy, dict) else {}
     refresh_requested = bool(
@@ -8104,6 +8110,7 @@ def build_refresh_reconciliation(
     capability_outcomes: dict[str, dict[str, Any]] = {}
     for capability in selected:
         manifest_item = manifest_by_capability.get(capability) or {}
+        reader_acquisition = (primary_reader_acquisitions or {}).get(capability) or {}
         indexes = attempt_indexes_by_capability.get(capability) or []
         related_attempts = [attempts[index] for index in indexes]
         reader_attempts = [
@@ -8115,13 +8122,13 @@ def build_refresh_reconciliation(
             for attempt in related_attempts
         ]
         tool_run_attempted = bool(related_attempts)
-        provider_fetch_requested = bool(reader_attempts) or any(
+        provider_fetch_requested = reader_acquisition.get("requested") is True or bool(reader_attempts) or any(
             attempt.get("external_fetch") is True
             for attempt in related_attempts
         )
-        provider_fetch_attempted = any(
-            str(attempt.get("status") or "").lower()
-            not in {"blocked", "skipped", "not_attempted", "cache_hit"}
+        provider_fetch_attempted = reader_acquisition.get("attempted") is True or any(
+            attempt.get("attempted") is True or str(attempt.get("status") or "").lower()
+            in {"completed", "partial", "failed", "unavailable", "selected", "attempted"}
             for attempt in reader_attempts
         ) or any(
             attempt.get("external_fetch") is True
@@ -8148,20 +8155,26 @@ def build_refresh_reconciliation(
             for status in statuses
         )
         fill_satisfied = _fill_payload_is_satisfied(manifest_item)
+        provider_succeeded = bool(
+            reader_acquisition.get("attempted") is True
+            and reader_acquisition.get("status") == "completed"
+        )
         historical_incomplete = isinstance(manifest_item.get("fill_state"), dict) and not fill_satisfied
         if usable_evidence_available and not historical_incomplete:
             reconciliation = "satisfied"
-        elif evidence_payload_available and tool_succeeded:
+        elif evidence_payload_available and (tool_succeeded or provider_succeeded):
             reconciliation = "evidence_available_with_quality_limits"
-        elif tool_succeeded:
+        elif tool_succeeded or provider_succeeded:
             reconciliation = "successful_without_usable_evidence"
         elif any(
             status in {"pending", "timeout"}
             for status in statuses
         ):
             reconciliation = "pending_or_incomplete"
-        elif related_attempts:
+        elif related_attempts or provider_fetch_attempted:
             reconciliation = "attempt_failed_or_blocked"
+        elif reader_acquisition.get("status") == "unverified":
+            reconciliation = "acquisition_outcome_unverified"
         else:
             reconciliation = "not_attempted"
         remaining_action = remaining_actions.get(capability)
@@ -8190,7 +8203,8 @@ def build_refresh_reconciliation(
             or "no_resolution_recorded"
         )
         primary_reader_attempted = bool(
-            related_attempts
+            reader_acquisition.get("requested") is True
+            or reader_acquisition.get("attempted") is True
             or reader_attempts
             or capability in already_attempted_by_capability
         )
@@ -8206,6 +8220,7 @@ def build_refresh_reconciliation(
             else str(unresolved_reason or "no_executable_tool_run")
         )
         capability_outcomes[capability] = {
+            "primary_reader_acquisition": reader_acquisition or None,
             "primary_reader_provider_attempts": reader_attempts,
             "attempted": tool_run_attempted,
             "tool_run_attempted": tool_run_attempted,
@@ -8219,6 +8234,7 @@ def build_refresh_reconciliation(
             "attempt_count": len(related_attempts),
             "attempt_indexes": indexes,
             "tool_succeeded": tool_succeeded,
+            "provider_succeeded": provider_succeeded,
             "tool_statuses": statuses,
             "refresh_outcomes": list(
                 dict.fromkeys(

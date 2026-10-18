@@ -16,9 +16,24 @@ class AcquisitionBatchEvidence(CanonicalModel):
     missing_z: int = Field(ge=0)
     verified_no_trade: int = Field(ge=0)
     duration_ms: float = Field(ge=0)
+    # Caller-owned: remaining scan budget at batch start, before admission.
+    # Nullable so old receipts remain valid; never infer a missing measurement.
+    remaining_budget_at_start_seconds: float | None = Field(default=None, ge=0)
+    # Caller-side elapsed bounded_fetch duration (not provider socket wait).
+    # Null for a batch that never entered its IO worker, including in-flight skips.
+    caller_wait_seconds: float | None = Field(default=None, ge=0)
+    fetch_decode_seconds: float = Field(default=0, ge=0)
+    transport_seconds: float | None = Field(default=None, ge=0)
+    decode_seconds: float | None = Field(default=None, ge=0)
+    classification_seconds: float = Field(default=0, ge=0)
+    digest_seconds: float = Field(default=0, ge=0)
+    fetch_completed_in_budget: bool = False
     attempted: bool
     error: str | None = Field(default=None, max_length=64)
     timeout: bool = False
+    # Null for old receipts: absent detail must not become inferred socket truth.
+    timeout_origin: Literal["provider", "acquisition_deadline"] | None = None
+    timeout_stage: Literal["connect", "read", "request"] | None = None
     receipt_at: datetime | None = None
     event_min: datetime | None = None
     event_max: datetime | None = None
@@ -72,6 +87,8 @@ class BreadthAcquisitionEvidence(CanonicalModel):
     missing_z_count: int = Field(ge=0)
     verified_no_trade_count: int = Field(ge=0)
     batch_count: int = Field(ge=0, le=21)
+    scan_start_code: str | None = Field(default=None, max_length=4)
+    scan_next_code: str | None = Field(default=None, max_length=4)
     batches: tuple[AcquisitionBatchEvidence, ...] = Field(default=(), max_length=21)
     batch_duration_ms: dict[str, float | int | None]
     event_to_receipt_seconds: dict[str, float | int | None]
@@ -80,7 +97,14 @@ class BreadthAcquisitionEvidence(CanonicalModel):
     budget_remaining_seconds: float = Field(ge=0)
     scan_budget_seconds: float = Field(ge=0)
     rescue_max_budget_seconds: float = Field(ge=0, le=4)
-    total_hard_deadline_seconds: float = Field(ge=0)
+    # Python finalization is bounded by row counts, not forcibly preemptible.
+    total_hard_deadline_seconds: float | None = Field(default=None, ge=0)
+    total_elapsed_seconds: float = Field(default=0, ge=0)
+    finalization_allowance_seconds: float = Field(default=0, ge=0)
+    total_ceiling_seconds: float = Field(default=0, ge=0)
+    scan_deadline_exceeded: bool = False
+    timing_policy: str = "legacy"
+    phase_seconds: dict[str, float] = Field(default_factory=dict)
     deadline_exceeded: bool
     rescue: AcquisitionRescueEvidence
     error: str | None = Field(default=None, max_length=64)

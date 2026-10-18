@@ -204,6 +204,38 @@ def resolve_taiwan_current_price(
     current_session_date: Any = None,
     checked_at: datetime | None = None,
 ) -> dict[str, Any]:
+    from app.market.quote_depth import project_taiwan_decision_price
+
+    decision = project_taiwan_decision_price(
+        _mapping(quote), checked_at=checked_at, session_date=current_session_date,
+    ).model_dump(mode="json")
+    research = _research_price_candidate(
+        quote=quote, intraday_bars=intraday_bars,
+        current_session_date=current_session_date, checked_at=checked_at,
+    )
+    return {
+        **research, **decision,
+        "kind": "resolved_current_price", "version": CURRENT_PRICE_CONTRACT_VERSION,
+        "confidence": "high" if decision["decision_usable"] else "none",
+        "is_estimate": False,
+        "is_current_session": bool(decision["decision_usable"] and decision["trade_date"] == _iso(current_session_date)),
+        "fallback_reason": None if decision["decision_usable"] else decision["reason"],
+        "decision_price": decision,
+        "research_price": {
+            **research, "kind": "research_price", "decision_usable": False,
+            "execution_usable": False, "usage": "display_reference_only",
+            "quality": dict(_mapping(quote).get("freshness") or {}),
+        } if research.get("value") is not None or research.get("reference_price") is not None else None,
+    }
+
+
+def _research_price_candidate(
+    *,
+    quote: dict[str, Any] | None,
+    intraday_bars: dict[str, Any] | None,
+    current_session_date: Any = None,
+    checked_at: datetime | None = None,
+) -> dict[str, Any]:
     raw_quote = _mapping(quote)
     raw_intraday = _mapping(intraday_bars)
     quote_trade_date = raw_quote.get("trade_date")

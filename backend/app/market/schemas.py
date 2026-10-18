@@ -7,6 +7,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.market.financial_metric_semantics import source_reported_financial_semantics
 
 
+class TaiwanDecisionPriceRead(BaseModel):
+    """Market-owned price qualification; absence never authorizes alias fallback."""
+
+    value: float | None = None
+    decision_usable: bool = False
+    execution_usable: bool = False
+    source_kind: str = "unavailable"
+    source: str | None = None
+    provider: str | None = None
+    event_time: datetime | None = None
+    trade_date: date | None = None
+    age_seconds: float | None = None
+    semantics: str = "unavailable"
+    quality: dict[str, Any] = Field(default_factory=dict)
+    reason: str = "QUALIFIED_PRICE_UNAVAILABLE"
+
+
 class MarketCalendarReleaseWindowRead(BaseModel):
     key: str
     label: str

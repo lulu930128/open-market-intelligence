@@ -15,7 +15,7 @@ from app.db.models import (
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
 from app.market.quote_volume import build_taiwan_quote_volume_contract
-from app.market.schemas import TaiwanChangeReferenceRead
+from app.market.schemas import TaiwanChangeReferenceRead, TaiwanDecisionPriceRead
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
     reconcile_taiwan_session_close,
@@ -327,6 +327,99 @@ def _headline_contract(
     }
 
 
+def project_taiwan_quote_price_usability(payload: dict[str, Any]) -> bool:
+    """Map owner decisions, including the pre-headline completed-close contract.
+
+    An explicit headline denial always wins. The compatibility seam only accepts
+    completed-session evidence; price presence or a fresh receipt never grants
+    usability to a live/stale last trade. Remove it when pre-headline close
+    payloads are retired, retaining the negative acceptance tests.
+    """
+    if "headline_decision_usable" in payload:
+        return payload["headline_decision_usable"] is True
+    if payload.get("session_phase") not in POST_CLOSE_PHASES:
+        return False
+    components = payload.get("data_core_components") or {}
+    for capability, availability, price_field in (
+        ("quote.official_close", "official_close_available", "official_close_price"),
+        ("quote.session_close", "session_close_available", "session_close_price"),
+    ):
+        component = components.get(capability) or {}
+        if payload.get(availability) is not True:
+            continue
+        price = _as_float(component.get("price", payload.get(price_field, payload.get("last_trade_price"))))
+        if price is None or not math.isfinite(price) or price <= 0:
+            return False
+        if "decision_usable" in component:
+            return component["decision_usable"] is True
+        # The legacy official-close owner emits confirmed + official_close
+        # freshness instead of a component decision. Neither flag alone suffices.
+        freshness = payload.get("freshness") or {}
+        if capability == "quote.official_close":
+            return bool(
+                payload.get("official_close_status") in {"confirmed", "confirmed_latest_session"}
+                and freshness.get("status") in {"official_close", "latest_completed_session"}
+                and freshness.get("is_stale") is False
+            )
+        return False
+    return False
+
+
+def project_taiwan_decision_price(
+    payload: dict[str, Any], *, checked_at: datetime | None, session_date: Any = None,
+) -> TaiwanDecisionPriceRead:
+    """Qualify the selected price, never search aliases after an owner denial."""
+    freshness = payload.get("freshness") or {}
+    basis = payload.get("headline_basis") or payload.get("quote_semantics") or "unavailable"
+    close = basis in {"session_close", "official_close", "latest_completed_session_close"}
+    component = (payload.get("data_core_components") or {}).get(
+        "quote.session_close" if basis == "session_close" else "quote.official_close", {}
+    ) if close else {}
+    # A qualified close has its own freshness; a stale sibling quote does not
+    # invalidate it. Missing close quality still falls back conservatively.
+    if isinstance(component.get("freshness"), dict) and component["freshness"]:
+        freshness = component["freshness"]
+    price = payload.get("headline_price")
+    event = payload.get("headline_event_time") or payload.get("last_trade_time") or payload.get("event_time")
+    day = payload.get("headline_trade_date") or payload.get("trade_date")
+    if price is None and "headline_decision_usable" not in payload:
+        if close:
+            price = (payload.get("session_close_price") if basis == "session_close" else payload.get("official_close_price")) or payload.get("latest_price")
+            event = payload.get("session_close_event_time") or event
+        else:
+            price = payload.get("last_trade_price")
+    try:
+        day = date.fromisoformat(str(day)[:10])
+        event = datetime.fromisoformat(str(event).replace("Z", "+00:00")) if event else None
+        now = datetime.fromisoformat(checked_at.replace("Z", "+00:00")) if isinstance(checked_at, str) else checked_at
+        age = (now - event).total_seconds() if now and event and event.tzinfo else None
+    except (TypeError, ValueError):
+        return TaiwanDecisionPriceRead(reason="PRICE_TIME_INVALID")
+    value = _as_float(price)
+    owner_usable = payload.get("headline_decision_usable", payload.get("price_decision_usable")) is True
+    denied = (payload.get("price_decision_usable") is False or payload.get("is_estimate") is True
+              or component.get("decision_usable") is False
+              or (component.get("resolved_health") or {}).get("status") == "stale")
+    valid = bool(owner_usable and not denied and value is not None and math.isfinite(value) and value > 0)
+    if close:
+        valid = valid and freshness.get("is_stale") is not True and (age is None or age >= 0)
+    else:
+        valid = bool(valid and basis in {"actual_trade", "current_session_last_trade", "last_trade"}
+                     and day.isoformat() == str(session_date)[:10]
+                     and age is not None and 0 <= age <= TW_REALTIME_MAX_AGE_SECONDS
+                     and freshness.get("is_stale") is not True
+                     and freshness.get("status") not in {"stale", "delayed", "missing", "unknown"})
+    return TaiwanDecisionPriceRead(
+        value=value if valid else None, decision_usable=valid,
+        # Completed close supports valuation, never a current executable quote.
+        execution_usable=bool(valid and not close and freshness.get("is_live") is True),
+        source_kind=str(basis), source=payload.get("headline_source") or payload.get("source"),
+        provider=payload.get("provider"), event_time=event, trade_date=day,
+        age_seconds=age, semantics=str(basis), quality=dict(freshness),
+        reason="QUALIFIED_PRICE" if valid else "PRICE_NOT_DECISION_GRADE",
+    )
+
+
 def _loads_levels(value: str | None) -> list[dict[str, Any]]:
     if not value:
         return []
@@ -459,6 +552,8 @@ def _observation_for_row(
         ),
     )
     observation = resolve_twse_mis_observation(
+        observation_available=row is not None,
+        actual_trade_reason_code=actual_trade["reason_code"],
         confirmed_trade_occurred=bool(actual_trade["actual_trade_occurred"] or confirmed_trade_row is not None),
         confirmed_trade_price_available=bool(actual_trade["actual_trade_price_available"] or confirmed_trade_row is not None),
         request_now=local_now,
@@ -1545,7 +1640,8 @@ def _finalize_shared_projection_semantics(
     depth_at = event_datetime(payload.get("depth_event_time"))
     trade_at = event_datetime(payload.get("last_trade_time"))
     local_now = _local_now(requested_at)
-    if payload.get("instrument_phase") == "awaiting_first_trade" and payload.get("actual_trade_occurred"):
+    if (payload.get("instrument_phase") in {"awaiting_first_trade", "unknown"}
+        and payload.get("actual_trade_occurred")):
         # Canonical breadth-backed quotes can arrive after the empty legacy
         # projection. Reclassify with the confirmed fact, preserving its clock.
         observation = resolve_twse_mis_observation(
@@ -2228,6 +2324,11 @@ def project_taiwan_quote_evidence_bundle(
         requested_at=requested_at,
     )
     _apply_change_reference(response, bundle)
+    if response.get("headline_basis") == "actual_trade":
+        response["headline_decision_usable"] = bool(
+            response.get("headline_decision_usable")
+            and quote_evidence["freshness"]["is_current"]
+        )
     _apply_headline_compatibility_aliases(response)
     selected_sources = [
         observation.lineage.source
@@ -2263,10 +2364,22 @@ def project_taiwan_quote_evidence_bundle(
     ]
     provider_attempts_by_capability = {
         capability: {
-            "attempted": result.acquisition.attempted,
-            "status": result.acquisition.status.value,
-            "providers_attempted": list(result.acquisition.providers_attempted),
-            "resource_attempts": [attempt.model_dump(mode="json") for attempt in result.acquisition.resource_attempts],
+            **result.acquisition.model_dump(mode="json"),
+            "requested": bool(bundle.acquisition_scope is not None and (
+                capability in bundle.acquisition_scope.requested_capabilities
+                or result.acquisition.attempted
+            )),
+            "resource_attempts": [
+                {**attempt.model_dump(mode="json"),
+                 "attempted": result.acquisition.attempted,
+                 "acquisition_status": result.acquisition.status.value,
+                 "resource_health": [health.model_dump(mode="json")
+                     for health in result.provider_health
+                     if health.provider == attempt.provider
+                     and health.resource_id == attempt.resource_id]}
+                for attempt in result.acquisition.resource_attempts
+            ],
+            "persistence": result.persistence.model_dump(mode="json"),
         }
         for capability, result in bundle.component_results.items()
     }

@@ -282,6 +282,11 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
                         "quote": {
                             "latest_price": 2290,
                             "trade_date": "2026-07-17",
+                            "decision_price": {
+                                "value": 2290, "decision_usable": True,
+                                "event_time": "2026-07-17T10:00:00+08:00",
+                                "semantics": "actual_trade", "execution_usable": True,
+                            },
                         }
                     }
                 },
@@ -323,7 +328,7 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
         self.assertEqual(assembled.response_analysis["position_math"]["latest_price"], 2290)
         self.assertEqual(
             assembled.response_analysis["position_math"]["latest_price_source"],
-            "data.compact.quote.latest_price",
+            "data.compact.quote.decision_price",
         )
         self.assertAlmostEqual(
             assembled.response_analysis["position_math"]["unrealized_return_pct"],

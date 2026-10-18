@@ -23,6 +23,7 @@ from app.market.financial_contract import (
 )
 from app.market.financial_metric_semantics import source_reported_financial_semantics
 from app.market.index_resolution import (
+    project_taiwan_index_freshness,
     ResolvedTaiwanIndexTruth,
     resolve_taiwan_index_truth,
 )
@@ -30,6 +31,7 @@ from app.market.live_snapshot import classify_market_snapshot
 from app.market.market_chips import project_market_chip_freshness
 from app.market.monthly_revenue_continuity import analyze_monthly_revenue_continuity
 from app.market.quote_volume import build_taiwan_quote_volume_contract
+from app.market.quote_depth import project_taiwan_quote_price_usability
 from app.market.trading_calendar import (
     normalize_taiwan_session_phase,
     taiwan_session_is_auction,
@@ -210,6 +212,8 @@ def _intraday_slot_status(intraday_bars: dict[str, Any]) -> str:
                 else {}
             )
             coverage_status = coverage.get("status")
+            if item.get("is_partial") is True:
+                return "partial"
             if coverage_status and coverage_status not in {
                 "complete_prefix",
                 "complete_session",
@@ -1828,9 +1832,8 @@ def _compact_quote_snapshot(
         "headline_finalization": quote_depth.get("headline_finalization"),
         "headline_authority": quote_depth.get("headline_authority"),
         "headline_source": quote_depth.get("headline_source"),
-        "headline_decision_usable": bool(
-            quote_depth.get("headline_decision_usable")
-        ),
+        **({"headline_decision_usable": quote_depth["headline_decision_usable"] is True}
+           if "headline_decision_usable" in quote_depth else {}),
         "price_available": price_available,
         "last_trade_available": last_trade_available,
         "last_trade_price": (
@@ -1883,7 +1886,7 @@ def _compact_quote_snapshot(
         "change": quote_depth.get("change"),
         "change_pct": quote_depth.get("change_pct"),
         **volume_contract,
-        "price_decision_usable": price_available,
+        "price_decision_usable": project_taiwan_quote_price_usability(quote_depth),
         "currency": "TWD",
         "price_unit": "TWD",
         "best_bid_price": (
@@ -3105,7 +3108,15 @@ def _intraday_bar_freshness_resource(intraday_bars: dict[str, Any]) -> dict[str,
         for interval, item in series.items()
         if not isinstance(item, dict) or not item.get("returned_point_count")
     ]
-    status = "current" if series and not missing_intervals else "missing"
+    partial_intervals = [
+        interval for interval, item in series.items()
+        if isinstance(item, dict) and (
+            item.get("is_partial") is True
+            or item.get("coverage_status") not in {None, "complete_prefix", "complete_session", "complete"}
+        )
+    ]
+    status = ("missing" if not series or missing_intervals
+              else "partial" if partial_intervals else "current")
     return {
         "resource": "intraday_bars",
         "label": "Intraday bars",
@@ -3114,8 +3125,10 @@ def _intraday_bar_freshness_resource(intraday_bars: dict[str, Any]) -> dict[str,
         "latest": str(max(latest_values)) if latest_values else None,
         "expected": None,
         "reason": (
-            "Intraday bar cache has 1m and 5m data."
+            "Intraday bar cache has data for the requested intervals."
             if status == "current"
+            else "Partial intraday coverage for: " + ", ".join(partial_intervals)
+            if status == "partial"
             else "Missing intraday bars for: " + ", ".join(missing_intervals)
         ),
     }
@@ -3344,15 +3357,6 @@ def _latest_intraday_point(intraday: dict[str, Any] | None) -> dict[str, Any] | 
         if isinstance(point, dict):
             return point
     return None
-
-
-def _intraday_source_is_live(source: str | None) -> bool:
-    source_text = str(source or "")
-    if not source_text:
-        return False
-    if source_text in {"twse_openapi_mi_index", "tpex_openapi_daily_trading_index"}:
-        return False
-    return any(key in source_text for key in ("intraday", "twse_index_5s", "twse_mis", "yahoo_finance_chart"))
 
 
 def _index_candidate_datetime(
@@ -3734,18 +3738,7 @@ def _compact_index_quote(
         resolution.get("selected_event_time")
         or resolution.get("last_trade_time")
     )
-    freshness = classify_market_snapshot(
-        calendar_status=effective_calendar,
-        quote_time=quote_time,
-    )
-    source_supports_intraday = bool(latest_point) and _intraday_source_is_live(source)
-    if not source_supports_intraday and freshness["status"] in {"live", "delayed"}:
-        freshness = {
-            **freshness,
-            "status": "delayed",
-            "is_live": False,
-            "is_realtime": False,
-        }
+    freshness = project_taiwan_index_freshness(truth, calendar_status=effective_calendar)
     timezone_name = str(effective_calendar.get("timezone") or "Asia/Taipei")
     selected_trade_date = resolution.get("selected_trade_date")
     selected_session_date = _index_candidate_date(
@@ -3905,7 +3898,7 @@ def _compact_index_quote(
         "kind": "quote_snapshot",
         "instrument_type": "cash_index",
         "source": source,
-        "provider": source,
+        "provider": resolution.get("selected_provider"),
         "status": (
             "official_close"
             if resolution["official_close_status"] == "confirmed"

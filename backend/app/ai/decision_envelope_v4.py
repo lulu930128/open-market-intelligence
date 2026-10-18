@@ -4241,13 +4241,6 @@ def build(
         for run in _list(execution.get("tool_runs"))
         if isinstance(run, dict)
     ]
-    fill_plan = capability_contract.build_fill_plan(
-        canonical=canonical,
-        selection=selection,
-        manifest=reconciled_manifest,
-        scope_type=scope_type,
-        tool_runs=tool_runs,
-    )
     reader_data = _dict(_dict(projection_response.get("result")).get("data"))
     reader_provider_contract = _dict(reader_data.get("provider_contract"))
     keyed_reader_attempts = _dict(reader_provider_contract.get("provider_attempts_by_capability"))
@@ -4261,6 +4254,14 @@ def build(
     } if keyed_reader_attempts else {
         "quote.snapshot": _list(reader_provider_contract.get("provider_attempts"))
     }
+    fill_plan = capability_contract.build_fill_plan(
+        canonical=canonical,
+        selection=selection,
+        manifest=reconciled_manifest,
+        scope_type=scope_type,
+        tool_runs=tool_runs,
+        primary_reader_acquisitions=keyed_reader_attempts,
+    )
     execution["refresh_reconciliation"] = (
         capability_contract.build_refresh_reconciliation(
             selection=selection,
@@ -4270,6 +4271,7 @@ def build(
             scope_type=scope_type,
             request_policy=_dict(execution.get("policy")),
             primary_reader_provider_attempts=reader_attempts,
+            primary_reader_acquisitions=keyed_reader_attempts,
         )
     )
     canonical["execution"] = execution

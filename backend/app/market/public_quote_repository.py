@@ -364,10 +364,9 @@ class TaiwanPublicQuoteRepository:
             storage_row_id=row.id,
             raw_result_id=raw.id,
             market_session=session,
-            confirmed_at=max(
-                _as_utc(row.received_at),
-                _as_utc(raw.fetched_at),
-            ),
+            # Only the observation receipt confirms its price. Raw fetch time
+            # can belong to a later cache/fallback attempt, not a new trade receipt.
+            confirmed_at=_as_utc(row.received_at),
             rows_examined=1,
         )
 
@@ -378,8 +377,7 @@ class TaiwanPublicQuoteRepository:
         return (
             TaiwanStockQuoteSnapshot.quote_time >= close_at,
             TaiwanStockQuoteSnapshot.quote_time <= confirmed_at,
-            or_(TaiwanStockQuoteSnapshot.received_at >= _as_utc(confirmed_at),
-                RawFetchResult.fetched_at >= _as_utc(confirmed_at)),
+            TaiwanStockQuoteSnapshot.received_at >= _as_utc(confirmed_at),
         )
 
     def preload_session_close_candidates(
@@ -462,6 +460,8 @@ class TaiwanPublicQuoteRepository:
             if existing is None or existing.observation is None or (
                 existing.observation.last_trade_price is None
                 or existing.observation.lineage.event_at < state.price_as_of
+                or (existing.observation.lineage.event_at == state.price_as_of
+                    and not state.current_price_verified)
             ):
                 quote = QuoteObservation(
                     instrument=instrument, lineage=state.lineage.model_copy(update={
@@ -477,7 +477,7 @@ class TaiwanPublicQuoteRepository:
                         else None
                     ),
                     trade_date=state.trade_date, currency="TWD",
-                    state=ObservationState.AVAILABLE,
+                    state=ObservationState.AVAILABLE if state.current_price_verified else ObservationState.STALE,
                     trade_state=TradeObservationState.TRADE_OBSERVED,
                     last_trade_price=state.price,
                     previous_close=state.previous_close,
@@ -492,12 +492,10 @@ class TaiwanPublicQuoteRepository:
                     ).descriptor.priority,
                     raw_result_id=int(quote.lineage.raw_receipt_id.split(":")[1]),
                     market_session=taiwan_market_session(state.price_as_of),
-                    confirmed_at=max(
-                        (value for value in (quote.lineage.received_at, quote.lineage.fetched_at)
-                         if value is not None),
-                        default=None,
+                    confirmed_at=quote.lineage.received_at,
+                    limitations=("CURRENT_SESSION_LAST_ACTUAL_TRADE",) + (
+                        () if state.current_price_verified else ("CURRENT_PRICE_UNVERIFIED",)
                     ),
-                    limitations=("CURRENT_SESSION_LAST_ACTUAL_TRADE",),
                 ))
         return reads
 

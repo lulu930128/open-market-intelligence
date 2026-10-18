@@ -159,6 +159,8 @@ def resolve_twse_mis_observation(
     cumulative_volume_lots: int | None,
     confirmed_trade_occurred: bool = False,
     confirmed_trade_price_available: bool = False,
+    observation_available: bool = True,
+    actual_trade_reason_code: str | None = None,
 ) -> dict[str, Any]:
     """Classify one TWSE MIS observation without IO or persistence.
 
@@ -182,7 +184,11 @@ def resolve_twse_mis_observation(
         or confirmed_trade_occurred
     )
 
-    if market_phase == "market_closed":
+    if not observation_available:
+        instrument_phase = "unknown"
+        projected_legacy_phase = legacy_phase
+        reason_code = "NO_SNAPSHOT"
+    elif market_phase == "market_closed":
         instrument_phase = "closed"
         projected_legacy_phase = "market_closed"
         reason_code = "MARKET_CLOSED"
@@ -212,8 +218,16 @@ def resolve_twse_mis_observation(
             else "OPENING_AUCTION_DELAYED"
         )
     elif market_phase == "regular":
+        known_no_trade = (
+            cumulative_volume_lots == 0
+            and not isinstance(cumulative_volume_lots, bool)
+            and event_time is not None and event_time.date() == local_now.date()
+            and event_time.time() >= TAIWAN_SESSION_OPEN_TIME
+            and actual_trade_reason_code in {None, "ACTUAL_TRADE_EVIDENCE_MISSING"}
+        )
         instrument_phase = (
             "regular_traded" if actual_trade_occurred else "awaiting_first_trade"
+            if known_no_trade else "unknown"
         )
         projected_legacy_phase = "regular_live"
         reason_code = (
@@ -221,7 +235,8 @@ def resolve_twse_mis_observation(
             if actual_trade_price_available or confirmed_trade_price_available
             else "ACTUAL_TRADE_PRICE_MISSING"
             if actual_trade_occurred
-            else "AWAITING_FIRST_TRADE"
+            else "AWAITING_FIRST_TRADE" if known_no_trade
+            else actual_trade_reason_code or "ACTUAL_TRADE_EVIDENCE_MISSING"
         )
     elif market_phase == "closing_auction":
         instrument_phase = "closing_auction"
@@ -251,7 +266,8 @@ def resolve_twse_mis_observation(
         reason_code = "UNKNOWN_SESSION_STATE"
 
     session_final_candidate = bool(
-        market_phase in {"close_resolution", "post_close"}
+        observation_available
+        and market_phase in {"close_resolution", "post_close"}
         and not trial
         and actual_trade_price_available
         and event_time is not None
@@ -259,7 +275,8 @@ def resolve_twse_mis_observation(
         and event_time.time() <= TAIWAN_CLOSE_RESOLUTION_TIME
     )
     session_final_reason_code = (
-        "VALID_CURRENT_SESSION_ACTUAL_TRADE"
+        "NO_SNAPSHOT" if not observation_available
+        else "VALID_CURRENT_SESSION_ACTUAL_TRADE"
         if session_final_candidate
         else "TRIAL_OBSERVATION"
         if trial

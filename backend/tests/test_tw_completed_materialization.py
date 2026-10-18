@@ -437,6 +437,35 @@ def test_shared_time_budget_stops_freeze_before_next_candidate(env, monkeypatch)
         assert not db.query(JobRun).count()
 
 
+def test_summary_query_cost_does_not_grow_per_active_job(env):
+    from sqlalchemy import event
+    h = env
+    with h.factory() as db:
+        row, state = coordinator.checkpoint(db, f"{coordinator.AUDIT_PREFIX}{DAY.date()}")
+        universe = [{"stock_id": str(10000 + i)} for i in range(1000)]
+        for member in universe:
+            job = JobRun(job_type=demand.JOB_TYPE, target="fixture", status="queued")
+            db.add(job)
+            db.flush()
+            db.add(Item(trade_date=DAY.date(), stock_id=member["stock_id"], status="active",
+                        acquisition_lane="repair", scanned_at=DAY, last_job_id=job.id))
+        state.update(universe=universe, universe_revision="fixture")
+        coordinator.save_checkpoint(db, row, state, DAY)
+        statements = []
+        def record(conn, cursor, statement, *args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+        event.listen(h.engine, "before_cursor_execute", record)
+        try:
+            coordinator._summary(db, row, {**state, "universe": universe[:1]}, DAY.date(), DAY)
+            small_query_count = len(statements)
+            statements.clear()
+            result = coordinator._summary(db, row, state, DAY.date(), DAY)
+        finally:
+            event.remove(h.engine, "before_cursor_execute", record)
+        assert result["queued_count"] == 1000 and result["active_count"] == 0
+        assert not result["lifecycle_complete"] and not result["data_complete"]
+        assert len(statements) <= small_query_count, statements
 
 
 def test_real_audit_returns_before_executor_reports_quiescence(env, monkeypatch):

@@ -581,6 +581,10 @@ class BreadthPriceState(CanonicalModel):
     lineage: SourceLineage
     previous_close: Decimal | None = Field(default=None, gt=0)
     cumulative_volume_lots: int | None = Field(default=None, ge=0)
+    # False when retained without current-price qualification. True also allows
+    # unchanged-volume session cache; event age still comes from price_as_of,
+    # never the enclosing receipt, and must pass the existing freshness gate.
+    current_price_verified: bool = True
 
     @model_validator(mode="after")
     def _validate_time(self) -> BreadthPriceState:

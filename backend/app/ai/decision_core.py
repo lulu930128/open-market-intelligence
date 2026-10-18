@@ -742,6 +742,24 @@ def infer_position_context(question: str) -> PositionContext:
     )
 
 
+def requests_saved_position_context(question: str) -> bool:
+    """Require personal Account intent, not a public price/cost/holding metric."""
+    # A caller-supplied cost already supports hypothetical position analysis.
+    # Generic position inference also recognizes public terms such as 均價;
+    # it is deliberately not authorization to read a saved private holding.
+    if extract_position_entry_price(question)[0] is not None:
+        return False
+    personal = contains_non_negated_hint(question, (
+        "我的", "我持有", "我有", "我買", "我手上", "帳戶", "账户",
+        "my ", "our ",
+    ))
+    position = contains_non_negated_hint(question, (
+        "持倉", "持股", "部位", "倉位", "持有", "成本", "停損", "止損", "停利", "續抱",
+        "position", "holding", "cost basis", "entry price", "stop loss", "portfolio",
+    ))
+    return personal and position
+
+
 def infer_question_intent(
     question: str,
     *,

@@ -277,7 +277,18 @@ def ask(
             requested_contract_version=payload.contract_version,
         )
     warnings: list[str] = []
-    if not payload.position_context:
+    # Account context is opt-in. A resolved public-market symbol does not
+    # authorize reading its saved holding (including evidence-only requests).
+    account_context_requested = (
+        scope_type == "portfolio"
+        or decision_core.requests_saved_position_context(payload.question)
+        or "position_risk_decision" in payload.intents
+    )
+    if (
+        not payload.position_context
+        and account_context_requested
+        and not resolution.clarification_required
+    ):
         try:
             saved_position_context = portfolio_service.get_position_context_for_scope(
                 db,
@@ -380,6 +391,7 @@ def ask(
     query_plan_payload = execution_plan.as_dict()
     policy["query_plan"] = query_plan_payload
     stock_read_context = None
+    quote_acquisition_receipts = {}
     tool_stage_payload = payload
     if execution_plan.reader_profile == "capability_graph":
         # Preserve the registry's reader_fetch quote command outside the pure
@@ -406,13 +418,30 @@ def ask(
             and policy["tool_budget"]["max_external_fetches"] > 0
         ):
             try:
-                tools.acquire_taiwan_quote_evidence_projection(
+                acquired_quote = tools.acquire_taiwan_quote_evidence_projection(
                     db=db, stock_id=_require_scope_id(payload, "stock"),
                     policy=RealtimePolicy(execution_plan.realtime_policy),
                     requested_capabilities=quote_capabilities,
                 )
+                quote_acquisition_receipts = dict(
+                    acquired_quote.get("provider_attempts_by_capability") or {}
+                )
+                for capability in quote_capabilities:
+                    quote_acquisition_receipts.setdefault(capability, {
+                        "requested": True, "attempted": False, "status": "unverified",
+                        "resource_attempts": [],
+                        "limitations": ["ACQUISITION_RECEIPT_UNAVAILABLE"],
+                    })
             except Exception as exc:
                 warnings.append(f"Taiwan quote acquisition unavailable: {type(exc).__name__}")
+                # Entering the command proves a request, not a provider call.
+                # Without a receipt the provider outcome remains unverified.
+                quote_acquisition_receipts = {
+                    capability: {"requested": True, "attempted": False,
+                        "status": "unverified", "resource_attempts": [],
+                        "limitations": [f"ACQUISITION_RECEIPT_UNAVAILABLE:{type(exc).__name__}"]}
+                    for capability in quote_capabilities
+                }
             tool_stage_payload = payload.model_copy(update={"tool_budget": {
                 **policy["tool_budget"],
                 "max_calls": policy["tool_budget"]["max_calls"] - 1,
@@ -506,6 +535,14 @@ def ask(
     effective_mode = mode_result.effective_mode
     action = mode_result.action
     result = mode_result.result
+    if quote_acquisition_receipts:
+        # Preserve operation-local receipts across mandatory canonical rereads.
+        # Never replace reread quote values, event times, or resolved health.
+        provider_contract = result.setdefault("data", {}).setdefault("provider_contract", {})
+        provider_contract["provider_attempts_by_capability"] = {
+            **dict(provider_contract.get("provider_attempts_by_capability") or {}),
+            **quote_acquisition_receipts,
+        }
     warnings = mode_result.warnings
     if execution_plan.reader_profile == "capability_graph":
         freshness_result = result.get("freshness") or freshness_result

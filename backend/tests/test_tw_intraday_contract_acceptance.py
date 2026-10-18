@@ -68,7 +68,7 @@ def _breadth_item(
 
 
 class TaiwanIntradayContractAcceptanceTests(unittest.TestCase):
-    def test_case_01_live_depth_only_uses_intraday_current_price(self) -> None:
+    def test_case_01_live_depth_only_preserves_intraday_research_price(self) -> None:
         resolved = resolve_taiwan_current_price(
             quote={
                 "trade_date": "2026-07-30",
@@ -111,13 +111,16 @@ class TaiwanIntradayContractAcceptanceTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(resolved["value"], 110.0)
-        self.assertEqual(resolved["source_kind"], "intraday_bar_latest")
+        self.assertIsNone(resolved["value"])
+        self.assertFalse(resolved["decision_usable"])
+        research = resolved["research_price"]
+        self.assertEqual(research["value"], 110.0)
+        self.assertEqual(research["source_kind"], "intraday_bar_latest")
         self.assertEqual(
-            resolved["semantics"],
+            research["semantics"],
             "delayed_last_trade_finalized_bar",
         )
-        self.assertEqual(resolved["fallback_reason"], "quote_last_trade_unavailable")
+        self.assertEqual(research["fallback_reason"], "quote_last_trade_unavailable")
         self.assertEqual(resolved["reference_price"], 102.5)
 
     def test_case_02_delayed_complete_bars_keep_research_facts_usable(self) -> None:

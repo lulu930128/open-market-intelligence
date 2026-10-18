@@ -977,34 +977,20 @@ def _apply_taiwan_current_price_contract(
             if latest_completed_close > 0:
                 resolved["reference_price"] = latest_completed_close
     quote["provider_trade_date"] = provider_trade_date
-    price_observation = {
-        "price": resolved.get("value"),
-        "event_time": resolved.get("event_time"),
-        "trade_date": resolved.get("trade_date"),
-        "session_phase": calendar_status.get("phase"),
-        "quote_semantics": resolved.get("semantics"),
-        "interval": resolved.get("interval"),
-        "kind": "intraday_bar" if resolved.get("source_kind") == "intraday_bar_latest" else "quote_snapshot",
-        "is_live": False,
-    }
-    if resolved.get("source_kind") != "intraday_bar_latest":
-        price_observation["freshness"] = quote.get("freshness")
-        price_observation["is_live"] = quote.get("is_realtime") is True
-    resolved["freshness"] = classify_observation(
-        price_observation, market="TW", realtime_policy="cache_only",
-        now=datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
-        if isinstance(checked_at, str) else checked_at,
-    )
+    resolved["freshness"] = dict(resolved["quality"])
     quote["current_price"] = resolved
+    quote["decision_price"] = resolved["decision_price"]
+    quote["research_price"] = resolved["research_price"]
     quote["current_price_available"] = resolved.get("value") is not None
     quote["current_price_source"] = resolved.get("source_kind")
     quote["session_date_relation"] = relation
     # The resolved display/research price is a separate evidence object. Never
     # rewrite the snapshot's price, event time, OHLC or source with a bar fallback.
-    if resolved.get("is_estimate") is True:
+    research_price = resolved.get("research_price") or {}
+    if research_price.get("is_estimate") is True:
         # Keep research estimates separate from trade-price compatibility fields.
-        quote["mid_price_estimate"] = resolved.get("value")
-        quote["mid_price_estimate_source"] = resolved.get("source_kind")
+        quote["mid_price_estimate"] = research_price.get("value")
+        quote["mid_price_estimate_source"] = research_price.get("source_kind")
         quote["mid_price_estimate_usable"] = "research_only"
         quote.setdefault("latest_price", None)
         quote.setdefault("price", None)

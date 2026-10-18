@@ -619,7 +619,7 @@ def result_data(result: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+def latest_price_snapshot(result: dict[str, Any], *, target: dict[str, Any] | None = None) -> dict[str, Any]:
     data = result_data(result)
     compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
     canonical_quote = (
@@ -632,6 +632,31 @@ def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(canonical_quote.get("current_price"), dict)
         else {}
     )
+    # Modern Taiwan evidence is fail-closed at the reader, before position math
+    # or envelope readiness. A denied selected price cannot fall through to bars.
+    target = target or compact.get("target") or data.get("target") or result.get("target") or {}
+    decision = canonical_quote.get("decision_price") or current_price.get("decision_price") or current_price
+    freshness = decision.get("quality") or canonical_quote.get("freshness") or {}
+    taiwan_price = bool(
+        target.get("type") == "tw_stock"
+        or str(current_price.get("version") or "").startswith("tw.current_price.")
+        or "decision_price" in canonical_quote
+        or (not target.get("type") and "price_decision_usable" in canonical_quote)
+    )
+    if taiwan_price and (canonical_quote.get("price_decision_usable") is False
+        or canonical_quote.get("headline_decision_usable") is False
+        or canonical_quote.get("is_estimate") is True
+        or current_price.get("is_estimate") is True
+        or freshness.get("is_stale") is True
+        or freshness.get("status") in {"stale", "delayed"}):
+        return {}
+    if taiwan_price:
+        value = numeric_data_value(decision.get("value"))
+        if decision.get("decision_usable") is not True or value is None or value <= 0:
+            return {}
+        return {"value": value, "source": "data.compact.quote.decision_price",
+                "as_of": decision.get("event_time") or decision.get("trade_date"),
+                "execution_usable": decision.get("execution_usable") is True}
     value = numeric_data_value(current_price.get("value"))
     if value is not None:
         return {
@@ -736,12 +761,13 @@ def build_position_math(
     *,
     position_context: dict[str, Any],
     result: dict[str, Any],
+    target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not position_context.get("has_position_context"):
         return {}
 
     entry_price = numeric_data_value(position_context.get("entry_price"))
-    latest_snapshot = latest_price_snapshot(result)
+    latest_snapshot = latest_price_snapshot(result, target=target)
     latest_price = numeric_data_value(latest_snapshot.get("value"))
     pnl_pct = (
         ((latest_price - entry_price) / entry_price) * 100
@@ -755,6 +781,7 @@ def build_position_math(
         "latest_price": latest_price,
         "latest_price_source": latest_snapshot.get("source"),
         "latest_price_as_of": latest_snapshot.get("as_of"),
+        "execution_usable": latest_snapshot.get("execution_usable") is True,
         "unrealized_return_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
         "unrealized_points": round(pnl_points, 4) if pnl_points is not None else None,
         "ready": entry_price is not None and latest_price is not None,
@@ -827,6 +854,7 @@ def build_position_decision(
     position_math = build_position_math(
         position_context=position_context,
         result=result,
+        target=target,
     )
     entry_price = position_math.get("entry_price")
     latest_price = position_math.get("latest_price")
@@ -921,6 +949,12 @@ def build_position_decision(
     data_limits = [
         "缺少你的部位大小、原始停損規則、可承受虧損與預計持有時間。",
     ]
+    if pnl_pct is None and (
+        target.get("type") == "tw_stock"
+        or (result_data(result).get("compact") or {}).get("target", {}).get("type") == "tw_stock"
+    ):
+        action_plan = [{"label": "價格待確認", "text": "缺少合格決策價格；先確認成交時間與品質，暫不產生停損執行建議。"}]
+        data_limits.append("估算、過期成交與研究分 K 不可用於持倉損益或停損觸發。")
     _append_unique_texts(data_limits, supplemental_data_limits or [], limit=summary_limit)
 
     evidence_used = [
@@ -931,6 +965,8 @@ def build_position_decision(
 
     return {
         "kind": "position_decision",
+        "price_decision_usable": position_math.get("ready") is True,
+        "execution_usable": position_math.get("execution_usable") is True,
         "intent": "position_risk_decision",
         "question": question,
         "topic": topic,

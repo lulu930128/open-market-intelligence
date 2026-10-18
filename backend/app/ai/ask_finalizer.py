@@ -469,7 +469,13 @@ def _market_live_summary(
         and intraday_latest_price is not None
         and intraday_freshness not in {"stale", "missing", "unavailable"}
     )
-    if resolved_current_price is not None:
+    if (str(current_price.get("version") or "").startswith("tw.current_price.")
+        and current_price.get("decision_usable") is not True):
+        display_price = None
+        display_price_source = None
+        display_price_time = None
+        display_price_freshness = "missing"
+    elif resolved_current_price is not None:
         display_price = resolved_current_price
         display_price_source = (
             current_price.get("source_kind") or "resolved_current_price"
@@ -517,6 +523,7 @@ def _market_live_summary(
         "quote_source": quote.get("source"),
         "quote_provider": quote.get("provider"),
         "current_price": current_price or None,
+        "research_price": quote.get("research_price") or current_price.get("research_price"),
         "source_is_intraday": bool(quote.get("source_is_intraday") or intraday_available),
         "is_realtime": display_is_live
         or display_price_freshness in {"live", "current"},

@@ -533,6 +533,7 @@ def persist_taiwan_intraday_stock_states(
     *,
     rows: Iterable[dict[str, Any]],
     now: datetime | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     checked_at = _aware_taipei(now) or datetime.now(TAIWAN_TZ)
     inserted_count = 0
@@ -833,7 +834,7 @@ def persist_taiwan_intraday_stock_states(
                 setattr(existing, key, value)
             updated_count += 1
 
-    if inserted_count or updated_count:
+    if commit and (inserted_count or updated_count):
         db.commit()
     return {
         "kind": "taiwan_intraday_stock_state_persist",

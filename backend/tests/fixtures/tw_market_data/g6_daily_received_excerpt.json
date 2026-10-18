@@ -1,0 +1,100 @@
+{
+  "provenance": "Bounded excerpt of stored raw_text; not a new provider call or original wire-byte proof",
+  "tpex_raw_result_id": 690601,
+  "twse_raw_result_id": 690597,
+  "tpex": [
+    {
+      "Date": "1151008",
+      "SecuritiesCompanyCode": "3324",
+      "CompanyName": "雙鴻",
+      "Close": "1520.00",
+      "Change": "-5.00",
+      "Open": "1420.00",
+      "High": "1570.00",
+      "Low": "1395.00",
+      "TradingShares": "5945000",
+      "TransactionAmount": "8955635000",
+      "TransactionNumber": "4665",
+      "LatestBidPrice": "1515.00",
+      "LatesAskPrice": "1520.00",
+      "Capitals": "93076837",
+      "NextLimitUp": "1670.00",
+      "NextLimitDown": "1370.00"
+    }
+  ],
+  "twse": {
+    "tables": [
+      {
+        "title": "115年10月12日 每日收盤行情(全部(不含權證、牛熊證、可展延牛熊證))",
+        "fields": [
+          "證券代號",
+          "證券名稱",
+          "成交股數",
+          "成交筆數",
+          "成交金額",
+          "開盤價",
+          "最高價",
+          "最低價",
+          "收盤價",
+          "漲跌(+/-)",
+          "漲跌價差",
+          "最後揭示買價",
+          "最後揭示買量",
+          "最後揭示賣價",
+          "最後揭示賣量",
+          "本益比"
+        ],
+        "data": [
+          [
+            "2883",
+            "凱基金",
+            "57,137,594",
+            "15,591",
+            "2,200,470,279",
+            "37.30",
+            "39.10",
+            "37.10",
+            "38.80",
+            "<p style= color:red>+</p>",
+            "1.25",
+            "38.75",
+            "18",
+            "38.80",
+            "711",
+            "13.57"
+          ]
+        ],
+        "hints": "單位：元、股",
+        "groups": [
+          {
+            "start": 0,
+            "span": 11,
+            "title": "(元,股)"
+          },
+          {
+            "start": 11,
+            "span": 5,
+            "title": "(元,交易單位)"
+          }
+        ],
+        "notes": [
+          "漲跌(+/-)欄位符號說明:+/-/X表示漲/跌/不比價。",
+          "當證券代號為認購(售)權證及認股權憑證時本益比欄位置為結算價；但如為以外國證券或指數為標的之認購(售)權證及履約方式採歐式者，該欄位為空白。",
+          "除境外指數股票型基金及外國股票第二上市外，餘交易單位皆為千股。",
+          "本統計資訊含一般、零股、盤後定價，不含鉅額、拍賣、標購。"
+        ]
+      }
+    ],
+    "type": "ALLBUT0999",
+    "params": {
+      "date": "20261012",
+      "type": "ALLBUT0999",
+      "response": "json",
+      "controller": "afterTrading",
+      "action": "MI_INDEX",
+      "lang": "zh"
+    },
+    "stat": "OK",
+    "date": "20261012"
+  }
+}

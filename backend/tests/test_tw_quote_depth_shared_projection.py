@@ -261,7 +261,8 @@ def test_confirmed_session_trade_reclassifies_awaiting_phase_without_retiming_pr
         earlier.trade_date = NOW.date() - timedelta(days=1)
         db.commit()
         missing = _row_to_response(db, latest, phase="regular_live", now=NOW)
-        assert missing["instrument_phase"] == "awaiting_first_trade"
+        assert missing["instrument_phase"] == "unknown"
+        assert missing["observation_reason_code"] == "ACTUAL_TRADE_EVIDENCE_MISSING"
         assert missing["actual_trade_occurred"] is False
         assert missing["last_trade_price"] is None
     finally:

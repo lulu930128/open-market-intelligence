@@ -535,7 +535,9 @@ Quote/depth observation 的 auction 歸屬依 event time 判定，presentation c
 
 Market chips projection 與 Source Health 共用 calendar release window 的 expected trade date 判定 freshness，不能因為有資料便標為 current。Quote bundle 的 provider attempts 分 capability 保留；depth acquisition 不得改寫 cached quote 的 provider provenance。
 
-台股 `quote.snapshot` 的頂層 price／OHLC／event time 保留 snapshot evidence；其中 `current_price` 是獨立 resolved current-price 物件，帶有來源、時間、freshness 與 fallback reason。它可以取用 canonical 1m fallback，但不可讓 snapshot quality 因此升級。既有內部 display／decision consumers 使用 `current_price`，HTTP/SSE/MCP 均由同一 capability projection 傳遞；不新增 price alias 或 consumer-side fallback。
+台股 `quote.snapshot` 的頂層 price／OHLC／event time 保留 snapshot evidence；其中 `current_price` 是獨立 resolved current-price 物件，帶有來源、時間、freshness 與拒絕原因。其 value 只接受 Market owner 合格的 `decision_price`；canonical 1m、midpoint、stale 或前收參考保留在 `research_price`，不能供 PnL／停損或提高 snapshot quality。合法 completed-session close 可供決策估值，但不具 execution usability。HTTP/SSE/MCP 均由同一 capability projection 傳遞；不新增 price alias 或 consumer-side fallback。
+
+公開行情 scope 不授權讀取 Account。`ask` 只有在明示個人持倉需求、`position_risk_decision` intent 或 portfolio scope 時，才可查詢 saved position context；未解析完成的 target 不查詢。Caller 已提供 position context 或自然語言假設成本時，不自動補入私人持倉。`data_only`／`evidence_only` 本身不構成 Account 意圖；均價、機構持股或一般 quote 能力也不構成授權。真正 portfolio capability 仍走既有 portfolio scope／Account owner。
 
 `market.breadth.auction_breadth` 來自 canonical indicative companion，各市場有自己的 lineage、時間、coverage 與 freshness。盤前 generic overview 將正式成交尚未開始與試搓廣度分開呈現，不將 indicative counts 寫入 actual fields。
 

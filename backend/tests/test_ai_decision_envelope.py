@@ -3058,12 +3058,12 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(fill_plan["actions"], [])
         quote_deferred = next(
             item
-            for item in fill_plan["already_attempted_actions"]
+            for item in fill_plan["deferred_actions"]
             if item["capability"] == "quote.snapshot"
         )
         self.assertEqual(
             quote_deferred["reason"],
-            "reader_fetch_on_primary_request",
+            "reader_fetch_without_acquisition_receipt",
         )
         self.assertEqual(
             quote_deferred["refresh_strategy"],
@@ -3073,11 +3073,11 @@ class AiDecisionEnvelopeTests(unittest.TestCase):
         self.assertTrue(quote_deferred["refresh_requires_market_open"])
         refresh = canonical["execution"]["refresh_reconciliation"]
         quote_refresh = refresh["capabilities"]["quote.snapshot"]
-        self.assertTrue(quote_refresh["primary_reader_attempted"])
+        self.assertFalse(quote_refresh["primary_reader_attempted"])
         self.assertFalse(quote_refresh["provider_fetch_attempted"])
         self.assertEqual(
             quote_refresh["not_attempted_reason"],
-            "primary_reader_completed_without_tracked_provider_fetch",
+            "refresh_not_requested",
         )
         quote_manifest = next(
             item

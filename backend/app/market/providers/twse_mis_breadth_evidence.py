@@ -5,7 +5,7 @@ field/size limited; the digest covers the returned original messages, not HTTP b
 """
 from __future__ import annotations
 
-from concurrent.futures import Future, TimeoutError as FutureTimeout
+from concurrent.futures import Future, wait
 from hashlib import sha256
 import json
 from threading import Lock, Thread
@@ -20,6 +20,10 @@ _IN_FLIGHT: dict[str, Future] = {}
 
 class AcquisitionInFlight(RuntimeError):
     """An earlier timed-out transport still owns the single IO slot."""
+
+
+class AcquisitionDeadlineExceeded(TimeoutError):
+    """Caller budget expired; this does not establish a socket timeout."""
 
 
 def reset_io_slots() -> None:
@@ -42,7 +46,7 @@ blocks subsequent IO until completion instead of accumulating background workers
         raise ValueError("MIS breadth transport requires an explicit venue")
     deadline = monotonic() + seconds
     if seconds <= 0:
-        raise TimeoutError("TWSE_MIS_ACQUISITION_DEADLINE")
+        raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE")
     with _IO_LOCK:
         previous = _IN_FLIGHT.get(venue)
         if previous is not None and not previous.done():
@@ -57,10 +61,12 @@ blocks subsequent IO until completion instead of accumulating background workers
                 future.set_exception(exc)
 
         Thread(target=run, name=f"twse-mis-breadth-{venue}-io", daemon=True).start()
-    try:
-        return future.result(timeout=max(0.0, deadline - monotonic()))
-    except FutureTimeout as exc:
-        raise TimeoutError("TWSE_MIS_ACQUISITION_DEADLINE") from exc
+    completed, _ = wait((future,), timeout=max(0.0, deadline - monotonic()))
+    if not completed:
+        raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE")
+    # Resolve outside the wait: Future.result also raises the worker's own
+    # TimeoutError, which must not be relabeled as caller budget exhaustion.
+    return future.result()
 
 
 def original_message_evidence(messages: list[dict], missing: list[dict]) -> dict:

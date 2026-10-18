@@ -39,9 +39,11 @@ class TaiwanQuoteComponentTests(unittest.TestCase):
             calendar_status={"date": "2026-09-08", "phase": "regular_live", "is_trading_day": True},
             checked_at=datetime.fromisoformat("2026-09-08T10:06:00+08:00"),
         )
-        self.assertEqual(resolved["value"], 2490)
-        self.assertEqual(resolved["source_kind"], "intraday_bar_latest")
-        self.assertEqual(resolved["event_time"], "2026-09-08T10:04:00+08:00")
+        self.assertIsNone(resolved["value"])
+        self.assertFalse(resolved["decision_usable"])
+        self.assertEqual(resolved["research_price"]["value"], 2490)
+        self.assertEqual(resolved["research_price"]["source_kind"], "intraday_bar_latest")
+        self.assertEqual(resolved["research_price"]["event_time"], "2026-09-08T10:04:00+08:00")
         for key, value in original.items():
             self.assertEqual(quote[key], value, key)
         self.assertEqual(quote["current_price"], resolved)
@@ -59,7 +61,8 @@ class TaiwanQuoteComponentTests(unittest.TestCase):
         outward = projected["quote.snapshot"]
         self.assertEqual(outward["price"], 2470)
         self.assertEqual(outward["high_price"], 2475)
-        self.assertEqual(outward["current_price"]["value"], 2490)
+        self.assertIsNone(outward["current_price"]["value"])
+        self.assertEqual(outward["current_price"]["research_price"]["value"], 2490)
         self.assertEqual(outward["freshness"]["status"], "stale")
         from app.ai.data_quality_contract import _quality_for_capability
         quality = _quality_for_capability(

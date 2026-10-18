@@ -1837,9 +1837,9 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["actions"], [])
-        self.assertEqual(plan["summary"]["deferred_count"], 3)
+        self.assertEqual(plan["summary"]["deferred_count"], 4)
         self.assertEqual(plan["summary"]["unfillable_count"], 1)
-        self.assertEqual(plan["summary"]["already_attempted_count"], 1)
+        self.assertEqual(plan["summary"]["already_attempted_count"], 0)
         reasons = {
             item["capability"]: item["reason"]
             for item in plan["resolutions"]
@@ -1862,7 +1862,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         )
         self.assertEqual(
             reasons["intraday.bars"],
-            "reader_fetch_on_primary_request",
+            "reader_fetch_without_acquisition_receipt",
         )
 
     def test_fill_plan_does_not_repeat_already_attempted_primary_reader(
@@ -1957,29 +1957,29 @@ class AiCapabilityContractTests(unittest.TestCase):
             scope_type="market",
         )
         outcome = reconciliation["capabilities"]["intraday.bars"]
-        self.assertTrue(outcome["primary_reader_attempted"])
+        self.assertFalse(outcome["primary_reader_attempted"])
         self.assertFalse(outcome["tool_run_attempted"])
         self.assertFalse(outcome["provider_fetch_attempted"])
         self.assertFalse(outcome["cache_hit"])
         self.assertEqual(
             outcome["not_attempted_reason"],
-            "primary_reader_completed_without_tracked_provider_fetch",
+            "refresh_not_requested",
         )
-        self.assertTrue(reconciliation["primary_reader_attempted"])
+        self.assertFalse(reconciliation["primary_reader_attempted"])
         self.assertFalse(reconciliation["provider_fetch_attempted"])
         self.assertEqual(
             reconciliation["not_attempted_reason"],
-            "primary_reader_completed_without_tracked_provider_fetch",
+            "refresh_not_requested",
         )
         self.assertTrue(outcome["final_payload_present"])
         self.assertEqual(
             outcome["final_quality_issue"],
             ["live_requirement_not_satisfied"],
         )
-        self.assertEqual(outcome["resolution_type"], "already_attempted")
+        self.assertEqual(outcome["resolution_type"], "deferred_action")
         self.assertEqual(
             outcome["unresolved_reason"],
-            "reader_fetch_on_primary_request",
+            "reader_fetch_without_acquisition_receipt",
         )
 
     def test_reconciliation_distinguishes_requested_refresh_from_policy_denial(self) -> None:

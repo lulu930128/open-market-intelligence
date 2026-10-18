@@ -96,6 +96,7 @@ def test_11_batches_19184ms_preserves_primary_coverage_and_uses_fractional_rescu
     assert evidence.batch_count == 12
     assert evidence.actual_trade_price_count == 1048
     assert evidence.missing_z_count == 84  # Original scan: 64 traded missing + 20 no-trade.
+    assert evidence.scan_start_code == evidence.scan_next_code == CODES[0]
     assert evidence.verified_no_trade_count == 20
     assert evidence.rescue.candidate_count == 64
     assert evidence.rescue.attempted_count == evidence.rescue.succeeded_count == 32
@@ -103,7 +104,10 @@ def test_11_batches_19184ms_preserves_primary_coverage_and_uses_fractional_rescu
     assert evidence.rescue.skip_reasons == {"RESCUE_SKIPPED_SYMBOL_CAP": 32}
     assert calls[-1][1] == pytest.approx(0.816)
     assert evidence.budget_elapsed_seconds == pytest.approx(19.684)
-    assert evidence.scan_budget_seconds == evidence.total_hard_deadline_seconds == 20
+    assert evidence.scan_budget_seconds == 20
+    assert evidence.total_hard_deadline_seconds is None
+    assert evidence.total_ceiling_seconds == 22
+    assert evidence.finalization_allowance_seconds == 2
     assert evidence.rescue_max_budget_seconds == 4
     assert not evidence.deadline_exceeded
     assert evidence.batches[0].missing_examples[0]["z"] == "-"
@@ -269,3 +273,146 @@ def test_late_transport_cannot_modify_cache_guard_or_publish_rows(monkeypatch):
     assert not provider._CACHE and not provider._STOCK_ROWS
     assert provider.TWSE_MIS_PROVIDER_GUARD.snapshot() == guard
     assert evidence["batches"][0]["returned"] == 0
+
+
+@pytest.mark.parametrize("market", ["TWSE", "TPEX"])
+def test_truncated_scan_rotates_across_refreshes_without_merging_old_rows(clock, monkeypatch, market):
+    codes = CODES[:600]
+    starts = []
+    def slow(batch, *, timeout_seconds, **kwargs):
+        starts.append(batch[0])
+        duration = 1.5
+        clock.seconds += min(duration, timeout_seconds)
+        if duration > timeout_seconds:
+            raise TimeoutError("fixture vendor latency")
+        return [message(code) for code in batch]
+    monkeypatch.setattr(provider.twse_mis, "fetch_stock_messages", slow)
+    observed = set()
+    for expected_start, next_start in ((codes[0], codes[200]), (codes[200], codes[400]), (codes[400], codes[0])):
+        began = clock.seconds
+        result = provider.read_twse_mis_current_breadth(market, 4, universe_reader=lambda _: codes)
+        assert clock.seconds - began <= 4
+        assert result.external_calls == 3
+        assert result.status == "partial"
+        diag = result.payload["acquisition_diagnostics"]
+        assert diag["scan_start_code"] == expected_start
+        assert diag["scan_next_code"] == next_start
+        assert diag["requested_symbol_count"] == 300
+        assert result.payload["message_count"] == 200
+        assert result.payload["not_received_count"] == 400
+        assert result.payload["skipped_batch_count"] == 3
+        current = {row["code"] for row in provider.get_cached_current_breadth_stock_rows(market)}
+        assert len(current) == 200 and not (current & observed)
+        observed |= current
+        # A cache hit performs no IO and does not advance scan scheduling.
+        cached = provider.read_twse_mis_current_breadth(market, 4, universe_reader=lambda _: codes)
+        assert cached.external_calls == 0
+        provider._CACHE[market]["expires_at"] = 0
+    assert observed == set(codes)
+    assert starts == [codes[0], codes[100], codes[200], codes[200], codes[300], codes[400], codes[400], codes[500], codes[0]]
+
+
+@pytest.mark.parametrize("market", ["TWSE", "TPEX"])
+@pytest.mark.parametrize("digest_seconds,exceeded", [(0.1, False), (1.0, False), (3.0, True)])
+def test_timely_batch_survives_digest_tail_and_never_starts_io_after_scan_budget(
+    clock, monkeypatch, market, digest_seconds, exceeded,
+):
+    calls = []
+    def fetch(codes, **kwargs):
+        calls.append(clock.seconds)
+        clock.seconds += 19.8
+        return [message(code) for code in codes]
+    digest = provider.original_message_evidence
+    def slow_digest(*args):
+        clock.seconds += digest_seconds
+        return digest(*args)
+    monkeypatch.setattr(provider.twse_mis, "fetch_stock_messages", fetch)
+    monkeypatch.setattr(provider, "original_message_evidence", slow_digest)
+    # Fast finalization still leaves a fractional allocation; the next IO fails
+    # honestly rather than completing another 19.8 seconds outside its budget.
+    def bounded(fetcher, seconds, *args, **kwargs):
+        if seconds < 19.8:
+            calls.append(clock.seconds)
+            clock.seconds += seconds
+            raise TimeoutError("fixture bounded IO")
+        return fetcher(*args, **kwargs)
+    monkeypatch.setattr(provider, "bounded_fetch", bounded)
+    outcome = provider.read_twse_mis_current_breadth(market, 20, universe_reader=lambda _: CODES)
+    receipt = BreadthAcquisitionEvidence.model_validate(outcome.payload["acquisition_diagnostics"])
+    assert receipt.eligible_stock_row_count == 100
+    assert outcome.payload["message_count"] == 100 and outcome.payload["not_received_count"] == 1000
+    assert outcome.status == "partial" and not outcome.payload["decision_usable"]
+    assert all(start < 20 for start in calls)
+    assert receipt.batches[0].fetch_completed_in_budget
+    assert receipt.batches[0].fetch_decode_seconds == pytest.approx(19.8)
+    assert receipt.batches[0].digest_seconds == pytest.approx(digest_seconds)
+    assert receipt.batches[0].error is None
+    assert receipt.total_elapsed_seconds == pytest.approx(max(20, 19.8 + digest_seconds))
+    assert receipt.deadline_exceeded is exceeded
+    assert receipt.total_hard_deadline_seconds is None
+    assert receipt.timing_policy == "bounded_io_cooperative_finalization"
+    assert receipt.phase_seconds["scan"] == pytest.approx(receipt.total_elapsed_seconds)
+    assert set(receipt.phase_seconds) == {"preparation", "scan", "payload_build", "rescue", "receipt_finalization"}
+    assert receipt.scan_next_code == CODES[100]
+    if exceeded:
+        assert outcome.detail_code == "TWSE_MIS_FINALIZATION_CEILING_EXCEEDED"
+
+
+def test_receipt_finalization_itself_is_measured(clock, monkeypatch):
+    original_dump = BreadthAcquisitionEvidence.model_dump
+    def slow_dump(self, *args, **kwargs):
+        clock.seconds += 3
+        return original_dump(self, *args, **kwargs)
+    monkeypatch.setattr(BreadthAcquisitionEvidence, "model_dump", slow_dump)
+    receipt = provider._finish_acquisition({}, market="TWSE", codes=[], payload=None,
+        started=0, started_wall=NOW, timeout_seconds=20, acquisition_id="synthetic")
+    assert receipt["total_elapsed_seconds"] == 3
+    assert receipt["phase_seconds"]["receipt_finalization"] == 3
+    assert receipt["finished_at"] == (NOW + timedelta(seconds=3)).isoformat()
+
+
+def test_transport_and_json_decode_clocks_are_separate(clock, monkeypatch):
+    monkeypatch.setattr(provider.twse_mis, "monotonic", lambda: clock.seconds)
+    def request(*args, **kwargs):
+        clock.seconds += 1
+        return object()
+    def decode(_response):
+        clock.seconds += 2
+        return {"rtcode": "0000", "msgArray": [message("6000")]}
+    monkeypatch.setattr(provider.twse_mis, "json_from_response", decode)
+    timing = {}
+    rows = provider.twse_mis.fetch_stock_messages(["6000"], request=request, phase_timing=timing)
+    assert len(rows) == 1 and timing == {"transport_seconds": 1, "decode_seconds": 2}
+
+
+def test_decode_exception_is_not_a_transport_success(clock, monkeypatch):
+    def malformed(*args, **kwargs):
+        clock.seconds += 0.2
+        raise ValueError("invalid JSON fixture")
+    monkeypatch.setattr(provider.twse_mis, "fetch_stock_messages", malformed)
+    diag = {}
+    rows, failed, calls = provider._fetch_messages(CODES[:100], "TWSE", 20, diagnostics=diag)
+    assert rows == [] and failed == calls == 1
+    assert diag["batches"][0]["error"] == "parse_error"
+    assert diag["batches"][0]["fetch_decode_seconds"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("market", ["TWSE", "TPEX"])
+def test_all_batches_succeed_but_payload_finalization_overrun_is_partial(clock, monkeypatch, market):
+    monkeypatch.setattr(provider.twse_mis, "fetch_stock_messages", lambda codes, **_: [message(c) for c in codes])
+    build = provider._build_payload
+    def slow_build(*args, **kwargs):
+        value = build(*args, **kwargs)
+        clock.seconds += 23
+        return value
+    monkeypatch.setattr(provider, "_build_payload", slow_build)
+    result = provider.read_twse_mis_current_breadth(market, 20, universe_reader=lambda _: CODES)
+    receipt = result.payload["acquisition_diagnostics"]
+    assert result.status == result.payload["status"] == "partial"
+    assert result.operational_status.value == "degraded"
+    assert result.external_calls == 11 and result.payload["failed_batch_count"] == 0
+    assert result.payload["message_count"] == 1100
+    assert receipt["eligible_stock_row_count"] == receipt["universe_count"] == 1100
+    assert not result.payload["decision_usable"] and receipt["deadline_exceeded"]
+    assert receipt["total_elapsed_seconds"] == 23 and receipt["phase_seconds"]["payload_build"] == 23
+    assert market not in provider._LAST_GOOD

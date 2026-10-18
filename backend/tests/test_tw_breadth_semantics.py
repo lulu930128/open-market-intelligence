@@ -43,7 +43,11 @@ def test_cache_rejects_unconfirmed_or_changed_volume(current_volume, cached_volu
     assert row["price_as_of"] is None
     assert row["cache_rejection_reason"] == reason
     assert payload["classified_count"] == 0
-    assert "2330" not in payload["price_states"]
+    retained = payload["price_states"]["2330"]
+    assert retained["price"] == prior["price"]
+    assert retained["price_as_of"] == prior["price_as_of"]
+    assert retained["cumulative_volume_lots"] == cached_volume
+    assert retained["current_price_verified"] is False
     if current_volume != "-":
         assert payload["coverage_reason_counts"]["actual_trade_unavailable"] == 1
 
@@ -122,7 +126,7 @@ def test_real_gaps_still_degrade_quality_without_fabricating_staleness(kind):
         engine.dispose()
 
 
-def test_confirmed_volume_persists_and_invalidated_price_does_not_resurrect():
+def test_confirmed_trade_survives_but_invalidated_current_price_does_not_resurrect():
     db, engine = _db()
     try:
         acquire(db, provider._build_payload("TWSE", ["2330", "2454"], [message(), message("2454")], 0))
@@ -138,7 +142,20 @@ def test_confirmed_volume_persists_and_invalidated_price_does_not_resurrect():
         raw = provider._build_payload("TWSE", ["2330", "2454"],
             [message(z="-", v="6", t="10:17:00"), message("2454", t="10:17:00")], 0, prior_states={"2330": retained})
         acquire(db, raw, later + timedelta(minutes=1))
-        assert "2330" not in read_current_stock_price_states(db, venue="TWSE", requested_at=later + timedelta(minutes=1))
+        historical = read_current_stock_price_states(db, venue="TWSE", requested_at=later + timedelta(minutes=1))["2330"]
+        assert historical == {**original, "current_price_verified": False}
+        from app.db.models import StockMaster
+        from app.market.public_quote_platform import read_taiwan_public_last_trade_quote
+        db.add(StockMaster(stock_id="2330", stock_name="test", market="TWSE", instrument_type="stock"))
+        db.commit()
+        quote = read_taiwan_public_last_trade_quote(db, stock_id="2330", requested_at=later + timedelta(minutes=1))
+        assert quote.resolved.quote.last_trade_price == original["price"]
+        assert quote.resolved.quote.lineage.event_at == original["price_as_of"]
+        assert quote.resolved.quote.lineage.raw_receipt_id == original["lineage"]["raw_receipt_id"]
+        assert quote.resolved.candidates[0].freshness.value == "stale"
+        assert "CURRENT_PRICE_UNVERIFIED" in quote.limitations
+        # Missing volume remains unknown, and next-session reads cannot inherit it.
+        assert read_current_stock_price_states(db, venue="TWSE", requested_at=NOW + timedelta(days=1)) == {}
     finally:
         db.close()
         engine.dispose()
