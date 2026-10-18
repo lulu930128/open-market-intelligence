@@ -32,7 +32,10 @@ def main():
         result = json.loads(child.stdout)
         assert child.returncode == 2 and result['status'] == 'BLOCKED'
         assert result['broker_calls'] == 0 and result['orders_sent'] == 0
-        assert all(result['dedicated_secret_presence'].values()) == (case == 'sim_presence_cannot_unlock')
+        assert not any(result['dedicated_secret_presence'].values())
+        assert result['credential_owner'] == 'app.config.Settings'
+        assert result['credential_values_read'] is False
+        assert 'SIM_ENTITLEMENT_UNVERIFIED' in result['probe']['reasonCodes']
         checks.append(case)
     script = r"""
 $m = [System.Threading.Mutex]::new($false, 'Local\OMI_KGI_OFFICIAL_SIM_QUALIFICATION_V1')

@@ -11,7 +11,7 @@ forbidden_prefixes = ["execution_kgi_simulator"]
 id = "kgi_sim_no_second_owner_or_live_sdk"
 kind = "python_forbidden_import"
 roots = ["execution_kgi_simulator"]
-exclude_path_prefixes = ["execution_kgi_simulator/tests"]
+exclude_path_prefixes = ["execution_kgi_simulator/tests", "execution_kgi_simulator/native/adapter.py", "execution_kgi_simulator/native/credentials.py", "execution_kgi_simulator/native/windows_host.py"]
 extensions = [".py"]
 forbidden_prefixes = ["app", "backend", "agents", "paos", "personal_asset_os", "kgi_broker_bridge", "kgisuperpy", "sqlite3", "sqlalchemy", "requests", "httpx", "urllib", "socket", "ctypes", "execution.state_machine", "execution.service", "execution_broker_preflight", "execution_manual_mock", "execution_simulation.storage"]
 
@@ -22,3 +22,90 @@ roots = ["execution_kgi_simulator"]
 exclude_path_prefixes = ["execution_kgi_simulator/tests"]
 extensions = [".py"]
 forbidden_call_names = ["assess", "transition", "connect", "commit", "rollback", "eval", "exec", "__import__", "import_module", "load_dotenv", "Popen", "system"]
+
+[[rules]]
+id = "real_sim_no_synthetic_or_execution_ingress"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator/real_sim.py"]
+extensions = [".py"]
+forbidden_prefixes = ["execution", "execution_simulation", "execution_kgi_simulator.fake", "execution_kgi_simulator.wire", "execution_kgi_simulator.tests"]
+
+[[rules]]
+id = "real_sim_no_native_or_order_effect"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator/real_sim.py"]
+extensions = [".py"]
+forbidden_call_names = ["login", "Login", "Connect", "create_order", "cancel_order", "cancel_order_all", "set_Account", "dispatch", "callback"]
+
+[[rules]]
+id = "login_only_no_order_or_live_adapter"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator/login_probe.py"]
+extensions = [".py"]
+forbidden_call_names = ["create_order", "cancel_order", "cancel_order_all", "set_Account", "set_event", "subscribe", "Connect", "Login", "get_settings", "Settings"]
+
+[[rules]]
+id = "qualification_cannot_dispatch_login_fixture"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator/worker.py", "execution_kgi_simulator/real_sim.py"]
+extensions = [".py"]
+forbidden_call_names = ["exercise_fixture", "encode_private_frame", "read_private_frame", "login", "get_settings", "Settings"]
+
+# Exact private source seams only. The source checker never dispatches them.
+[[rules]]
+id = "native_sim_adapter_no_second_owner"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator/native/adapter.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "sqlite3", "sqlalchemy", "execution", "execution_simulation", "execution_kgi_simulator.fake", "execution_kgi_simulator.wire", "execution_kgi_simulator.tests", "socket", "ctypes", "subprocess", "requests", "httpx"]
+
+[[rules]]
+id = "native_sim_credentials_only_canonical_owner"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator/native/credentials.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.market", "app.portfolio", "app.db", "backend", "agents", "kgisuperpy", "sqlite3", "sqlalchemy", "dotenv", "socket", "ctypes", "subprocess", "execution", "execution_simulation"]
+
+[[rules]]
+id = "native_sim_no_order_or_second_settings"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator/native"]
+extensions = [".py"]
+forbidden_call_names = ["Settings", "get_settings", "getenv", "load_dotenv", "create_order", "update_order", "cancel_order", "cancel_order_all", "set_Account", "set_FutAccount", "set_SubAccount", "set_disconnect_cb", "set_event", "subscribe", "Connect", "Login", "SetCA_PFX", "SetCA_PW"]
+
+[[rules]]
+id = "native_sim_no_issuer_or_secret_dispatch_in_source_worker"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator/worker.py", "execution_kgi_simulator/real_sim.py", "execution_kgi_simulator/native/readiness.py"]
+extensions = [".py"]
+forbidden_prefixes = ["execution_kgi_simulator.native.adapter", "execution_kgi_simulator.native.credentials", "execution_kgi_simulator.native.windows_host", "execution_kgi_simulator.native.parent", "app.config", "kgisuperpy"]
+
+[[rules]]
+id = "native_child_never_reads_settings_or_fixture"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator/native/worker.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "execution_kgi_simulator.native.credentials", "execution_kgi_simulator.tests", "execution_kgi_simulator.fake", "execution_kgi_simulator.wire", "kgisuperpy"]
+
+# Native ctypes is confined to the single Windows lifecycle implementation; it is
+# not a general SDK/secret/network escape or an issuer.
+[[rules]]
+id = "native_windows_host_no_sdk_secrets_or_second_owner"
+kind = "python_forbidden_import"
+roots = ["execution_kgi_simulator/native/windows_host.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app", "backend", "agents", "kgisuperpy", "sqlite3", "sqlalchemy", "socket", "requests", "httpx", "urllib", "subprocess", "execution", "execution_simulation", "execution_kgi_simulator.native.credentials", "execution_kgi_simulator.native.adapter"]
+
+[[rules]]
+id = "native_host_cannot_install_policy_or_dispatch_secrets"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator/native/windows_host.py", "execution_kgi_simulator/native/parent.py", "execution_kgi_simulator/native/host_policy.py"]
+extensions = [".py"]
+forbidden_call_names = ["NtResumeProcess", "CreateProcessW", "CreateAppContainerProfile", "DeleteAppContainerProfile", "FwpmEngineOpen0", "FwpmFilterAdd0", "SetNamedSecurityInfoW", "SetSecurityInfo", "RegSetValueExW", "LoadLibraryW", "LoadLibraryExW", "_canonical_frame", "_handoff_once", "login", "_login_readback_logout"]
+
+[[rules]]
+id = "native_parent_policy_cannot_resume"
+kind = "python_forbidden_call"
+roots = ["execution_kgi_simulator/native/parent.py", "execution_kgi_simulator/native/host_policy.py"]
+extensions = [".py"]
+forbidden_call_names = ["ResumeThread", "CreateProcessAsUserW", "WinDLL"]

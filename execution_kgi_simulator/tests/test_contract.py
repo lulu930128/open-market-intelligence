@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class Gates(unittest.TestCase):
     def test_sdk_exact_version_signatures_enums_and_no_import(self):
         info = inspect_sdk(ROOT)
-        self.assertEqual(info['status'], 'PASS')
+        self.assertEqual(info['status'], 'INSPECTED')
         self.assertEqual(info['installed_version'], '2.1.0')
         self.assertFalse(info['sdk_imported'])
         self.assertFalse(info['abi_verified'])
@@ -73,10 +73,17 @@ class Gates(unittest.TestCase):
             self.assertEqual(result['orders_sent'], 0)
             self.assertEqual(result['login_attempts'], 0)
 
-    def test_ordinary_credentials_cannot_substitute(self):
+    def test_canonical_identity_is_not_sim_entitlement_or_second_secret_source(self):
         result = preflight({}, {'KGI_SUPERPY_PERSON_ID': True, 'KGI_SUPERPY_PASSWORD': True}, NOW)
         self.assertFalse(any(result['dedicated_secret_presence'].values()))
-        self.assertIn('MISSING_KGI_SIM_PERSON_ID', result['probe']['reasonCodes'])
+        self.assertIn('SIM_ENTITLEMENT_UNVERIFIED', result['probe']['reasonCodes'])
+        self.assertFalse(any(code.startswith('MISSING_KGI_SIM_') for code in result['probe']['reasonCodes']))
+        self.assertEqual(result['credential_owner'], 'app.config.Settings')
+        self.assertFalse(result['credential_values_read'])
+        for code in ('NATIVE_ENDPOINT_ATTESTATION_MISSING', 'NATIVE_EGRESS_CONFINEMENT_UNVERIFIED',
+                     'NATIVE_FILESYSTEM_CONFINEMENT_UNVERIFIED'):
+            self.assertIn(code, result['probe']['reasonCodes'])
+        self.assertEqual((result['broker_calls'], result['orders_sent']), (0, 0))
 
     def test_version_mismatch_propagates(self):
         result = preflight({'reasonCodes': ['SDK_VERSION_MISMATCH']}, {}, NOW)
