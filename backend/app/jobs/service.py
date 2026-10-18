@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import json
 import logging
+import re
 from threading import BoundedSemaphore, Lock, RLock
 import time
 from typing import Any
@@ -38,6 +39,7 @@ SUMMARY_COUNT_KEYS = (
     "evaluated_count",
     "initialized_evaluation_count",
     "initialized_path_count",
+    "initialization_pending_count",
     "due_count_before",
     "attempted_evaluation_count",
     "attempted_path_count",
@@ -85,8 +87,22 @@ FAILED_RESULT_ITEM_LIMIT = 4
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = RLock()
 _admission_closed = False
+_admission_pause = None
 _active_enqueues = 0
-_pending_tasks: dict[Future, str] = {}
+
+
+@dataclass
+class PendingJobTask:
+    lane: str
+    job_id: int
+    task_name: str
+    submitted_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+
+
+_pending_tasks: dict[Future, PendingJobTask] = {}
+PENDING_TASK_DIAGNOSTIC_LIMIT = 12
 _task_failures = 0
 _enqueue_failures = 0
 _materialization_executors: dict[str, ThreadPoolExecutor] = {}
@@ -122,8 +138,89 @@ class JobDrainResult:
 
 def require_job_admission() -> None:
     with _executor_lock:
-        if _admission_closed:
+        if _admission_closed or _admission_pause is not None:
             raise JobAdmissionClosed("JOB_ADMISSION_CLOSED: new process lifecycle required")
+
+
+def pause_jobs_if_idle():
+    global _admission_pause
+    with _executor_lock:
+        if _admission_closed or _admission_pause is not None:
+            raise JobAdmissionClosed("Job quiescence unavailable")
+        if _pending_tasks or _active_enqueues or _enqueue_failures:
+            return None
+        _admission_pause = object()
+        return _admission_pause
+
+
+def observe_job_quiescence() -> dict[str, Any]:
+    """Memory-only diagnosis of the existing job owner; never clears a failure.
+
+    A failed enqueue may have committed an unknown durable JobRun. Only a
+    separate, explicit reconciliation may resolve that uncertainty. This
+    observation is not a restart gate or proof of writer completion.
+    """
+    with _executor_lock:
+        pending_by_lane: dict[str, int] = {}
+        completed_by_lane: dict[str, int] = {}
+        cancelled_by_lane: dict[str, int] = {}
+        tasks: list[dict[str, Any]] = []
+        observed_at = time.monotonic()
+        unfinished_count = 0
+        for future, task in _pending_tasks.items():
+            raw_lane = task.lane
+            lane = raw_lane if raw_lane == "default" or raw_lane in _materialization_slots else "other"
+            pending_by_lane[lane] = pending_by_lane.get(lane, 0) + 1
+            done = future.done()
+            if done:
+                completed_by_lane[lane] = completed_by_lane.get(lane, 0) + 1
+            else:
+                unfinished_count += 1
+            if future.cancelled():
+                cancelled_by_lane[lane] = cancelled_by_lane.get(lane, 0) + 1
+            if len(tasks) < PENDING_TASK_DIAGNOSTIC_LIMIT:
+                finished_at = task.finished_at if task.finished_at is not None else observed_at
+                queue_end = task.started_at if task.started_at is not None else finished_at
+                tasks.append({
+                    "job_id": task.job_id,
+                    "task_name": task.task_name,
+                    "execution_lane": lane,
+                    "state": "done" if done else "running" if future.running() else "queued",
+                    "queue_wait_seconds": round(max(0.0, queue_end - task.submitted_at), 3),
+                    "execution_seconds": None if task.started_at is None else round(
+                        max(0.0, finished_at - task.started_at), 3),
+                })
+        reason = (
+            "ADMISSION_CLOSED" if _admission_closed else
+            "ALREADY_PAUSED" if _admission_pause is not None else
+            "UNRESOLVED_ENQUEUE" if _enqueue_failures else
+            "ACTIVE_ENQUEUE" if _active_enqueues else
+            "PENDING_FUTURES" if pending_by_lane else "IDLE"
+        )
+        return {
+            "reason": reason,
+            "admission_closed": _admission_closed,
+            "admission_paused": _admission_pause is not None,
+            "pending_by_lane": dict(sorted(pending_by_lane.items())),
+            "completed_pending_by_lane": dict(sorted(completed_by_lane.items())),
+            "cancelled_pending_by_lane": dict(sorted(cancelled_by_lane.items())),
+            "active_enqueues": _active_enqueues,
+            "unresolved_enqueues": _enqueue_failures,
+            "task_failures": _task_failures,
+            "unfinished_future_count": unfinished_count,
+            "completed_pending_count": sum(completed_by_lane.values()),
+            "tasks": tasks,
+            "tasks_omitted": max(0, len(_pending_tasks) - len(tasks)),
+            "default_executor_max_workers": getattr(_executor, "_max_workers", None),
+        }
+
+
+def resume_jobs(lease):
+    global _admission_pause
+    with _executor_lock:
+        if lease is not _admission_pause or _admission_closed:
+            raise JobAdmissionClosed("Invalid job quiescence lease")
+        _admission_pause = None
 
 
 @contextmanager
@@ -148,7 +245,8 @@ def begin_job_drain() -> None:
 def job_drain_status() -> JobDrainResult:
     with _executor_lock:
         lanes: dict[str, int] = {}
-        for lane in _pending_tasks.values():
+        for task in _pending_tasks.values():
+            lane = task.lane
             lanes[lane] = lanes.get(lane, 0) + 1
         return JobDrainResult(_admission_closed, lanes, _active_enqueues, _task_failures, _enqueue_failures)
 
@@ -565,6 +663,7 @@ def _get_executor() -> ThreadPoolExecutor:
                 max_workers=max(settings.job_worker_max_concurrency, 1),
                 thread_name_prefix="omi-job",
             )
+            logger.info("JOB_DEFAULT_EXECUTOR max_workers=%s", _executor._max_workers)
 
         return _executor
 
@@ -607,12 +706,26 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
                     workers = settings.taiwan_completed_materialization_concurrency if execution_lane == "market_completed" else 1
                     executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"omi-{execution_lane}")
                     _materialization_executors[execution_lane] = executor
-            future = executor.submit(task, job_id, *task_args)
+            # Only source identifiers are retained, never arguments or repr(task).
+            raw_name = getattr(task, "__name__", "")
+            task_name = raw_name if isinstance(raw_name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,95}", raw_name) else "job_task"
+            tracked = PendingJobTask(execution_lane, job_id, task_name, time.monotonic())
+
+            def run_task():
+                with _executor_lock:
+                    tracked.started_at = time.monotonic()
+                try:
+                    return task(job_id, *task_args)
+                finally:
+                    with _executor_lock:
+                        tracked.finished_at = time.monotonic()
+
+            future = executor.submit(run_task)
         except BaseException:
             if slots is not None:
                 slots.release()
             raise
-        _pending_tasks[future] = execution_lane
+        _pending_tasks[future] = tracked
 
         def completed(done: Future) -> None:
             global _task_failures
@@ -805,8 +918,10 @@ def complete_job(
     job = get_job(db, job_id)
     now = utc_now()
     job.status = "success"
-    job.progress_current = max(job.progress_current, job.progress_total)
-    job.message = message or "Job completed."
+    partial = isinstance(result, dict) and result.get("status") == "partial"
+    if not partial:
+        job.progress_current = max(job.progress_current, job.progress_total)
+    job.message = message or (result.get("message") if partial else None) or "Job completed."
     job.error_message = None
     job.result_json = _to_json(result)
     job.result_summary_json = _to_result_summary_json(result)

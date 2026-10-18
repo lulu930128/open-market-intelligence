@@ -10,6 +10,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.runtime_admission import AdmissionCommitted, AsyncAdmission
 from app.crypto_market.realtime import CryptoRealtimeUpdate, LIQUIDATION_RESOURCE, OHLCV_RESOURCE
 from app.crypto_market.service import persist_crypto_realtime_updates
 from app.db.session import SessionLocal
@@ -53,6 +54,7 @@ class CryptoRealtimePersistenceManager:
         self._stop_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._flush_task: asyncio.Task | None = None
+        self.restart_admission = AsyncAdmission()
         self._lock = RLock()
         self._pending: dict[tuple[Any, ...], CryptoRealtimeUpdate] = {}
         self._enqueued_count = 0
@@ -193,6 +195,13 @@ class CryptoRealtimePersistenceManager:
             self._flush_task = asyncio.create_task(self._flush_pending())
         return await asyncio.shield(self._flush_task)
 
+    def commit_restart(self, lease):
+        if not self.restart_admission.idle(lease):
+            raise RuntimeError("Crypto persistence not quiescent")
+        self._stop_event.set()
+        self._running = False
+        self.restart_admission.commit(lease)
+
     async def _flush_pending(self) -> dict[str, Any] | None:
         updates = self._take_pending()
         if not updates:
@@ -234,8 +243,13 @@ class CryptoRealtimePersistenceManager:
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.flush_interval_seconds)
             except asyncio.TimeoutError:
-                if self._running:
-                    await self.flush_once()
+                try:
+                    async with self.restart_admission.work():
+                        if self._running:
+                            await self.flush_once()
+                except AdmissionCommitted:
+                    if self._running:
+                        raise
 
     def _take_pending(self) -> list[CryptoRealtimeUpdate]:
         with self._lock:

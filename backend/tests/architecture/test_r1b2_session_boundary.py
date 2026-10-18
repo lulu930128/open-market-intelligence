@@ -1,4 +1,4 @@
-"""Private Session seam stays opt-in and cannot become a global write policy."""
+"""API owner adoption cannot become a global writer certificate."""
 import ast
 from pathlib import Path
 
@@ -17,7 +17,7 @@ def calls(node):
 def test_default_dependency_keeps_lazy_session_close_without_drain_or_sql():
     tree = source("backend/app/db/session.py")
     dependency = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "get_db")
-    assert calls(dependency) == {"SessionLocal", "db.close"}
+    assert calls(dependency) == {"get_draining_db"}
     assert not any(isinstance(n, ast.ClassDef) and any("Session" in ast.unparse(b) for b in n.bases)
                    for n in tree.body)
     for n in tree.body:
@@ -30,12 +30,15 @@ def test_default_dependency_keeps_lazy_session_close_without_drain_or_sql():
             } for c in calls(n))
 
 
-def test_production_lifespan_does_not_enable_private_session_seam():
+def test_production_lifespan_enables_canonical_owner_fences():
     tree = source("backend/app/runtime.py")
     lifespan = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
     constructor = next(n for n in ast.walk(lifespan)
                        if isinstance(n, ast.Call) and ast.unparse(n.func) == "RuntimeCoordinator")
-    assert not constructor.args and not constructor.keywords
+    assert not constructor.args
+    assert {kw.arg: ast.literal_eval(kw.value) for kw in constructor.keywords} == {
+        "drain_owned_sessions": True, "drain_engine_connections": True,
+    }
     init = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "__init__"
                 and any(a.arg == "drain_owned_sessions" for a in n.args.kwonlyargs))
     defaults = dict(zip((a.arg for a in init.args.kwonlyargs), init.args.kw_defaults))

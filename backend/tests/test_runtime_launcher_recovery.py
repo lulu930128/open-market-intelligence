@@ -283,12 +283,10 @@ def test_launcher_explicit_start_and_restart_share_recovery_reset() -> None:
     assert "Reset-ServiceRecoveryState" in request
     assert "$script:FrontendHealthRecoveryAttempts = 0" not in restart + request
     assert "$script:BackendPortRecoveryAttempts = 0" not in restart + request
-    assert restart.index("Reset-ServiceRecoveryState") < restart.index(
-        "Stop-Services"
-    ) < restart.index("Start-Services")
+    assert restart.index("Stop-Services") < restart.index("Reset-ServiceRecoveryState") < restart.index("Start-Services")
     assert '$startItem.add_Click({ Invoke-ServiceStartRequest -Reason "tray-start" })' in source
-    assert "$restartItem.add_Click({ Restart-Services })" in source
-    assert "$stopItem.add_Click({ Stop-Services })" in source
+    assert "$restartItem.add_Click({ try { Restart-Services } catch { Show-Message $_.Exception.Message } })" in source
+    assert "$stopItem.add_Click({ try { Stop-Services } catch { Show-Message $_.Exception.Message } })" in source
     assert request.index("Restore-TrayIcon") < request.index("Get-BackendHealth")
     assert "finally {" in request
     assert "$script:ServiceStartRequestInProgress = $false" in request
@@ -338,6 +336,8 @@ $script:RunEvent = [pscustomobject]@{}
 $script:RunEvent | Add-Member ScriptMethod Reset { $script:RunResetCount += 1 }
 
 function Write-LauncherLog { param($Message, $Level) $script:Messages.Add($Message) }
+# The isolated AST harness does not load the runtime-control module or its pipe.
+function Invoke-OmiRuntimeControlTick { }
 function Restore-TrayIcon { param($Reason) $script:Calls.Add('restore') }
 function Get-ExpectedBackendPython { 'test-python' }
 function Get-BackendHealth { [pscustomobject]@{ runtime = 'test-runtime' } }
@@ -571,7 +571,7 @@ Invoke-ServiceStartRequest -Reason 'second-run'
     assert any("services starting" in message for message in result["logs"])
 
 
-def test_launcher_stop_then_run_rearms_services_without_exiting(tmp_path: Path) -> None:
+def test_launcher_stop_then_run_retains_owner_without_restarting(tmp_path: Path) -> None:
     result = _run_isolated_launcher(
         tmp_path,
         r"""
@@ -579,6 +579,8 @@ $stop = $ast.Find({ param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-Services'
 }, $false)
 . ([scriptblock]::Create($stop.Extent.Text))
+function Assert-FrontendSafeStopAvailable { if ($null -ne $script:FrontendProcess) { throw 'Frontend must already be absent' } }
+function Show-Message { param($Message) $script:Messages.Add($Message) }
 function Stop-FrontendService { $script:FrontendProcess = $null; $script:Calls.Add('frontend-stop') }
 function Stop-BackendService {
     $script:BackendStopExpected = $true
@@ -586,14 +588,14 @@ function Stop-BackendService {
     $script:Calls.Add('backend-stop')
 }
 $script:BackendProcess = New-TestProcess
-$script:FrontendProcess = New-TestProcess
+$script:FrontendProcess = $null
 Stop-Services
 if ($script:IsShuttingDown) { throw 'Stop must not exit the owner' }
 Invoke-ServiceStartRequest -Reason 'run-after-stop'
 """,
     )
-    assert result["calls"] == ["frontend-stop", "backend-stop", "restore", "start"]
-    assert result["backend_attempts"] == result["frontend_attempts"] == 0
+    assert result["calls"] == ["backend-stop", "frontend-stop", "restore"]
+    assert result["backend_attempts"] == 3 and result["frontend_attempts"] == 1
 
 
 def test_launcher_reentrant_start_is_coalesced(tmp_path: Path) -> None:

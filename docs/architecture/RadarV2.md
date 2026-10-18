@@ -126,6 +126,35 @@ Outcome v2 同時保存：
 
 Frontend 只呈現 backend 的 version、score、regime、quality、tag 與 limitation，不重算 Radar 邏輯。
 
+### Scheduled outcome reconciliation 的工作片段
+
+`run_watchlist_radar_outcome_reconcile_job` 在既有 default lane 執行，每次 invocation
+共用 5 秒 monotonic 合作式預算，涵蓋 Group／Mode。只在完整 evaluation 的
+commit／rollback 邊界停止取下一單位；不取消 Future、不拆 horizon transaction。
+已 commit 的 path 仍依 evaluation、horizon、contract version/config hash 的原 identity
+保存。未初始化工作由缺少 horizon 的原 ledger query 找回；mature pending paths
+沿用 `evaluated_at`、到期日與 ID 排序。Group／Mode 依最早 due attempt 排序，
+讓缺少日線而保持 pending 的工作在後續片段輪替。
+
+排程 eligibility 同時查看 mature pending paths 與尚未初始化的 evaluation；
+只剩初始化工作時仍可接續，不需要另一個 queue、cursor table 或重送 callback。
+Scheduled JobRun 的執行狀態沿用既有 enum；未完成的資料結果保存為 `partial`，
+summary/detail 的 `public_status` 都是 `partial`，不強制把進度補滿。
+全數評估失敗仍是 `error`／`failed`。直接呼叫原 evaluation API 時不自動套用時間片段。
+
+5 秒是取下一單位的預算，不是完成時限。單筆查詢、SQLite lock、flush、commit
+或收尾 coverage 查詢可能超過預算；實際 Future 未完成前，Job quiescence 繼續阻擋。
+`RADAR_OUTCOME_SLICE` 保存 candidate／scope／due／coverage 查詢、初始化、evaluation、
+日線／公司事件讀取、config、flush 與 commit 的 monotonic 耗時。
+單位超時以 `RADAR_OUTCOME_SLOW_UNIT`／`RADAR_OUTCOME_SLOW_PHASE` 記錄，
+不輸出 payload 或 SQL 參數；初始化／evaluation 的總時間包含其內層 phase，不能相加。
+
+Job Service 的原 `_pending_tasks` 同時保存 source task name、Job ID、lane 與 monotonic
+提交／開始／結束時間。Quiescence observation 最多列出 12 筆 task，另列遺漏筆數、
+未完成數及已完成待 callback 清理數；觀察不清除 registry、不 cancel、不重試。
+`default_executor_max_workers` 與 `JOB_DEFAULT_EXECUTOR` 來自已建立的 executor，
+不是依設定預設值推定 runtime。Source／fixture 通過不代表現役 runtime 已載入這些變更。
+
 ## Version promotion 條件
 
 任何 `active_version` promotion 至少需要：

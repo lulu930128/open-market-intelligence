@@ -9,6 +9,7 @@ import json
 import hashlib
 import logging
 from threading import Lock
+from time import monotonic
 
 from sqlalchemy import case, func, or_, update
 from sqlalchemy.exc import IntegrityError
@@ -24,7 +25,33 @@ from app.market_data.contracts import InstrumentType
 logger = logging.getLogger(__name__)
 AUDIT_PREFIX = "tw-coverage-audit:"
 SLICE_SIZE = 32
+FREEZE_SLICE_SIZE = 128
+FREEZE_COMMIT_SIZE = 16
+AUDIT_SLICE_SECONDS = 5.0
 _pass_lock = Lock()
+
+
+class _AuditYield(Exception):
+    """Cooperative return at a transaction boundary, never executor cancellation."""
+
+
+class AuditSlice:
+    def __init__(self, should_pause=lambda: False):
+        self.should_pause = should_pause
+        self.deadline = monotonic() + AUDIT_SLICE_SECONDS
+
+    def yield_reason(self) -> str | None:
+        """Observe cooperative yield without raising across a dispatch boundary."""
+        if self.should_pause():
+            return "scheduler_pause"
+        if monotonic() >= self.deadline:
+            return "slice_budget"
+        return None
+
+    def check(self):
+        reason = self.yield_reason()
+        if reason is not None:
+            raise _AuditYield(reason)
 
 
 def _aware(value: datetime) -> datetime:
@@ -154,31 +181,58 @@ def _observe(db, item, now, reread, frozen=None) -> bool:
     return True
 
 
-def _freeze(db, row, state, target, now):
-    """Atomic, metadata-only snapshot; no provider IO or canonical bar writes."""
+def _freeze(db, row, state, target, now, budget=None):
+    """Freeze candidate membership once; commit resolved members with a cursor.
+
+    The revision is published only after every candidate has been resolved.
+    Partial discovery never permits ingestion or claims complete coverage.
+    """
     if "universe_revision" in state:
         return
-    universe = []
-    with db.no_autoflush:
-        for (symbol,) in db.query(StockMaster.stock_id).order_by(StockMaster.stock_id).all():
-            if not _eligible(db, symbol):
-                continue
-            instrument = resolve_taiwan_instrument(db, symbol)
-            universe.append({"stock_id": symbol, "venue": instrument.venue,
-                             "instrument_type": instrument.instrument_type.value})
-            item = db.get(TaiwanIntradayRepairItem, (target, symbol))
-            if item is None:
-                item = TaiwanIntradayRepairItem(trade_date=target, stock_id=symbol,
-                    acquisition_lane="normal", status="pending")
-                db.add(item)
-            elif (item.attempt_count == 0 and item.last_job_id is None
-                  and item.last_reason in {None, "CANONICAL_COVERAGE_INCOMPLETE", "CANONICAL_COVERAGE_READY"}):
-                # Prior versions discovered the entire universe as repair work.
-                # Only untouched rows move to normal; preserve tried recovery.
-                item.acquisition_lane = "normal"
-                item.status = "pending"
-            if item.acquisition_lane == "normal":
-                item.scanned_at = None
+    budget = budget or AuditSlice()
+    budget.check()
+    if "freeze_candidates" not in state:
+        state.update(freeze_candidates=[symbol for (symbol,) in db.query(StockMaster.stock_id)
+            .order_by(StockMaster.stock_id).all()], freeze_cursor=0, universe=[],
+            started_at=now.isoformat(), coverage_scan_complete=False, lifecycle_complete=False)
+        save_checkpoint(db, row, state, now)
+    universe = state["universe"]
+    start = state["freeze_cursor"]
+    candidates = state["freeze_candidates"]
+    stop = min(len(candidates), start + FREEZE_SLICE_SIZE)
+    for offset in range(start, stop, FREEZE_COMMIT_SIZE):
+        budget.check()
+        for symbol in candidates[offset:min(offset + FREEZE_COMMIT_SIZE, stop)]:
+            try:
+                budget.check()
+            except _AuditYield:
+                if state["freeze_cursor"] > offset:
+                    save_checkpoint(db, row, state, now)
+                raise
+            with db.no_autoflush:
+                if _eligible(db, symbol):
+                    instrument = resolve_taiwan_instrument(db, symbol)
+                    universe.append({"stock_id": symbol, "venue": instrument.venue,
+                                     "instrument_type": instrument.instrument_type.value})
+                    item = db.get(TaiwanIntradayRepairItem, (target, symbol))
+                    if item is None:
+                        item = TaiwanIntradayRepairItem(trade_date=target, stock_id=symbol,
+                            acquisition_lane="normal", status="pending")
+                        db.add(item)
+                    elif (item.attempt_count == 0 and item.last_job_id is None
+                          and item.last_reason in {None, "CANONICAL_COVERAGE_INCOMPLETE", "CANONICAL_COVERAGE_READY"}):
+                        item.acquisition_lane = "normal"
+                        item.status = "pending"
+                    if item.acquisition_lane == "normal":
+                        item.scanned_at = None
+            state["freeze_cursor"] += 1
+        # Commit at most 16 candidates together. Cursor, frozen identities and
+        # obligations are atomic; pause commits only the finished partial batch.
+        save_checkpoint(db, row, state, now)
+    if state["freeze_cursor"] < len(candidates):
+        raise _AuditYield("freeze_slice")
+    state.pop("freeze_candidates")
+    state.pop("freeze_cursor")
     if not universe:
         state.update(universe_unavailable=True, eligible_count=0, coverage_scan_complete=False,
                      lifecycle_complete=False)
@@ -187,7 +241,7 @@ def _freeze(db, row, state, target, now):
     state.pop("universe_unavailable", None)
     material = json.dumps(universe, sort_keys=True, separators=(",", ":"))
     state.update(universe=universe, universe_revision=hashlib.sha256(material.encode()).hexdigest(),
-        frozen_at=now.isoformat(), started_at=now.isoformat(), trade_date=target.isoformat(),
+        frozen_at=now.isoformat(), started_at=state.get("started_at", now.isoformat()), trade_date=target.isoformat(),
         eligible_count=len(universe), coverage_scan_complete=False, lifecycle_complete=False)
     save_checkpoint(db, row, state, now)
 
@@ -211,13 +265,15 @@ def _normal_slots(db):
     return max(0, settings.taiwan_completed_materialization_concurrency - used)
 
 
-def _normal_materialization(db, target, now, reread, enqueuer, frozen):
+def _normal_materialization(db, target, now, reread, enqueuer, frozen, budget):
+    budget.check()
     batch = settings.scheduler_taiwan_completed_materialization_batch_size
     query = db.query(TaiwanIntradayRepairItem).filter(TaiwanIntradayRepairItem.trade_date == target,
         TaiwanIntradayRepairItem.stock_id.in_(list(frozen)))
     # Scan every frozen member, including legacy recovery rows, in bounded pages.
     for item in query.filter(TaiwanIntradayRepairItem.scanned_at.is_(None)).order_by(
             TaiwanIntradayRepairItem.stock_id).limit(batch).all():
+        budget.check()
         previous_status, previous_due = item.status, item.next_check_at
         _observe(db, item, now, reread, frozen)
         if item.acquisition_lane == "normal":
@@ -231,11 +287,13 @@ def _normal_materialization(db, target, now, reread, enqueuer, frozen):
                 item.next_check_at = max(_aware(previous_due), _aware(item.next_check_at))
         item.scanned_at = now
         db.commit()
+    budget.check()
     # Reconcile before admitting more; never infer coverage from Job success.
     for item in query.filter(TaiwanIntradayRepairItem.acquisition_lane == "normal",
             TaiwanIntradayRepairItem.normal_attempted_at.is_not(None),
             TaiwanIntradayRepairItem.status.in_(("pending", "active"))).order_by(
                 TaiwanIntradayRepairItem.stock_id).limit(batch).all():
+        budget.check()
         job = _latest_job(db, item)
         if job is not None and job.status in {"queued", "running"}:
             item.status = "active"
@@ -245,6 +303,7 @@ def _normal_materialization(db, target, now, reread, enqueuer, frozen):
             if item.status == "pending":
                 _handoff(item, now, "NORMAL_MATERIALIZATION_INCOMPLETE", job)
         db.commit()
+    budget.check()
     slots = _normal_slots(db)
     backoff = completed_lane_backoff(db)
     if slots <= 0 or (backoff and now < backoff) or taiwan_market_session_phase(now) in {"regular", "closing_auction"}:
@@ -254,6 +313,7 @@ def _normal_materialization(db, target, now, reread, enqueuer, frozen):
         TaiwanIntradayRepairItem.normal_attempted_at.is_(None)).order_by(
             TaiwanIntradayRepairItem.stock_id).limit(min(slots, batch)).all()
     for item in items:
+        budget.check()
         if item.scanned_at.replace(tzinfo=None) != now.replace(tzinfo=None) and not _observe(db, item, now, reread, frozen):
             db.commit()
             continue
@@ -266,6 +326,7 @@ def _normal_materialization(db, target, now, reread, enqueuer, frozen):
                 _handoff(item, now, "EXISTING_PROVIDER_BACKOFF", job)
                 db.commit()
                 continue
+        budget.check()
         item.normal_attempted_at = now
         item.status = "active"
         db.commit()  # Crash uncertainty hands off; normal never retries blindly.
@@ -294,7 +355,8 @@ def _latest_job(db, item):
     return next((job for job in candidates if materialization_request(job)), None)
 
 
-def _process_backlog(db, target, now, reread, enqueuer, background_slots, frozen=None):
+def _process_backlog(db, target, now, reread, enqueuer, background_slots, frozen, budget):
+    budget.check()
     items = db.query(TaiwanIntradayRepairItem).filter(
         TaiwanIntradayRepairItem.trade_date == target,
         TaiwanIntradayRepairItem.acquisition_lane == "repair",
@@ -305,6 +367,7 @@ def _process_backlog(db, target, now, reread, enqueuer, background_slots, frozen
                TaiwanIntradayRepairItem.stock_id).limit(SLICE_SIZE).all()
     slots = background_slots(db)
     for item in items:
+        budget.check()
         was_active = item.status == "active"
         repairable = _observe(db, item, now, reread, frozen)
         job = _latest_job(db, item) if item.status not in {"complete", "not_applicable"} else None
@@ -328,6 +391,7 @@ def _process_backlog(db, target, now, reread, enqueuer, background_slots, frozen
         # fairness order. Never renew it from the active-priority slice.
         if was_active:
             continue
+        budget.check()
         backoff = completed_lane_backoff(db)
         if not repairable or slots <= 0 or (backoff and now < backoff) or not _reserve(db, now):
             continue
@@ -425,10 +489,12 @@ def _summary(db, row, state, target, now):
     return state
 
 
-def audit_completed_sessions(db, *, now, reread, enqueuer, background_slots):
+def audit_completed_sessions(db, *, now, reread, enqueuer, background_slots, budget=None):
     if not _pass_lock.acquire(blocking=False):
         return {"status": "skipped", "reason": "coverage_audit_in_flight"}
     try:
+        budget = budget or AuditSlice()
+        budget.check()
         latest = latest_completed_taiwan_session_date(now)
         if latest == now.date() and now.time().replace(tzinfo=None) < time(13, 35):
             latest = previous_taiwan_trading_day(latest, include_value=False)
@@ -445,17 +511,27 @@ def audit_completed_sessions(db, *, now, reread, enqueuer, background_slots):
         selected = [newest] + [row for row in unresolved[:1] if row is not newest]
         summaries = []
         for row in selected:
+            budget.check()
             state = json.loads(row.state_json)
             target = date.fromisoformat(row.key[len(AUDIT_PREFIX):])
-            _freeze(db, row, state, target, now)
+            _freeze(db, row, state, target, now, budget)
+            budget.check()
             frozen = {item["stock_id"]: item for item in state.get("universe", [])}
-            _normal_materialization(db, target, now, reread, enqueuer, frozen)
+            _normal_materialization(db, target, now, reread, enqueuer, frozen, budget)
             due = state.get("next_repair_cycle_at")
             if due is None or now >= datetime.fromisoformat(due):
-                _process_backlog(db, target, now, reread, enqueuer, background_slots, frozen)
+                _process_backlog(db, target, now, reread, enqueuer, background_slots, frozen, budget)
                 state["next_repair_cycle_at"] = (now + timedelta(
                     seconds=settings.scheduler_taiwan_intraday_repair_interval_seconds)).isoformat()
+            budget.check()
             summaries.append(_summary(db, row, state, target, now))
         return {**summaries[0], "sessions": summaries}
+    except _AuditYield as exc:
+        # Previous per-item commits remain durable. Do not run an expensive
+        # summary or advance the repair-cycle deadline on an unfinished slice.
+        db.rollback()
+        return {"status": "partial", "reason": str(exc),
+                "coverage_scan_complete": False, "lifecycle_complete": False,
+                "data_complete": False, "repair_complete": False}
     finally:
         _pass_lock.release()

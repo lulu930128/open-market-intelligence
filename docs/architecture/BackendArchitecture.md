@@ -201,12 +201,26 @@ Market Data Resolver / FX
 
 ## 3. Runtime / FastAPI
 
+2026-10-17 Source 更新：固定 `omi_restart_backend` → Backend API → Launcher Controller 管線改由專用 Token、OS Pipe client identity、Owner UUID 與一次性 durable intent 授權遠端 Restart，取消 Windows 本機 Yes/No。後續仍走既有 Writer Drain／Owned Stop／Exact Exit／Start／Readiness。完整契約見 [Runtime Control](RuntimeControl.md)；新 Launcher／Backend 尚待使用者換版及正式 MCP E2E。下方 source-only 段落保留 2026-10-15 原始歷史基準，不能當作此變更後的 Runtime 已採用證據。
+
 - `backend/app/main.py` 只建立 FastAPI app、middleware、exception handlers 與 route registry。
 - `backend/app/runtime.py` 擁有 startup/shutdown lifecycle。
 - migration / schema ownership 延續 Alembic-only 原則；正常啟動不以 `Base.metadata.create_all()` 取代 migration。
 - background leader lock、scheduler、collector ownership 由 runtime/job boundary 管理。
 - follower process 不應重複執行 background collector。
 - shutdown 只停止本 process 實際持有的 runtime resource。
+
+RuntimeCoordinator 的 `restart_preflight()` 僅觀察記憶體中的 registered drain result、
+in-flight stop task 與 unknown-writer count；不觸發 stop、admission fence 或 DB/provider IO。
+Runtime-control router 經 app.state 委派此觀察，不 import 或取得 lifecycle ownership。
+Launcher pipe 以 OS client PID＋creation 綁定報告，正式 Restart-Backend 僅保存 blocked preflight
+receipt 與缺失 gates；完整 all-writer drain、獨立 approval、graceful/no-respawn、無 adoption
+fallback 的 start 及新 process readiness/source adoption 尚未接通。Standalone owned shutdown
+transport 現由 `OmiOwnedShutdown.cs`、既有 Runner 的 terminal channel branch 與
+`app/owned_uvicorn.py` 實作；可信 disposable launcher／Uvicorn 共用實際 transport，
+先持久 no-respawn 再送 cooperative STOP，以 lifespan completion 加 retained child handle
+exact exit 判斷成功。Production session issuer 與 startup adoption 尚未啟用，fixture proof
+不能通過 production writer／approval gate。細節見 [Runtime Control](RuntimeControl.md)。
 
 US intraday cache-only publisher 的 Thread／Session 由既有
 `jobs/us_intraday_materializer_scheduler.py` 持有；symbol 去重及最多四個 retained

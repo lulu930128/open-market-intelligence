@@ -8,6 +8,7 @@
 - [Operating Model](../product/OperatingModel.md)：各 plane 的責任與互動方式。
 - [Quality Bar](../product/QualityBar.md)：資料、架構、AI、UX 與驗證品質門檻。
 - [Backend Architecture](BackendArchitecture.md)：dependency direction、ownership、transaction、health 與 migration 原則。
+- [Runtime Control](RuntimeControl.md)：launcher-owned 固定 runtime API、專用授權、durable receipt 與尚未解鎖的 restart gate。
 - [Execution Simulator Qualification](ExecutionSimulatorQualification.md)：獨立 SDK 檢查、LOCAL MOCK command boundary 與真實模擬環境封鎖條件。
 - [OMI Decision Contract](OmiDecisionContract.md)：唯一 outward AI decision contract。
 - [Atlas Company News](AtlasCompanyNews.md)：OLA 個股新聞 Document 的唯讀 API 與 omi.ask 整合。

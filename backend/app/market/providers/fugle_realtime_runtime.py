@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.session import SessionLocal
+from app.runtime_admission import AsyncAdmission
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.providers.fugle_realtime import (
     FUGLE_TAIEX_SYMBOL,
@@ -296,6 +297,9 @@ class FugleRealtimeRuntime:
         self._connect = connect
         self._clock = clock
         self._session_factory = session_factory
+        self.restart_admission = AsyncAdmission()
+        self._restart_flush_task = None
+        self._restart_flushed = False
         self.buffer = FugleRealtimeBuffer()
         self.allocator = FugleSubscriptionAllocator()
         self.allocator.set_active_stock(active_stock)
@@ -353,7 +357,7 @@ class FugleRealtimeRuntime:
         # Never cancel a coroutine awaiting a persistence thread.
         if self._materializer_task is not None:
             await asyncio.shield(self._materializer_task)
-        if self._final_flush_task is None and self._materializer_task is not None:
+        if self._final_flush_task is None and self._materializer_task is not None and not self._restart_flushed:
             self._final_flush_task = asyncio.create_task(asyncio.to_thread(self._materialize_once))
         if self._final_flush_task is not None:
             await asyncio.shield(self._final_flush_task)
@@ -594,7 +598,8 @@ class FugleRealtimeRuntime:
                     )
                     raise RuntimeError("FUGLE_PROVIDER_ERROR")
                 elif event == "data":
-                    self.buffer.ingest(envelope, received_at=received_at)
+                    async with self.restart_admission.work():
+                        self.buffer.ingest(envelope, received_at=received_at)
                 else:
                     self._handle_control(envelope)
                 if authenticated:
@@ -623,7 +628,7 @@ class FugleRealtimeRuntime:
                     pass
                 delay = min(delay * 2, self.reconnect_max_seconds)
 
-    def _materialize_once(self) -> None:
+    def _materialize_once(self) -> dict[str, object]:
         db = self._session_factory()
         try:
             result = self.materializer.materialize(
@@ -632,6 +637,7 @@ class FugleRealtimeRuntime:
             )
             if result:
                 logger.debug("Fugle canonical materialization completed surfaces=%s.", sorted(result))
+            return result
         except Exception:
             db.rollback()
             logger.exception("Fugle canonical materialization failed.")
@@ -642,7 +648,16 @@ class FugleRealtimeRuntime:
     async def _materialize_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                await asyncio.to_thread(self._materialize_once)
+                async with self.restart_admission.work():
+                    if self._restart_flush_task is not None:
+                        try:
+                            await asyncio.shield(self._restart_flush_task)
+                        finally:
+                            if self._restart_flush_task.done():
+                                self._restart_flush_task = None
+                    if self._stop_event.is_set():
+                        break
+                    await asyncio.to_thread(self._materialize_once)
             except Exception:
                 # Retry on the next normal cadence; final stop flush propagates failure.
                 logger.exception("Fugle materializer iteration failed.")
@@ -653,6 +668,27 @@ class FugleRealtimeRuntime:
                 )
             except asyncio.TimeoutError:
                 pass
+
+    async def flush_for_restart(self, lease):
+        if self._materializer_task is None:
+            return
+        if self._restart_flush_task is None or self._restart_flush_task.done():
+            self._restart_flush_task = asyncio.create_task(asyncio.to_thread(self._materialize_once))
+        result = await asyncio.shield(self._restart_flush_task)
+        if any(not isinstance(value, dict) or value.get("status") not in {"materialized", "rejected"}
+               for value in result.values()):
+            raise RuntimeError("Fugle accepted buffer still has unresolved materialization")
+        self._restart_flushed = self.restart_admission.idle(lease)
+
+    def resume_after_restart_refusal(self, lease):
+        self._restart_flushed = False
+        self.restart_admission.resume(lease)
+
+    def commit_restart(self, lease):
+        if not self.restart_admission.idle(lease):
+            raise RuntimeError("Fugle collector not quiescent")
+        self._stop_event.set()
+        self.restart_admission.commit(lease)
 
     def health(self) -> dict[str, object]:
         active_stock = self.allocator.active_stock

@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$FilePath,
     [Parameter(Mandatory = $true)][string]$ArgumentsJsonBase64,
     [int]$LauncherPid = 0,
+    [switch]$OwnedShutdownChannel,
     [ValidateRange(0, 20)][int]$MaxRestartAttempts = 3,
     [string]$RestartBackoffSecondsCsv = "2,10,30",
     [ValidateRange(1, 86400)][int]$StableRunResetSeconds = 600,
@@ -18,6 +19,32 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Fixed launcher-owned inherited channel. Always terminal: it cannot reach the
+# legacy cmd/force/respawn branch, including after timeout or malformed input.
+if ($OwnedShutdownChannel) {
+    try {
+        if ($ServiceName -cne 'backend' -or $LauncherPid -le 0 -or
+            $ArgumentsJsonBase64 -cne 'W10=' -or $GracefulStopFixture -or $UvicornLifespanFixture) {
+            throw 'OWNED_CHANNEL_IDENTITY_REQUIRED'
+        }
+        $expectedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+        if ([IO.Path]::GetFullPath($RepoRoot) -ine $expectedRoot -or
+            [IO.Path]::GetFullPath($WorkingDirectory) -ine (Join-Path $expectedRoot 'backend')) {
+            throw 'FIXED_REPOSITORY_REQUIRED'
+        }
+        $basePython = @(Get-Content -LiteralPath (Join-Path $expectedRoot '.venv/pyvenv.cfg') |
+            Where-Object { $_ -match '^executable = ' })
+        if ($basePython.Count -ne 1 -or [IO.Path]::GetFullPath($FilePath) -ine $basePython[0].Substring(13)) {
+            throw 'EXACT_BASE_INTERPRETER_REQUIRED'
+        }
+        Add-Type -Path (Join-Path $PSScriptRoot 'OmiOwnedShutdown.cs') -ReferencedAssemblies @('System.Web.Extensions', 'System.Core')
+        exit ([Omi.OwnedShutdown.Runner]::Run($expectedRoot, $FilePath, $LauncherPid))
+    } catch {
+        Write-Error "Owned shutdown channel failed closed: $($_.Exception.Message)" -ErrorAction Continue
+        exit 79
+    }
+}
 
 # The B4 seam is a bounded extension of the R1E owner, never production startup.
 if ($UvicornLifespanFixture) {

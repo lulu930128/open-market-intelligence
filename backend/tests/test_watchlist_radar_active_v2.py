@@ -55,7 +55,42 @@ from app.routers.watchlists import (
 from app.watchlists.radar_shadow_v2_service import (
     evaluate_pending_radar_v2_outcomes,
 )
+from app.watchlists import radar_automation, radar_outcome_v2_service
 from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
+
+
+def test_radar_slice_sqlite_lock_rolls_back_and_recovers(tmp_path):
+    engine = create_engine("sqlite:///" + (tmp_path / "radar.sqlite").as_posix(), connect_args={"timeout": 0.02})
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as db:
+            item = _source_item("1100", signal_keys=[], source_rank=1)
+            active = build_radar_v2_active_projection(radar=_base_radar(item), universe_items=[item])
+            db.add(WatchlistGroup(id=7, group_name="Lock fixture"))
+            db.commit()
+            persist_radar_v2_active(db=db, radar=active, group_id=7, mode="action")
+            with engine.connect() as lock_owner:
+                lock_owner.exec_driver_sql("BEGIN IMMEDIATE")
+                work_slice = radar_outcome_v2_service.RadarOutcomeWorkSlice(budget_seconds=30)
+                result = evaluate_pending_radar_v2_outcomes(
+                    db=db, group_id=7, mode="action", rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                    work_slice=work_slice,
+                )
+                assert result["status"] == "error"
+                assert result["error_count"] == 1
+                assert result["errors"][0]["phase"] == "initialize"
+                assert "database is locked" in result["errors"][0]["error_message"]
+                assert db.query(RadarOutcomePath).count() == 0
+                assert work_slice.phase_seconds["contract_config"] > 0
+                lock_owner.rollback()
+            result = evaluate_pending_radar_v2_outcomes(
+                db=db, group_id=7, mode="action", rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+            )
+            assert result["error_count"] == 0
+            assert result["initialized_path_count"] == 3
+            assert db.query(RadarOutcomePath).count() == 3
+    finally:
+        engine.dispose()
 
 
 def _add_canonical_daily_bar(
@@ -228,6 +263,165 @@ class WatchlistRadarActiveV2Tests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.engine.dispose()
+
+    def _seed_slice_evaluations(self, db, *, with_bars=True, group_id=7, stock_base=1100):
+        items = [_source_item(str(stock_base + i), signal_keys=[], source_rank=i + 1) for i in range(3)]
+        active = build_radar_v2_active_projection(radar=_base_radar(items[0]), universe_items=items)
+        db.add(WatchlistGroup(id=group_id, group_name=f"Slice fixture {group_id}"))
+        db.commit()
+        persisted = persist_radar_v2_active(db=db, radar=active, group_id=group_id, mode="action")
+        if with_bars:
+            trade_date = date(2026, 7, 30)
+            for _ in range(5):
+                trade_date = next_taiwan_trading_day(trade_date)
+                for item in items:
+                    _add_canonical_daily_bar(db, stock_id=item["stock_id"], trade_date=trade_date)
+            db.commit()
+        return persisted["evaluation_ids"]
+
+    def test_scheduled_slice_resumes_initialization_without_due_paths_or_duplicates(self):
+        clock = [0.0]
+        original = radar_outcome_v2_service.evaluate_radar_outcome_v2
+
+        def evaluate_one(**kwargs):
+            result = original(**kwargs)
+            # Deterministic time advance AFTER the actual SQLite commit.
+            clock[0] += 6.0
+            return result
+
+        with Session(self.engine) as db, patch.object(
+            radar_outcome_v2_service, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(radar_outcome_v2_service, "evaluate_radar_outcome_v2", side_effect=evaluate_one), patch.object(
+            radar_outcome_v2_service, "_corporate_action_context", return_value=("partial_coverage", [], [])
+        ):
+            ids = self._seed_slice_evaluations(db)
+            retained = {}
+            for remaining in (2, 1, 0):
+                result = radar_automation.reconcile_watchlist_radar_v2_outcomes(
+                    db=db, group_ids=[7], as_of_trade_date=date(2026, 8, 7),
+                    work_slice=radar_outcome_v2_service.RadarOutcomeWorkSlice(started_at=clock[0]),
+                )
+                assert result["initialization_pending_count"] == remaining
+                assert result["remaining_due_count"] == 0
+                assert result["initialized_evaluation_count"] == 1
+                rows = db.query(RadarOutcomePath).all()
+                assert len(rows) == (3 - remaining) * 3
+                for row in rows:
+                    identity = (row.id, row.evaluated_at)
+                    if row.evaluation_id in retained:
+                        assert identity in retained[row.evaluation_id]
+                for eid in ids:
+                    if eid not in retained and any(row.evaluation_id == eid for row in rows):
+                        retained[eid] = {(row.id, row.evaluated_at) for row in rows if row.evaluation_id == eid}
+                if remaining:
+                    assert result["status"] == "partial_success"
+                    assert result["yielded"]
+                    assert result["slice"]["yield_reason"] == "TIME_BUDGET"
+                    assert result["slice"]["slow_unit_count"] == 1
+            assert {row.evaluation_id for row in rows} == set(ids)
+            coverage = radar_automation.get_watchlist_radar_v2_outcome_due_coverage(
+                db=db, group_ids=[7], as_of_trade_date=date(2026, 8, 7),
+            )
+            assert coverage["status"] == "complete"
+
+    def test_slice_due_backlog_counts_only_attempted_paths_and_resumes(self):
+        clock = [0.0]
+        original = radar_outcome_v2_service.evaluate_radar_outcome_v2
+
+        def evaluate_one(**kwargs):
+            result = original(**kwargs)
+            clock[0] += 6.0
+            return result
+
+        with Session(self.engine) as db:
+            ids = self._seed_slice_evaluations(db, with_bars=False)
+            evaluate_pending_radar_v2_outcomes(db=db, evaluation_ids=ids,
+                                             rule_version=RADAR_V2_ACTIVE_RULE_VERSION)
+            old_ids = {row.id for row in db.query(RadarOutcomePath).all()}
+            trade_date = date(2026, 7, 30)
+            for _ in range(5):
+                trade_date = next_taiwan_trading_day(trade_date)
+                for stock_id in ("1100", "1101", "1102"):
+                    _add_canonical_daily_bar(db, stock_id=stock_id, trade_date=trade_date)
+            db.commit()
+            with patch.object(radar_outcome_v2_service, "monotonic", side_effect=lambda: clock[0]), patch.object(
+                radar_outcome_v2_service, "evaluate_radar_outcome_v2", side_effect=evaluate_one
+            ), patch.object(radar_outcome_v2_service, "_corporate_action_context", return_value=("partial_coverage", [], [])):
+                for remaining in (6, 3, 0):
+                    result = evaluate_pending_radar_v2_outcomes(
+                        db=db, group_id=7, mode="action", rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                        as_of_trade_date=date(2026, 8, 7),
+                        work_slice=radar_outcome_v2_service.RadarOutcomeWorkSlice(started_at=clock[0]),
+                    )
+                    assert result["attempted_evaluation_count"] == 1
+                    assert result["attempted_path_count"] == result["finalized_count"] == 3
+                    assert result["remaining_due_count"] == remaining
+                    assert {row.id for row in db.query(RadarOutcomePath).all()} == old_ids
+                    assert result["error_count"] == 0
+
+    def test_failed_commit_rolls_back_only_current_evaluation_and_can_resume(self):
+        with Session(self.engine) as db, patch.object(
+            radar_outcome_v2_service, "_corporate_action_context", return_value=("partial_coverage", [], [])
+        ):
+            ids = self._seed_slice_evaluations(db)
+            original_commit = db.commit
+            count = [0]
+
+            def commit_or_timeout():
+                count[0] += 1
+                if count[0] == 2:
+                    raise TimeoutError("fixture transaction timeout")
+                original_commit()
+
+            with patch.object(db, "commit", side_effect=commit_or_timeout):
+                result = evaluate_pending_radar_v2_outcomes(
+                    db=db, evaluation_ids=ids, rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                    work_slice=radar_outcome_v2_service.RadarOutcomeWorkSlice(budget_seconds=30),
+                )
+            assert result["status"] == "partial_success"
+            assert result["error_count"] == 1
+            assert db.query(RadarOutcomePath).count() == 6
+            retained = {row.id for row in db.query(RadarOutcomePath).all()}
+            resumed = evaluate_pending_radar_v2_outcomes(
+                db=db, group_id=7, mode="action", rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+            )
+            assert resumed["initialized_evaluation_count"] == 1
+            assert resumed["error_count"] == 0
+            assert db.query(RadarOutcomePath).count() == 9
+            assert retained <= {row.id for row in db.query(RadarOutcomePath).all()}
+
+    def test_slice_rotates_pending_work_across_groups_without_completing_missing_bars(self):
+        clock = [0.0]
+        original = radar_outcome_v2_service.evaluate_radar_outcome_v2
+        attempted = []
+
+        def evaluate_one(**kwargs):
+            result = original(**kwargs)
+            attempted.append(kwargs["evaluation_id"])
+            clock[0] += 6.0
+            return result
+
+        with Session(self.engine) as db:
+            ids = self._seed_slice_evaluations(db, with_bars=False)
+            ids += self._seed_slice_evaluations(db, with_bars=False, group_id=8, stock_base=2200)
+            evaluate_pending_radar_v2_outcomes(
+                db=db, evaluation_ids=ids, rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+                as_of_trade_date=date(2026, 8, 7), now=datetime(2026, 8, 8, tzinfo=timezone.utc),
+            )
+            with patch.object(radar_outcome_v2_service, "monotonic", side_effect=lambda: clock[0]), patch.object(
+                radar_outcome_v2_service, "evaluate_radar_outcome_v2", side_effect=evaluate_one
+            ):
+                for _ in ids:
+                    result = radar_automation.reconcile_watchlist_radar_v2_outcomes(
+                        db=db, group_ids=[7, 8], initialize_limit=0, as_of_trade_date=date(2026, 8, 7),
+                        work_slice=radar_outcome_v2_service.RadarOutcomeWorkSlice(started_at=clock[0]),
+                    )
+                    assert result["status"] == "partial_success"
+                    assert result["due_count_before"] == result["remaining_due_count"] == 18
+                    assert result["attempted_path_count"] == result["awaiting_daily_bar_count"] == 3
+                    assert result["finalized_count"] == 0
+            assert set(attempted) == set(ids) and len(attempted) == len(ids)
+            assert db.query(RadarOutcomePath).count() == 18
 
     def test_legacy_cached_summary_fails_closed_when_cross_market_metadata_missing(
         self,

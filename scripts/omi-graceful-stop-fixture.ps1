@@ -74,7 +74,7 @@ function Invoke-OmiGracefulStopFixture {
     $sourceHashes = @{}
     if ($Uvicorn) {
         $fixture = Join-Path $repository 'backend\tests\fixtures\b4_lifespan_child.py'
-        foreach ($relative in @('backend/app/runtime.py', 'backend/app/db/session.py',
+        foreach ($relative in @('backend/app/runtime.py', 'backend/app/runtime_admission.py', 'backend/app/db/session.py',
             'backend/app/jobs/us_intraday_materializer_scheduler.py', 'backend/tests/fixtures/r1e_stop_child.py',
             'backend/tests/fixtures/b4_lifespan_child.py', 'scripts/run-service-logged.ps1',
             'scripts/omi-graceful-stop-fixture.ps1')) {

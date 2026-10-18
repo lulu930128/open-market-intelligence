@@ -623,9 +623,12 @@ def run_watchlist_radar_outcome_reconcile_job(
     initialize_limit: int,
     as_of_trade_date: date | None,
 ) -> None:
+    from app.watchlists.radar_outcome_v2_service import RadarOutcomeWorkSlice
+
     def worker(db: Session, progress: ProgressCallback):
+        work_slice = RadarOutcomeWorkSlice()
         progress(0, 1, "Reconciling Radar v2 outcomes.")
-        return reconcile_watchlist_radar_v2_outcomes(
+        result = reconcile_watchlist_radar_v2_outcomes(
             db=db,
             group_ids=group_ids,
             modes=modes,
@@ -633,7 +636,15 @@ def run_watchlist_radar_outcome_reconcile_job(
             initialize_limit=initialize_limit,
             as_of_trade_date=as_of_trade_date,
             progress_callback=progress,
+            work_slice=work_slice,
         )
+        if result["status"] == "error":
+            raise JobExecutionError("Radar v2 outcome reconciliation failed.", result=result)
+        if result["status"] == "partial_success":
+            # Preserve the existing JobRun status enum; public_status carries
+            # the incomplete data outcome through both summary and detail APIs.
+            result["status"] = "partial"
+        return result
 
     run_tracked_job(job_id, worker)
 

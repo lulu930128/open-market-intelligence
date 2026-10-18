@@ -8,9 +8,10 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
-from sqlalchemy.engine.url import make_url
+from sqlalchemy.engine.url import URL, make_url
 
 from app.config import PROJECT_ROOT, settings
+from app.db.admission import attach_sqlite_admission
 
 
 logger = logging.getLogger(__name__)
@@ -65,14 +66,24 @@ def get_head_revision() -> str:
     return ScriptDirectory.from_config(config).get_current_head()
 
 
-def get_database_revision(database_url: str | None = None) -> str | None:
+def get_database_revision(database_url: str | None = None, *, existing_only: bool = False) -> str | None:
     resolved_database_url = database_url or settings.database_url
-    _ensure_sqlite_parent(resolved_database_url)
+    if existing_only:
+        target = make_url(resolved_database_url)
+        if (target.drivername not in {"sqlite", "sqlite+pysqlite"} or target.query
+                or not target.database or not Path(target.database).is_absolute()
+                or not Path(target.database).is_file()):
+            raise RuntimeError("Owned startup requires an existing local SQLite database")
+        resolved_database_url = URL.create("sqlite+pysqlite", database=Path(target.database).as_uri(),
+                                          query={"mode": "ro", "uri": "true"})
+    else:
+        _ensure_sqlite_parent(resolved_database_url)
 
     engine = create_engine(
         resolved_database_url,
-        connect_args=_sqlite_connect_args(resolved_database_url),
+        connect_args=_sqlite_connect_args(str(resolved_database_url)),
     )
+    attach_sqlite_admission(engine)
     try:
         with engine.connect() as connection:
             return MigrationContext.configure(connection).get_current_revision()

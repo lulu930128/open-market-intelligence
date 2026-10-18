@@ -50,19 +50,20 @@ def coordinator(enabled=True):
                               drain_owned_sessions=enabled)
 
 
-def test_default_dependency_and_sessionlocal_are_not_globally_fenced(database):
+def test_default_dependency_fenced_while_other_engine_remains_unattested(database):
+    from fastapi import HTTPException
     owner.begin_session_scope_drain()
     dependency = owner.get_db()
-    db = next(dependency)
-    assert db.execute(text("SELECT 1")).scalar() == 1
-    dependency.close()
+    with pytest.raises(HTTPException) as error:
+        next(dependency)
+    assert error.value.status_code == 503
     with database[1]() as db:
         db.execute(text("INSERT INTO receipt VALUES (1)"))
         db.commit()
     assert drain().drained
     result = asyncio.run(coordinator().stop())
     assert not result.all_writers_drained
-    assert "API/direct transactions" in result.unknown_writers
+    assert any("raw DBAPI" in item for item in result.unknown_writers)
     assert result.sessions.evidence_scope == "explicit_session_scopes_only"
 
 

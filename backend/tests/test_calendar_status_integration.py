@@ -972,6 +972,21 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         )
         fake_db.close.assert_called_once_with()
 
+    def test_watchlist_radar_outcome_reconcile_resumes_missing_initialization(self):
+        fake_db = SimpleNamespace(close=Mock())
+        coverage = {
+            "group_ids": [1], "modes": ["action"], "due_count": 0,
+            "initialization_pending_count": 2, "latest_available_trade_date": date(2026, 8, 7),
+            "oldest_due_trade_date": None,
+        }
+        with patch.object(scheduler, "SessionLocal", return_value=fake_db), patch.object(
+            scheduler.radar_automation, "get_watchlist_radar_v2_outcome_due_coverage", return_value=coverage
+        ), patch.object(scheduler.job_service, "enqueue_job", return_value=(SimpleNamespace(id=89), True)) as enqueue:
+            scheduler.enqueue_watchlist_radar_outcome_reconcile()
+        assert enqueue.call_count == 1
+        assert enqueue.call_args.kwargs["job_type"] == "watchlist.radar_v2.outcome_reconcile"
+        fake_db.close.assert_called_once()
+
     def test_watchlist_radar_reconciliation_respects_configured_time(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")
 

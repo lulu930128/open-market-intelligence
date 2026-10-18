@@ -44,6 +44,7 @@ _INDEX_BATCH_OFFSETS = {"quote.snapshot": 0, "intraday.bars": 0}
 _READ_MODEL_PUBLISH_LOCK = Lock()
 _READ_MODEL_PUBLISH_MAX_IN_FLIGHT = 4
 _READ_MODEL_PUBLISH_CLOSED = False
+_READ_MODEL_PUBLISH_PAUSE = None
 _READ_MODEL_PUBLISH_COMPLETED = 0
 _READ_MODEL_PUBLISH_FAILURES = 0
 _READ_MODEL_PUBLISH_SKIPPED = 0
@@ -94,6 +95,26 @@ def begin_intraday_publisher_drain() -> None:
     global _READ_MODEL_PUBLISH_CLOSED
     with _READ_MODEL_PUBLISH_LOCK:
         _READ_MODEL_PUBLISH_CLOSED = True
+
+
+def pause_publishers_if_idle():
+    global _READ_MODEL_PUBLISH_PAUSE
+    with _READ_MODEL_PUBLISH_LOCK:
+        if _READ_MODEL_PUBLISH_CLOSED or _READ_MODEL_PUBLISH_PAUSE is not None:
+            raise RuntimeError("Publisher quiescence unavailable")
+        _reap_intraday_publishers_locked()
+        if _READ_MODEL_PUBLISH_TASKS:
+            return None
+        _READ_MODEL_PUBLISH_PAUSE = object()
+        return _READ_MODEL_PUBLISH_PAUSE
+
+
+def resume_publishers(lease):
+    global _READ_MODEL_PUBLISH_PAUSE
+    with _READ_MODEL_PUBLISH_LOCK:
+        if lease is not _READ_MODEL_PUBLISH_PAUSE or _READ_MODEL_PUBLISH_CLOSED:
+            raise RuntimeError("Invalid publisher quiescence lease")
+        _READ_MODEL_PUBLISH_PAUSE = None
 
 
 def _reap_intraday_publishers_locked() -> None:
@@ -730,6 +751,7 @@ def _schedule_intraday_consumer_read_model(symbol: str) -> bool:
         _reap_intraday_publishers_locked()
         if (
             _READ_MODEL_PUBLISH_CLOSED
+            or _READ_MODEL_PUBLISH_PAUSE is not None
             or symbol in _READ_MODEL_PUBLISH_TASKS
             or len(_READ_MODEL_PUBLISH_TASKS)
             >= _READ_MODEL_PUBLISH_MAX_IN_FLIGHT

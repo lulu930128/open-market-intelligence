@@ -10,6 +10,7 @@ from typing import Any
 from app.config import settings
 from app.crypto_market.contract import ProviderInstrument, normalize_provider
 from app.db.session import SessionLocal
+from app.runtime_admission import AsyncAdmission
 from app.settings.market_data_subscription import (
     ALWAYS_ON_SUBSCRIPTION_MODES,
     market_data_subscription_skip_reason,
@@ -71,6 +72,7 @@ class CryptoRealtimeCollectorManager:
         self._tasks: list[asyncio.Task] = []
         self._running = False
         self._draining = False
+        self.restart_admission = AsyncAdmission()
         self._stop_task: asyncio.Task | None = None
         self._reload_lock = asyncio.Lock()
         self._reloading = False
@@ -177,6 +179,12 @@ class CryptoRealtimeCollectorManager:
             self._stop_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
         await asyncio.wait_for(asyncio.shield(self._stop_task), timeout=timeout_seconds)
 
+    def commit_restart(self, lease):
+        if not self.restart_admission.idle(lease):
+            raise RuntimeError("Crypto collector not quiescent")
+        self._running = False
+        self.restart_admission.commit(lease)
+
     async def _finish_stop(self, *, drain: bool) -> None:
         for task in self._tasks:
             task.cancel()
@@ -201,11 +209,14 @@ class CryptoRealtimeCollectorManager:
                     async for message in websocket:
                         if not self._running:
                             break
-                        payload = json.loads(message)
-                        updates = parse_realtime_message(spec.provider, payload)
-                        for update in updates:
-                            crypto_realtime_store.update(update)
-                        crypto_realtime_persistence_manager.enqueue_many(updates)
+                        async with self.restart_admission.work():
+                            if not self._running:
+                                break
+                            payload = json.loads(message)
+                            updates = parse_realtime_message(spec.provider, payload)
+                            for update in updates:
+                                crypto_realtime_store.update(update)
+                            crypto_realtime_persistence_manager.enqueue_many(updates)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

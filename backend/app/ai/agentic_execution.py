@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 from queue import Empty, Queue
-from threading import Event, Lock, Thread
+from threading import Event, Lock
+from app.runtime_admission import OwnedWorkThread as Thread
 from time import perf_counter
 from typing import Any
 

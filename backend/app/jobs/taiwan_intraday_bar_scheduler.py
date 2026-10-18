@@ -15,7 +15,7 @@ from app.jobs.taiwan_intraday_demand import (
 )
 from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day, taiwan_market_session_phase
 from app.market.tw_intraday_universe import resolve_taiwan_intraday_target_universe, resolve_taiwan_tier_a_target_plan
-from app.jobs.taiwan_intraday_repair import audit_completed_sessions, checkpoint, save_checkpoint
+from app.jobs.taiwan_intraday_repair import AuditSlice, audit_completed_sessions, checkpoint, save_checkpoint
 
 logger = logging.getLogger(__name__)
 TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES = (25, 30, 33)
@@ -124,13 +124,26 @@ def reconcile_taiwan_intraday_close_tails(*, now: datetime | None = None,
 
 def audit_completed_taiwan_intraday_coverage(*, now: datetime | None = None,
     session_factory: Callable = SessionLocal,
-    enqueuer: Callable = enqueue_intraday_materialization_demand) -> dict:
+    enqueuer: Callable = enqueue_intraday_materialization_demand,
+    should_pause: Callable = lambda: False) -> dict:
     """Freeze/audit normal ingestion, then resume only residual recovery."""
     local = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
+    budget = AuditSlice(should_pause)
+    if should_pause():
+        return {"status": "skipped", "reason": "scheduler_pause"}
     with session_factory() as db:
-        dispatch_due_materializations(db, requested_at=local)
+        dispatch_due_materializations(db, requested_at=local,
+            should_yield=lambda: budget.yield_reason() is not None)
+        reason = budget.yield_reason()
+        if reason is not None:
+            # The dispatched items have finished their own transactions.
+            # Preserve remaining work for the next cadence; do not enter a
+            # large audit while the scheduler is draining.
+            return {"status": "partial", "reason": reason,
+                    "coverage_scan_complete": False, "lifecycle_complete": False,
+                    "data_complete": False, "repair_complete": False}
         return audit_completed_sessions(db, now=local, reread=_reread,
-            enqueuer=enqueuer, background_slots=_background_slots)
+            enqueuer=enqueuer, background_slots=_background_slots, budget=budget)
 
 
 def resume_taiwan_materializations() -> None:
@@ -148,6 +161,9 @@ def add_taiwan_intraday_bar_jobs(scheduler: Any) -> bool:
         (resume_taiwan_materializations, "taiwan_intraday_materialization_retry", 15),
     ):
         scheduler.add_job(function, trigger="interval", seconds=seconds, id=job_id,
+            kwargs=({"should_pause": scheduler.restart_pause_requested}
+                    if function is audit_completed_taiwan_intraday_coverage
+                    and hasattr(scheduler, "restart_pause_requested") else {}),
             replace_existing=True, coalesce=True, max_instances=1,
             next_run_time=datetime.now(TAIWAN_TZ) + timedelta(seconds=10))
     for minute in TAIWAN_INTRADAY_CLOSE_TAIL_RETRY_MINUTES:

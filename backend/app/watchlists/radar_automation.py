@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import date, timedelta
-from typing import Any
+from datetime import date, datetime, timedelta
+import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.watchlists.radar_outcome_v2_service import RadarOutcomeWorkSlice
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -24,6 +28,7 @@ from app.watchlists.radar_rule_contract import (
     RADAR_V1_WRITE_ENABLED,
     RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
     RADAR_V2_ACTIVE_RULE_VERSION,
+    RADAR_V2_ACTIVE_CONTRACT,
 )
 from app.watchlists import (
     radar_active_v2_service,
@@ -35,6 +40,7 @@ from app.watchlists import (
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
+logger = logging.getLogger(__name__)
 
 
 def _split_csv(value: str | Sequence[str] | None) -> list[str]:
@@ -145,12 +151,20 @@ def get_watchlist_radar_v2_outcome_due_coverage(
         if due_count
         else None
     )
+    initialization_query = radar_shadow_v2_service.radar_v2_initialization_query(
+        db, rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
+    ).filter(
+        RadarUniverseObservation.group_id.in_(resolved_group_ids),
+        RadarUniverseObservation.mode.in_(resolved_modes),
+    )
+    initialization_pending_count = initialization_query.count()
     return {
-        "status": "pending" if due_count else "complete",
+        "status": "pending" if due_count or initialization_pending_count else "complete",
         "group_ids": resolved_group_ids,
         "modes": resolved_modes,
         "latest_available_trade_date": latest_available_trade_date,
         "due_count": due_count,
+        "initialization_pending_count": initialization_pending_count,
         "oldest_due_trade_date": oldest_due_trade_date,
     }
 
@@ -164,7 +178,11 @@ def reconcile_watchlist_radar_v2_outcomes(
     initialize_limit: int = 200,
     as_of_trade_date: date | None = None,
     progress_callback: ProgressCallback | None = None,
+    work_slice: RadarOutcomeWorkSlice | None = None,
 ) -> dict[str, Any]:
+    from app.watchlists.radar_outcome_v2_service import measure_outcome_phase
+
+    timing = work_slice.record if work_slice is not None else None
     resolved_group_ids = _resolve_group_ids(db=db, group_ids=group_ids)
     resolved_modes = _normalize_modes(modes)
     scopes = [
@@ -172,6 +190,26 @@ def reconcile_watchlist_radar_v2_outcomes(
         for group_id in resolved_group_ids
         for mode in resolved_modes
     ]
+    if work_slice is not None:
+        # Resume using the ledger's attempt order across groups as well as paths.
+        # Missing-bar attempts move to the back; no new cursor/queue is required.
+        with measure_outcome_phase(timing, "scope_query"):
+            due_before = as_of_trade_date or read_taiwan_daily_freshness(db).latest_date
+            attempted = dict(((group_id, mode), attempted_at) for group_id, mode, attempted_at in (
+                db.query(RadarUniverseObservation.group_id, RadarUniverseObservation.mode,
+                         func.min(RadarOutcomePath.evaluated_at))
+                .join(RadarOutcomePath, RadarOutcomePath.evaluation_id == RadarUniverseObservation.evaluation_id)
+                .filter(RadarUniverseObservation.group_id.in_(resolved_group_ids),
+                        RadarUniverseObservation.mode.in_(resolved_modes),
+                        RadarUniverseObservation.rule_version == RADAR_V2_ACTIVE_RULE_VERSION,
+                        RadarUniverseObservation.rule_config_hash == RADAR_V2_ACTIVE_RULE_CONFIG_HASH,
+                        RadarOutcomePath.status == "pending",
+                        RadarOutcomePath.outcome_contract_version == RADAR_V2_ACTIVE_CONTRACT["outcome_contract_version"],
+                        RadarOutcomePath.outcome_config_hash == RADAR_V2_ACTIVE_CONTRACT["outcome_config_hash"],
+                        RadarOutcomePath.horizon_end_trade_date <= due_before if due_before is not None else False)
+                .group_by(RadarUniverseObservation.group_id, RadarUniverseObservation.mode).all()
+            ))
+            scopes.sort(key=lambda scope: ((attempted.get(scope) or datetime.min).replace(tzinfo=None), scope))
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     aggregate_keys = (
@@ -190,8 +228,18 @@ def reconcile_watchlist_radar_v2_outcomes(
     totals = {key: 0 for key in aggregate_keys}
     latest_available_trade_date: date | None = as_of_trade_date
     oldest_due_trade_date: date | None = None
+    completed_scope_count = 0
+    due_count_before_slice = None
+    if work_slice is not None:
+        with measure_outcome_phase(timing, "coverage_query"):
+            due_count_before_slice = get_watchlist_radar_v2_outcome_due_coverage(
+                db=db, group_ids=resolved_group_ids, modes=resolved_modes,
+                as_of_trade_date=as_of_trade_date,
+            )["due_count"]
 
     for index, (group_id, mode) in enumerate(scopes, start=1):
+        if work_slice is not None and work_slice.exhausted():
+            break
         if progress_callback is not None:
             progress_callback(
                 index - 1,
@@ -206,6 +254,7 @@ def reconcile_watchlist_radar_v2_outcomes(
             initialize_limit=initialize_limit,
             rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
             as_of_trade_date=as_of_trade_date,
+            **({"work_slice": work_slice} if work_slice is not None else {}),
         )
         result_row = {
             "group_id": group_id,
@@ -233,26 +282,50 @@ def reconcile_watchlist_radar_v2_outcomes(
             }
             for error in result.get("errors") or []
         )
+        if result.get("yielded"):
+            break
+        completed_scope_count += 1
+
+    yielded = bool(work_slice is not None and work_slice.yield_reason)
+    initialization_pending_count = 0
+    if work_slice is not None:
+        # Include scopes not visited in this slice, without claiming their work ran.
+        with measure_outcome_phase(timing, "coverage_query"):
+            coverage = get_watchlist_radar_v2_outcome_due_coverage(
+                db=db, group_ids=resolved_group_ids, modes=resolved_modes,
+                as_of_trade_date=as_of_trade_date,
+            )
+        totals["remaining_due_count"] = coverage["due_count"]
+        totals["due_count_before"] = due_count_before_slice
+        initialization_pending_count = coverage["initialization_pending_count"]
+        oldest_due_trade_date = coverage["oldest_due_trade_date"]
+        latest_available_trade_date = coverage["latest_available_trade_date"]
 
     if progress_callback is not None:
         progress_callback(
-            len(scopes),
+            completed_scope_count,
             max(len(scopes), 1),
-            "Radar v2 outcome reconciliation completed.",
+            "Radar v2 outcome reconciliation yielded; durable work remains."
+            if yielded else "Radar v2 outcome reconciliation completed.",
         )
     if errors and totals["evaluated_count"]:
         status = "partial_success"
     elif errors:
         status = "error"
-    elif totals["remaining_due_count"]:
+    elif yielded or initialization_pending_count or totals["remaining_due_count"]:
         status = "partial_success"
     elif totals["evaluated_count"]:
         status = "success"
     else:
         status = "skipped"
+    diagnostics = work_slice.evidence() if work_slice is not None else None
+    if diagnostics is not None:
+        logger.info("RADAR_OUTCOME_SLICE evidence=%s", diagnostics)
     return {
         "status": status,
         "message": (
+            "Radar v2 outcome reconciliation yielded; durable work remains."
+            if yielded or initialization_pending_count else
             "Radar v2 outcome reconciliation still has mature pending paths."
             if totals["remaining_due_count"]
             else "Radar v2 outcome reconciliation completed."
@@ -262,6 +335,9 @@ def reconcile_watchlist_radar_v2_outcomes(
         "latest_available_trade_date": latest_available_trade_date,
         "due_before": latest_available_trade_date,
         "oldest_due_trade_date": oldest_due_trade_date,
+        **({"yielded": yielded, "slice": diagnostics,
+            "initialization_pending_count": initialization_pending_count,
+            "completed_scope_count": completed_scope_count} if work_slice is not None else {}),
         **totals,
         "error_count": len(errors),
         "results": results,

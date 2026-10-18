@@ -21,6 +21,7 @@ from app.crypto_market.service import (
     refresh_crypto_tickers,
 )
 from app.db.session import SessionLocal
+from app.runtime_admission import AdmissionCommitted, AsyncAdmission
 from app.settings.market_data_subscription import (
     ALWAYS_ON_SUBSCRIPTION_MODES,
     get_market_data_subscription_settings,
@@ -438,6 +439,7 @@ class CryptoAutoRefreshManager:
         self._task: asyncio.Task | None = None
         self._running = False
         self._draining = False
+        self.restart_admission = AsyncAdmission()
         self._stop_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._active_runs: set[asyncio.Task] = set()
@@ -540,6 +542,23 @@ class CryptoAutoRefreshManager:
         await asyncio.shield(task)
 
     async def _run_once(self, *, force: bool = False) -> None:
+        try:
+            async with self.restart_admission.work():
+                if self._stop_event.is_set():
+                    return
+                await self._run_once_admitted(force=force)
+        except AdmissionCommitted:
+            if not self._stop_event.is_set():
+                raise
+
+    def commit_restart(self, lease):
+        if not self.restart_admission.idle(lease):
+            raise RuntimeError("Crypto refresh not quiescent")
+        self._stop_event.set()
+        self._running = False
+        self.restart_admission.commit(lease)
+
+    async def _run_once_admitted(self, *, force: bool = False) -> None:
         plans = await asyncio.to_thread(_load_auto_refresh_plans)
         active_keys = {plan.state_key() for plan in plans}
 

@@ -5,7 +5,7 @@ from datetime import date, datetime
 import json
 import logging
 from queue import Queue
-from threading import Thread
+from app.runtime_admission import OwnedWorkThread as Thread
 from typing import Any
 
 from sqlalchemy.orm import Session

@@ -40,6 +40,7 @@ from app.routers import (
     watchlists,
 )
 from app.runtime import lifespan
+from app.runtime_admission import RuntimeAdmissionMiddleware
 from app.version import PROJECT_VERSION
 
 
@@ -57,6 +58,7 @@ app = FastAPI(
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
+app.add_middleware(RuntimeAdmissionMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

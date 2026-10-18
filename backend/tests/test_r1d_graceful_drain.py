@@ -155,11 +155,130 @@ def test_commit_submit_race_has_terminal_record_or_truthful_unresolved(db, monke
     assert not service._pending_tasks
 
 
+def test_job_quiescence_observation_preserves_pending_and_failure_state(monkeypatch):
+    """Memory-only evidence cannot dismiss a recorded uncertain enqueue."""
+    running, complete = Future(), Future()
+    running.set_running_or_notify_cancel()
+    complete.set_result(None)
+    monkeypatch.setattr(service.time, "monotonic", lambda: 20.0)
+    with service._executor_lock:
+        service._pending_tasks[running] = service.PendingJobTask("market_background", 1, "work", 10.0, 12.0)
+        service._pending_tasks[complete] = service.PendingJobTask("market_completed", 2, "work", 10.0, 11.0, 13.0)
+    monkeypatch.setattr(service, "_active_enqueues", 1)
+    monkeypatch.setattr(service, "_enqueue_failures", 1)
+    monkeypatch.setattr(service, "_task_failures", 2)
+    try:
+        before = dict(service._pending_tasks)
+        observed = service.observe_job_quiescence()
+        assert observed == {
+            "reason": "UNRESOLVED_ENQUEUE",
+            "admission_closed": False,
+            "admission_paused": False,
+            "pending_by_lane": {"market_background": 1, "market_completed": 1},
+            "completed_pending_by_lane": {"market_completed": 1},
+            "cancelled_pending_by_lane": {},
+            "active_enqueues": 1,
+            "unresolved_enqueues": 1,
+            "task_failures": 2,
+            "unfinished_future_count": 1,
+            "completed_pending_count": 1,
+            "tasks": [
+                {"job_id": 1, "task_name": "work", "execution_lane": "market_background",
+                 "state": "running", "queue_wait_seconds": 2.0, "execution_seconds": 8.0},
+                {"job_id": 2, "task_name": "work", "execution_lane": "market_completed",
+                 "state": "done", "queue_wait_seconds": 1.0, "execution_seconds": 2.0},
+            ],
+            "tasks_omitted": 0,
+            "default_executor_max_workers": None,
+        }
+        assert dict(service._pending_tasks) == before
+        assert service.pause_jobs_if_idle() is None
+        # Even if all active futures have exited, a sticky uncertain enqueue
+        # is still a blocker. Never reset it to claim restart safety.
+        with service._executor_lock:
+            service._pending_tasks.clear()
+        monkeypatch.setattr(service, "_active_enqueues", 0)
+        assert service.observe_job_quiescence()["reason"] == "UNRESOLVED_ENQUEUE"
+        assert service.pause_jobs_if_idle() is None
+        assert service._enqueue_failures == 1
+    finally:
+        with service._executor_lock:
+            service._pending_tasks.clear()
+
+
+def test_single_default_worker_reports_bounded_queue_without_payload(monkeypatch):
+    monkeypatch.setattr(service.settings, "job_worker_max_concurrency", 1)
+    entered, release = Event(), Event()
+    completed = []
+
+    def radar_work(job_id, payload):
+        entered.set()
+        assert release.wait(3)
+        completed.append(job_id)
+
+    def other_work(job_id, payload):
+        completed.append(job_id)
+
+    service.submit_job_task(radar_work, 100, "secret-payload")
+    assert entered.wait(2)
+    try:
+        for job_id in range(101, 116):
+            service.submit_job_task(other_work, job_id, {"token": "secret-payload"})
+        observed = service.observe_job_quiescence()
+        assert observed["default_executor_max_workers"] == 1
+        assert observed["unfinished_future_count"] == 16
+        assert observed["pending_by_lane"] == {"default": 16}
+        assert observed["tasks_omitted"] == 4
+        assert len(observed["tasks"]) == service.PENDING_TASK_DIAGNOSTIC_LIMIT
+        assert observed["tasks"][0]["state"] == "running"
+        assert observed["tasks"][0]["task_name"] == "radar_work"
+        assert observed["tasks"][0]["execution_seconds"] >= 0
+        assert all(row["state"] == "queued" and row["execution_seconds"] is None
+                   for row in observed["tasks"][1:])
+        assert "secret-payload" not in repr(observed) and "token" not in repr(observed)
+        assert completed == []
+        assert service.pause_jobs_if_idle() is None
+    finally:
+        release.set()
+    assert run(service.drain_job_executor(deadline=time.monotonic() + 2)).drained
+    assert completed == list(range(100, 116))
+
+
 def test_async_legacy_wait_is_rejected():
     async def scenario():
         with pytest.raises(RuntimeError, match="async drain"):
             service.shutdown_job_executor(wait=True)
     run(scenario())
+
+
+@pytest.mark.parametrize("status", ["partial_success", "error", "success"])
+def test_scheduled_radar_jobrun_public_status_preserves_result(db, monkeypatch, status):
+    from app.jobs import backfill_tasks
+    from app.watchlists.radar_outcome_v2_service import RadarOutcomeWorkSlice
+
+    job = service.create_job(db, job_type="watchlist.radar_v2.outcome_reconcile", progress_total=2)
+    job_id = job.id
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+
+    def reconcile(**kwargs):
+        assert isinstance(kwargs["work_slice"], RadarOutcomeWorkSlice)
+        assert kwargs["work_slice"].budget_seconds == 5.0
+        kwargs["progress_callback"](0, 2, "Durable remainder")
+        return {"status": status, "message": "Durable remainder", "remaining_due_count": 3,
+                "initialization_pending_count": 2}
+
+    monkeypatch.setattr(backfill_tasks, "reconcile_watchlist_radar_v2_outcomes", reconcile)
+    backfill_tasks.run_watchlist_radar_outcome_reconcile_job(job_id, [7], "action", 200, 200, None)
+    saved = service.get_job(db, job_id)
+    for include_payload in (True, False):
+        public = service.serialize_job(saved, include_payload=include_payload)
+        assert public["public_status"] == {"partial_success": "partial", "error": "failed", "success": "completed"}[status]
+        assert public["result"]["remaining_due_count"] == 3
+        assert public["result"]["initialization_pending_count"] == 2
+    if status == "partial_success":
+        assert saved.status == "success"  # Existing JobRun execution enum.
+        assert saved.progress_current == 0 and saved.progress_total == 2
+        assert saved.message == "Durable remainder"
 
 
 def test_scheduler_join_is_observed_not_assumed():

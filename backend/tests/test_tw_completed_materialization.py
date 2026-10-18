@@ -338,3 +338,255 @@ def test_completed_executor_bound_is_independent_of_general_jobs(monkeypatch):
     finally:
         release.set()
         service.shutdown_job_executor(wait=True)
+
+
+def test_large_freeze_batches_commits_and_resumes_fixed_membership(env, monkeypatch):
+    from sqlalchemy import event
+    h = env
+    # This fixture measures work/commit bounds; the separate monotonic fixture
+    # proves elapsed-time termination without depending on host speed.
+    monkeypatch.setattr(coordinator, "monotonic", lambda: 0.0)
+    symbols = [str(10000 + i) for i in range(2048)]
+    with h.factory() as db:
+        db.add_all(StockMaster(stock_id=s, market="TWSE", instrument_type="stock", is_active=True)
+                   for s in symbols)
+        db.commit()
+    commits, reads = [], []
+    event.listen(h.factory, "after_commit", lambda session: commits.append(1))
+    original = coordinator._eligible
+    def eligible(db, symbol):
+        reads.append(symbol)
+        return original(db, symbol)
+    monkeypatch.setattr(coordinator, "_eligible", eligible)
+    result = h.run()
+    assert result["reason"] == "freeze_slice" and not result["data_complete"]
+    assert len(reads) == coordinator.FREEZE_SLICE_SIZE
+    # Initial checkpoint + candidate snapshot + bounded batches, not per member.
+    assert len(commits) <= 2 + coordinator.FREEZE_SLICE_SIZE // coordinator.FREEZE_COMMIT_SIZE
+    with h.factory() as db:
+        state = json.loads(db.get(State, f"{coordinator.AUDIT_PREFIX}{DAY.date()}").state_json)
+        assert state["freeze_cursor"] == db.query(Item).count() == len(reads)
+        assert "universe_revision" not in state and not db.query(JobRun).count()
+    h.add("99999")  # A late member cannot enter the frozen candidate snapshot.
+    h.engine.dispose()
+    for _ in range(len(symbols) // coordinator.FREEZE_SLICE_SIZE):
+        result = h.run()
+        if "universe_revision" in result:
+            break
+    assert result["eligible_count"] == len(symbols)
+    assert {i["stock_id"] for i in result["universe"]} == set(symbols)
+    assert len(result["universe"]) == len(set(i["stock_id"] for i in result["universe"]))
+    assert not result["data_complete"]
+
+
+def test_freeze_pause_commits_only_finished_batch_and_crash_rolls_back_cursor(env, monkeypatch):
+    h = env
+    for i in range(40):
+        h.add(str(10000 + i))
+    pause = Event()
+    original = coordinator._eligible
+    visits = []
+    def eligible(db, symbol):
+        visits.append(symbol)
+        if len(visits) == 19:
+            pause.set()
+        return original(db, symbol)
+    monkeypatch.setattr(coordinator, "_eligible", eligible)
+    result = scheduler.audit_completed_taiwan_intraday_coverage(now=DAY,
+        session_factory=h.factory, should_pause=pause.is_set)
+    assert result["reason"] == "scheduler_pause" and not h.submitted
+    with h.factory() as db:
+        state = json.loads(db.get(State, f"{coordinator.AUDIT_PREFIX}{DAY.date()}").state_json)
+        assert state["freeze_cursor"] == db.query(Item).count() == 19
+        assert "universe_revision" not in state
+    pause.clear()
+    save = coordinator.save_checkpoint
+    def crash(db, row, state, now):
+        if state.get("freeze_cursor", 0) > 19:
+            raise RuntimeError("disposable crash before commit")
+        return save(db, row, state, now)
+    monkeypatch.setattr(coordinator, "save_checkpoint", crash)
+    with pytest.raises(RuntimeError, match="disposable crash"):
+        h.run()
+    with h.factory() as db:
+        state = json.loads(db.get(State, f"{coordinator.AUDIT_PREFIX}{DAY.date()}").state_json)
+        assert state["freeze_cursor"] == db.query(Item).count() == 19
+    monkeypatch.setattr(coordinator, "save_checkpoint", save)
+    h.engine.dispose()
+    assert h.run()["eligible_count"] == 40
+    with h.factory() as db:
+        assert db.query(Item).count() == 40
+
+
+def test_shared_time_budget_stops_freeze_before_next_candidate(env, monkeypatch):
+    h = env
+    for i in range(40):
+        h.add(str(10000 + i))
+    ticks = [0.0]
+    monkeypatch.setattr(coordinator, "monotonic", lambda: ticks[0])
+    original = coordinator._eligible
+    def slow_read(db, symbol):
+        ticks[0] += 1.0
+        return original(db, symbol)
+    monkeypatch.setattr(coordinator, "_eligible", slow_read)
+    result = h.run()
+    assert result["reason"] == "slice_budget" and not result["coverage_scan_complete"]
+    with h.factory() as db:
+        state = json.loads(db.get(State, f"{coordinator.AUDIT_PREFIX}{DAY.date()}").state_json)
+        assert state["freeze_cursor"] == db.query(Item).count() == 5
+        assert not db.query(JobRun).count()
+
+
+
+
+def test_real_audit_returns_before_executor_reports_quiescence(env, monkeypatch):
+    import time
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.jobs import scheduler as owner_module
+    h = env
+    for symbol in ("1101", "2303", "2330"):
+        h.add(symbol)
+    for field in type(owner_module.settings).model_fields:
+        if field.startswith("enable_"):
+            monkeypatch.setattr(owner_module.settings, field, False)
+    monkeypatch.setattr(owner_module.settings, "enable_scheduler", True)
+    with monkeypatch.context() as registration:
+        registration.setattr(BackgroundScheduler, "add_job", lambda *a, **kw: None)
+        owner = owner_module.start_scheduler()
+    entered, release, finished = Event(), Event(), Event()
+    result = []
+    def reread(db, request, now):
+        entered.set()
+        assert release.wait(5)
+        return h.reread(db, request, now)
+    monkeypatch.setattr(scheduler, "_reread", reread)
+    def work():
+        try:
+            result.append(scheduler.audit_completed_taiwan_intraday_coverage(now=DAY,
+                session_factory=h.factory, should_pause=owner.restart_pause_requested))
+        finally:
+            finished.set()
+    try:
+        owner.add_job(work)
+        assert entered.wait(3)
+        lease = owner.pause_for_restart()
+        assert owner.restart_pause_requested()
+        assert not finished.is_set() and not owner.restart_quiescent(lease)
+        # Pause cannot erase active IO or executor accounting. A refused pause
+        # reopens admission without pretending that this long read has exited.
+        owner.resume_after_restart_refusal(lease)
+        assert not owner.restart_pause_requested()
+        lease = owner.pause_for_restart()
+        assert not owner.restart_quiescent(lease)
+        release.set()
+        assert finished.wait(3)
+        deadline = time.monotonic() + 2
+        while not owner.restart_quiescent(lease) and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert owner.restart_quiescent(lease)
+        assert result[0]["reason"] == "scheduler_pause" and not h.submitted
+        with h.factory() as db:
+            assert db.query(Item).filter(Item.scanned_at.is_not(None)).count() == 1
+            assert db.query(Item).count() == 3 and db.query(JobRun).count() == 0
+        owner.resume_after_restart_refusal(lease)
+        assert h.run()["scanned_count"] == 3
+    finally:
+        release.set()
+        owner.shutdown(wait=True)
+
+
+def test_production_registration_passes_owner_pause_to_audit_before_database_open(monkeypatch):
+    pause = Event()
+    jobs = {}
+    class Owner:
+        restart_pause_requested = staticmethod(pause.is_set)
+        def add_job(self, function, **kwargs):
+            jobs[kwargs["id"]] = (function, kwargs)
+    monkeypatch.setattr(scheduler.settings, "enable_taiwan_intraday_bar_scheduler", True)
+    assert scheduler.add_taiwan_intraday_bar_jobs(Owner())
+    audit, options = jobs["taiwan_intraday_completed_coverage"]
+    pause.set()
+    def no_database():
+        pytest.fail("paused audit must not open a database")
+    assert audit(now=DAY, session_factory=no_database, **options["kwargs"]) == {
+        "status": "skipped", "reason": "scheduler_pause"}
+
+def test_due_dispatch_yields_between_durable_jobs_without_duplicate_admission(monkeypatch):
+    # Scheduler work may resume later; a pause is not a cancellation of a
+    # previously committed queue/dispatch command.
+    pending = [SimpleNamespace(id=n, status="queued") for n in (1, 2, 3)]
+    pause = Event()
+    submitted = []
+
+    class FakeQuery:
+        def filter(self, *args):
+            return self
+
+        def order_by(self, *args):
+            return self
+
+        def limit(self, value):
+            assert value == 64
+            return self
+
+        def all(self):
+            return [job for job in pending if job.status == "queued"]
+
+    class FakeDB:
+        def query(self, model):
+            assert model is JobRun
+            return FakeQuery()
+
+    def fake_dispatch(db, job, now):
+        assert now == DAY and job.status == "queued"
+        submitted.append(job.id)
+        job.status = "running"  # stand-in for an already committed admission
+        if job.id == 1:
+            pause.set()
+        return True
+
+    monkeypatch.setattr(demand, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(demand, "materialization_request",
+        lambda job: {"consumer": "scheduler", "expires_at": (DAY + timedelta(minutes=5)).isoformat()})
+
+    db = FakeDB()
+    assert demand.dispatch_due_materializations(db, requested_at=DAY, should_yield=pause.is_set) == 1
+    assert submitted == [1]
+    assert [job.id for job in pending if job.status == "queued"] == [2, 3]
+    assert demand.dispatch_due_materializations(db, requested_at=DAY, should_yield=pause.is_set) == 0
+
+    pause.clear()
+    assert demand.dispatch_due_materializations(db, requested_at=DAY, should_yield=pause.is_set) == 2
+    assert submitted == [1, 2, 3]
+
+
+def test_completed_audit_skips_work_after_due_dispatch_requests_pause(monkeypatch):
+    pause = Event()
+    visited = []
+
+    class Factory:
+        def __enter__(self):
+            visited.append("session_enter")
+            return object()
+
+        def __exit__(self, *_):
+            visited.append("session_exit")
+
+    def dispatched(db, *, requested_at, should_yield):
+        assert requested_at == DAY and not should_yield()
+        pause.set()  # simulate owner cooperative pause after a safe boundary
+        visited.append("dispatch")
+        assert should_yield()
+        return 1
+
+    def audit(*args, **kwargs):
+        pytest.fail("audit must not run after the scheduler requests pause")
+
+    monkeypatch.setattr(scheduler, "dispatch_due_materializations", dispatched)
+    monkeypatch.setattr(scheduler, "audit_completed_sessions", audit)
+    partial = scheduler.audit_completed_taiwan_intraday_coverage(
+        now=DAY, session_factory=Factory, should_pause=pause.is_set)
+    assert partial == {"status": "partial", "reason": "scheduler_pause",
+                       "coverage_scan_complete": False, "lifecycle_complete": False,
+                       "data_complete": False, "repair_complete": False}
+    assert visited == ["session_enter", "dispatch", "session_exit"]

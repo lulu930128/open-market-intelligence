@@ -1,7 +1,7 @@
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from threading import Event, Thread
+from threading import Event, Thread, RLock
 import json
 import logging
 from typing import Any
@@ -2196,7 +2196,7 @@ def enqueue_watchlist_radar_outcome_reconcile() -> None:
                 modes=settings.scheduler_watchlist_radar_modes,
             )
         )
-        if not coverage["due_count"]:
+        if not coverage["due_count"] and not coverage.get("initialization_pending_count"):
             logger.info(
                 "Skipped Radar v2 outcome reconciliation because no mature pending paths remain latest_available_trade_date=%s.",
                 coverage.get("latest_available_trade_date"),
@@ -2793,7 +2793,60 @@ def start_scheduler() -> Any | None:
         logger.warning("APScheduler is not installed; job scheduler disabled.")
         return None
 
-    scheduler = BackgroundScheduler(timezone=_timezone())
+    class OwnedScheduler(BackgroundScheduler):
+        # Serialize dispatch and pause at the actual scheduler owner. A plain
+        # pause() plus a later executor snapshot has a submission race.
+        def __init__(self, **kwargs):
+            self._omi_admission_lock = RLock()
+            self._omi_pause = None
+            self._omi_cooperative_pause = Event()
+            self._omi_was_running = False
+            super().__init__(**kwargs)
+
+        def _process_jobs(self):
+            with self._omi_admission_lock:
+                if self._omi_pause is not None:
+                    return None
+                return super()._process_jobs()
+
+        def pause_for_restart(self):
+            with self._omi_admission_lock:
+                if self._omi_pause is not None or getattr(self, "_omi_drain", None) is not None:
+                    raise RuntimeError("Scheduler quiescence unavailable")
+                self._omi_was_running = self.state == 1
+                self.pause()
+                self._omi_cooperative_pause.set()
+                self._omi_pause = object()
+                return self._omi_pause
+
+        def restart_pause_requested(self):
+            return self._omi_cooperative_pause.is_set()
+
+        def restart_quiescent(self, lease):
+            with self._omi_admission_lock:
+                if lease is not self._omi_pause or self.state != 2:
+                    return False
+                with self._executors_lock:
+                    for executor in self._executors.values():
+                        with executor._lock:
+                            # APScheduler's defaultdict may retain zero-count keys;
+                            # only live counts block quiescence. Invalid counts
+                            # remain blocking; never rewrite executor state.
+                            for instances in executor._instances.values():
+                                if type(instances) is not int or instances != 0:
+                                    return False
+                return True
+
+        def resume_after_restart_refusal(self, lease):
+            with self._omi_admission_lock:
+                if lease is not self._omi_pause or getattr(self, "_omi_drain", None) is not None:
+                    raise RuntimeError("Invalid scheduler quiescence lease")
+                self._omi_pause = None
+                self._omi_cooperative_pause.clear()
+                if self._omi_was_running:
+                    self.resume()
+
+    scheduler = OwnedScheduler(timezone=_timezone())
 
     if settings.enable_scheduler:
         hour, minute = _parse_hour_minute(settings.scheduler_market_refresh_time)

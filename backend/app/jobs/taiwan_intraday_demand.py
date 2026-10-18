@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
+from typing import Callable
 
 from sqlalchemy import func, text, update
 from sqlalchemy.dialects.sqlite import insert
@@ -564,12 +565,21 @@ def run_consumer_demand(job_id: int) -> None:
         db.close()
 
 
-def dispatch_due_materializations(db: Session, *, requested_at: datetime, limit: int = 3) -> int:
-    """Scheduler command only: bounded recovery for background-owned retries."""
+def dispatch_due_materializations(db: Session, *, requested_at: datetime, limit: int = 3,
+                                  should_yield: Callable[[], bool] | None = None) -> int:
+    """Scheduler command only: bounded recovery with optional cooperative yield.
+
+    Return only after a current item's transactional command has completed.
+    Never cancel or roll back work belonging to an admitted job.
+    """
     dispatched = 0
+    if should_yield is not None and should_yield():
+        return 0
     candidates = db.query(JobRun).filter(JobRun.job_type == JOB_TYPE,
         JobRun.target.like(PREFIX + "%"), JobRun.status == "queued").order_by(JobRun.id).limit(64).all()
     for job in candidates:
+        if should_yield is not None and should_yield():
+            break
         request = materialization_request(job)
         if request is None:
             continue

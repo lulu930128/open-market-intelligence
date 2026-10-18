@@ -18,7 +18,7 @@ def _fresh_publisher_lifecycle(monkeypatch):
     """Test-only fresh process state; never erase a surviving worker."""
     assert not publisher._READ_MODEL_PUBLISH_TASKS
     for name, value in {
-        "_READ_MODEL_PUBLISH_TASKS": {}, "_READ_MODEL_PUBLISH_CLOSED": False,
+        "_READ_MODEL_PUBLISH_TASKS": {}, "_READ_MODEL_PUBLISH_CLOSED": False, "_READ_MODEL_PUBLISH_PAUSE": None,
         "_READ_MODEL_PUBLISH_COMPLETED": 0, "_READ_MODEL_PUBLISH_FAILURES": 0,
         "_READ_MODEL_PUBLISH_SKIPPED": 0,
         "_READ_MODEL_PUBLISH_LAST_EXIT_AT": None,
@@ -83,7 +83,7 @@ def isolated_job_lifecycle(monkeypatch):
     _fresh_publisher_lifecycle(monkeypatch)
     for name, value in {
         "_executor": None, "_materialization_executors": {}, "_pending_tasks": {},
-        "_admission_closed": False, "_active_enqueues": 0, "_task_failures": 0,
+        "_admission_closed": False, "_admission_pause": None, "_active_enqueues": 0, "_task_failures": 0,
         "_enqueue_failures": 0,
         "_materialization_slots": {name: BoundedSemaphore(size) for name, size in (
             ("market_interactive", 8), ("market_background", 2), ("market_completed", 3),

@@ -26,6 +26,11 @@ from app.jobs.us_index_data_repair_gate import (
 
 router = APIRouter()
 
+# Lifecycle transport stays separate from research/refresh and owns no processes.
+from app.routers.runtime_control import router as runtime_control_router
+
+router.include_router(runtime_control_router, prefix="/runtime-control")
+
 
 def _us_canonical_shadow_symbol_count() -> int:
     return len(

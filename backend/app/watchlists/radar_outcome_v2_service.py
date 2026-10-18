@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Iterable
+import logging
+from time import monotonic
+from typing import Any, Callable, Iterable
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +31,69 @@ from app.watchlists.radar_v2_service import ensure_rule_config, json_dumps, json
 DEFAULT_HORIZONS = tuple(
     int(value) for value in RADAR_V2_OUTCOME_CONFIG["horizons"]
 )
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def measure_outcome_phase(callback, phase: str):
+    started = monotonic()
+    try:
+        yield
+    finally:
+        if callback is not None:
+            callback(phase, max(0.0, monotonic() - started))
+
+
+@dataclass
+class RadarOutcomeWorkSlice:
+    """Invocation-local budget; never interrupts an evaluation transaction."""
+
+    budget_seconds: float = 5.0
+    started_at: float = field(default_factory=monotonic)
+    phase_seconds: dict[str, float] = field(default_factory=dict)
+    slow_unit_count: int = 0
+    yield_reason: str | None = None
+
+    def exhausted(self) -> bool:
+        if monotonic() - self.started_at >= self.budget_seconds:
+            self.yield_reason = "TIME_BUDGET"
+        return self.yield_reason is not None
+
+    def record(self, phase: str, seconds: float) -> None:
+        self.phase_seconds[phase] = self.phase_seconds.get(phase, 0.0) + seconds
+        if seconds >= self.budget_seconds and phase not in {"initialize", "reconcile"}:
+            logger.warning("RADAR_OUTCOME_SLOW_PHASE phase=%s seconds=%.3f reason=NON_PREEMPTIBLE_PHASE",
+                           phase, seconds)
+
+    @contextmanager
+    def unit(self, phase: str, evaluation_id: int):
+        started = monotonic()
+        failure_type = None
+        try:
+            yield
+        except Exception as exc:
+            failure_type = type(exc).__name__
+            raise
+        finally:
+            seconds = max(0.0, monotonic() - started)
+            self.record(phase, seconds)
+            if seconds >= self.budget_seconds:
+                self.slow_unit_count += 1
+                logger.warning(
+                    "RADAR_OUTCOME_SLOW_UNIT phase=%s evaluation_id=%s seconds=%.3f "
+                    "failure_type=%s reason=NON_PREEMPTIBLE_UNIT",
+                    phase, evaluation_id, seconds, failure_type,
+                )
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "budget_seconds": self.budget_seconds,
+            "elapsed_seconds": round(max(0.0, monotonic() - self.started_at), 3),
+            "phase_seconds": {key: round(value, 3) for key, value in sorted(self.phase_seconds.items())},
+            "slow_unit_count": self.slow_unit_count,
+            "yield_reason": self.yield_reason,
+        }
+
 DIRECTIONAL_BUCKETS = {
     "limit_up_lock",
     "surge_up",
@@ -541,65 +607,69 @@ def evaluate_radar_outcome_v2(
     outcome_config_hash: str = RADAR_V2_OUTCOME_CONFIG_HASH,
     outcome_config: dict[str, Any] = RADAR_V2_OUTCOME_CONFIG,
     contract_status: str = "shadow",
+    timing_callback: Callable[[str, float], None] | None = None,
 ) -> list[dict[str, Any]]:
-    evaluation = (
-        db.query(RadarRuleEvaluation)
-        .filter(RadarRuleEvaluation.id == evaluation_id)
-        .one_or_none()
-    )
-    if evaluation is None:
-        raise RadarV2EvaluationNotFoundError(
-            f"Radar v2 evaluation id={evaluation_id} was not found."
+    with measure_outcome_phase(timing_callback, "evaluation_load"):
+        evaluation = (
+            db.query(RadarRuleEvaluation)
+            .filter(RadarRuleEvaluation.id == evaluation_id)
+            .one_or_none()
         )
-    feature = (
-        db.query(RadarFeatureSnapshot)
-        .filter(RadarFeatureSnapshot.id == evaluation.feature_snapshot_id)
-        .one()
-    )
-    linked_event_ids = [
-        int(value)
-        for (value,) in (
-            db.query(RadarEvaluationEventLink.signal_event_id)
-            .filter(
-                RadarEvaluationEventLink.evaluation_id
-                == evaluation.id
+        if evaluation is None:
+            raise RadarV2EvaluationNotFoundError(
+                f"Radar v2 evaluation id={evaluation_id} was not found."
             )
-            .order_by(RadarEvaluationEventLink.signal_event_id.asc())
-            .all()
+        feature = (
+            db.query(RadarFeatureSnapshot)
+            .filter(RadarFeatureSnapshot.id == evaluation.feature_snapshot_id)
+            .one()
         )
-    ]
-    if signal_event_id is not None:
-        linked_event_ids = sorted(
-            {signal_event_id, *linked_event_ids}
+        linked_event_ids = [
+            int(value)
+            for (value,) in (
+                db.query(RadarEvaluationEventLink.signal_event_id)
+                .filter(
+                    RadarEvaluationEventLink.evaluation_id
+                    == evaluation.id
+                )
+                .order_by(RadarEvaluationEventLink.signal_event_id.asc())
+                .all()
+            )
+        ]
+        if signal_event_id is not None:
+            linked_event_ids = sorted(
+                {signal_event_id, *linked_event_ids}
+            )
+        canonical_signal_event_id = (
+            linked_event_ids[0] if len(linked_event_ids) == 1 else None
         )
-    canonical_signal_event_id = (
-        linked_event_ids[0] if len(linked_event_ids) == 1 else None
-    )
     normalized_horizons = sorted({int(value) for value in horizons})
     if not normalized_horizons or any(value <= 0 for value in normalized_horizons):
         raise ValueError("Radar outcome horizons must contain positive integers.")
 
     try:
-        ensure_rule_config(
-            db=db,
-            contract_type="outcome",
-            version=outcome_contract_version,
-            config_hash=outcome_config_hash,
-            config=outcome_config,
-            status=contract_status,
-            description="Radar v2 ATR-normalized multi-horizon outcome contract.",
-        )
+        with measure_outcome_phase(timing_callback, "contract_config"):
+            ensure_rule_config(
+                db=db,
+                contract_type="outcome",
+                version=outcome_contract_version,
+                config_hash=outcome_config_hash,
+                config=outcome_config,
+                status=contract_status,
+                description="Radar v2 ATR-normalized multi-horizon outcome contract.",
+            )
         results: list[dict[str, Any]] = []
         for horizon in normalized_horizons:
             expected_dates = trading_dates_after(
                 feature.signal_trade_date,
                 horizon,
             )
-            bars, missing_dates, invalid_dates = _daily_bars(
-                db=db,
-                stock_id=feature.stock_id,
-                expected_dates=expected_dates,
-            )
+            with measure_outcome_phase(timing_callback, "daily_read"):
+                bars, missing_dates, invalid_dates = _daily_bars(
+                    db=db,
+                    stock_id=feature.stock_id,
+                    expected_dates=expected_dates,
+                )
             limitations = ["entry_proxy_not_execution", "daily_ohlc_path_unordered"]
             if feature.data_status != "current":
                 limitations.append(f"feature_data_status:{feature.data_status}")
@@ -719,23 +789,25 @@ def evaluate_radar_outcome_v2(
                     }
                 )
             else:
-                calculation = calculate_outcome_path(
-                    bars=bars,
-                    reference_price=float(feature.close_price),
-                    signal_atr=feature.signal_atr,
-                    direction=evaluation.direction,
-                    outcome_kind=_outcome_kind(
-                        evaluation.primary_bucket,
-                        evaluation.direction,
-                    ),
-                )
-                corporate_status, corporate_actions, corporate_limitations = (
-                    _corporate_action_context(
-                        stock_id=feature.stock_id,
-                        date_from=expected_dates[0],
-                        date_to=expected_dates[-1],
+                with measure_outcome_phase(timing_callback, "path_calculation"):
+                    calculation = calculate_outcome_path(
+                        bars=bars,
+                        reference_price=float(feature.close_price),
+                        signal_atr=feature.signal_atr,
+                        direction=evaluation.direction,
+                        outcome_kind=_outcome_kind(
+                            evaluation.primary_bucket,
+                            evaluation.direction,
+                        ),
                     )
-                )
+                with measure_outcome_phase(timing_callback, "corporate_action_read"):
+                    corporate_status, corporate_actions, corporate_limitations = (
+                        _corporate_action_context(
+                            stock_id=feature.stock_id,
+                            date_from=expected_dates[0],
+                            date_to=expected_dates[-1],
+                        )
+                    )
                 limitations.extend(corporate_limitations)
                 if feature.signal_atr is None or feature.signal_atr <= 0:
                     limitations.append("missing_signal_atr")
@@ -780,7 +852,8 @@ def evaluate_radar_outcome_v2(
             else:
                 for key, value in values.items():
                     setattr(row, key, value)
-            db.flush()
+            with measure_outcome_phase(timing_callback, "transaction_flush"):
+                db.flush()
             for linked_event_id in linked_event_ids:
                 link = (
                     db.query(RadarOutcomeEventLink)
@@ -800,7 +873,8 @@ def evaluate_radar_outcome_v2(
                             signal_event_id=linked_event_id,
                         )
                     )
-            db.flush()
+            with measure_outcome_phase(timing_callback, "transaction_flush"):
+                db.flush()
             results.append(
                 _serialize_outcome(
                     row,
@@ -809,7 +883,8 @@ def evaluate_radar_outcome_v2(
             )
 
         if commit:
-            db.commit()
+            with measure_outcome_phase(timing_callback, "transaction_commit"):
+                db.commit()
         return results
     except Exception:
         if commit:

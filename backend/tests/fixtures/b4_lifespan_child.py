@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from contextlib import contextmanager, closing
+from contextlib import asynccontextmanager, contextmanager, closing
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
@@ -85,6 +85,9 @@ def owners(root, read, session_factory, source_bytes):
                   Thread=Thread, current_thread=current_thread, Any=Any, Callable=Callable,
                   Generator=Generator, Protocol=Protocol, Session=object,
                   logger=logging.getLogger('b4-fixture'))
+    admission = load_owner('backend/app/runtime_admission.py',
+        lambda n: node_name(n) in {'AdmissionCommitted', 'AsyncAdmission'},
+        dict(shared, asynccontextmanager=asynccontextmanager), source_bytes)
     session_names = {'SessionAdmissionClosed', '_SessionScope', 'SessionDrainResult',
         'require_session_scope_admission', 'begin_session_scope_drain', 'owned_session',
         'session_scope_drain_status', 'drain_session_scopes', 'get_draining_db'}
@@ -108,8 +111,9 @@ def owners(root, read, session_factory, source_bytes):
     jobs = SimpleNamespace(begin_job_drain=lambda: None, drain_job_executor=drain_jobs,
                            job_drain_status=EmptyJobsReceipt)
     runtime = load_owner('backend/app/runtime.py',
-        lambda n: node_name(n) in {'RuntimeLock', 'RuntimeDrainResult', 'RuntimeDrainError', 'RuntimeCoordinator'},
-        dict(shared, session_owner=session, intraday_publisher=publisher, job_service=jobs,
+        lambda n: node_name(n) in {'UNATTESTED_WRITERS', 'RuntimeLock', 'RuntimeDrainResult', 'RuntimeDrainError', 'RuntimeCoordinator'},
+        dict(shared, AsyncAdmission=admission.AsyncAdmission,
+             session_owner=session, intraday_publisher=publisher, job_service=jobs,
              settings=SimpleNamespace(runtime_lock_dir=root)), source_bytes)
     coordinator = runtime.RuntimeCoordinator(schema_lock=object(), background_lock=object(),
                                              drain_owned_sessions=True)

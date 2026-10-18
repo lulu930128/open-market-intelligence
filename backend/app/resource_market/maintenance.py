@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.session import SessionLocal
 from app.db.models import utc_now
+from app.db.admission import sqlite_admission
 
 
 DEFAULT_MIN_RAW_CHARS = 10_000
@@ -45,13 +46,10 @@ def backup_sqlite_database(*, suffix: str = "resource-ohlcv-raw-compact") -> Pat
     timestamp = utc_now().strftime("%Y%m%d-%H%M%S")
     backup_path = backup_dir / f"{database_path.stem}-{suffix}-{timestamp}{database_path.suffix}"
 
-    source = sqlite3.connect(str(database_path))
-    target = sqlite3.connect(str(backup_path))
-    try:
+    with closing(sqlite_admission.connect(str(database_path))) as source, closing(
+        sqlite_admission.connect(str(backup_path))
+    ) as target:
         source.backup(target)
-    finally:
-        target.close()
-        source.close()
     return backup_path
 
 
@@ -62,7 +60,7 @@ def vacuum_sqlite_database() -> None:
     if not database_path.exists():
         raise RuntimeError(f"SQLite database was not found: {database_path}")
 
-    connection = sqlite3.connect(str(database_path))
+    connection = sqlite_admission.connect(str(database_path))
     try:
         connection.execute("VACUUM")
     finally:

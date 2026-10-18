@@ -1,6 +1,30 @@
 schema_version = 1
 
 [[rules]]
+id = "owned_shutdown_transport_no_data_or_process_owner"
+kind = "python_forbidden_import"
+description = "Owned Uvicorn transport delegates lifespan; it cannot own data IO, provider operations or process management."
+roots = ["backend/app/owned_uvicorn.py"]
+extensions = [".py"]
+forbidden_prefixes = ["subprocess", "sqlite3", "sqlalchemy", "app.db", "app.market", "app.jobs", "app.runtime"]
+
+[[rules]]
+id = "runtime_control_transport_no_business_or_process_owner"
+kind = "python_forbidden_import"
+description = "Runtime HTTP/pipe transport has no DB, market, AI, shell or lifecycle ownership."
+roots = ["backend/app/runtime_control.py", "backend/app/routers/runtime_control.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.db", "app.jobs", "app.ai", "app.market", "app.market_data", "app.runtime", "sqlalchemy", "subprocess", "requests", "httpx"]
+
+[[rules]]
+id = "runtime_control_transport_no_mutation"
+kind = "python_forbidden_call"
+description = "Runtime transport cannot kill/spawn processes, signal events or write DB/receipt storage."
+roots = ["backend/app/runtime_control.py", "backend/app/routers/runtime_control.py"]
+extensions = [".py"]
+forbidden_call_names = ["kill", "terminate", "Popen", "system", "commit", "flush", "write_text", "write_bytes", "unlink"]
+
+[[rules]]
 id = "tw_intraday_radar_read_boundary"
 kind = "python_forbidden_import"
 description = "Intraday discovery uses cached lightweight state; candidate admission cannot acquire or depend on consumers."

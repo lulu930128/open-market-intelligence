@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.db.models import Base
+from app.db.admission import EngineAdmission
 
 
 connect_args = {}
@@ -38,6 +39,7 @@ if settings.database_url.startswith("sqlite"):
     engine_options["poolclass"] = NullPool
 
 engine = create_engine(settings.database_url, **engine_options)
+engine_admission = EngineAdmission(engine)
 
 
 def _database_target_metadata(url) -> dict[str, object]:
@@ -129,17 +131,14 @@ def init_db() -> None:
 
 
 def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    yield from get_draining_db()
 
 
-# Explicit owner scopes only. SessionLocal and the default API dependency above
-# remain unchanged. No engine/SQLAlchemy-wide hooks, SQL inspection or new IO.
+# API/startup scopes retain cancellation and lazy-construction ownership.
+# Direct/borrowed connections through this Engine additionally use its fence.
 _session_scope_lock = Lock()
 _session_scope_closed = False
+_session_scope_pause = None
 _session_scopes: dict[object, "_SessionScope"] = {}
 _session_scope_last_exit: float | None = None
 
@@ -174,8 +173,30 @@ class SessionDrainResult:
 
 def require_session_scope_admission() -> None:
     with _session_scope_lock:
-        if _session_scope_closed:
+        if _session_scope_closed or _session_scope_pause is not None:
             raise SessionAdmissionClosed("Explicit Session admission is closed")
+
+
+def pause_session_scopes():
+    global _session_scope_pause
+    with _session_scope_lock:
+        if _session_scope_closed or _session_scope_pause is not None:
+            raise SessionAdmissionClosed("Session quiescence unavailable")
+        _session_scope_pause = object()
+        return _session_scope_pause
+
+
+def session_scopes_quiescent(lease):
+    with _session_scope_lock:
+        return lease is _session_scope_pause and not _session_scope_closed and not _session_scopes
+
+
+def resume_session_scopes(lease):
+    global _session_scope_pause
+    with _session_scope_lock:
+        if lease is not _session_scope_pause or _session_scope_closed:
+            raise SessionAdmissionClosed("Invalid session quiescence lease")
+        _session_scope_pause = None
 
 
 def begin_session_scope_drain() -> None:
@@ -202,7 +223,7 @@ def owned_session(
     token = object()
     record = _SessionScope(owner)
     with _session_scope_lock:
-        if _session_scope_closed:
+        if _session_scope_closed or _session_scope_pause is not None:
             raise SessionAdmissionClosed("Explicit Session admission is closed")
         _session_scopes[token] = record
     # Reservation precedes construction, including a blocked/late constructor.
@@ -277,12 +298,7 @@ async def drain_session_scopes(*, deadline: float) -> SessionDrainResult:
 
 
 def get_draining_db() -> Generator[Session, None, None]:
-    """Opt-in dependency seam; default app routes still use get_db.
-
-    Adoption must pair dependency_overrides[get_db] with RuntimeCoordinator's
-    drain_owned_sessions=True before serving requests. Only disposable fixtures
-    exercise that wiring so far; it is not production writer coverage.
-    """
+    """Canonical API dependency; terminal closure returns 503 before construction."""
     from fastapi import HTTPException
 
     scope = owned_session("api_request")
