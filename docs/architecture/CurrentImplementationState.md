@@ -24,6 +24,20 @@
 
 ## State matrix
 
+2026-10-15 owned Backend shutdown checkpoint：Source `partial`（固定 inherited pipe、
+identity／nonce／TTL binding、Runner durable no-respawn、Uvicorn cooperative lifespan／
+exact-exit transport 已實作；disposable 正常與負向矩陣 accepted）。Production execution `blocked`：
+全 writer authority、獨立 approval issuer、正式 startup/config adoption 尚缺。
+Runtime `not_reverified`、Live `not_applicable`、Product `pending`；本輪未動正式程序。
+見 [控制邊界](RuntimeControl.md) 與 [證據](../exec-plans/completed/owned-backend-shutdown/Progress.md)。
+
+2026-10-14 runtime-control source checkpoint：Source `partial`（status／專用授權／launcher
+admission／durable receipt 的 source fixtures accepted；production STOP/START binding blocked）；
+Runtime `not_reverified`，Live `not_applicable`，Product `pending`。完整 all-writer drain、
+獨立本機 approval 與 graceful/no-respawn 尚未接入，RestartBackend 只保存 blocked，
+不委派 legacy force/port cleanup。見 [固定 contract](RuntimeControl.md) 與
+[驗證紀錄](../exec-plans/completed/runtime-control-source/Progress.md)。
+
 2026-10-07 Taiwan progressive workspace checkpoint：Source `accepted`；Runtime
 `not_reverified`；Live `not_applicable`（本次 cache-only source slice）；Product `pending`。
 Header／selected watchlist／hot groups／stock chart／stock research 的 typed routes 與 generated
