@@ -33,9 +33,15 @@ test("provisional Daily is display-only and the actual Tape reader ignores it", 
   const average = source.slice(source.indexOf("function averageLastNumbers"), source.indexOf("function sumJpIntradayVolume"));
   const script = ts.transpileModule(`${average}\n${reader}\nfetchUsMarketTapeReferenceSnapshot({symbol: "^GSPC"});`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
   const result = await runInNewContext(script, { fetchJson: async () => chart });
-  expect(result).toMatchObject({ close: 120, previousClose: 100, change: 20, ma20: 110, pointCount: 2, asOf: "2026-10-07" });
+  expect(result).toMatchObject({ close: 120, previousClose: 100, change: 20, ma20: null, pointCount: 2, asOf: "2026-10-07" });
   chart.intraday_overlay = null;
   expect(projectUSVisibleDailyChartPoints(chart)).toBe(chart.points);
+  const fullWindow = { ...chart, point_count: 20, points: Array.from({ length: 20 }, () => ({ close: 100 })) };
+  const complete = await runInNewContext(script, { fetchJson: async () => fullWindow });
+  expect(complete.ma20).toBe(100);
+  const gap = { ...fullWindow, points: [...fullWindow.points.slice(0, 19), { close: null }] };
+  const incomplete = await runInNewContext(script, { fetchJson: async () => gap });
+  expect(incomplete.ma20).toBeNull();
 });
 
 test("supplemental partial failure preserves successful fields and a later retry can succeed", async () => {
@@ -201,6 +207,18 @@ test("US market tape projects backend headline metrics instead of Daily D-2", ()
     marketSession: "market_closed",
   });
   expect(projected?.change).not.toBe(20);
+  const stale = { ...headline, freshness_status: "stale", decision_usable: false,
+    limitations: ["DELAYED_VENDOR_EVIDENCE", "US_INDEX_OBSERVATION_STALE"] };
+  expect(projectUSMarketTapeSnapshot(null, stale, "regular")).toMatchObject({
+    symbol: "^GSPC", close: 200, asOf: headline.event_at, priceVsMa20: null,
+    volume: null, volumeStatus: "not_applicable", freshnessStatus: "stale",
+    decisionUsable: false, limitations: stale.limitations,
+  });
+  expect(projectUSMarketTapeSnapshot(reference, { ...stale, event_at: null })?.asOf).toBeNull();
+  expect(projectUSMarketTapeSnapshot({ ...reference, volume: 123 }, stale)?.volume).toBeNull();
+  expect(projectUSMarketTapeSnapshot(reference, { ...stale, value: "NaN" })?.close).toBeNull();
+  expect(projectUSMarketTapeSnapshot(reference, { ...stale, canonical_symbol: "^DJI" })?.source).toBe("daily");
+  expect(projectUSMarketTapeSnapshot(null, null)).toBeNull();
 });
 
 test("intraday indicator projection preserves backend metadata and usability", () => {

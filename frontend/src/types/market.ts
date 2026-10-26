@@ -4319,6 +4319,9 @@ export type USMarketResearchRead = {
     status: string;
     observed_event_count: number;
     completeness_checkpoint: string | null;
+    applicability?: "required" | "not_applicable";
+    observed_event_scope?: "all_cached_symbol_events";
+    reason_codes?: string[];
   };
   market_coverage: Record<string, unknown>;
   missing: string[];

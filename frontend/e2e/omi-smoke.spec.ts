@@ -1,5 +1,76 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { usTruthResponse } from "./fixtures/usMarketTruth";
+import usDistributionFixture from "./fixtures/usSectorDistribution.json";
+
+test.describe("G3 US EOD distribution", () => {
+  for (const [locale, title, emptyText] of [
+    ["zh-TW", "美股板塊與產業分布", "沒有同時具備分類"],
+    ["en-US", "US sectors & industries", "No sample has both classification"],
+    ["ja-JP", "米国セクター・業種分布", "分類と比較可能な確定日価格"],
+  ]) {
+    test(`${locale} sample sorting, expansion and responsive empty state`, async ({ page }, info) => {
+      await page.addInitScript((language) => localStorage.setItem("omi:settings:language", language), locale);
+      await page.setViewportSize({ width: 390, height: 844 });
+      let empty = false;
+      await mockOmiApi(page, { apiResponder: ({ path }) => path.endsWith("/us-market/sectors") ? { body: empty
+        ? { ...usDistributionFixture, status: "unavailable", as_of: null, sectors: [], industries: [], hot_groups: [] }
+        : usDistributionFixture } : null });
+      await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+      const panel = page.getByTestId("us-sector-distribution");
+      await expect(panel).toContainText(title);
+      await expect(panel).toContainText("2026-10-23");
+      await expect(panel).toContainText("2026-10-22");
+      await expect(panel).toContainText("GICS");
+      await expect(panel.locator("details").first()).toContainText("TECHNOLOGY");
+      await panel.locator("select").nth(1).selectOption("weak");
+      await expect(panel.locator("details").first()).toContainText("INDUSTRIALS");
+      await panel.locator("select").first().selectOption("industries");
+      await expect(panel).toContainText("AEROSPACE & DEFENSE");
+      await panel.locator("summary").first().click();
+      await expect(panel).toContainText("yahoo_chart.daily");
+      await panel.scrollIntoViewIfNeeded();
+      expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      const screenshot = info.outputPath(`g3-${locale}-mobile.png`);
+      await panel.screenshot({ path: screenshot });
+      await info.attach(`g3-${locale}-mobile`, { path: screenshot, contentType: "image/png" });
+      empty = true;
+      await panel.getByRole("button").click();
+      await expect(panel).toContainText(emptyText);
+      await page.goto("/?market=tw", { waitUntil: "domcontentloaded" });
+      await expect(panel).toHaveCount(0);
+    });
+  }
+
+  test("manual read only, loading guard, error retry and departure", async ({ page }) => {
+    await page.clock.install();
+    let reads = 0;
+    let fail = true;
+    await mockOmiApi(page, { apiResponder: ({ path }) => {
+      if (!path.endsWith("/us-market/sectors")) return null;
+      reads += 1;
+      return fail ? { status: 503, body: { detail: "offline fixture" } }
+        : { body: usDistributionFixture, delayMs: 500 };
+    } });
+    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-sector-distribution");
+    await expect(panel.getByRole("alert")).toBeVisible();
+    const initialReads = reads;
+    await page.clock.fastForward(30_000);
+    expect(reads).toBe(initialReads);
+    fail = false;
+    await panel.getByRole("button").click();
+    await expect(panel.getByRole("button")).toBeDisabled();
+    await expect(panel).toContainText("TECHNOLOGY");
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+    expect(reads).toBe(initialReads + 1);
+    await page.clock.fastForward(30_000);
+    expect(reads).toBe(initialReads + 1);
+    await page.goto("/?market=tw", { waitUntil: "domcontentloaded" });
+    await expect(panel).toHaveCount(0);
+    await page.clock.fastForward(30_000);
+    expect(reads).toBe(initialReads + 1);
+  });
+});
 
 // Shared G4 synthetic fixture: the same timing and payloads run against the
 // saved pre-G4 component and current component in separate local builds.
@@ -4700,15 +4771,18 @@ test.describe("OMI dashboard smoke", () => {
   });
 
   test("US market tape reloads after leaving and returning to the market", async ({ page }) => {
+    // Remounts may issue another initial request. Keep the outage active until
+    // navigation, so recovery is tested rather than a first-request race.
+    let failDailyReference = true;
     await mockOmiApi(page, {
       usWatchlistTree: seededUsWatchlistTree(),
       usWatchlistItems: seededUsWatchlistItems(),
-      marketTapeResponder: ({ market, kind, target, requestNumber }) => {
+      marketTapeResponder: ({ market, kind, target }) => {
         if (
           market === "us" &&
           kind === "ohlc" &&
           target === "^GSPC" &&
-          requestNumber === 1
+          failDailyReference
         ) {
           return { body: { detail: "initial market tape failure" }, status: 500 };
         }
@@ -4721,6 +4795,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(tape).toHaveAttribute("data-load-state", "error");
 
     await page.getByRole("link", { name: "台股", exact: true }).click();
+    failDailyReference = false;
     await page.getByRole("link", { name: "美股", exact: true }).click();
 
     await expect(tape).toHaveAttribute("data-load-state", "success");
@@ -4951,6 +5026,35 @@ test.describe("OMI dashboard smoke", () => {
     expect(
       tapeRequests.filter((path) => path.endsWith("/us-market/indices")).length
     ).toBeGreaterThan(initialLiveCount);
+  });
+
+  test("US market tape keeps stale headline when Daily reference fails", async ({ page }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/us-market/indices")) {
+          const response = usMarketIndicesResponse();
+          return { body: { ...response, items: response.items.map((item) => ({
+            ...item, value: 200, freshness_status: "stale", decision_usable: false,
+            limitations: ["DELAYED_VENDOR_EVIDENCE", "US_INDEX_OBSERVATION_STALE"],
+          })) } };
+        }
+        if (decodeURIComponent(path).includes("/us-market/ohlc/^")) {
+          return { status: 503, body: { detail: "fixture Daily unavailable" } };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+    const card = page.getByTestId("market-tape-us").locator('[data-symbol="^GSPC"]');
+    await expect(card).toContainText("200");
+    await expect(card).toHaveAttribute("data-freshness-status", "stale");
+    await expect(card).toHaveAttribute("data-decision-usable", "false");
+    await expect(card).toContainText("資料過期");
+    await expect(card).toContainText("來源延遲，非即時行情");
+    await expect(card).toContainText("僅供參考，不可作決策依據");
+    await expect(card).toContainText("不適用（指數）");
   });
 
   test("US market tape renders canonical D versus D-1 headline metrics", async ({ page }) => {

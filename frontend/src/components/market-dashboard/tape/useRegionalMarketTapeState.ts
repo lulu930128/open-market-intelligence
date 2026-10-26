@@ -143,10 +143,10 @@ async function fetchUsMarketTapeReferenceSnapshot(config: USMarketIndexConfig) {
     change !== null && previousClose !== null && previousClose !== 0
       ? (change / previousClose) * 100
       : null;
-  const ma20 = averageLastNumbers(
-    chartPoints.map((point) => point.close),
-    20
-  );
+  const dailyCloses = chartPoints.slice(-20).map((point) => point.close);
+  const ma20 = dailyCloses.length === 20 && dailyCloses.every((value) => value !== null && Number.isFinite(value))
+    ? averageLastNumbers(dailyCloses, 20)
+    : null;
   const priceVsMa20 =
     close !== null && ma20 !== null && ma20 !== 0
       ? ((close - ma20) / ma20) * 100
@@ -162,7 +162,11 @@ async function fetchUsMarketTapeReferenceSnapshot(config: USMarketIndexConfig) {
     change,
     changePct,
     priceVsMa20,
-    volume: latestDaily?.volume ?? null,
+    volume: null,
+    volumeStatus: "not_applicable",
+    freshnessStatus: chart.freshness_status,
+    decisionUsable: false,
+    limitations: [],
     pointCount: chart.point_count,
     asOf: latestDaily?.time ?? null,
     source: "daily",
@@ -555,12 +559,14 @@ export function useUsMarketTapeState({
   const primarySnapshot = projectUSMarketTapeSnapshot(
     referenceState.primarySnapshot,
     headlineItems.items[primaryIndex.symbol.toUpperCase()] ?? null,
-    headlineItems.marketSession
+    headlineItems.marketSession,
+    primaryIndex
   );
   const contextSnapshot = projectUSMarketTapeSnapshot(
     referenceState.contextSnapshot,
     headlineItems.items[contextIndex.symbol.toUpperCase()] ?? null,
-    headlineItems.marketSession
+    headlineItems.marketSession,
+    contextIndex
   );
 
   return {

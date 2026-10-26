@@ -1,0 +1,910 @@
+{
+  "schema_version": "us.market.sector_distribution.v1",
+  "market": "US",
+  "status": "partial",
+  "as_of": "2026-10-23",
+  "expected_trade_date": "2026-10-23",
+  "reference_trade_date": "2026-10-22",
+  "evaluated_at": "2026-10-24T12:00:00+00:00",
+  "data_mode": "eod_market_snapshot",
+  "is_intraday": false,
+  "is_full_market": true,
+  "decision_usable": false,
+  "execution_grade_usable": false,
+  "sample_only": false,
+  "freshness_status": "current",
+  "coverage": {
+    "classified_comparable_count": 3,
+    "classified_price_eligible_count": 3,
+    "comparable_count": 4,
+    "comparable_coverage_ratio": 1.0,
+    "coverage_basis": "materialized_eod_coverage_checkpoint",
+    "evaluated_count": 4,
+    "expected_trade_date": "2026-10-23",
+    "inventory_current_count": 4,
+    "inventory_current_ratio": 1.0,
+    "inventory_missing_count": 0,
+    "inventory_partial_count": 0,
+    "inventory_stale_count": 0,
+    "not_covered_count": 0,
+    "observed_price_count": 4,
+    "over_budget_count": 0,
+    "price_coverage_ratio": 1.0,
+    "query_symbol_limit": null,
+    "selection_rule": "all_eligible_stockmaster_members_canonical_gateway",
+    "snapshot_trade_date": "2026-10-23",
+    "truncated": false,
+    "universe_complete": true,
+    "universe_count": 4,
+    "universe_hash": "f40014dc79480d79150cbb5a068888b105cdcc17c8d2e5c0c0cece0e9415d68a",
+    "universe_source": "us_stock_master.active.nasdaq_trader.non_etf_non_test_stock"
+  },
+  "classification_coverage": {
+    "as_of": "2026-08-01T00:00:00+00:00",
+    "coverage_ratio": 0.75,
+    "decision_usable": false,
+    "effective_date": null,
+    "effective_date_status": "unknown",
+    "industry_count": 3,
+    "industry_coverage_ratio": 0.75,
+    "industry_unknown_count": 1,
+    "mapped_count": 3,
+    "observed_universe_count": 4,
+    "profile_count": 3,
+    "reason_codes": [
+      "STANDARD_TAXONOMY_NOT_CONFIGURED",
+      "EFFECTIVE_MEMBERSHIP_DATE_UNKNOWN"
+    ],
+    "sector_count": 3,
+    "sector_coverage_ratio": 0.75,
+    "sector_unknown_count": 1,
+    "selection_rule": "valid_alphavantage_then_valid_other_then_sec_sic_then_incomplete;fetched_at_desc_provider_asc_id_desc",
+    "source_scope": "provider_reported_company_profile",
+    "taxonomies": [
+      "provider_reported"
+    ],
+    "taxonomy_id": "us_company_profile.provider_reported",
+    "taxonomy_version": "us_company_profile.provider_reported.v1@2026-08-01T00:00:00+00:00",
+    "universe_complete": false,
+    "unknown_count": 1
+  },
+  "counts": {
+    "universe": 4,
+    "evaluated": 4,
+    "observed_price": 4,
+    "comparable": 4,
+    "up": 2,
+    "down": 1,
+    "flat": 1,
+    "unknown": 0,
+    "no_trade": 0,
+    "fresh": 4,
+    "stale": 0,
+    "missing": 0,
+    "partial": 0,
+    "not_covered": 0
+  },
+  "avg_return_pct": 5.0,
+  "median_return_pct": 5.0,
+  "sectors": [
+    {
+      "group_id": "[\"sector\", \"alphavantage\", \"TECHNOLOGY\", null]",
+      "dimension": "sector",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "TECHNOLOGY",
+      "industry": null,
+      "classification_status": "known",
+      "counts": {
+        "universe": 2,
+        "evaluated": 2,
+        "observed_price": 2,
+        "comparable": 2,
+        "up": 2,
+        "down": 0,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 2,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 15.0,
+      "median_return_pct": 15.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": 10.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "SEMICONDUCTORS",
+            "profile_id": 1,
+            "provider": "alphavantage",
+            "raw_industry": "SEMICONDUCTORS",
+            "raw_sector": "TECHNOLOGY",
+            "sector": "TECHNOLOGY",
+            "source_url": null,
+            "symbol": "NVDA",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "up",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 20.0,
+          "symbol": "NVDA"
+        },
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "SOFTWARE",
+            "profile_id": 2,
+            "provider": "alphavantage",
+            "raw_industry": "SOFTWARE",
+            "raw_sector": "TECHNOLOGY",
+            "sector": "TECHNOLOGY",
+            "source_url": null,
+            "symbol": "MSFT",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "up",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 10.0,
+          "symbol": "MSFT"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"sector\", null, null, null]",
+      "dimension": "sector",
+      "provider": null,
+      "taxonomy": null,
+      "sector": null,
+      "industry": null,
+      "classification_status": "unknown",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 0,
+        "down": 0,
+        "flat": 1,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 0.0,
+      "median_return_pct": 0.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": -5.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": null,
+          "direction": "flat",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 0.0,
+          "symbol": "UNCLASSIFIED"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"sector\", \"alphavantage\", \"INDUSTRIALS\", null]",
+      "dimension": "sector",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "INDUSTRIALS",
+      "industry": null,
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 0,
+        "down": 1,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": -10.0,
+      "median_return_pct": -10.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": -15.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "AEROSPACE & DEFENSE",
+            "profile_id": 3,
+            "provider": "alphavantage",
+            "raw_industry": "AEROSPACE & DEFENSE",
+            "raw_sector": "INDUSTRIALS",
+            "sector": "INDUSTRIALS",
+            "source_url": null,
+            "symbol": "BA",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "down",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": -10.0,
+          "symbol": "BA"
+        }
+      ],
+      "members_truncated": false
+    }
+  ],
+  "industries": [
+    {
+      "group_id": "[\"industry\", \"alphavantage\", \"TECHNOLOGY\", \"SEMICONDUCTORS\"]",
+      "dimension": "industry",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "TECHNOLOGY",
+      "industry": "SEMICONDUCTORS",
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 1,
+        "down": 0,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 20.0,
+      "median_return_pct": 20.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": 15.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "SEMICONDUCTORS",
+            "profile_id": 1,
+            "provider": "alphavantage",
+            "raw_industry": "SEMICONDUCTORS",
+            "raw_sector": "TECHNOLOGY",
+            "sector": "TECHNOLOGY",
+            "source_url": null,
+            "symbol": "NVDA",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "up",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 20.0,
+          "symbol": "NVDA"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"industry\", \"alphavantage\", \"TECHNOLOGY\", \"SOFTWARE\"]",
+      "dimension": "industry",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "TECHNOLOGY",
+      "industry": "SOFTWARE",
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 1,
+        "down": 0,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 10.0,
+      "median_return_pct": 10.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": 5.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "SOFTWARE",
+            "profile_id": 2,
+            "provider": "alphavantage",
+            "raw_industry": "SOFTWARE",
+            "raw_sector": "TECHNOLOGY",
+            "sector": "TECHNOLOGY",
+            "source_url": null,
+            "symbol": "MSFT",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "up",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 10.0,
+          "symbol": "MSFT"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"industry\", null, null, null]",
+      "dimension": "industry",
+      "provider": null,
+      "taxonomy": null,
+      "sector": null,
+      "industry": null,
+      "classification_status": "unknown",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 0,
+        "down": 0,
+        "flat": 1,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 0.0,
+      "median_return_pct": 0.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": -5.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": null,
+          "direction": "flat",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 0.0,
+          "symbol": "UNCLASSIFIED"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"industry\", \"alphavantage\", \"INDUSTRIALS\", \"AEROSPACE & DEFENSE\"]",
+      "dimension": "industry",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "INDUSTRIALS",
+      "industry": "AEROSPACE & DEFENSE",
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 0,
+        "down": 1,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": -10.0,
+      "median_return_pct": -10.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": -15.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "AEROSPACE & DEFENSE",
+            "profile_id": 3,
+            "provider": "alphavantage",
+            "raw_industry": "AEROSPACE & DEFENSE",
+            "raw_sector": "INDUSTRIALS",
+            "sector": "INDUSTRIALS",
+            "source_url": null,
+            "symbol": "BA",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "down",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": -10.0,
+          "symbol": "BA"
+        }
+      ],
+      "members_truncated": false
+    }
+  ],
+  "hot_groups": [
+    {
+      "group_id": "[\"industry\", \"alphavantage\", \"TECHNOLOGY\", \"SEMICONDUCTORS\"]",
+      "dimension": "industry",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "TECHNOLOGY",
+      "industry": "SEMICONDUCTORS",
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 1,
+        "down": 0,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 20.0,
+      "median_return_pct": 20.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": 15.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "SEMICONDUCTORS",
+            "profile_id": 1,
+            "provider": "alphavantage",
+            "raw_industry": "SEMICONDUCTORS",
+            "raw_sector": "TECHNOLOGY",
+            "sector": "TECHNOLOGY",
+            "source_url": null,
+            "symbol": "NVDA",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "up",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 20.0,
+          "symbol": "NVDA"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"industry\", \"alphavantage\", \"TECHNOLOGY\", \"SOFTWARE\"]",
+      "dimension": "industry",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "TECHNOLOGY",
+      "industry": "SOFTWARE",
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 1,
+        "down": 0,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": 10.0,
+      "median_return_pct": 10.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": 5.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "SOFTWARE",
+            "profile_id": 2,
+            "provider": "alphavantage",
+            "raw_industry": "SOFTWARE",
+            "raw_sector": "TECHNOLOGY",
+            "sector": "TECHNOLOGY",
+            "source_url": null,
+            "symbol": "MSFT",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "up",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": 10.0,
+          "symbol": "MSFT"
+        }
+      ],
+      "members_truncated": false
+    },
+    {
+      "group_id": "[\"industry\", \"alphavantage\", \"INDUSTRIALS\", \"AEROSPACE & DEFENSE\"]",
+      "dimension": "industry",
+      "provider": "alphavantage",
+      "taxonomy": "provider_reported",
+      "sector": "INDUSTRIALS",
+      "industry": "AEROSPACE & DEFENSE",
+      "classification_status": "known",
+      "counts": {
+        "universe": 1,
+        "evaluated": 1,
+        "observed_price": 1,
+        "comparable": 1,
+        "up": 0,
+        "down": 1,
+        "flat": 0,
+        "unknown": 0,
+        "no_trade": 0,
+        "fresh": 1,
+        "stale": 0,
+        "missing": 0,
+        "partial": 0,
+        "not_covered": 0
+      },
+      "avg_return_pct": -10.0,
+      "median_return_pct": -10.0,
+      "price_coverage_ratio": 1.0,
+      "comparable_coverage_ratio": 1.0,
+      "relative_strength_pct": -15.0,
+      "turnover_value": null,
+      "turnover_status": "unavailable",
+      "members": [
+        {
+          "classification": {
+            "effective_date": null,
+            "effective_date_status": "unknown",
+            "fetched_at": "2026-08-01T00:00:00+00:00",
+            "industry": "AEROSPACE & DEFENSE",
+            "profile_id": 3,
+            "provider": "alphavantage",
+            "raw_industry": "AEROSPACE & DEFENSE",
+            "raw_sector": "INDUSTRIALS",
+            "sector": "INDUSTRIALS",
+            "source_url": null,
+            "symbol": "BA",
+            "taxonomy": "provider_reported"
+          },
+          "direction": "down",
+          "evaluated": true,
+          "observed_price": true,
+          "price_lineage": [
+            {
+              "event_at": "2026-10-23T20:00:00+00:00",
+              "fetched_at": "2026-10-23T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            },
+            {
+              "event_at": "2026-10-22T20:00:00+00:00",
+              "fetched_at": "2026-10-22T21:00:00+00:00",
+              "finalization": "final",
+              "price_basis": "raw",
+              "provider": "yahoo_chart",
+              "source": "yahoo_chart.daily"
+            }
+          ],
+          "price_status": "fresh",
+          "reason": "COMPLETED_SAME_SOURCE_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",
+          "reference_trade_date": "2026-10-22",
+          "return_pct": -10.0,
+          "symbol": "BA"
+        }
+      ],
+      "members_truncated": false
+    }
+  ],
+  "provenance": {
+    "comparison": "previous_trading_session_same_source_raw_price_return",
+    "corporate_action_coverage": "unknown",
+    "effective_date": null,
+    "external_calls": 0,
+    "price_owner": "USDailyOhlcvPlatform",
+    "read_policy": "cache_only",
+    "relative_strength_basis": "group_equal_weight_mean_minus_all_comparable_universe_equal_weight_mean",
+    "relative_strength_benchmark_count": 4,
+    "taxonomies": [
+      "provider_reported"
+    ],
+    "taxonomy": "source_specific",
+    "turnover_status": "unavailable"
+  },
+  "limitations": [
+    "EOD_NOT_INTRADAY",
+    "RAW_PRICE_RETURN_NOT_TOTAL_RETURN",
+    "TURNOVER_NOT_AVAILABLE_NOT_NET_FLOW",
+    "CURRENT_CLASSIFICATION_EFFECTIVE_DATE_UNKNOWN",
+    "PROVIDER_TAXONOMIES_NOT_EQUIVALENT_NO_GICS_MAPPING",
+    "CORPORATE_ACTION_INTERVAL_PROOF_MISSING",
+    "NO_TRADE_MEANS_PROVIDER_REPORTED_ZERO_SHARES_NOT_SUSPENSION"
+  ],
+  "intraday": {
+    "reason": "US_INTRADAY_UNIVERSE_SNAPSHOT_COVERAGE_NOT_VERIFIED",
+    "sample_only": true,
+    "status": "pending"
+  }
+}
