@@ -2,7 +2,7 @@ from collections.abc import Callable
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import json
 import logging
@@ -17,11 +17,14 @@ from sqlalchemy.orm import Session, load_only
 from app.config import settings
 from app.db.models import JobRun, utc_now
 from app.db.session import SessionLocal
+from app.jobs.cooperative import JobPaused, JobStopToken, current_job_stop
+from app.jobs.resumption import RESUME_KEY, describe, validate
+from app.utils.backfill_checkpoint import BackfillContextChanged
 
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_STATUSES = {"queued", "running"}
+ACTIVE_STATUSES = {"queued", "running", "paused"}
 TERMINAL_STATUSES = {"success", "error"}
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 JobWorker = Callable[[Session, ProgressCallback], Any]
@@ -99,11 +102,16 @@ class PendingJobTask:
     submitted_at: float
     started_at: float | None = None
     finished_at: float | None = None
+    stop: JobStopToken = field(default_factory=JobStopToken)
 
 
 _pending_tasks: dict[Future, PendingJobTask] = {}
+_paused_tasks: dict[int, dict[str, Any]] = {}
+_resuming_jobs: set[int] = set()
 PENDING_TASK_DIAGNOSTIC_LIMIT = 12
 _task_failures = 0
+# Historical durable-outcome uncertainty, not a count of executing writers.
+# Keep it after execution ends; Session/SQLite owners separately prove closure.
 _enqueue_failures = 0
 _materialization_executors: dict[str, ThreadPoolExecutor] = {}
 MARKET_BACKGROUND_MAX_IN_FLIGHT = 2
@@ -133,7 +141,8 @@ class JobDrainResult:
 
     @property
     def drained(self) -> bool:
-        return self.admission_closed and not self.pending_by_lane and not self.active_enqueues and not self.unresolved_enqueues
+        # Execution drain does not certify durable job completion/reconciliation.
+        return self.admission_closed and not self.pending_by_lane and not self.active_enqueues
 
 
 def require_job_admission() -> None:
@@ -147,18 +156,39 @@ def pause_jobs_if_idle():
     with _executor_lock:
         if _admission_closed or _admission_pause is not None:
             raise JobAdmissionClosed("Job quiescence unavailable")
-        if _pending_tasks or _active_enqueues or _enqueue_failures:
+        if _pending_tasks or _active_enqueues:
             return None
         _admission_pause = object()
         return _admission_pause
+
+
+def request_job_pause():
+    """One reversible admission/signal fence, shared with terminal drain."""
+    global _admission_pause
+    with _executor_lock:
+        if _admission_closed:
+            raise JobAdmissionClosed("Job drain is terminal")
+        if _admission_pause is None:
+            _admission_pause = object()
+        for task in _pending_tasks.values():
+            task.stop.requested.set()
+        return _admission_pause
+
+
+def jobs_paused(lease) -> bool:
+    with _executor_lock:
+        return (lease is not None and lease is _admission_pause
+                and not _pending_tasks and not _active_enqueues)
 
 
 def observe_job_quiescence() -> dict[str, Any]:
     """Memory-only diagnosis of the existing job owner; never clears a failure.
 
     A failed enqueue may have committed an unknown durable JobRun. Only a
-    separate, explicit reconciliation may resolve that uncertainty. This
-    observation is not a restart gate or proof of writer completion.
+    separate, explicit reconciliation may resolve that uncertainty. Historical
+    uncertainty alone does not keep an idle execution owner alive; downstream
+    Session/SQLite gates must still prove writer closure. This observation is
+    not restart authority or evidence that the durable obligation completed.
     """
     with _executor_lock:
         pending_by_lane: dict[str, int] = {}
@@ -186,16 +216,19 @@ def observe_job_quiescence() -> dict[str, Any]:
                     "task_name": task.task_name,
                     "execution_lane": lane,
                     "state": "done" if done else "running" if future.running() else "queued",
+                    "cooperation": ("CHECKPOINT_CAPABLE" if task.stop.safe_point else
+                                    "UNCOOPERATIVE/UNKNOWN" if task.started_at else "NOT_STARTED"),
+                    "stop_requested": task.stop.requested.is_set(),
                     "queue_wait_seconds": round(max(0.0, queue_end - task.submitted_at), 3),
                     "execution_seconds": None if task.started_at is None else round(
                         max(0.0, finished_at - task.started_at), 3),
                 })
         reason = (
             "ADMISSION_CLOSED" if _admission_closed else
-            "ALREADY_PAUSED" if _admission_pause is not None else
-            "UNRESOLVED_ENQUEUE" if _enqueue_failures else
             "ACTIVE_ENQUEUE" if _active_enqueues else
-            "PENDING_FUTURES" if pending_by_lane else "IDLE"
+            "PENDING_FUTURES" if pending_by_lane else
+            "UNRESOLVED_ENQUEUE" if _enqueue_failures else
+            "ALREADY_PAUSED" if _admission_pause is not None else "IDLE"
         )
         return {
             "reason": reason,
@@ -206,6 +239,8 @@ def observe_job_quiescence() -> dict[str, Any]:
             "cancelled_pending_by_lane": dict(sorted(cancelled_by_lane.items())),
             "active_enqueues": _active_enqueues,
             "unresolved_enqueues": _enqueue_failures,
+            "execution_quiescent": not _pending_tasks and not _active_enqueues,
+            "reconciliation_required": bool(_enqueue_failures),
             "task_failures": _task_failures,
             "unfinished_future_count": unfinished_count,
             "completed_pending_count": sum(completed_by_lane.values()),
@@ -218,9 +253,12 @@ def observe_job_quiescence() -> dict[str, Any]:
 def resume_jobs(lease):
     global _admission_pause
     with _executor_lock:
-        if lease is not _admission_pause or _admission_closed:
+        if lease is None or lease is not _admission_pause or _admission_closed:
             raise JobAdmissionClosed("Invalid job quiescence lease")
         _admission_pause = None
+        for task in _pending_tasks.values():
+            task.stop.requested.clear()
+    _resume_ready_tasks()
 
 
 @contextmanager
@@ -240,6 +278,8 @@ def begin_job_drain() -> None:
     global _admission_closed
     with _executor_lock:
         _admission_closed = True
+        for task in _pending_tasks.values():
+            task.stop.requested.set()
 
 
 def job_drain_status() -> JobDrainResult:
@@ -460,6 +500,9 @@ def serialize_job(job: JobRun, *, include_payload: bool = True) -> dict[str, Any
             result_json = _loaded_attr(job, "result_json")
             result = _summarize_result(_from_json(result_json)) if result_json is not None else None
 
+    if isinstance(result, dict) and RESUME_KEY in result:
+        # Continuation code/arguments are private persistence, not API payload.
+        result = {key: value for key, value in result.items() if key != RESUME_KEY}
     result_dict = result if isinstance(result, dict) else {}
     result_status = str(result_dict.get("status") or "").strip().lower()
     public_status = (
@@ -685,8 +728,139 @@ def _log_unhandled_task_exception(future) -> None:
         )
 
 
+class JobQuiescenceUnknown(RuntimeError):
+    pass
+
+
+def _persist_job_pause(job_id, task, task_args, lane, checkpoint):
+    """Future stays live through durable disposition AND Session close."""
+    try:
+        descriptor = describe(task, task_args, lane)
+        with SessionLocal() as db:
+            job = get_job(db, job_id)
+            previous = _from_json(job.result_json)
+            # A repeatedly paused queued continuation retains its original state.
+            prior = previous.get(RESUME_KEY) if isinstance(previous, dict) else None
+            if prior and checkpoint == {"safe_point": "not_started"}:
+                # A continuation can be queued twice before it starts. Retain
+                # its committed cursor, never downgrade it to a fresh replay.
+                checkpoint = prior["checkpoint"]
+            descriptor.update(previous_status=prior["previous_status"] if prior else job.status,
+                              previous_result=prior["previous_result"] if prior else previous,
+                              checkpoint=checkpoint)
+            validate(descriptor)
+            job.status = "paused"
+            job.message = "Restart paused; durable continuation pending."
+            job.error_message = None
+            job.ended_at = None
+            job.updated_at = utc_now()
+            if "current" in checkpoint:
+                job.progress_current = checkpoint["current"]
+                job.progress_total = max(checkpoint["total"], 1)
+            result = {"status": "partial", "reason": "restart_paused", RESUME_KEY: descriptor}
+            job.result_json = _to_json(result)
+            job.result_summary_json = _to_result_summary_json(result)
+            db.commit()
+        with _executor_lock:
+            _paused_tasks[job_id] = descriptor
+    except Exception as exc:
+        raise JobQuiescenceUnknown("JOB_PAUSE_PERSISTENCE_UNKNOWN") from exc
+
+
+def _restore_paused_job(job_id, task, task_args, lane):
+    with SessionLocal() as db:
+        job = get_job(db, job_id)
+        result = _from_json(job.result_json)
+        descriptor = result[RESUME_KEY]
+        restored_task, restored_args = validate(descriptor)
+        if restored_task is not task or restored_args != task_args or descriptor["lane"] != lane:
+            raise JobQuiescenceUnknown("JOB_RESUME_DESCRIPTOR_CHANGED")
+        if job.status != "paused":
+            raise JobQuiescenceUnknown("JOB_RESUME_STATE_CHANGED")
+        if descriptor["checkpoint"].get("job_id", job_id) != job_id:
+            raise JobQuiescenceUnknown("JOB_RESUME_PROVENANCE_CHANGED")
+        job.status = descriptor["previous_status"]
+        job.result_json = _to_json(descriptor["previous_result"])
+        job.result_summary_json = _to_result_summary_json(descriptor["previous_result"])
+        job.message = "Resuming after restart pause."
+        job.updated_at = utc_now()
+        db.commit()
+
+    return descriptor["checkpoint"]
+
+
+def _resume_ready_tasks():
+    """Reserve under the fence; validate/import/submit outside it. Never DB IO."""
+    global _active_enqueues
+    with _executor_lock:
+        candidates = list(_paused_tasks)
+    for job_id in candidates:
+        with _executor_lock:
+            if _admission_closed or _admission_pause is not None:
+                return
+            if (job_id not in _paused_tasks or job_id in _resuming_jobs
+                    or any(t.job_id == job_id for t in _pending_tasks.values())):
+                continue
+            descriptor = _paused_tasks.pop(job_id)
+            _resuming_jobs.add(job_id)
+            _active_enqueues += 1
+        try:
+            task, args = validate(descriptor)
+            submit_job_task(task, job_id, *args, execution_lane=descriptor["lane"], _resuming=True)
+        except BaseException as exc:
+            with _executor_lock:
+                _paused_tasks[job_id] = descriptor
+            if isinstance(exc, JobAdmissionClosed) or str(exc) == "MARKET_MATERIALIZATION_QUEUE_FULL":
+                return  # Still durable; next rearm/completion can dispatch it.
+            raise
+        finally:
+            with _executor_lock:
+                _resuming_jobs.remove(job_id)
+                _active_enqueues -= 1
+        with _executor_lock:
+            # An immediate completion can pause/rearm while this submit still
+            # owns the reservation. Its callback cannot redispatch the same id
+            # yet; retain that wakeup for this dispatch loop instead.
+            if (job_id in _paused_tasks and not _admission_closed and _admission_pause is None
+                    and not any(t.job_id == job_id for t in _pending_tasks.values())):
+                candidates.append(job_id)
+
+
+def read_paused_job_obligations(db: Session) -> dict[int, dict[str, Any]]:
+    """Validate durable obligations without writes, admission changes or submit."""
+    obligations = {}
+    for job in db.query(JobRun).filter(JobRun.status == "paused").all():
+        result = _from_json(job.result_json)
+        if not isinstance(result, dict) or RESUME_KEY not in result:
+            raise JobQuiescenceUnknown("JOB_RESUME_OBLIGATION_UNKNOWN")
+        validate(result[RESUME_KEY])
+        checkpoint = result[RESUME_KEY]["checkpoint"]
+        if "job_id" in checkpoint and checkpoint["job_id"] != job.id:
+            raise JobQuiescenceUnknown("JOB_RESUME_PROVENANCE_CHANGED")
+        obligations[job.id] = result[RESUME_KEY]
+    return obligations
+
+
+def resume_job_obligations(obligations: dict[int, dict[str, Any]]) -> int:
+    """Explicit ready-background-leader command; never a GET/read side effect."""
+    with _enqueue_admission():
+        for descriptor in obligations.values():
+            validate(descriptor)
+        with _executor_lock:
+            for job_id, descriptor in obligations.items():
+                if job_id not in _resuming_jobs and not any(t.job_id == job_id for t in _pending_tasks.values()):
+                    _paused_tasks[job_id] = descriptor
+        _resume_ready_tasks()
+        return len(obligations)
+
+
+def recover_paused_jobs(db: Session) -> int:
+    """Explicit recovery command for an already-ready background owner."""
+    return resume_job_obligations(read_paused_job_obligations(db))
+
+
 def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
-                    execution_lane: str = "default") -> None:
+                    execution_lane: str = "default", _resuming: bool = False) -> None:
     # Submit and register under the same fence. Immediate callbacks may re-enter.
     with _executor_lock:
         require_job_admission()
@@ -710,13 +884,48 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
             raw_name = getattr(task, "__name__", "")
             task_name = raw_name if isinstance(raw_name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,95}", raw_name) else "job_task"
             tracked = PendingJobTask(execution_lane, job_id, task_name, time.monotonic())
+            tracked.stop.task_identity = (getattr(task, "__module__", None), raw_name)
+            tracked.stop.task_args = task_args
+            tracked.stop.job_id = job_id
 
             def run_task():
                 with _executor_lock:
-                    tracked.started_at = time.monotonic()
+                    pause_before_start = _admission_closed or _admission_pause is not None
+                    if not pause_before_start:
+                        tracked.started_at = time.monotonic()
+                context = current_job_stop.set(tracked.stop)
                 try:
+                    if pause_before_start:
+                        # This owner already claimed queued -> running before
+                        # submit. Return only the unstarted claim to its own
+                        # dispatcher, preserving deadline/quota/backoff.
+                        from app.jobs.taiwan_intraday_demand import run_consumer_demand, requeue_unstarted_consumer_demand
+                        if task is run_consumer_demand:
+                            requeue_unstarted_consumer_demand(job_id)
+                            return
+                        _persist_job_pause(job_id, task, task_args, execution_lane,
+                                           {"safe_point": "not_started"})
+                        return
+                    if _resuming:
+                        try:
+                            tracked.stop.resume_checkpoint = _restore_paused_job(
+                                job_id, task, task_args, execution_lane)
+                        except Exception as exc:
+                            raise JobQuiescenceUnknown("JOB_RESUME_CLAIM_UNKNOWN") from exc
                     return task(job_id, *task_args)
+                except JobPaused as paused:
+                    _persist_job_pause(job_id, task, task_args, execution_lane, paused.checkpoint)
+                except BackfillContextChanged as exc:
+                    # Preserve the durable obligation but block automatic retry
+                    # in this process. A changed universe is not completion.
+                    if tracked.stop.resume_checkpoint is not None:
+                        _persist_job_pause(job_id, task, task_args, execution_lane,
+                                           tracked.stop.resume_checkpoint)
+                        with _executor_lock:
+                            _paused_tasks.pop(job_id, None)
+                    raise JobQuiescenceUnknown("JOB_PERIOD_CONTEXT_CHANGED") from exc
                 finally:
+                    current_job_stop.reset(context)
                     with _executor_lock:
                         tracked.finished_at = time.monotonic()
 
@@ -728,18 +937,34 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
         _pending_tasks[future] = tracked
 
         def completed(done: Future) -> None:
-            global _task_failures
+            global _task_failures, _enqueue_failures, _active_enqueues
             try:
                 _log_unhandled_task_exception(done)
             finally:
                 with _executor_lock:
                     if not done.cancelled() and done.exception() is not None:
                         _task_failures += 1
+                        # Tracked failures already persist their terminal state.
+                        # An escaping exception has no proven durable outcome.
+                        _enqueue_failures += 1
+                    if done.cancelled():
+                        # Cancellation has no proven durable disposition.
+                        _enqueue_failures += 1
                     if slots is not None:
                         slots.release()
+                    _active_enqueues += 1  # Callback itself is still owned work.
                     _pending_tasks.pop(done, None)
+                try:
+                    _resume_ready_tasks()
+                except Exception:
+                    with _executor_lock:
+                        _enqueue_failures += 1
+                    logger.exception("Job continuation admission failed; obligation retained.")
+                finally:
+                    with _executor_lock:
+                        _active_enqueues -= 1
 
-        future.add_done_callback(completed)
+    future.add_done_callback(completed)
 
 
 def enqueue_job(
@@ -815,6 +1040,11 @@ def _enqueue_job(
 
     try:
         submit_job_task(task, job.id, *task_args)
+    except JobAdmissionClosed:
+        # The enqueue was admitted before PREPARE, but committed after its fence.
+        # It has never executed provider IO and needs a durable continuation.
+        _persist_job_pause(job.id, task, task_args, "default", {"safe_point": "not_started"})
+        db.refresh(job)
     except Exception as exc:
         fail_job(db, job.id, error_message=f"Failed to submit job: {exc}")
         db.refresh(job)
@@ -847,9 +1077,11 @@ def shutdown_job_executor(wait: bool = False) -> None:
 
 
 def mark_interrupted_jobs(db: Session) -> int:
+    from app.jobs.taiwan_intraday_demand import is_restart_handoff
+
     jobs = (
         db.query(JobRun)
-        .filter(JobRun.status.in_(ACTIVE_STATUSES))
+        .filter(JobRun.status.in_({"queued", "running"}))
         .all()
     )
 
@@ -858,7 +1090,11 @@ def mark_interrupted_jobs(db: Session) -> int:
 
     now = utc_now()
 
+    interrupted = 0
     for job in jobs:
+        if is_restart_handoff(job):
+            continue
+        interrupted += 1
         job.status = "error"
         job.error_message = "Job interrupted by application restart."
         job.message = "Job stopped before completion."
@@ -866,7 +1102,7 @@ def mark_interrupted_jobs(db: Session) -> int:
         job.updated_at = now
 
     db.commit()
-    return len(jobs)
+    return interrupted
 
 
 def start_job(db: Session, job_id: int, message: str | None = None) -> JobRun:
@@ -975,6 +1211,8 @@ def run_tracked_job(job_id: int, worker: JobWorker) -> None:
         start_job(db, job_id, message="Job started.")
         result = worker(db, progress)
         complete_job(db, job_id, result=result)
+    except BackfillContextChanged:
+        raise
     except JobExecutionError as exc:
         fail_job(db, job_id, error_message=str(exc), result=exc.result)
         logger.warning("Tracked job %s failed its outcome contract: %s", job_id, exc)
@@ -982,4 +1220,7 @@ def run_tracked_job(job_id: int, worker: JobWorker) -> None:
         fail_job(db, job_id, error_message=str(exc))
         logger.exception("Tracked job %s failed.", job_id)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as exc:
+            raise JobQuiescenceUnknown("JOB_SESSION_CLOSE_UNKNOWN") from exc

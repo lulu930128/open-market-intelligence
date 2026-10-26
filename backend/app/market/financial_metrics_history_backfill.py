@@ -11,6 +11,8 @@ import requests
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.utils.backfill_checkpoint import BackfillProgress
+
 from app.db.models import FinancialMetricQuarterly, RawFetchResult, SourceRegistry, StockMaster
 from app.http_client import new_session
 from app.market.taiwan_rules import expected_financial_metrics_period
@@ -386,7 +388,10 @@ def ensure_stock_financial_metrics_history(
     lookback_quarters: int = 40,
     sleep_seconds: float = 0.05,
     skip_existing: bool = True,
+    *, checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
+    if checkpoint is not None and (db.new or db.dirty or db.deleted):
+        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
     stock = _get_stock(db=db, stock_id=stock_id)
     market = _normalize_market(stock.market)
     source = _get_financial_source(db=db, market=market)
@@ -400,156 +405,176 @@ def ensure_stock_financial_metrics_history(
         lookback_quarters=lookback_quarters,
     )
 
+    state = BackfillProgress(
+        owner='financial_quarter', identity=[stock_id, source.id],
+        items=[f"{year}Q{quarter}" for year, quarter in quarters], counters=('fetched_count', 'cached_count', 'skipped_existing_count', 'inserted_count', 'updated_count', 'error_count'),
+        checkpoint=checkpoint, resume_state=resume_state,
+    )
+    results = state.results
     session = new_session()
-    results: list[dict] = []
-    fetched_count = 0
-    cached_count = 0
-    skipped_existing_count = 0
-    inserted_count = 0
-    updated_count = 0
-    error_count = 0
 
-    for fiscal_year, quarter in quarters:
-        existing = (
-            db.query(FinancialMetricQuarterly.id)
-            .filter(FinancialMetricQuarterly.source_id == source.id)
-            .filter(FinancialMetricQuarterly.stock_id == stock_id)
-            .filter(FinancialMetricQuarterly.fiscal_year == fiscal_year)
-            .filter(FinancialMetricQuarterly.quarter == quarter)
-            .first()
-        )
-
-        if skip_existing and existing is not None:
-            skipped_existing_count += 1
-            results.append(
-                {
-                    "period": f"{fiscal_year}Q{quarter}",
-                    "status": "skipped_existing",
-                    "raw_result_id": None,
-                    "message": "Skipped because financial metric row already exists.",
-                    "error_message": None,
-                }
-            )
-            continue
-
-        cache_url = _bundle_cache_url(market=market, fiscal_year=fiscal_year, quarter=quarter)
-
-        try:
-            raw_result = _get_cached_raw_result(db=db, source_id=source.id, url=cache_url)
-            if raw_result is not None:
-                cached_count += 1
-                bundle = json.loads(raw_result.raw_text or "{}")
-            else:
-                income_text, income_status, income_content_type, income_url = _fetch_statement_html(
-                    session=session,
-                    statement="04",
-                    market=market,
-                    fiscal_year=fiscal_year,
-                    quarter=quarter,
-                )
-                balance_text, balance_status, balance_content_type, balance_url = _fetch_statement_html(
-                    session=session,
-                    statement="05",
-                    market=market,
-                    fiscal_year=fiscal_year,
-                    quarter=quarter,
-                )
-                fetched_count += 1
-                bundle = {
-                    "income": {"url": income_url, "raw_text": income_text},
-                    "balance": {"url": balance_url, "raw_text": balance_text},
-                }
-                raw_result = _create_raw_result(
-                    db=db,
-                    source_id=source.id,
-                    url=cache_url,
-                    raw_text=json.dumps(bundle, ensure_ascii=False),
-                    status_code=max(income_status, balance_status),
-                    content_type=income_content_type or balance_content_type,
-                )
-
-            income_row = _row_map_from_html(
-                raw_text=bundle.get("income", {}).get("raw_text") or "",
-                stock_id=stock_id,
-            )
-            balance_row = _row_map_from_html(
-                raw_text=bundle.get("balance", {}).get("raw_text") or "",
-                stock_id=stock_id,
+    try:
+        for item_index, item in enumerate(state.items):
+            if item_index < state.completed:
+                continue
+            fiscal_year, quarter = map(int, item.split("Q"))
+            existing = (
+                db.query(FinancialMetricQuarterly.id)
+                .filter(FinancialMetricQuarterly.source_id == source.id)
+                .filter(FinancialMetricQuarterly.stock_id == stock_id)
+                .filter(FinancialMetricQuarterly.fiscal_year == fiscal_year)
+                .filter(FinancialMetricQuarterly.quarter == quarter)
+                .first()
             )
 
-            if income_row is None:
-                db.commit()
+            if skip_existing and existing is not None:
+                state.totals['skipped_existing_count'] += 1
                 results.append(
                     {
                         "period": f"{fiscal_year}Q{quarter}",
-                        "status": "no_data",
-                        "raw_result_id": raw_result.id,
-                        "message": "Stock row was not found in MOPS income statement page.",
+                        "status": "skipped_existing",
+                        "raw_result_id": None,
+                        "message": "Skipped because financial metric row already exists.",
                         "error_message": None,
                     }
                 )
+                if checkpoint is not None:
+                    # Existing-period branch owns only coverage reads.
+                    if db.new or db.dirty or db.deleted:
+                        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                    db.rollback()
+                state.advance()
                 continue
 
-            payload = _financial_payload(
-                source_id=source.id,
-                raw_result_id=raw_result.id,
-                fiscal_year=fiscal_year,
-                quarter=quarter,
-                stock_id=stock_id,
-                stock=stock,
-                market=market,
-                income=income_row,
-                balance=balance_row,
-            )
-            mutation = _upsert_financial_metric(db=db, payload=payload)
-            db.commit()
+            cache_url = _bundle_cache_url(market=market, fiscal_year=fiscal_year, quarter=quarter)
 
-            if mutation == "inserted":
-                inserted_count += 1
-            else:
-                updated_count += 1
+            totals_before = state.totals.copy()
+            try:
+                raw_result = _get_cached_raw_result(db=db, source_id=source.id, url=cache_url)
+                if raw_result is not None:
+                    state.totals['cached_count'] += 1
+                    bundle = json.loads(raw_result.raw_text or "{}")
+                else:
+                    income_text, income_status, income_content_type, income_url = _fetch_statement_html(
+                        session=session,
+                        statement="04",
+                        market=market,
+                        fiscal_year=fiscal_year,
+                        quarter=quarter,
+                    )
+                    balance_text, balance_status, balance_content_type, balance_url = _fetch_statement_html(
+                        session=session,
+                        statement="05",
+                        market=market,
+                        fiscal_year=fiscal_year,
+                        quarter=quarter,
+                    )
+                    state.totals['fetched_count'] += 1
+                    bundle = {
+                        "income": {"url": income_url, "raw_text": income_text},
+                        "balance": {"url": balance_url, "raw_text": balance_text},
+                    }
+                    raw_result = _create_raw_result(
+                        db=db,
+                        source_id=source.id,
+                        url=cache_url,
+                        raw_text=json.dumps(bundle, ensure_ascii=False),
+                        status_code=max(income_status, balance_status),
+                        content_type=income_content_type or balance_content_type,
+                    )
 
-            results.append(
-                {
-                    "period": f"{fiscal_year}Q{quarter}",
-                    "status": mutation,
-                    "raw_result_id": raw_result.id,
-                    "message": "MOPS financial metric row saved.",
-                    "error_message": None,
-                }
-            )
-        except Exception as exc:
-            db.rollback()
-            error_count += 1
-            results.append(
-                {
-                    "period": f"{fiscal_year}Q{quarter}",
-                    "status": "error",
-                    "raw_result_id": None,
-                    "message": "MOPS financial metrics history backfill failed.",
-                    "error_message": str(exc),
-                }
-            )
+                income_row = _row_map_from_html(
+                    raw_text=bundle.get("income", {}).get("raw_text") or "",
+                    stock_id=stock_id,
+                )
+                balance_row = _row_map_from_html(
+                    raw_text=bundle.get("balance", {}).get("raw_text") or "",
+                    stock_id=stock_id,
+                )
 
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+                if income_row is None:
+                    saved_raw_id = raw_result.id if raw_result is not None else None
+                    db.commit()
+                    results.append(
+                        {
+                            "period": f"{fiscal_year}Q{quarter}",
+                            "status": "no_data",
+                            "raw_result_id": saved_raw_id,
+                            "message": "Stock row was not found in MOPS income statement page.",
+                            "error_message": None,
+                        }
+                    )
+                    state.advance()
+                    continue
+
+                payload = _financial_payload(
+                    source_id=source.id,
+                    raw_result_id=raw_result.id,
+                    fiscal_year=fiscal_year,
+                    quarter=quarter,
+                    stock_id=stock_id,
+                    stock=stock,
+                    market=market,
+                    income=income_row,
+                    balance=balance_row,
+                )
+                mutation = _upsert_financial_metric(db=db, payload=payload)
+                saved_raw_id = raw_result.id
+                db.commit()
+
+                if mutation == "inserted":
+                    state.totals['inserted_count'] += 1
+                else:
+                    state.totals['updated_count'] += 1
+
+                results.append(
+                    {
+                        "period": f"{fiscal_year}Q{quarter}",
+                        "status": mutation,
+                        "raw_result_id": saved_raw_id,
+                        "message": "MOPS financial metric row saved.",
+                        "error_message": None,
+                    }
+                )
+            except Exception as exc:
+                db.rollback()
+                state.totals.update(totals_before)
+                state.checkpoint()  # Retry this period after owner rollback.
+                state.totals['error_count'] += 1
+                results.append(
+                    {
+                        "period": f"{fiscal_year}Q{quarter}",
+                        "status": "error",
+                        "raw_result_id": None,
+                        "message": "MOPS financial metrics history backfill failed.",
+                        "error_message": str(exc),
+                    }
+                )
+
+            state.advance()
+
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+    finally:
+        session.close()
 
     status = "success"
-    if error_count:
-        status = "partial_success" if inserted_count or updated_count or skipped_existing_count else "error"
+    if state.totals['error_count']:
+        status = "partial_success" if state.totals['inserted_count'] or state.totals['updated_count'] or state.totals['skipped_existing_count'] else "error"
 
     return {
         "status": status,
         "stock_id": stock_id,
         "market": market,
         "source_id": source.id,
-        "requested_period_count": len(quarters),
-        "fetched_count": fetched_count,
-        "cached_count": cached_count,
-        "skipped_existing_count": skipped_existing_count,
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-        "error_count": error_count,
+        "requested_period_count": len(state.items),
+        "fetched_count": state.totals['fetched_count'],
+        "cached_count": state.totals['cached_count'],
+        "skipped_existing_count": state.totals['skipped_existing_count'],
+        "inserted_count": state.totals['inserted_count'],
+        "updated_count": state.totals['updated_count'],
+        "error_count": state.totals['error_count'],
         "results": results,
     }
 

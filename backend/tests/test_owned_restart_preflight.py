@@ -140,7 +140,10 @@ def restart_runtime(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def test_external_writer_refusal_rearms_every_owner(restart_runtime):
+@pytest.mark.parametrize("historical_failures", [0, 1])
+def test_external_writer_refusal_rearms_every_owner(restart_runtime, monkeypatch, historical_failures):
+    from app.jobs import service
+    monkeypatch.setattr(service, "_enqueue_failures", historical_failures)
     runtime, owner, engine, path = restart_runtime
     external = sqlite3.connect(path, timeout=0, isolation_level=None)
     external.execute("BEGIN IMMEDIATE")
@@ -174,7 +177,10 @@ def test_external_writer_refusal_rearms_every_owner(restart_runtime):
     assert owner.observation()["active_connections"] == 0
 
 
-def test_prepare_lock_survives_commit_until_lifespan_drain(restart_runtime):
+@pytest.mark.parametrize("historical_failures", [0, 1])
+def test_prepare_lock_survives_commit_until_lifespan_drain(restart_runtime, monkeypatch, historical_failures):
+    from app.jobs import service
+    monkeypatch.setattr(service, "_enqueue_failures", historical_failures)
     runtime, owner, engine, path = restart_runtime
 
     async def check():
@@ -192,6 +198,7 @@ def test_prepare_lock_survives_commit_until_lifespan_drain(restart_runtime):
             runtime.commit_owned_restart()
             result = await runtime.stop(timeout_seconds=1)
             assert result.all_writers_drained and result.unknown_writers == ()
+            assert result.jobs.unresolved_enqueues == historical_failures
             assert runtime._restart_guard.held
             with pytest.raises(sqlite3.OperationalError, match="locked"):
                 external.execute("BEGIN IMMEDIATE")
@@ -199,6 +206,123 @@ def test_prepare_lock_survives_commit_until_lifespan_drain(restart_runtime):
         finally:
             external.close()
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("blocker", ["session", "physical_sqlite"])
+def test_history_does_not_bypass_active_session_or_sqlite_writer(restart_runtime, monkeypatch, blocker):
+    from contextlib import ExitStack
+    from sqlalchemy.orm import Session
+    from app.db import session as session_owner
+    from app.jobs import service
+
+    runtime, owner, engine, path = restart_runtime
+    monkeypatch.setattr(service, "_enqueue_failures", 1)
+    with ExitStack() as stack:
+        if blocker == "session":
+            db = stack.enter_context(session_owner.owned_session(
+                "api_request", session_factory=lambda: Session(engine)))
+            db.execute(text("INSERT INTO retained VALUES (1)"))
+            expected = "SESSION_QUIESCENCE"
+        else:
+            db = owner.connect(path)
+            stack.callback(db.close)
+            db.execute("INSERT INTO retained VALUES (1)")
+            expected = "SQLITE_PHYSICAL_CONNECTION_QUIESCENCE"
+        stack.callback(db.rollback)
+
+        async def refuse():
+            result = await runtime.prepare_owned_restart(timeout_seconds=.05)
+            assert result == {"state": "PREFLIGHT_REARMED", "stage": expected,
+                              "terminal_drain_started": False}
+            assert runtime.owned_restart_rearmed() and runtime._stop_task is None
+
+        asyncio.run(refuse())
+        assert service._enqueue_failures == 1
+        # Refusal must not close/rollback the actual writer to fabricate idle.
+        transaction_open = db.in_transaction() if blocker == "session" else db.in_transaction
+        assert transaction_open
+        statement = "SELECT COUNT(*) FROM retained"
+        assert (db.execute(text(statement)).scalar() if blocker == "session"
+                else db.execute(statement).fetchone()[0]) == 1
+
+    async def after_writer_exit():
+        result = await runtime.prepare_owned_restart(timeout_seconds=1)
+        try:
+            assert result["state"] == "WRITERS_PREPARED"
+            assert service._enqueue_failures == 1
+        finally:
+            assert runtime.abort_owned_restart()
+
+    asyncio.run(after_writer_exit())
+
+
+@pytest.mark.parametrize("ownership", ["active_transport", "unknown_start"])
+def test_history_does_not_bypass_unfinished_provider_thread(restart_runtime, monkeypatch, ownership):
+    from threading import Event, Thread
+    from app.jobs import service
+    from app import runtime_admission
+
+    runtime, _, _, _ = restart_runtime
+    monkeypatch.setattr(service, "_enqueue_failures", 1)
+    entered, release, completed = Event(), Event(), Event()
+    def transport():
+        entered.set()
+        assert release.wait(3)
+        completed.set()
+    worker = runtime_admission.OwnedWorkThread(target=transport)
+    if ownership == "unknown_start":
+        # start() may fail after native dispatch; absence of a live Thread is
+        # not completion proof. Preserve the original owner's reservation.
+        with monkeypatch.context() as start_failure:
+            start_failure.setattr(Thread, "start", lambda _: (_ for _ in ()).throw(RuntimeError("unknown dispatch")))
+            with pytest.raises(RuntimeError, match="unknown dispatch"):
+                worker.start()
+    else:
+        worker.start()
+        assert entered.wait(2)
+    async def refuse():
+        result = await runtime.prepare_owned_restart(timeout_seconds=.05)
+        assert result == {"state": "PREFLIGHT_REARMED", "stage": "DETACHED_WORKER_QUIESCENCE",
+                          "terminal_drain_started": False}
+        assert runtime._stop_task is None and runtime.owned_restart_rearmed()
+        assert runtime_admission.detached_admission.observation()["retained_worker_count"] == 1
+        assert service._enqueue_failures == 1 and not completed.is_set()
+    try:
+        asyncio.run(refuse())
+    finally:
+        release.set()
+        if ownership == "active_transport":
+            worker.join(2)
+            assert completed.is_set() and not worker.is_alive()
+    # An unknown reservation is deliberately never cleared, even in this test;
+    # fixture isolation disposes the entire owner after the assertion.
+    if ownership == "unknown_start":
+        assert runtime_admission.detached_admission.observation()["retained_worker_count"] == 1
+
+
+def test_history_does_not_bypass_unknown_session_close(restart_runtime, monkeypatch):
+    from sqlalchemy.orm import Session
+    from app.db import session as session_owner
+    from app.jobs import service
+
+    runtime, _, engine, _ = restart_runtime
+    monkeypatch.setattr(service, "_enqueue_failures", 1)
+    class UnacknowledgedClose(Session):
+        def close(self):
+            super().close()
+            raise RuntimeError("fixture close acknowledgement unknown")
+    with pytest.raises(RuntimeError, match="acknowledgement unknown"):
+        with session_owner.owned_session("api_request", session_factory=lambda: UnacknowledgedClose(engine)) as db:
+            db.execute(text("INSERT INTO retained VALUES (1)"))
+            db.commit()
+    async def refuse():
+        result = await runtime.prepare_owned_restart(timeout_seconds=.05)
+        assert result == {"state": "PREFLIGHT_REARMED", "stage": "SESSION_QUIESCENCE",
+                          "terminal_drain_started": False}
+        assert runtime._stop_task is None and runtime.owned_restart_rearmed()
+        assert session_owner.session_scope_drain_status(deadline=time.monotonic()).close_failures == 1
+        assert service._enqueue_failures == 1
+    asyncio.run(refuse())
 
 
 def test_prepared_owner_loss_expiry_rearms_without_stop(restart_runtime):
@@ -714,10 +838,10 @@ def test_production_prepare_zero_count_key_still_runs_all_later_writer_gates(
         owner.shutdown(wait=True)
 
 
-def test_prepare_job_quiescence_unresolved_enqueue_refuses_without_waiting(
+def test_prepare_historical_enqueue_uncertainty_retains_diagnostics_and_runs_writer_gates(
     restart_runtime, monkeypatch, caplog
 ):
-    """Sticky enqueue uncertainty is never cured by retrying an idle poll."""
+    """Historical durable uncertainty is not an executing writer."""
     from app.jobs import service as job_service
 
     runtime, _, _, _ = restart_runtime
@@ -728,32 +852,31 @@ def test_prepare_job_quiescence_unresolved_enqueue_refuses_without_waiting(
         with caplog.at_level("WARNING", logger="app.runtime"):
             result = await runtime.prepare_owned_restart(timeout_seconds=2)
         elapsed = time.monotonic() - start
-        assert result == {
-            "state": "PREFLIGHT_REARMED",
-            "stage": "JOB_QUIESCENCE",
-            "terminal_drain_started": False,
-        }
-        assert elapsed < 1.5  # No futile wait for an immutable failure counter.
+        try:
+            assert result["state"] == "WRITERS_PREPARED"
+            assert elapsed < 1.5
+            assert runtime._stop_task is None and runtime._restart_guard.held
+            assert job_service._enqueue_failures == 1
+            observed = job_service.observe_job_quiescence()
+            assert observed["execution_quiescent"] and observed["reconciliation_required"]
+        finally:
+            assert runtime.abort_owned_restart()
         assert runtime.http_admission.accepting and runtime.owned_restart_rearmed()
-        assert runtime._stop_task is None and runtime._restart_guard is None
-        assert job_service._admission_pause is None
-        assert job_service._enqueue_failures == 1
 
     asyncio.run(check())
-    assert "OMI_RESTART_JOB_QUIESCENCE" in caplog.text
-    assert "UNRESOLVED_ENQUEUE" in caplog.text
-    assert "'unresolved_enqueues': 1" in caplog.text
-    assert "last_false_remaining_ms=" in caplog.text
-    assert "last_false_evidence=" in caplog.text
+    assert "OMI_RESTART_JOB_RECONCILIATION_PENDING" in caplog.text
+    assert "unresolved_enqueues=1" in caplog.text
 
 
 @pytest.mark.parametrize("lane", ["default", "market_background"])
+@pytest.mark.parametrize("historical_failures", [0, 1])
 def test_prepare_job_quiescence_waits_for_real_future_without_forcing_stop(
-    restart_runtime, caplog, lane
+    restart_runtime, monkeypatch, caplog, lane, historical_failures
 ):
     """Active JobService Future remains owned on a bounded refused PREPARE."""
     from threading import Event
     from app.jobs import service as job_service
+    monkeypatch.setattr(job_service, "_enqueue_failures", historical_failures)
 
     runtime, _, _, _ = restart_runtime
     entered, release = Event(), Event()

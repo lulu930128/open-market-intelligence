@@ -37,6 +37,8 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             patch("app.runtime.run_database_migrations") as run_migrations,
             patch("app.runtime.SessionLocal", return_value=fake_db),
             patch("app.runtime.job_service.mark_interrupted_jobs", return_value=2) as mark_interrupted,
+            patch("app.runtime.job_service.read_paused_job_obligations", return_value={}) as read_paused,
+            patch("app.runtime.job_service.resume_job_obligations", return_value=0) as resume_paused,
             patch.object(RuntimeCoordinator, "_reconcile_dispatch_runs") as reconcile_dispatch,
             patch("app.runtime.job_scheduler.start_scheduler", return_value="scheduler") as start_scheduler,
             patch("app.runtime.start_crypto_auto_refresh", new=AsyncMock()) as start_auto_refresh,
@@ -63,8 +65,10 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         run_migrations.assert_called_once_with()
         background_lock.acquire.assert_called_once_with(timeout_seconds=0)
         mark_interrupted.assert_called_once_with(fake_db)
+        read_paused.assert_called_once_with(fake_db)
+        resume_paused.assert_called_once_with({})
         reconcile_dispatch.assert_called_once_with()
-        fake_db.close.assert_called_once_with()
+        self.assertEqual(fake_db.close.call_count, 2)  # interrupted scan + read-only obligations
         start_scheduler.assert_called_once_with()
         start_auto_refresh.assert_awaited_once_with()
         start_collectors.assert_awaited_once_with()
@@ -158,6 +162,8 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             patch("app.runtime.run_database_migrations"),
             patch("app.runtime.SessionLocal", return_value=fake_db),
             patch("app.runtime.job_service.mark_interrupted_jobs", return_value=0),
+            patch("app.runtime.job_service.read_paused_job_obligations", return_value={}),
+            patch("app.runtime.job_service.resume_job_obligations") as resume_paused,
             patch.object(RuntimeCoordinator, "_reconcile_dispatch_runs"),
             patch("app.runtime.job_scheduler.start_scheduler", return_value="scheduler"),
             patch("app.runtime.start_crypto_auto_refresh", new=AsyncMock()),
@@ -178,6 +184,7 @@ class RuntimeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 await coordinator.start()
 
         stop_collectors.assert_awaited_once_with(drain=True)
+        resume_paused.assert_not_called()
         stop_auto_refresh.assert_awaited_once_with(drain=True)
         stop_scheduler.assert_called_once_with("scheduler")
         background_lock.release.assert_not_called()

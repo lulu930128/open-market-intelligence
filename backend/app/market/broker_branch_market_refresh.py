@@ -7,7 +7,7 @@ from typing import Callable
 
 from sqlalchemy.orm import Session
 
-from app.db.models import BrokerBranchTradeDaily
+from app.db.models import BrokerBranchTradeDaily, BrokerBranchSnapshotQuality, SourceRegistry
 from app.market.broker_branch import (
     NSTOCK_BRANCH_SOURCE_NAME,
     NSTOCK_BRANCH_TOP15_URL,
@@ -16,6 +16,8 @@ from app.market.broker_branch import (
 )
 from app.market.broker_branch_quality import (
     reconcile_nstock_snapshot_quality_from_trade_rows,
+    NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+    BROKER_BRANCH_FETCH_EMPTY, BROKER_BRANCH_FETCH_SUCCESS, BROKER_BRANCH_FETCH_PARTIAL,
 )
 from app.market.tw_universe import (
     TAIWAN_STOCK_INSTRUMENT_TYPE,
@@ -71,6 +73,21 @@ def get_taiwan_broker_branch_market_coverage(
         "missing_count": len(missing),
         "complete": bool(universe) and not missing,
     }
+
+
+def _completed_snapshot_ids(db: Session, trade_date: date, universe: list[str]) -> set[str]:
+    """Valid same-date acquisition (including empty) is not full coverage."""
+    return {row[0] for row in db.query(BrokerBranchSnapshotQuality.stock_id).join(
+        SourceRegistry, SourceRegistry.id == BrokerBranchSnapshotQuality.source_id,
+    ).filter(
+        SourceRegistry.source_name == NSTOCK_BRANCH_SOURCE_NAME,
+        BrokerBranchSnapshotQuality.stock_id.in_(universe),
+        BrokerBranchSnapshotQuality.expected_trade_date == trade_date,
+        BrokerBranchSnapshotQuality.provider_trade_date == trade_date,
+        BrokerBranchSnapshotQuality.source_contract_version == NSTOCK_BROKER_BRANCH_CONTRACT_VERSION,
+        BrokerBranchSnapshotQuality.fetch_status.in_(
+            (BROKER_BRANCH_FETCH_EMPTY, BROKER_BRANCH_FETCH_SUCCESS, BROKER_BRANCH_FETCH_PARTIAL)),
+    ).all()}
 
 
 def _record_collection_event(
@@ -136,6 +153,7 @@ def refresh_taiwan_broker_branch_market(
     max_runtime_seconds: int = 7200,
     progress: ProgressCallback | None = None,
     job_run_id: int | None = None,
+    checkpoint: Callable[[dict], None] | None = None,
 ) -> dict:
     """Collect the latest nStock Top15 snapshot for the ordinary-stock universe.
 
@@ -143,6 +161,9 @@ def refresh_taiwan_broker_branch_market(
     intentionally validates the provider date before starting the all-market
     loop. Existing stock/date rows are never fetched again.
     """
+    if checkpoint:
+        db.commit()
+        checkpoint({"safe_point": "before_universe", "current": 0, "total": 1})
     universe = list_taiwan_broker_branch_stock_ids(db)
     covered_before = _covered_stock_ids(
         db,
@@ -154,7 +175,8 @@ def refresh_taiwan_broker_branch_market(
         trade_date=trade_date,
         covered_stock_ids=covered_before,
     )
-    missing = [stock_id for stock_id in universe if stock_id not in covered_before]
+    completed_before = covered_before | _completed_snapshot_ids(db, trade_date, universe)
+    missing = [stock_id for stock_id in universe if stock_id not in completed_before]
     request_budget = max(int(max_stocks), 1)
     candidates = missing[:request_budget]
     total = max(len(candidates), 1)
@@ -192,16 +214,16 @@ def refresh_taiwan_broker_branch_market(
 
     if not missing:
         if progress:
-            progress(1, 1, "Taiwan broker-branch daily coverage is already complete.")
+            progress(1, 1, "Taiwan broker-branch snapshots already persisted; coverage may remain partial.")
         return {
-            "status": "completed",
-            "reason": "already_complete",
+            "status": "completed" if len(covered_before) == len(universe) else "partial",
+            "reason": "already_complete" if len(covered_before) == len(universe) else "snapshots_attempted",
             "trade_date": trade_date,
             "source_name": NSTOCK_BRANCH_SOURCE_NAME,
             "expected_count": len(universe),
             "covered_before_count": len(covered_before),
             "covered_count": len(covered_before),
-            "remaining_count": 0,
+            "remaining_count": len(universe) - len(covered_before),
             "request_count": 0,
             "success_count": 0,
             "no_data_count": 0,
@@ -214,6 +236,9 @@ def refresh_taiwan_broker_branch_market(
         }
 
     probe_stock_id = "2330" if "2330" in universe else universe[0]
+    if checkpoint:
+        db.commit()
+        checkpoint({"safe_point": "before_probe", "current": 0, "total": len(candidates)})
     try:
         probe = probe_broker_branch_release(probe_stock_id)
     except Exception as exc:
@@ -292,6 +317,10 @@ def refresh_taiwan_broker_branch_market(
     runtime_limit = max(int(max_runtime_seconds), 1)
 
     for index, stock_id in enumerate(candidates, start=1):
+        if checkpoint:
+            db.commit()
+            checkpoint({"safe_point": "before_stock", "current": index - 1,
+                        "total": len(candidates), "trade_date": trade_date.isoformat()})
         if monotonic() - started_at >= runtime_limit:
             stopped_reason = "max_runtime_reached"
             break
@@ -332,6 +361,14 @@ def refresh_taiwan_broker_branch_market(
                     f"empty={no_data_count}; errors={error_count})."
                 ),
             )
+
+        if checkpoint:
+            # ensure_* owns stock commit/rollback; end subsequent progress/read
+            # transactions before acknowledging, never interrupt provider IO.
+            db.commit()
+            checkpoint({"safe_point": "stock_transaction_complete", "stock_id": stock_id,
+                        "trade_date": trade_date.isoformat(), "current": index,
+                        "total": len(candidates)})
 
         if delay_seconds > 0 and index < len(candidates):
             sleep(delay_seconds)

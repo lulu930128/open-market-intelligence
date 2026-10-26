@@ -37,6 +37,55 @@ VERSION = "tw.intraday.demand.v1"
 RETRY_DELAYS = (15, 30)
 ORIGINS = {"viewer", "ai", "scheduler", "close_tail", "completed_session_repair", "completed_session", "operator", "front"}
 COMPLETED_BACKOFF_KEY = "tw-completed-materialization:backoff"
+RESTART_HANDOFF_KEY = "restart_unstarted_v1"
+
+
+def is_restart_handoff(job: JobRun) -> bool:
+    """Only an original-owner queued disposition survives startup cleanup."""
+    request, result = materialization_request(job), _decode(job.result_json)
+    return (job.status == "queued" and request is not None
+            and result.get(RESTART_HANDOFF_KEY) is True and _valid_handoff_budget(request, result))
+
+
+def _valid_handoff_budget(request: dict, result: dict) -> bool:
+    for key, limit in (("attempt_count", "max_attempts"), ("external_call_budget_used", "max_external_calls")):
+        if type(result.get(key)) is not int or not 0 <= result[key] <= request[limit]:
+            return False
+    actual = result.get("external_call_count")
+    if actual is not None and (type(actual) is not int or not 0 <= actual <= result["external_call_budget_used"]):
+        return False
+    try:
+        retry = result.get("next_retry_at")
+        if retry is not None and datetime.fromisoformat(retry).utcoffset() is None:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _requeue_unstarted(db: Session, job: JobRun) -> None:
+    request = materialization_request(job)
+    if request is None or job.status != "running" or not _valid_handoff_budget(request, _decode(job.result_json)):
+        raise RuntimeError("TW_INTRADAY_UNSTARTED_CLAIM_CHANGED")
+    original = job.result_json
+    result = _decode(original)
+    result[RESTART_HANDOFF_KEY] = True
+    changed = db.execute(update(JobRun).where(
+        JobRun.id == job.id, JobRun.status == "running",
+        JobRun.request_json == job.request_json, JobRun.result_json == original,
+    ).values(status="queued", result_json=json.dumps(result), updated_at=_now(),
+             message="Unstarted attempt returned to original demand dispatcher."),
+        execution_options={"synchronize_session": False}).rowcount
+    db.commit()
+    if changed != 1:
+        raise RuntimeError("TW_INTRADAY_UNSTARTED_CLAIM_CHANGED")
+    db.refresh(job)
+
+
+def requeue_unstarted_consumer_demand(job_id: int) -> None:
+    """Invoked only by JobService before this submitted callable has started."""
+    with jobs.SessionLocal() as db:
+        _requeue_unstarted(db, jobs.get_job(db, job_id))
 
 
 def completed_lane_backoff(db: Session) -> datetime | None:
@@ -234,6 +283,8 @@ def _finish(db: Session, job: JobRun, result: dict, reason: str) -> None:
 
 
 def _dispatch(db: Session, job: JobRun, now: datetime) -> bool:
+    # SQLite strips offsets: normalize before persistence, not after reread.
+    now = _aware(now).astimezone(timezone.utc)
     result = _decode(job.result_json)
     next_retry = result.get("next_retry_at")
     if next_retry and now < datetime.fromisoformat(next_retry):
@@ -253,6 +304,8 @@ def _dispatch(db: Session, job: JobRun, now: datetime) -> bool:
         jobs.submit_job_task(run_consumer_demand, job.id,
             execution_lane=("market_completed" if request.get("consumer") == "completed_session"
                             else "market_background" if background else "market_interactive"))
+    except jobs.JobAdmissionClosed:
+        _requeue_unstarted(db, job)
     except Exception:
         _finish(db, job, result, "TW_INTRADAY_DEMAND_SUBMIT_FAILED")
     return True
@@ -455,6 +508,7 @@ def run_consumer_demand(job_id: int) -> None:
             return
         now = _now()
         result = _decode(job.result_json)
+        result.pop(RESTART_HANDOFF_KEY, None)
         remaining = int((datetime.fromisoformat(request["expires_at"]) - now).total_seconds())
         calls = min(2, request["max_external_calls"] - result.get("external_call_budget_used", 0))
         if remaining < 1 or calls < 1:
@@ -585,7 +639,7 @@ def dispatch_due_materializations(db: Session, *, requested_at: datetime, limit:
             continue
         if requested_at >= datetime.fromisoformat(request["expires_at"]):
             _finish(db, job, _decode(job.result_json), "TW_INTRADAY_DEMAND_EXPIRED")
-        elif request["consumer"] in {"scheduler", "close_tail", "completed_session_repair", "completed_session"}:
+        elif is_restart_handoff(job) or request["consumer"] in {"scheduler", "close_tail", "completed_session_repair", "completed_session"}:
             dispatched += int(_dispatch(db, job, requested_at))
             if dispatched >= limit:
                 break

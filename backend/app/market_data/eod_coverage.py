@@ -7,6 +7,9 @@ import json
 from time import monotonic, sleep
 from typing import Any, Callable, Protocol
 
+from app.utils.backfill_checkpoint import BackfillContextChanged
+from app.utils.owner_checkpoint import OwnerWork, OwnerOutcomeUnknown
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -70,6 +73,7 @@ class USFullMarketEodPort(Protocol):
         *,
         symbol: str,
         expected_trade_date: date,
+        max_external_calls: int = 2,
     ) -> dict[str, Any]: ...
 
 
@@ -1089,114 +1093,115 @@ def _rotate_after_cursor(symbols: tuple[str, ...], cursor: str | None) -> tuple[
 
 
 def _repair_us_eod(
-    db: Session,
-    *,
-    row: MarketDatasetCoverageCheckpoint,
-    computation: CoverageComputation,
-    job_id: int | None,
-    max_symbols: int,
-    max_runtime_seconds: int,
-    sleep_seconds: float,
-    max_consecutive_errors: int,
-    error_backoff_seconds: int,
-    progress_callback: ProgressCallback | None,
-    us_port: USFullMarketEodPort,
+    db: Session, *, row: MarketDatasetCoverageCheckpoint, computation: CoverageComputation,
+    job_id: int | None, max_symbols: int, max_runtime_seconds: int, sleep_seconds: float,
+    max_consecutive_errors: int, error_backoff_seconds: int,
+    progress_callback: ProgressCallback | None, us_port: USFullMarketEodPort,
     priority_symbols: Callable[[], tuple[str, ...]] | None = None,
+    continuation=None, resume_state=None, identity=None,
 ) -> dict[str, Any]:
     candidates = _rotate_after_cursor(computation.unresolved_symbols, row.cursor_symbol)
-    targets = candidates[:max_symbols]
-    started = monotonic()
-    errors: list[dict[str, Any]] = []
-    attempted = 0
-    succeeded = 0
-    rate_limited = False
-    consecutive_errors = int(row.consecutive_error_count or 0)
-    _update_repair_state(
-        db,
-        row,
-        repair_status="running",
-        repair_provider="yahoo_chart",
-        job_id=job_id,
-        detail_update={
-            "repair": {
-                "phase": "bounded_symbol_shard",
-                "candidate_count": len(candidates),
-                "bounded_target_count": len(targets),
-            }
-        },
-    )
-
-    remaining_symbols = list(candidates)
+    priority = tuple(priority_symbols()) if priority_symbols else ()
     dispatch_offset = int(row.attempted_count or 0)
-    for index in range(1, len(targets) + 1):
-        if monotonic() - started >= max_runtime_seconds:
+    remaining = list(candidates)
+    targets = []
+    # Freeze the exact original priority/rotation, including the fifth background slot.
+    for index in range(1, min(len(candidates), max_symbols) + 1):
+        preferred = priority if (dispatch_offset + index) % 5 else ()
+        symbol = next((value for value in preferred if value in remaining), remaining[0])
+        targets.append(symbol)
+        remaining.remove(symbol)
+    work = OwnerWork("us_eod_symbols", identity, targets, continuation=continuation,
+        resume_state=resume_state, context={"candidates": list(candidates), "priority": list(priority),
+            "dispatch_offset": dispatch_offset, "initial_current": computation.current_count,
+            "consecutive_errors": int(row.consecutive_error_count or 0), "next_retry_at": None})
+    candidates = work.state["context"]["candidates"]
+    targets = work.state["items"]
+    outcomes = [entry["outcome"] for entry in work.state["results"]]
+    errors = [entry["error"] for entry in outcomes if entry["error"] is not None]
+    attempted = work.state["totals"]["attempted"]
+    succeeded = work.state["totals"]["succeeded"]
+    rate_limited = any(entry["rate_limited"] for entry in outcomes)
+    consecutive_errors = work.state["context"]["consecutive_errors"]
+    tick = monotonic()
+    # End the owner admission read before exposing a safe point.
+    work.notify("save")
+    work.notify("checkpoint")
+    for index, symbol in enumerate(targets[attempted:], start=attempted + 1):
+        elapsed = work.state["elapsed"] + monotonic() - tick
+        next_retry = work.state["context"]["next_retry_at"]
+        if (elapsed >= max_runtime_seconds or rate_limited or (attempted > 0 and consecutive_errors >= max_consecutive_errors)
+                or (next_retry and datetime.fromisoformat(next_retry) > utc_now())):
             break
-        # Reserve every fifth dispatch for the rotated background queue.
-        # attempted_count persists across shards, including max_symbols=1.
-        priority = priority_symbols() if priority_symbols and (dispatch_offset + index) % 5 else ()
-        symbol = next((value for value in priority if value in remaining_symbols), remaining_symbols[0])
-        remaining_symbols.remove(symbol)
+        remaining_calls = identity["budget"]["calls"] - work.state["totals"]["calls"]
+        if remaining_calls <= 0:
+            break
         if progress_callback:
             progress_callback(index - 1, max(len(targets), 1), f"Refreshing US EOD {symbol}.")
-        attempted += 1
+        reserved = min(2, remaining_calls) if continuation else 1
+        work.begin(reserved)  # Durable reservation before provider IO.
+        error = None
+        retry_at = None
+        success = False
+        used = reserved
         try:
-            us_port.refresh_symbol(
-                db,
-                symbol=symbol,
+            result = us_port.refresh_symbol(db, symbol=symbol,
                 expected_trade_date=computation.expected_trade_date,
-            )
-            succeeded += 1
+                **({"max_external_calls": reserved} if continuation else {}))
+            if continuation:
+                actual = result.get("external_call_count") if isinstance(result, dict) else None
+                if type(actual) is not int or not 0 <= actual <= reserved:
+                    raise OwnerOutcomeUnknown("US_EOD_PROVIDER_USAGE_UNKNOWN")
+                used = actual
+            success = True
             consecutive_errors = 0
-            _update_repair_state(
-                db,
-                row,
-                repair_status="running",
-                repair_provider="yahoo_chart",
-                job_id=job_id,
-                cursor_symbol=symbol,
-                attempted_delta=1,
-                succeeded_delta=1,
-                consecutive_error_count=0,
-                mark_success=True,
-            )
         except Exception as exc:
+            # Roll back the provider scope before recording the failed attempt.
+            # The injected job transaction owner handles the boundary; Shared
+            # does not acquire another transaction-ownership occurrence.
+            if continuation:
+                continuation("rollback", work.state)
             failure = provider_http_failure(exc)
-            error: dict[str, Any] = {"symbol": symbol, "message": str(exc)}
+            error = {"symbol": symbol, "message": str(exc)}
             if failure is not None:
                 error.update(failure.diagnostic_fields())
             errors.append(error)
             consecutive_errors += 1
             rate_limited = bool(failure and failure.rate_limited)
             retry_after = int(failure.retry_after_seconds or 0) if failure else 0
-            _update_repair_state(
-                db,
-                row,
-                repair_status="rate_limited" if rate_limited else "running",
-                repair_provider="yahoo_chart",
-                job_id=job_id,
-                cursor_symbol=symbol,
-                attempted_delta=1,
-                failed_delta=1,
-                consecutive_error_count=consecutive_errors,
-                next_retry_at=(
-                    utc_now() + timedelta(seconds=max(retry_after, error_backoff_seconds))
-                    if rate_limited or consecutive_errors >= max_consecutive_errors
-                    else None
-                ),
-                detail_update={
-                    "last_error": error,
-                    "last_provider_failure": failure.diagnostic_fields() if failure else None,
-                },
-            )
             if rate_limited or consecutive_errors >= max_consecutive_errors:
-                break
+                retry_at = utc_now() + timedelta(seconds=max(retry_after, error_backoff_seconds))
+        # Persistence errors are deliberately outside the provider handler: an
+        # uncertain commit must never become a second failed/finished request.
+        attempted += 1
+        succeeded += int(success)
+        work.state["context"].update(consecutive_errors=consecutive_errors,
+            next_retry_at=retry_at.isoformat() if retry_at else None)
+        work.state["elapsed"] += monotonic() - tick
+        tick = monotonic()
+        work.finish(dict(attempted=1, succeeded=int(success), failed=int(not success), calls=used),
+            dict(error=error, rate_limited=rate_limited, usage_known=success))
+        try:
+            work.notify("stage")
+            _update_repair_state(db, row, repair_status="rate_limited" if rate_limited else "running",
+                repair_provider="yahoo_chart", job_id=job_id, cursor_symbol=symbol,
+                attempted_delta=1, succeeded_delta=int(success), failed_delta=int(not success),
+                consecutive_error_count=consecutive_errors, next_retry_at=retry_at,
+                mark_success=success, detail_update={"last_error": error} if error else None)
+        except Exception as exc:
+            raise OwnerOutcomeUnknown("US_EOD_COMMIT_UNKNOWN") from exc
+        # Charge commit/progress latency as well; no paused wall time is added.
+        work.state["elapsed"] += monotonic() - tick
+        tick = monotonic()
+        work.notify("save")
+        work.notify("checkpoint")
         if progress_callback:
             progress_callback(index, max(len(targets), 1), f"Processed {index}/{len(targets)} US EOD symbols.")
         if index < len(targets) and sleep_seconds > 0:
-            remaining = max_runtime_seconds - (monotonic() - started)
-            if remaining <= 0:
+            remaining_seconds = max_runtime_seconds - (work.state["elapsed"] + monotonic() - tick)
+            if remaining_seconds <= 0:
                 break
-            sleep(min(sleep_seconds, remaining))
+            sleep(min(sleep_seconds, remaining_seconds))
 
     refreshed = compute_eod_coverage(
         db,
@@ -1212,7 +1217,7 @@ def _repair_us_eod(
                 "attempted_count": attempted,
                 "succeeded_count": succeeded,
                 "error_count": len(errors),
-                "runtime_seconds": round(monotonic() - started, 3),
+                "runtime_seconds": round(work.state["elapsed"] + monotonic() - tick, 3),
                 "errors": errors[:10],
             }
         },
@@ -1245,6 +1250,9 @@ def _repair_us_eod(
         **_lifecycle_result(refreshed),
         **_result_coverage_counts(refreshed_row),
         "attempted_count": attempted,
+        "external_call_count": (work.state["totals"]["calls"]
+            if continuation and not errors else None),
+        "external_call_budget_used": work.state["totals"]["calls"] if continuation else None,
         "success_count": succeeded,
         "error_count": len(errors),
         "errors": errors[:10],
@@ -1253,7 +1261,7 @@ def _repair_us_eod(
         "continuation_required": (
             refreshed.status != "healthy" and not errors
             and attempted > 0 and attempted < len(candidates)
-            and refreshed.current_count > computation.current_count
+            and refreshed.current_count > work.state["context"]["initial_current"]
         ),
     }
 
@@ -1275,6 +1283,8 @@ def reconcile_eod_coverage(
     taiwan_daily_qualifier: TaiwanDailyQualifier | None = None,
     us_port: USFullMarketEodPort | None = None,
     priority_symbols: Callable[[], tuple[str, ...]] | None = None,
+    continuation=None,
+    resume_state=None,
 ) -> dict[str, Any]:
     normalized = normalize_coverage_market(market)
     bounds = eod_reconcile_bounds(normalized)
@@ -1294,8 +1304,22 @@ def reconcile_eod_coverage(
         us_port=us_port,
         taiwan_daily_qualifier=taiwan_daily_qualifier,
     )
+    identity = None
+    if normalized == "US":
+        identity = dict(contract=CHECKPOINT_VERSION + "|" + repr(eod_lifecycle_contract("US")),
+            date=computation.expected_trade_date.isoformat(),
+            release=us_port.expected_trade_date().isoformat(),
+            universe=[member.symbol + "|" + member.venue for member in computation.members],
+            budget=dict(symbols=bounded_max_symbols, calls=bounded_max_symbols if continuation else bounded_max_symbols * 2,
+                runtime=bounded_runtime_seconds, attempts=2),
+            options=[repair, sleep_seconds, max_consecutive_errors, error_backoff_seconds])
+        # Symbols are the work keys; venue/universe revision is bound separately.
+        identity["options"].append(identity["universe"])
+        identity["universe"] = [member.symbol for member in computation.members]
+        if resume_state is not None:
+            OwnerWork("us_eod_symbols", identity, [], resume_state=resume_state)
     row = persist_eod_coverage(db, computation)
-    if computation.status == "healthy":
+    if computation.status == "healthy" and resume_state is None:
         _update_repair_state(
             db,
             row,
@@ -1334,7 +1358,7 @@ def reconcile_eod_coverage(
     decision_now = utc_now()
     next_retry_at = _as_aware_utc(row.next_retry_at)
     if (
-        next_retry_at is not None
+        resume_state is None and next_retry_at is not None
         and next_retry_at > decision_now
         and not _release_guard_retry_is_now_eligible(
             row,
@@ -1414,6 +1438,7 @@ def reconcile_eod_coverage(
         progress_callback=progress_callback,
         us_port=us_port,
         priority_symbols=priority_symbols,
+        continuation=continuation, resume_state=resume_state, identity=identity,
     )
 
 

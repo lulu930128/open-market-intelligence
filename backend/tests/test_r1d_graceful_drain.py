@@ -107,6 +107,7 @@ def test_immediate_callback_and_slot_recovery(monkeypatch, outcome):
     else:
         service.submit_job_task(lambda _: None, 1, execution_lane="market_background")
     assert not service._pending_tasks
+    assert service.job_drain_status().unresolved_enqueues == int(outcome in {"exception", "cancelled"})
     slots = service._materialization_slots["market_background"]
     assert slots.acquire(False) and slots.acquire(False)
     assert not slots.acquire(False)
@@ -131,8 +132,7 @@ def test_closed_enqueue_does_not_touch_database(db, monkeypatch):
     assert db.query(service.JobRun).count() == 0
 
 
-@pytest.mark.parametrize("compensation_failure", [False, True])
-def test_commit_submit_race_has_terminal_record_or_truthful_unresolved(db, monkeypatch, compensation_failure):
+def test_commit_submit_race_with_unsupported_continuation_is_unresolved(db, monkeypatch):
     original = service.create_job
     def create_then_fence(*args, **kwargs):
         job = original(*args, **kwargs)
@@ -140,17 +140,15 @@ def test_commit_submit_race_has_terminal_record_or_truthful_unresolved(db, monke
         assert service.job_drain_status().active_enqueues == 1
         return job
     monkeypatch.setattr(service, "create_job", create_then_fence)
-    if compensation_failure:
-        monkeypatch.setattr(service, "fail_job", Mock(side_effect=RuntimeError("commit failed")))
-        with pytest.raises(RuntimeError, match="commit failed"):
-            service.enqueue_job(db, job_type="fixture", task=lambda _: None)
-        assert service.job_drain_status().unresolved_enqueues == 1
-        assert not run(service.drain_job_executor(deadline=time.monotonic())).drained
-    else:
-        job, created = service.enqueue_job(db, job_type="fixture", task=lambda _: None)
-        assert created and job.status == "error"
-        assert "JOB_ADMISSION_CLOSED" in job.error_message
-        assert service.job_drain_status().drained
+    fail = Mock(side_effect=AssertionError("Expected pause must not become Error"))
+    monkeypatch.setattr(service, "fail_job", fail)
+    with pytest.raises(service.JobQuiescenceUnknown, match="PAUSE_PERSISTENCE_UNKNOWN"):
+        service.enqueue_job(db, job_type="fixture", task=lambda _: None)
+    fail.assert_not_called()
+    assert db.query(service.JobRun).one().status == "queued"
+    assert service.job_drain_status().unresolved_enqueues == 1
+    assert run(service.drain_job_executor(deadline=time.monotonic())).drained
+    assert db.query(service.JobRun).one().status == "queued"
     assert service.job_drain_status().active_enqueues == 0
     assert not service._pending_tasks
 
@@ -171,7 +169,7 @@ def test_job_quiescence_observation_preserves_pending_and_failure_state(monkeypa
         before = dict(service._pending_tasks)
         observed = service.observe_job_quiescence()
         assert observed == {
-            "reason": "UNRESOLVED_ENQUEUE",
+            "reason": "ACTIVE_ENQUEUE",
             "admission_closed": False,
             "admission_paused": False,
             "pending_by_lane": {"market_background": 1, "market_completed": 1},
@@ -179,13 +177,17 @@ def test_job_quiescence_observation_preserves_pending_and_failure_state(monkeypa
             "cancelled_pending_by_lane": {},
             "active_enqueues": 1,
             "unresolved_enqueues": 1,
+            "execution_quiescent": False,
+            "reconciliation_required": True,
             "task_failures": 2,
             "unfinished_future_count": 1,
             "completed_pending_count": 1,
             "tasks": [
                 {"job_id": 1, "task_name": "work", "execution_lane": "market_background",
+                 "cooperation": "UNCOOPERATIVE/UNKNOWN", "stop_requested": False,
                  "state": "running", "queue_wait_seconds": 2.0, "execution_seconds": 8.0},
                 {"job_id": 2, "task_name": "work", "execution_lane": "market_completed",
+                 "cooperation": "UNCOOPERATIVE/UNKNOWN", "stop_requested": False,
                  "state": "done", "queue_wait_seconds": 1.0, "execution_seconds": 2.0},
             ],
             "tasks_omitted": 0,
@@ -193,17 +195,59 @@ def test_job_quiescence_observation_preserves_pending_and_failure_state(monkeypa
         }
         assert dict(service._pending_tasks) == before
         assert service.pause_jobs_if_idle() is None
-        # Even if all active futures have exited, a sticky uncertain enqueue
-        # is still a blocker. Never reset it to claim restart safety.
+        # Finished execution permits pausing; the durable uncertainty remains.
         with service._executor_lock:
             service._pending_tasks.clear()
         monkeypatch.setattr(service, "_active_enqueues", 0)
         assert service.observe_job_quiescence()["reason"] == "UNRESOLVED_ENQUEUE"
-        assert service.pause_jobs_if_idle() is None
+        observed = service.observe_job_quiescence()
+        assert observed["execution_quiescent"] and observed["reconciliation_required"]
+        lease = service.pause_jobs_if_idle()
+        assert lease is not None and service.jobs_paused(lease)
+        service.resume_jobs(lease)
         assert service._enqueue_failures == 1
     finally:
         with service._executor_lock:
             service._pending_tasks.clear()
+        monkeypatch.setattr(service, "_active_enqueues", 0)
+
+
+def test_failed_enqueue_rollback_must_finish_before_history_is_nonblocking(monkeypatch):
+    entered, release = Event(), Event()
+    errors = []
+
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("fixture durable outcome unknown")
+
+    def rollback():
+        entered.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr(service, "_enqueue_job", fail_enqueue)
+    db = SimpleNamespace(rollback=rollback)
+
+    def enqueue():
+        try:
+            service.enqueue_job(db, job_type="fixture", task=lambda _: None)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    thread = Thread(target=enqueue)
+    thread.start()
+    try:
+        assert entered.wait(2)
+        assert service.observe_job_quiescence()["active_enqueues"] == 1
+        assert service.observe_job_quiescence()["unresolved_enqueues"] == 1
+        lease = service.request_job_pause()
+        assert not service.jobs_paused(lease)
+        result = run(service.drain_job_executor(deadline=time.monotonic() + .02))
+        assert not result.drained and thread.is_alive()
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive() and errors == ["fixture durable outcome unknown"]
+    result = run(service.drain_job_executor(deadline=time.monotonic() + 1))
+    assert result.drained and result.unresolved_enqueues == 1
 
 
 def test_single_default_worker_reports_bounded_queue_without_payload(monkeypatch):
@@ -240,6 +284,7 @@ def test_single_default_worker_reports_bounded_queue_without_payload(monkeypatch
         assert service.pause_jobs_if_idle() is None
     finally:
         release.set()
+    run(eventually(lambda: completed == list(range(100, 116))))
     assert run(service.drain_job_executor(deadline=time.monotonic() + 2)).drained
     assert completed == list(range(100, 116))
 

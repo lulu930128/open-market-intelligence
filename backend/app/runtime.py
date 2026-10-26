@@ -227,8 +227,10 @@ class RuntimeCoordinator:
             if self.scheduler is not None:
                 scheduler_lease = self.scheduler.pause_for_restart()
                 self._restart_undo.append(lambda: self.scheduler.resume_after_restart_refusal(scheduler_lease))
-            # Let admitted HTTP/BackgroundTasks and scheduler callbacks finish
-            # before closing Session or child-job admission.
+            jobs = job_service.request_job_pause()
+            self._restart_undo.append(lambda: job_service.resume_jobs(jobs))
+            # Admitted HTTP/scheduler callbacks can finish, but cannot launch
+            # new child jobs after this fence. Keep their Session owner open.
             await until(lambda: self.http_admission.idle(http))
             if self.http_ownership_unknown:
                 raise RuntimeError("HTTP_WORKER_OWNERSHIP_UNKNOWN")
@@ -247,11 +249,6 @@ class RuntimeCoordinator:
             stage = "DETACHED_WORKER_QUIESCENCE"
             workers = await until(detached_admission.pause_if_idle)
             self._restart_undo.append(lambda: detached_admission.resume(workers))
-            sessions = session_owner.pause_session_scopes()
-            self._restart_undo.append(lambda: session_owner.resume_session_scopes(sessions))
-            stage = "SESSION_QUIESCENCE"
-            await until(lambda: session_owner.session_scopes_quiescent(sessions))
-
             from app.crypto_market.auto_refresh import crypto_auto_refresh_manager as auto
             from app.crypto_market.ws_runtime import crypto_realtime_collector_manager as collectors
             from app.crypto_market.realtime_persistence import crypto_realtime_persistence_manager as persistence
@@ -274,10 +271,10 @@ class RuntimeCoordinator:
                 raise RuntimeError("COLLECTOR_UNPERSISTED_WORK")
             stage = "JOB_QUIESCENCE"
 
-            def pause_jobs_or_refuse_unresolved():
+            def jobs_quiescent():
                 nonlocal last_job_false_remaining_ms, last_job_false_evidence, last_job_sample_at
-                lease = job_service.pause_jobs_if_idle()
-                if lease is None:
+                idle = job_service.jobs_paused(jobs)
+                if not idle:
                     current = time.monotonic()
                     last_job_false_remaining_ms = round((deadline - current) * 1000)
                     # Capture the last refused state at most four times a
@@ -288,14 +285,23 @@ class RuntimeCoordinator:
                             last_job_false_evidence = job_service.observe_job_quiescence()
                         except Exception:
                             last_job_false_evidence = {"reason": "UNVERIFIED"}
-                    if job_service.job_drain_status().unresolved_enqueues:
-                        # This sticky counter cannot become safe by waiting.
-                        # Preserve the unknown durable write and fail closed.
-                        raise RuntimeError("JOB_ENQUEUE_OWNERSHIP_UNKNOWN")
-                return lease
+                return idle
 
-            jobs = await until(pause_jobs_or_refuse_unresolved)
-            self._restart_undo.append(lambda: job_service.resume_jobs(jobs))
+            await until(jobs_quiescent)
+            job_history = job_service.job_drain_status()
+            if job_history.unresolved_enqueues:
+                # Execution has exited, but its durable result still needs
+                # reconciliation. Preserve that evidence through safe shutdown;
+                # it does not replace the following Session/SQLite writer gates.
+                logger.warning(
+                    "OMI_RESTART_JOB_RECONCILIATION_PENDING unresolved_enqueues=%s task_failures=%s",
+                    job_history.unresolved_enqueues, job_history.task_failures,
+                )
+            # Jobs can still open Sessions while persisting a safe checkpoint.
+            sessions = session_owner.pause_session_scopes()
+            self._restart_undo.append(lambda: session_owner.resume_session_scopes(sessions))
+            stage = "SESSION_QUIESCENCE"
+            await until(lambda: session_owner.session_scopes_quiescent(sessions))
             stage = "PUBLISHER_QUIESCENCE"
             publisher = await until(intraday_publisher.pause_publishers_if_idle)
             self._restart_undo.append(lambda: intraday_publisher.resume_publishers(publisher))
@@ -329,8 +335,6 @@ class RuntimeCoordinator:
                 except Exception:
                     job_evidence = {"reason": "UNVERIFIED"}
                 reason = (
-                    "UNRESOLVED_ENQUEUE" if type(exc) is RuntimeError
-                    and str(exc) == "JOB_ENQUEUE_OWNERSHIP_UNKNOWN" else
                     "DEADLINE" if isinstance(exc, TimeoutError) else "OTHER"
                 )
                 logger.warning(
@@ -341,6 +345,13 @@ class RuntimeCoordinator:
                     last_job_false_remaining_ms, last_job_false_evidence,
                     round((deadline - time.monotonic()) * 1000), job_evidence
                 )
+            elif stage == "DETACHED_WORKER_QUIESCENCE":
+                try:
+                    worker_evidence = detached_admission.observation()
+                except Exception:
+                    worker_evidence = {"state": "UNVERIFIED"}
+                logger.warning("OMI_RESTART_DETACHED_QUIESCENCE failure_type=%s evidence=%s",
+                               type(exc).__name__, worker_evidence)
             rearmed = self.abort_owned_restart()
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -416,6 +427,29 @@ class RuntimeCoordinator:
             "unknown_writer_count": len(result.unknown_writers if result else UNATTESTED_WRITERS),
         }
 
+    def restart_diagnostics(self) -> dict[str, object]:
+        """GET-only memory observations; never part of the five-field pipe wire."""
+        result = self.drain_result
+        return {
+            # This legacy count measures scope categories, not live processes
+            # or connections. Keep its value and refusal semantics unchanged.
+            "unknown_writer_count_basis": "unattested_scope_categories",
+            "unknown_writer_categories": list(result.unknown_writers if result else UNATTESTED_WRITERS),
+            "observation_scope": "process_local_non_atomic_not_restart_authority",
+            "owned_restart_capability": self.owned_restart_preflight(),
+            "owner_observations": {
+                "jobs": job_service.observe_job_quiescence(),
+                "detached_workers": detached_admission.observation(),
+                "http": {"accepting": self.http_admission.accepting,
+                         "ownership_unknown": self.http_ownership_unknown},
+                "session_fence_enabled": self._drain_owned_sessions,
+                "engine_fence_enabled": self._drain_engine_connections,
+                "prepare_in_progress": self._restart_preparing,
+                "native_writer_lease_retained": self._restart_guard is not None,
+                "stop_committed": self._restart_committed,
+            },
+        }
+
     async def start(self) -> None:
         if self._stop_task is not None:
             raise RuntimeError("Runtime drain is terminal; new process lifecycle required")
@@ -457,6 +491,8 @@ class RuntimeCoordinator:
                 return
 
             self._mark_interrupted_jobs()
+            with self._startup_session() as db:
+                paused_jobs = job_service.read_paused_job_obligations(db)
             self._reconcile_dispatch_runs()
 
             self.scheduler = job_scheduler.start_scheduler()
@@ -465,6 +501,9 @@ class RuntimeCoordinator:
             await start_fugle_realtime()
             self._enqueue_stock_master_bootstrap()
             self.started = True
+            # Recovery cannot launch IO until all required runtime components
+            # have started. A prior startup failure leaves obligations durable.
+            job_service.resume_job_obligations(paused_jobs)
         except Exception:
             logger.exception("Runtime startup failed; cleaning up started components.")
             try:

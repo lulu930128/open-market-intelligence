@@ -1,6 +1,22 @@
 schema_version = 1
 
 [[rules]]
+id = "job_cooperative_protocol_has_no_runtime_owner"
+kind = "python_forbidden_import"
+description = "Job stop/checkpoint protocol and continuation codec cannot own executors, DB IO, providers or runtime control."
+roots = ["backend/app/jobs/cooperative.py", "backend/app/jobs/resumption.py"]
+extensions = [".py"]
+forbidden_prefixes = ["concurrent.futures", "sqlalchemy", "sqlite3", "subprocess", "requests", "httpx", "app.db", "app.market", "app.crypto_market", "app.runtime", "app.routers"]
+
+[[rules]]
+id = "job_service_no_forced_cancellation"
+kind = "python_forbidden_call"
+description = "JobService must retain actual Future completion; no thread/process kill or Future cancellation can substitute for a durable pause."
+roots = ["backend/app/jobs/service.py", "backend/app/jobs/cooperative.py", "backend/app/jobs/resumption.py"]
+extensions = [".py"]
+forbidden_call_names = ["kill", "terminate", "cancel", "PyThreadState_SetAsyncExc"]
+
+[[rules]]
 id = "owned_shutdown_transport_no_data_or_process_owner"
 kind = "python_forbidden_import"
 description = "Owned Uvicorn transport delegates lifespan; it cannot own data IO, provider operations or process management."

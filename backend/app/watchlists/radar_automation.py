@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from app.utils.backfill_checkpoint import BackfillContextChanged, BackfillProgress
 
 from app.db.write_coordination import run_with_sqlite_write_retry
 from app.db.models import (
@@ -179,6 +180,7 @@ def reconcile_watchlist_radar_v2_outcomes(
     as_of_trade_date: date | None = None,
     progress_callback: ProgressCallback | None = None,
     work_slice: RadarOutcomeWorkSlice | None = None,
+    checkpoint=None,
 ) -> dict[str, Any]:
     from app.watchlists.radar_outcome_v2_service import measure_outcome_phase
 
@@ -255,6 +257,7 @@ def reconcile_watchlist_radar_v2_outcomes(
             rule_version=RADAR_V2_ACTIVE_RULE_VERSION,
             as_of_trade_date=as_of_trade_date,
             **({"work_slice": work_slice} if work_slice is not None else {}),
+            **({"checkpoint": checkpoint} if checkpoint is not None else {}),
         )
         result_row = {
             "group_id": group_id,
@@ -630,6 +633,7 @@ def run_watchlist_radar_automation(
     save_snapshots: bool = True,
     radar_rule_version: str = radar_outcome_service.RADAR_RULE_VERSION,
     progress_callback: ProgressCallback | None = None,
+    checkpoint=None, resume_state: dict | None = None,
 ) -> dict[str, Any]:
     resolved_group_ids = _resolve_group_ids(db=db, group_ids=group_ids)
     resolved_modes = _normalize_modes(modes)
@@ -638,6 +642,8 @@ def run_watchlist_radar_automation(
     total_steps = total_scopes
 
     if total_scopes == 0:
+        if resume_state is not None:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED")
         return {
             "status": "skipped",
             "message": "No active watchlist groups found for radar automation.",
@@ -682,18 +688,33 @@ def run_watchlist_radar_automation(
             "errors": [],
         }
 
-    results: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    saved_count = 0
-    existing_count = 0
-    evaluated_count = 0
-    skipped_count = 0
-    invalid_count = 0
-    active_persisted_count = 0
-    active_outcome_evaluated_count = 0
-    shadow_persisted_count = 0
-    shadow_outcome_evaluated_count = 0
+    state = BackfillProgress(
+        owner="radar_snapshot_scope",
+        identity=[before_date.isoformat(), RADAR_V2_ACTIVE_RULE_VERSION, RADAR_V2_ACTIVE_RULE_CONFIG_HASH],
+        items=[f"{group_id}|{mode}" for group_id in resolved_group_ids for mode in resolved_modes],
+        counters=('radar_saved_count', 'radar_existing_count', 'radar_evaluated_count', 'radar_skipped_count', 'radar_invalid_count', 'radar_active_persisted_count', 'radar_active_outcome_evaluated_count', 'radar_shadow_persisted_count', 'radar_shadow_outcome_evaluated_count'),
+        checkpoint=checkpoint, resume_state=resume_state,
+    )
+    results = state.results
+    errors = []
+    for row in results:
+        if row.get("status") == "error":
+            errors.append(row)
+        else:
+            errors.extend({"group_id": row["group_id"], "mode": row["mode"],
+                           "status": "error", "phase": "radar_v2_active_outcome", **error}
+                          for error in row.get("radar_v2_active", {}).get("outcomes", {}).get("errors", []))
     processed = 0
+
+    def scope_finished():
+        if checkpoint is not None:
+            # persist_radar_v2 and evaluate_radar_outcome_v2 committed their
+            # own writes; only their trailing coverage/result reads remain.
+            if db.new or db.dirty or db.deleted:
+                raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+            db.rollback()
+        state.advance()
+
     intraday_overlay_cache: dict[str, dict | None] | None = (
         {} if use_intraday else None
     )
@@ -701,6 +722,8 @@ def run_watchlist_radar_automation(
     for group_id in resolved_group_ids:
         for mode in resolved_modes:
             processed += 1
+            if processed <= state.completed:
+                continue
             if progress_callback is not None:
                 progress_callback(
                     processed - 1,
@@ -718,8 +741,9 @@ def run_watchlist_radar_automation(
             if not save_snapshots:
                 row["snapshot_status"] = "skipped"
                 row["message"] = "Snapshot save skipped by scheduler calendar gate."
-                skipped_count += 1
+                state.totals["radar_skipped_count"] += 1
                 results.append(row)
+                scope_finished()
                 continue
 
             try:
@@ -760,7 +784,8 @@ def run_watchlist_radar_automation(
                     }
                     errors.append(error)
                     results.append({**row, **error})
-                    invalid_count += 1
+                    state.totals["radar_invalid_count"] += 1
+                    scope_finished()
                     continue
 
                 def persist_active_scope():
@@ -796,10 +821,10 @@ def run_watchlist_radar_automation(
                         reset_session_before_attempt=True,
                     )
                 )
-                active_persisted_count += int(
+                state.totals["radar_active_persisted_count"] += int(
                     active_result["evaluation_created_count"]
                 )
-                active_outcome_evaluated_count += int(
+                state.totals["radar_active_outcome_evaluated_count"] += int(
                     active_outcomes["evaluated_count"]
                 )
                 row["radar_v2_active"] = {
@@ -827,9 +852,10 @@ def run_watchlist_radar_automation(
                 }
                 errors.append(error)
                 results.append({**row, **error})
+                scope_finished()
                 continue
-            saved_count += 1
-            evaluated_count += int(active_outcomes["evaluated_count"])
+            state.totals["radar_saved_count"] += 1
+            state.totals["radar_evaluated_count"] += int(active_outcomes["evaluated_count"])
             row.update(
                 {
                     "snapshot_status": "persisted",
@@ -851,6 +877,7 @@ def run_watchlist_radar_automation(
                 "active_version": RADAR_V2_ACTIVE_RULE_VERSION,
             }
             results.append(row)
+            scope_finished()
 
     if progress_callback is not None:
         progress_callback(total_steps, total_steps, "Watchlist radar automation completed.")
@@ -875,7 +902,7 @@ def run_watchlist_radar_automation(
     }
     error_count = len(errors)
     status = "success"
-    if error_count and (saved_count or existing_count or evaluated_count):
+    if error_count and (state.totals["radar_saved_count"] or state.totals["radar_existing_count"] or state.totals["radar_evaluated_count"]):
         status = "partial_success"
     elif error_count:
         status = "error"
@@ -883,22 +910,22 @@ def run_watchlist_radar_automation(
         status = "error"
     elif save_snapshots and not coverage["reconciliation_complete"]:
         status = "partial_success"
-    elif not save_snapshots and evaluated_count == 0:
+    elif not save_snapshots and state.totals["radar_evaluated_count"] == 0:
         status = "skipped"
 
     return {
         "status": status,
         "requested_count": total_scopes,
         "success_count": sum(1 for row in results if row.get("status") == "success"),
-        "saved_count": saved_count,
-        "existing_count": existing_count,
-        "evaluated_count": evaluated_count,
-        "active_persisted_count": active_persisted_count,
-        "active_outcome_evaluated_count": active_outcome_evaluated_count,
-        "shadow_persisted_count": shadow_persisted_count,
-        "shadow_outcome_evaluated_count": shadow_outcome_evaluated_count,
-        "skipped_count": skipped_count,
-        "invalid_count": invalid_count,
+        "saved_count": state.totals["radar_saved_count"],
+        "existing_count": state.totals["radar_existing_count"],
+        "evaluated_count": state.totals["radar_evaluated_count"],
+        "active_persisted_count": state.totals["radar_active_persisted_count"],
+        "active_outcome_evaluated_count": state.totals["radar_active_outcome_evaluated_count"],
+        "shadow_persisted_count": state.totals["radar_shadow_persisted_count"],
+        "shadow_outcome_evaluated_count": state.totals["radar_shadow_outcome_evaluated_count"],
+        "skipped_count": state.totals["radar_skipped_count"],
+        "invalid_count": state.totals["radar_invalid_count"],
         "error_count": error_count,
         "group_ids": resolved_group_ids,
         "modes": resolved_modes,

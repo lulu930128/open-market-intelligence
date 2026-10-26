@@ -608,6 +608,7 @@ def evaluate_radar_outcome_v2(
     outcome_config: dict[str, Any] = RADAR_V2_OUTCOME_CONFIG,
     contract_status: str = "shadow",
     timing_callback: Callable[[str, float], None] | None = None,
+    checkpoint: Callable[[dict], None] | None = None,
 ) -> list[dict[str, Any]]:
     with measure_outcome_phase(timing_callback, "evaluation_load"):
         evaluation = (
@@ -885,10 +886,16 @@ def evaluate_radar_outcome_v2(
         if commit:
             with measure_outcome_phase(timing_callback, "transaction_commit"):
                 db.commit()
+            if checkpoint is not None:
+                checkpoint({"safe_point": "radar_outcome_transaction_complete",
+                            "evaluation_id": evaluation_id, "contract": outcome_config_hash})
         return results
     except Exception:
         if commit:
             db.rollback()
+            if checkpoint is not None:
+                checkpoint({"safe_point": "radar_outcome_transaction_complete",
+                            "evaluation_id": evaluation_id, "contract": outcome_config_hash})
         raise
 
 

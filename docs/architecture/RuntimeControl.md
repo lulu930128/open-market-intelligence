@@ -557,3 +557,142 @@ G1–G5 的正式 source 已接線，定點測試包含恢復接件、跨程序 
 
 後續 standalone adapter 僅機械轉送以上三個 endpoints，不把 runtime tools 加入 `/api/ai/ask`。
 舊 Backend 404 代表 source 尚未採用，不能自行啟動 owner。其他 MCP tools 不依賴此 feature。
+
+## JobService 協作式 quiescence（Source contract）
+
+正式 Stop／Restart request 本身即為停止授權；本契約不新增 modal、確認視窗或二次詢問。
+`RuntimeCoordinator` 仍是既有 orchestration owner：PREPARE 先關 HTTP／Scheduler admission，
+透過 `JobService.request_job_pause()` 關閉所有 managed lane 的新任務 admission，對已登記
+Future 發出同一套 cooperative stop signal。這是共同 admission／pause／ack 契約，
+**不代表所有 worker 都已支援 prompt stop**。
+
+`jobs_paused(lease)` 必須等到真正 Future、done callback、已接納的 enqueue 都退出。
+歷史 unresolved durable outcome 另保留為 reconciliation 診斷，不能宣稱工作已完成。
+queued wrapper 不呼叫 task／provider，先 commit `JobRun.status=paused`
+與 versioned `result_json.job_service_resume_v1` obligation，再關閉 Session；running worker
+只能在其 transaction owner 已完成 commit／rollback 的安全點退出。不能以 progress、token、
+Future.cancel、Python thread kill 或程序強制結束代替完成證據。uncaught task exception、
+pause commit failure 或無法編碼的 continuation 保留原 JobRun 與 unknown 診斷，不授權自動重放；
+未證實完成的 Session close、transaction、physical writer 或 provider ownership 仍阻擋。
+
+PREPARE 在 managed jobs 退出後才關閉 Session scope admission，接著仍必須通過 publisher、
+physical SQLite、Engine unknown check 與 native writer lease。collectors／HTTP／Frontend
+不是 JobService 所有；crypto／Fugle 的 admission 與 final flush 仍由原 owner 執行。
+Graceful ExactExit、UUID、source pin、STOP delivery 與不可逆 commit gate 不變。內層 deadline
+可回 blocked／rearm；明確 lifecycle operation 的外層 180 秒到期仍執行 exact-owner cutoff，
+不重送 STOP，也不宣稱工作完成。
+
+### 已驗證的安全點與未支援範圍
+
+`run_taiwan_broker_branch_market_refresh_job` 在當前 stock transaction 完成及
+progress transaction 結束後檢查 signal，保存精確
+current／total，再由 JobService 保存 `restart_paused` partial。重啟後根據 persisted
+stock／trade_date 與同來源、同 contract、同日期的 success／partial／empty quality 跳過
+已收集項目；provider failure、invalid、date mismatch 不當作完成。empty acquisition
+仍不等於完整 market coverage；缺資料保持 partial。2330 release probe 的對象與 provider
+參數沿用原契約；去重是逐股 acquisition 去重，並不省略原有 release probe。
+
+Period owner 的新增接點由 `jobs/resumption.py::PERIOD_TASK_OWNERS` 明列。TWSE／TPEx price
+按月、revenue 按月、financial 按季、shareholding 按週、market daily／margin 按 source/date、
+Radar snapshot 按完整 group/mode，在原 domain owner commit／rollback 完成後通知。
+`BackfillProgress` 只保存記憶體 cursor，不擁有 Session 或業務交易；descriptor 綁定 task、
+typed args、job id，並比對完整 canonical items 的內容與順序、identity 與 ledger totals。
+Price parsed 與 inserted 分別記錄，不從部分已有日價推定整月完成。Context 漂移保留 paused
+obligation 並 fail closed。Radar outcome 則使用原 pending path ledger，在原 evaluation owner
+的 commit=True commit／rollback 後通知；commit=False 不提供安全點。
+
+可執行盤點入口是 `scripts/job-support-inventory.py`，coverage test 對照 production submissions
+與 retry routing；本文件不維護另一份完整 task 表。來源掃描不能證明 hard wall-clock bound，
+Radar 單一 scope、provider request 與 DB commit 仍須等待原 owner 返回；drain deadline 到期
+回報 graceful blocked，不能中斷持有交易的 Python 執行緒；180 秒外層可終止 exact owned
+OS process，保留未確認對帳。
+
+EOD 的 US symbol、US priority OHLC 的 symbol scope、Taiwan intraday bootstrap 的 child
+admission，由 `jobs/resumption.py::OWNER_TASKS` 與原 owner 的明確接點授權。沿用 JobRun
+JSON 保存原 universe、release/date/contract、精確 work order、逐項結果與累計 quota/runtime；
+`OwnerWork` 是純資料 ledger，沒有 executor、provider selector 或 DB ownership。
+Job composition adapter 在 IO 前持久化保守 calls reservation，只有原 owner 完成後才結算。
+US EOD 的結果 ledger 與 coverage cursor 在 `_update_repair_state` 的同一 commit 寫入；
+優先序與每第五次 background rotation 在原 Job 凍結，續跑不依最後 cursor 推測完成集合。
+Provider exception 保留 reserved quota，原 retry/backoff 不重設。US priority 的 Shared
+read/ensure 必須返回，chart Session 必須 close，之後才保存 counters 與發布 checkpoint；
+unknown consumption 保留 reservation、實際 calls=null，terminal partial 不重放該 symbol。
+未知 commit/rollback/Session close 不能發布 pause。Future 的 escaping outcome 保留 reconciliation
+診斷；是否可停止仍取決於真正 execution exit 與後續完整 writer gates，不等同 durable completion。
+
+Bootstrap parent 保存原 target plan、admitted child ids 與剩餘 symbols；parent admission
+progress 不代表 children coverage。每個 child 的 deadline、CAS claim、quota、retry 與
+terminal postcondition 仍由 `taiwan_intraday_demand` 擁有。Admission 與 parent checkpoint
+之間若 persistence outcome 不明，保留 inflight ledger 並阻擋自動重放。
+
+其餘已開始的 worker，包括 TW EOD venue bulk、index repair、其他未接線 bootstrap、
+Dispatch 與 intraday-demand，尚無本契約驗證的中途 safe point；執行中顯示
+`UNCOOPERATIVE/UNKNOWN`，只能等實際自然完成。不能保證 prompt stop，deadline 到期必須
+拒絕成功。現有 AuditSlice 的 scheduler yield 不是 JobService checkpoint 的替代證據。
+
+queued continuation 的 executable allowlist 與 typed argument codec 由 `jobs/resumption.py`
+擁有，文件不複製另一份完整 task inventory。僅 source-owned top-level task、可驗證的
+argument shape／signature／lane／checkpoint 可重放；不用 pickle、不從 request_json
+決定 import、不允許任意 module。Dispatch／intraday-demand 有自己的 durable state machine，
+明確禁止通用 queue replay。Intraday demand 的 unstarted callable 由原 owner 以 CAS 將
+已 claim 的 running attempt 交回 queued，保留原 request、deadline、已耗 quota 與 backoff，
+並保存 original-owner handoff marker。原 `dispatch_due_materializations` 接回同一 episode；
+GET 不派送，沒有重新 enqueue 或重設 quota。已開始的 acquisition 使用原最多 40 秒的
+cooperative deadline／late callback rejection，但不保證 HTTP／Thread 在 40 秒內退出；
+仍須等真正 callable、Session、Future 與 done callback 完成。Dispatch send／SMTP 的
+irreversible state machine 沒有新 replay authority；unsupported callable／closure 不執行，
+保留 unknown durable 記錄。真正 execution 與 writer 都退出後可停止，下一次正式 startup
+依原 interrupted cleanup 明確標註未完成，不偽造 paused／success 或通用重送。
+
+### Durable recovery 與 rearm
+
+沒有 schema 變更：沿用 JobRun 既有字串 status 與 JSON 欄位。paused 納入共同 dedupe，
+不被 `mark_interrupted_jobs()` 改成意外 error；真正 crash 留下的 queued／running 仍沿用
+既有 interrupted error 語意；唯一 queued 例外是經原 intraday-demand owner 驗證的 unstarted
+handoff，保留給原 dispatcher。不存在 marker 或 quota 不明時不推測可恢復。
+不對未證實完成邊界做自動 replay。status=paused 本身不授權
+重放，必須通過完整 versioned descriptor 驗證；API projection 不輸出 private task descriptor。
+
+啟動時 background leader 先只讀取並驗證 obligation，關閉該 read Session；所有必要
+scheduler／collector components 啟動、runtime 設為 started 後，才從同一 JobService 提交
+continuation。啟動中途失敗時不得啟動 recovery worker，obligation 保持原 bytes。若正式
+提交後失敗，沿用實際 Runtime drain／unknown 結果，不能假稱安全退出。GET／status／read
+不啟動 recovery，也不寫 DB。
+
+無 STOP 的 rearm 先恢復其他被關閉 owner，再重新開啟 Job admission。已完成 pause 的工作
+可續跑；仍在寫 pause commit 的 worker 必須先完成並退出，由 done callback 才接續。
+reservation 在 `_executor_lock` 內，codec validation／submit dispatch 在鎖外，DB IO 不進入
+executor fence。Future 完成與 callback 續跑本身均納入 drain 計數，避免零 Future 空窗假成功。
+
+隔離測試使用實際 JobService、ThreadPoolExecutor、temporary SQLite 與 mocked provider，
+包含第二個 disposable Python process 的 durable recovery；這些都是 Source／offline 證據。
+本輪未操作正式 Backend／Frontend、DB、provider 或 Launcher；Live adoption 仍為 UNVERIFIED。
+
+### 2026-10-22 歷史 durable outcome 與執行 quiescence（Source contract）
+
+使用者明確核准解除「只有歷史不確定計數也永久禁止 Safe Stop／Exit／換版」的政策。
+`_enqueue_failures` 記錄 INSERT／commit／continuation 的結果不確定，並非 executing writer 數；
+數值、原 JobRun、result/request JSON 與既有 error 診斷均保留，不清零。JobService 的 drained
+只代表 admission 已關、實際 Future（含 callback）與 active enqueue（含 rollback）均退出。
+`execution_quiescent` 與 `reconciliation_required` 是不同 memory-only 診斷；GET 不加 DB query。
+
+RuntimeCoordinator 在 Job 執行靜止後記錄 `OMI_RESTART_JOB_RECONCILIATION_PENDING`，繼續原
+Session、publisher、physical SQLite、Engine unknown 與 native `BEGIN IMMEDIATE` 排他流程。
+HTTP、scheduler、detached provider worker、collector final flush 亦須通過原 gate。任何未完成
+或無法證明已退出的 writer／transport 仍拒絕；歷史計數非零不會授權 cancel、kill、清 owner、
+忽略 close failure 或跳過 SQLite exclusion。`all_writers_drained` 不宣稱所有 Job 業務成功。
+
+Durable obligation 的處置仍由既有 owner 負責：下一次正式 background-leader startup 的
+`mark_interrupted_jobs` 將一般 queued/running 原記錄標註 interrupted error，保留 ID、request、
+result、created/started 時鐘，填入 ended/updated；沒有新 job、沒有 provider replay。cleanup
+commit 失敗向外傳播並停止 startup；不宣稱已完成 reconciliation。合法 paused descriptor
+由既有 validated resume 接回；intraday-demand handoff 保留原 CAS、deadline、quota、backoff。
+這不是新的 recovery manager，也不增加 startup retry、status repair 或全市場掃描。
+
+離線驗收使用 temporary SQLite、真 Future／rollback／Session、第二個 disposable Python
+process，分別驗證失敗後仍存 queued/running、下一次啟動 interrupted 且冪等、合法 paused／
+original-owner resume、cleanup commit 失敗保留、未知 Session close／Provider start 不可放行。
+子程序受 offline guard 與外層 timeout 限制；不宣稱正式大 DB 的 startup wall-clock 上界。
+既有 architecture no-forced-cancellation 與 transport-no-owner constraints／debt 邊界不變。
+2026-10-22 12:51 的 JOB_QUIESCENCE/PREFLIGHT_REARMED 是當時載入政策下正確的安全拒絕；
+此 Source 修正不能倒寫該 receipt，也不代表現役程序已採用或現在已獲重啟許可。

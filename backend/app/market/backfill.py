@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from app.utils.backfill_checkpoint import BackfillContextChanged, BackfillProgress
+
 from app.db.models import (
     DataQualityCheck,
     FetchLog,
@@ -391,16 +393,21 @@ def backfill_twse_stock_day(
     source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
+    *, checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
 
+    if checkpoint is not None and (db.new or db.dirty or db.deleted):
+        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
     requested_end_date = end_date
     effective_end_date, release_limited = _official_daily_backfill_window(
         start_date=start_date,
         end_date=end_date,
     )
     if effective_end_date is None:
+        if resume_state is not None:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED")
         return _unreleased_daily_backfill_result(
             stock_id=stock_id,
             start_date=start_date,
@@ -417,20 +424,23 @@ def backfill_twse_stock_day(
 
     month_starts = _month_starts(start_date, end_date)
 
-    total_parsed_count = 0
-    total_inserted_count = 0
-    total_skipped_count = 0
-    skipped_existing_month_count = 0
-    fetched_month_count = 0
-
-    month_results: list[dict] = []
+    state = BackfillProgress(
+        owner='twse_price_month', identity=[stock_id, source.id, start_date.isoformat(), requested_end_date.isoformat(), end_date.isoformat()],
+        items=[value.isoformat() for value in month_starts],
+        counters=('total_parsed_count', 'total_inserted_count', 'total_skipped_count', 'skipped_existing_month_count', 'fetched_month_count'),
+        checkpoint=checkpoint, resume_state=resume_state,
+    )
+    month_results = state.results
 
     headers = {
         "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
         "Accept": "application/json,text/plain,*/*",
     }
 
-    for index, month_start in enumerate(month_starts):
+    for index, month_value in enumerate(state.items):
+        if index < state.completed:
+            continue
+        month_start = date.fromisoformat(month_value)
         month_started_perf = time.perf_counter()
 
         month_label = month_start.strftime("%Y-%m")
@@ -454,7 +464,7 @@ def backfill_twse_stock_day(
                 effective_end=effective_end,
                 month_end=month_end,
             ):
-                skipped_existing_month_count += 1
+                state.totals['skipped_existing_month_count'] += 1
                 month_results.append(
                     {
                         "month": month_label,
@@ -469,11 +479,18 @@ def backfill_twse_stock_day(
                         ),
                         "row_count": existing_count,
                         "parsed_count": 0,
+                        "inserted_count": 0,
                         "skipped_count": 0,
                         "status": "skipped_existing",
                         "error_message": None,
                     }
                 )
+                if checkpoint is not None:
+                    # This branch only read existing coverage; no business mutation.
+                    if db.new or db.dirty or db.deleted:
+                        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                    db.rollback()
+                state.advance()
                 continue
 
         fetch_log = _create_fetch_log(
@@ -484,6 +501,7 @@ def backfill_twse_stock_day(
         )
 
         raw_result: RawFetchResult | None = None
+        totals_before = state.totals.copy()
 
         try:
             response = http_get(url, headers=headers, timeout=30)
@@ -561,9 +579,9 @@ def backfill_twse_stock_day(
                 parsed_count = len(parsed_rows)
                 inserted_count = _save_market_rows(db, parsed_rows)
 
-                total_parsed_count += parsed_count
-                total_inserted_count += inserted_count
-                total_skipped_count += skipped_count
+                state.totals['total_parsed_count'] += parsed_count
+                state.totals['total_inserted_count'] += inserted_count
+                state.totals['total_skipped_count'] += skipped_count
 
             effective_status = "success"
 
@@ -584,32 +602,38 @@ def backfill_twse_stock_day(
                 source.last_success_at = utc_now()
                 source.last_error_at = None
                 source.last_error_message = None
-                fetched_month_count += 1
+                state.totals['fetched_month_count'] += 1
             else:
                 source.last_error_at = utc_now()
                 source.last_error_message = quality_message
 
+            fetch_log_id = fetch_log.id
+            raw_result_id = raw_result.id if raw_result else None
+            fetch_error = fetch_log.error_message
             db.commit()
 
             month_results.append(
                 {
                     "month": month_label,
                     "url": url,
-                    "fetch_log_id": fetch_log.id,
-                    "raw_result_id": raw_result.id,
+                    "fetch_log_id": fetch_log_id,
+                    "raw_result_id": raw_result_id,
                     "http_status_code": response.status_code,
                     "data_quality_status": quality_status,
                     "data_quality_message": quality_message,
                     "row_count": row_count,
                     "parsed_count": parsed_count,
+                    "inserted_count": inserted_count,
                     "skipped_count": skipped_count,
                     "status": effective_status,
-                    "error_message": fetch_log.error_message,
+                    "error_message": fetch_error,
                 }
             )
 
         except Exception as exc:
             db.rollback()
+            # Rolled-back rows are never counted or skipped by a continuation.
+            state.totals.update(totals_before)
 
             fetch_log.status = "error"
             fetch_log.ended_at = utc_now()
@@ -623,32 +647,39 @@ def backfill_twse_stock_day(
 
             db.add(fetch_log)
             db.add(source)
+            fetch_log_id = fetch_log.id
+            raw_result_id = raw_result.id if raw_result else None
+            fetch_error = fetch_log.error_message
             db.commit()
+            state.checkpoint()  # Error log durable; failed month remains pending.
 
             month_results.append(
                 {
                     "month": month_label,
                     "url": url,
-                    "fetch_log_id": fetch_log.id,
-                    "raw_result_id": raw_result.id if raw_result else None,
+                    "fetch_log_id": fetch_log_id,
+                    "raw_result_id": raw_result_id,
                     "http_status_code": None,
                     "data_quality_status": "error",
                     "data_quality_message": str(exc),
                     "row_count": None,
                     "parsed_count": 0,
+                    "inserted_count": 0,
                     "skipped_count": 0,
                     "status": "error",
                     "error_message": str(exc),
                 }
             )
 
-        if index < len(month_starts) - 1 and sleep_seconds > 0:
+        state.advance()
+
+        if index < len(state.items) - 1 and sleep_seconds > 0:
             time.sleep(sleep_seconds)
 
     overall_status = "success"
 
     if any(item["status"] == "error" for item in month_results):
-        overall_status = "partial_success" if total_inserted_count > 0 else "error"
+        overall_status = "partial_success" if state.totals['total_inserted_count'] > 0 else "error"
 
     return {
         "stock_id": stock_id,
@@ -658,12 +689,12 @@ def backfill_twse_stock_day(
         "end_date": requested_end_date,
         "effective_end_date": end_date,
         "release_limited": release_limited,
-        "requested_month_count": len(month_starts),
-        "fetched_month_count": fetched_month_count,
-        "skipped_existing_month_count": skipped_existing_month_count,
-        "parsed_count": total_parsed_count,
-        "inserted_count": total_inserted_count,
-        "skipped_count": total_skipped_count,
+        "requested_month_count": len(state.items),
+        "fetched_month_count": state.totals['fetched_month_count'],
+        "skipped_existing_month_count": state.totals['skipped_existing_month_count'],
+        "parsed_count": state.totals['total_parsed_count'],
+        "inserted_count": state.totals['total_inserted_count'],
+        "skipped_count": state.totals['total_skipped_count'],
         "status": overall_status,
         "message": "TWSE stock day backfill completed.",
         "months": month_results,
@@ -678,16 +709,21 @@ def backfill_tpex_trading_stock(
     source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
+    *, checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
 
+    if checkpoint is not None and (db.new or db.dirty or db.deleted):
+        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
     requested_end_date = end_date
     effective_end_date, release_limited = _official_daily_backfill_window(
         start_date=start_date,
         end_date=end_date,
     )
     if effective_end_date is None:
+        if resume_state is not None:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED")
         return _unreleased_daily_backfill_result(
             stock_id=stock_id,
             start_date=start_date,
@@ -703,20 +739,23 @@ def backfill_tpex_trading_stock(
     stock_name = _get_stock_name(db, stock_id)
     month_starts = _month_starts(start_date, end_date)
 
-    total_parsed_count = 0
-    total_inserted_count = 0
-    total_skipped_count = 0
-    skipped_existing_month_count = 0
-    fetched_month_count = 0
-
-    month_results: list[dict] = []
+    state = BackfillProgress(
+        owner='tpex_price_month', identity=[stock_id, source.id, start_date.isoformat(), requested_end_date.isoformat(), end_date.isoformat()],
+        items=[value.isoformat() for value in month_starts],
+        counters=('total_parsed_count', 'total_inserted_count', 'total_skipped_count', 'skipped_existing_month_count', 'fetched_month_count'),
+        checkpoint=checkpoint, resume_state=resume_state,
+    )
+    month_results = state.results
 
     headers = {
         "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
         "Accept": "application/json,text/plain,*/*",
     }
 
-    for index, month_start in enumerate(month_starts):
+    for index, month_value in enumerate(state.items):
+        if index < state.completed:
+            continue
+        month_start = date.fromisoformat(month_value)
         month_started_perf = time.perf_counter()
         month_label = month_start.strftime("%Y-%m")
         url = _build_tpex_trading_stock_url(stock_id, month_start)
@@ -739,7 +778,7 @@ def backfill_tpex_trading_stock(
                 effective_end=effective_end,
                 month_end=month_end,
             ):
-                skipped_existing_month_count += 1
+                state.totals['skipped_existing_month_count'] += 1
                 month_results.append(
                     {
                         "month": month_label,
@@ -754,11 +793,18 @@ def backfill_tpex_trading_stock(
                         ),
                         "row_count": existing_count,
                         "parsed_count": 0,
+                        "inserted_count": 0,
                         "skipped_count": 0,
                         "status": "skipped_existing",
                         "error_message": None,
                     }
                 )
+                if checkpoint is not None:
+                    # This branch only read existing coverage; no business mutation.
+                    if db.new or db.dirty or db.deleted:
+                        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                    db.rollback()
+                state.advance()
                 continue
 
         fetch_log = _create_fetch_log(
@@ -771,6 +817,7 @@ def backfill_tpex_trading_stock(
         )
 
         raw_result: RawFetchResult | None = None
+        totals_before = state.totals.copy()
 
         try:
             response = http_post(
@@ -871,9 +918,9 @@ def backfill_tpex_trading_stock(
                 parsed_count = len(parsed_rows)
                 inserted_count = _save_market_rows(db, parsed_rows)
 
-                total_parsed_count += parsed_count
-                total_inserted_count += inserted_count
-                total_skipped_count += skipped_count
+                state.totals['total_parsed_count'] += parsed_count
+                state.totals['total_inserted_count'] += inserted_count
+                state.totals['total_skipped_count'] += skipped_count
 
             effective_status = "success"
 
@@ -893,32 +940,38 @@ def backfill_tpex_trading_stock(
                 source.last_success_at = utc_now()
                 source.last_error_at = None
                 source.last_error_message = None
-                fetched_month_count += 1
+                state.totals['fetched_month_count'] += 1
             else:
                 source.last_error_at = utc_now()
                 source.last_error_message = quality_message
 
+            fetch_log_id = fetch_log.id
+            raw_result_id = raw_result.id if raw_result else None
+            fetch_error = fetch_log.error_message
             db.commit()
 
             month_results.append(
                 {
                     "month": month_label,
                     "url": url,
-                    "fetch_log_id": fetch_log.id,
-                    "raw_result_id": raw_result.id,
+                    "fetch_log_id": fetch_log_id,
+                    "raw_result_id": raw_result_id,
                     "http_status_code": response.status_code,
                     "data_quality_status": quality_status,
                     "data_quality_message": quality_message,
                     "row_count": row_count,
                     "parsed_count": parsed_count,
+                    "inserted_count": inserted_count,
                     "skipped_count": skipped_count,
                     "status": effective_status,
-                    "error_message": fetch_log.error_message,
+                    "error_message": fetch_error,
                 }
             )
 
         except Exception as exc:
             db.rollback()
+            # Rolled-back rows are never counted or skipped by a continuation.
+            state.totals.update(totals_before)
 
             fetch_log.status = "error"
             fetch_log.ended_at = utc_now()
@@ -931,32 +984,39 @@ def backfill_tpex_trading_stock(
 
             db.add(fetch_log)
             db.add(source)
+            fetch_log_id = fetch_log.id
+            raw_result_id = raw_result.id if raw_result else None
+            fetch_error = fetch_log.error_message
             db.commit()
+            state.checkpoint()  # Error log durable; failed month remains pending.
 
             month_results.append(
                 {
                     "month": month_label,
                     "url": url,
-                    "fetch_log_id": fetch_log.id,
-                    "raw_result_id": raw_result.id if raw_result else None,
+                    "fetch_log_id": fetch_log_id,
+                    "raw_result_id": raw_result_id,
                     "http_status_code": None,
                     "data_quality_status": "error",
                     "data_quality_message": str(exc),
                     "row_count": None,
                     "parsed_count": 0,
+                    "inserted_count": 0,
                     "skipped_count": 0,
                     "status": "error",
                     "error_message": str(exc),
                 }
             )
 
-        if index < len(month_starts) - 1 and sleep_seconds > 0:
+        state.advance()
+
+        if index < len(state.items) - 1 and sleep_seconds > 0:
             time.sleep(sleep_seconds)
 
     overall_status = "success"
 
     if any(item["status"] == "error" for item in month_results):
-        overall_status = "partial_success" if total_inserted_count > 0 else "error"
+        overall_status = "partial_success" if state.totals['total_inserted_count'] > 0 else "error"
 
     return {
         "stock_id": stock_id,
@@ -966,12 +1026,12 @@ def backfill_tpex_trading_stock(
         "end_date": requested_end_date,
         "effective_end_date": end_date,
         "release_limited": release_limited,
-        "requested_month_count": len(month_starts),
-        "fetched_month_count": fetched_month_count,
-        "skipped_existing_month_count": skipped_existing_month_count,
-        "parsed_count": total_parsed_count,
-        "inserted_count": total_inserted_count,
-        "skipped_count": total_skipped_count,
+        "requested_month_count": len(state.items),
+        "fetched_month_count": state.totals['fetched_month_count'],
+        "skipped_existing_month_count": state.totals['skipped_existing_month_count'],
+        "parsed_count": state.totals['total_parsed_count'],
+        "inserted_count": state.totals['total_inserted_count'],
+        "skipped_count": state.totals['total_skipped_count'],
         "status": overall_status,
         "message": "TPEx trading stock backfill completed.",
         "months": month_results,

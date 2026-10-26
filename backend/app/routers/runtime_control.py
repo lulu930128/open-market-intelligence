@@ -47,10 +47,12 @@ def status(request: Request):
                         "disk_matches_import": disk == control.LOADED_CONTROL_BUNDLE_ID if disk else None,
                         "loaded_release_identity": "UNATTESTED"}
     runtime = getattr(request.app.state, "runtime", None)
+    observe_writers = getattr(runtime, "restart_diagnostics", None)
     result["serving_backend"] = {"runtime_started": bool(runtime and getattr(runtime, "started", False)),
                                  "database_readiness": "not_checked",
                                  "readiness": "UNATTESTED",
-                                 "writer_preflight": _backend_preflight(request)}
+                                 "writer_preflight": _backend_preflight(request),
+                                 "writer_diagnostics": observe_writers() if callable(observe_writers) else None}
     owned_start = getattr(request.app.state, "owned_start", None)
     if owned_start is not None:
         result["serving_backend"]["owned_start"] = dict(owned_start)

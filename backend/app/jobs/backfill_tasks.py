@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.models import utc_now
+from app.jobs.cooperative import period_checkpoint_arguments, radar_outcome_checkpoint_arguments
 from app.jobs.service import JobExecutionError, ProgressCallback, run_tracked_job
 from app.jp_market import service as jp_market_service
 from app.kr_market import service as kr_market_service
@@ -80,6 +81,7 @@ def run_twse_daily_price_job(
             source_id=source_id,
             sleep_seconds=sleep_seconds,
             skip_existing_months=skip_existing_months,
+            **period_checkpoint_arguments(db, 'twse_price_month'),
         )
 
     run_tracked_job(job_id, worker)
@@ -104,6 +106,7 @@ def run_tpex_daily_price_job(
             source_id=source_id,
             sleep_seconds=sleep_seconds,
             skip_existing_months=skip_existing_months,
+            **period_checkpoint_arguments(db, 'tpex_price_month'),
         )
 
     run_tracked_job(job_id, worker)
@@ -132,6 +135,7 @@ def run_market_daily_metrics_job(
                 categories=categories,
                 sleep_seconds=sleep_seconds,
                 skip_existing=skip_existing,
+                **period_checkpoint_arguments(db, "daily_metric_source_date"),
                 required_trade_dates=(expected_trade_date,) if expected_trade_date else None,
             )
         else:
@@ -143,6 +147,7 @@ def run_market_daily_metrics_job(
                 include_today=include_today,
                 sleep_seconds=sleep_seconds,
                 skip_existing=skip_existing,
+                **period_checkpoint_arguments(db, "daily_metric_source_date"),
                 expected_trade_date=expected_trade_date,
             )
 
@@ -276,6 +281,8 @@ def run_taiwan_broker_branch_market_refresh_job(
     max_stocks: int,
     max_runtime_seconds: int,
 ) -> None:
+    from app.jobs.cooperative import checkpoint_after_transaction
+
     def worker(db: Session, progress: ProgressCallback):
         progress(0, 1, "Preparing Taiwan all-market broker-branch collection.")
         return refresh_taiwan_broker_branch_market(
@@ -286,6 +293,7 @@ def run_taiwan_broker_branch_market_refresh_job(
             max_runtime_seconds=max_runtime_seconds,
             progress=progress,
             job_run_id=job_id,
+            checkpoint=lambda evidence: checkpoint_after_transaction(db, evidence),
         )
 
     run_tracked_job(job_id, worker)
@@ -416,6 +424,7 @@ def run_stock_shareholding_history_job(
             lookback_weeks=lookback_weeks,
             sleep_seconds=sleep_seconds,
             skip_existing=skip_existing,
+            **period_checkpoint_arguments(db, 'shareholding_week'),
         )
 
     run_tracked_job(job_id, worker)
@@ -440,6 +449,7 @@ def run_stock_monthly_revenue_history_job(
             lookback_months=lookback_months,
             sleep_seconds=sleep_seconds,
             skip_existing=skip_existing,
+            **period_checkpoint_arguments(db, 'revenue_month'),
         )
 
     run_tracked_job(job_id, worker)
@@ -468,6 +478,7 @@ def run_stock_financial_metrics_history_job(
             lookback_quarters=lookback_quarters,
             sleep_seconds=sleep_seconds,
             skip_existing=skip_existing,
+            **period_checkpoint_arguments(db, 'financial_quarter'),
         )
 
     run_tracked_job(job_id, worker)
@@ -610,6 +621,7 @@ def run_watchlist_radar_auto_snapshot_job(
             evaluate_lookback_days=evaluate_lookback_days,
             save_snapshots=save_snapshots,
             progress_callback=progress,
+            **period_checkpoint_arguments(db, "radar_snapshot_scope"),
         )
 
     run_tracked_job(job_id, worker)
@@ -637,6 +649,7 @@ def run_watchlist_radar_outcome_reconcile_job(
             as_of_trade_date=as_of_trade_date,
             progress_callback=progress,
             work_slice=work_slice,
+            **radar_outcome_checkpoint_arguments(db),
         )
         if result["status"] == "error":
             raise JobExecutionError("Radar v2 outcome reconciliation failed.", result=result)
@@ -875,6 +888,8 @@ def run_us_priority_ohlc_reconcile_job(
     expected_trade_date: str | None = None,
 ) -> None:
     def worker(_db: Session, progress: ProgressCallback):
+        from app.jobs.owner_continuation import owner_continuation_arguments
+
         return reconcile_us_priority_ohlc(
             max_runtime_seconds=max_runtime_seconds,
             cursor_symbol=cursor_symbol,
@@ -885,6 +900,7 @@ def run_us_priority_ohlc_reconcile_job(
             continuation_remaining_count=continuation_remaining_count,
             to_date=date.fromisoformat(expected_trade_date) if expected_trade_date else None,
             progress_callback=progress,
+            **owner_continuation_arguments(_db, "us_priority_symbols"),
         )
 
     run_tracked_job(job_id, worker)

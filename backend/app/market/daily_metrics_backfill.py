@@ -3,6 +3,7 @@ from datetime import date, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from app.utils.backfill_checkpoint import BackfillContextChanged, BackfillProgress
 
 from app.db.models import (
     InstitutionalTradeDaily,
@@ -344,6 +345,7 @@ def ensure_daily_metrics(
     skip_existing: bool = True,
     parser_types: list[str] | tuple[str, ...] | None = None,
     required_trade_dates: list[date] | tuple[date, ...] | None = None,
+    checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
@@ -373,6 +375,8 @@ def ensure_daily_metrics(
         )
 
     if not sources:
+        if resume_state is not None:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED")
         return {
             "status": "skipped",
             "message": "No enabled daily metric sources found.",
@@ -389,17 +393,24 @@ def ensure_daily_metrics(
             "results": [],
         }
 
-    results: list[dict] = []
-    fetched_count = 0
-    skipped_existing_count = 0
-    error_count = 0
-    inserted_count = 0
-
+    state = BackfillProgress(
+        owner="daily_metric_source_date",
+        identity=[start_date.isoformat(), end_date.isoformat(), list(normalized_categories), list(normalized_parser_types or [])],
+        items=[f"{day.isoformat()}|{source.id}" for day in trade_dates for source in sources],
+        counters=('metric_fetched_count', 'metric_skipped_existing_count', 'metric_error_count', 'metric_inserted_count'),
+        checkpoint=checkpoint, resume_state=resume_state,
+    )
+    results = state.results
+    item_index = 0
     for trade_date in trade_dates:
         for source in sources:
+            item_index += 1
+            if item_index <= state.completed:
+                continue
+            totals_before = state.totals.copy()
             if skip_existing and _source_has_date_rows(db=db, source=source, trade_date=trade_date):
                 row_count = _source_row_count(db=db, source=source, trade_date=trade_date)
-                skipped_existing_count += 1
+                state.totals["metric_skipped_existing_count"] += 1
                 results.append(
                     {
                         "trade_date": trade_date,
@@ -417,6 +428,11 @@ def ensure_daily_metrics(
                         "error_message": None,
                     }
                 )
+                if checkpoint is not None:
+                    if db.new or db.dirty or db.deleted:
+                        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                    db.rollback()  # Coverage reads only.
+                state.advance()
                 continue
 
             try:
@@ -425,13 +441,13 @@ def ensure_daily_metrics(
                     source_id=source.id,
                     trade_date=trade_date,
                 )
-                fetched_count += 1
+                state.totals["metric_fetched_count"] += 1
                 result_inserted_count = refresh_result.get("inserted_count") or 0
-                inserted_count += result_inserted_count
+                state.totals["metric_inserted_count"] += result_inserted_count
 
                 status = refresh_result.get("parse_status") or refresh_result.get("fetch_status")
                 if status != "success":
-                    error_count += 1
+                    state.totals["metric_error_count"] += 1
 
                 results.append(
                     {
@@ -451,7 +467,11 @@ def ensure_daily_metrics(
                     }
                 )
             except Exception as exc:
-                error_count += 1
+                if checkpoint is not None:
+                    db.rollback()  # Original refresh failed; never save its uncommitted work.
+                    state.totals.update(totals_before)
+                    state.checkpoint()
+                state.totals["metric_error_count"] += 1
                 results.append(
                     {
                         "trade_date": trade_date,
@@ -470,14 +490,22 @@ def ensure_daily_metrics(
                     }
                 )
 
+            if checkpoint is not None:
+                # refresh_source delegates business commits to fetch/parse owners;
+                # its result projection opens only a subsequent read transaction.
+                if db.new or db.dirty or db.deleted:
+                    raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                db.rollback()
+            state.advance()
+
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
     requested_count = len(trade_dates) * len(sources)
     status = "success"
 
-    if error_count:
-        status = "partial_success" if inserted_count or skipped_existing_count else "error"
+    if state.totals["metric_error_count"]:
+        status = "partial_success" if state.totals["metric_inserted_count"] or state.totals["metric_skipped_existing_count"] else "error"
 
     return {
         "status": status,
@@ -488,10 +516,10 @@ def ensure_daily_metrics(
         "end_date": end_date,
         "trade_dates": trade_dates,
         "requested_count": requested_count,
-        "fetched_count": fetched_count,
-        "skipped_existing_count": skipped_existing_count,
-        "error_count": error_count,
-        "inserted_count": inserted_count,
+        "fetched_count": state.totals["metric_fetched_count"],
+        "skipped_existing_count": state.totals["metric_skipped_existing_count"],
+        "error_count": state.totals["metric_error_count"],
+        "inserted_count": state.totals["metric_inserted_count"],
         "results": results,
     }
 
@@ -505,6 +533,7 @@ def ensure_latest_daily_metrics(
     sleep_seconds: float = 0.2,
     skip_existing: bool = True,
     expected_trade_date: date | None = None,
+    checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
     normalized_categories = _normalize_categories(categories)
     sources = _list_metric_sources(db=db, categories=normalized_categories)
@@ -515,6 +544,8 @@ def ensure_latest_daily_metrics(
     )
 
     if latest_trade_date is None:
+        if resume_state is not None:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED")
         return {
             "status": "skipped",
             "message": "No market daily trade date is available for daily metric ensure.",
@@ -540,6 +571,19 @@ def ensure_latest_daily_metrics(
     if start_date > latest_trade_date:
         start_date = latest_trade_date
 
+    if resume_state is not None:
+        # This job's own commits advance _default_start_date. Retain the
+        # original resolved request window, then compare its complete source /
+        # date universe in ensure_daily_metrics. A changed release end is not
+        # silently adopted by a continuation.
+        try:
+            saved_start, saved_end = (date.fromisoformat(value) for value in resume_state["identity"][:2])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED") from exc
+        if saved_end != latest_trade_date or saved_start > saved_end:
+            raise BackfillContextChanged("JOB_PERIOD_CONTEXT_CHANGED")
+        start_date = saved_start
+
     result = ensure_daily_metrics(
         db=db,
         start_date=start_date,
@@ -548,6 +592,7 @@ def ensure_latest_daily_metrics(
         sleep_seconds=sleep_seconds,
         skip_existing=skip_existing,
         required_trade_dates=(expected_trade_date,) if expected_trade_date else None,
+        **({"checkpoint": checkpoint, "resume_state": resume_state} if checkpoint else {}),
     )
     if expected_trade_date is not None:
         postcondition = evaluate_daily_metrics_postcondition(

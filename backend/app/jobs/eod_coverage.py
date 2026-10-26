@@ -8,6 +8,7 @@ from app.db.models import JobRun
 from app.config import settings
 from app.jobs.market_refresh_priority import active_market_refresh_priorities
 from app.jobs import service as job_service
+from app.jobs.owner_continuation import owner_continuation_arguments
 from app.jobs.job_types import MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE
 from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue, qualify_taiwan_eod_universe
 from app.market_data.eod_coverage import (
@@ -43,6 +44,7 @@ def run_eod_coverage_reconcile_job(
             max_consecutive_errors=max_consecutive_errors,
             error_backoff_seconds=error_backoff_seconds,
             progress_callback=progress,
+            **(owner_continuation_arguments(db, "us_eod_symbols") if market.strip().upper() == "US" else {}),
             priority_symbols=(
                 lambda: active_market_refresh_priorities(db, market=market)
             ) if settings.enable_market_refresh_priority else None,

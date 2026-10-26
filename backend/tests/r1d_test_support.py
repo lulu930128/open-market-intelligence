@@ -83,6 +83,8 @@ def isolated_job_lifecycle(monkeypatch):
     _fresh_publisher_lifecycle(monkeypatch)
     for name, value in {
         "_executor": None, "_materialization_executors": {}, "_pending_tasks": {},
+        "_paused_tasks": {},
+        "_resuming_jobs": set(),
         "_admission_closed": False, "_admission_pause": None, "_active_enqueues": 0, "_task_failures": 0,
         "_enqueue_failures": 0,
         "_materialization_slots": {name: BoundedSemaphore(size) for name, size in (

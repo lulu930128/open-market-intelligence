@@ -8,6 +8,8 @@ from html.parser import HTMLParser
 import requests
 from sqlalchemy.orm import Session
 
+from app.utils.backfill_checkpoint import BackfillProgress
+
 from app.db.models import MonthlyRevenue, RawFetchResult, SourceRegistry, StockMaster
 from app.http_client import new_session
 from app.market.taiwan_rules import expected_monthly_revenue_period
@@ -338,7 +340,10 @@ def ensure_stock_monthly_revenue_history(
     lookback_months: int = 120,
     sleep_seconds: float = 0.05,
     skip_existing: bool = True,
+    *, checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
+    if checkpoint is not None and (db.new or db.dirty or db.deleted):
+        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
     stock = _get_stock(db=db, stock_id=stock_id)
     market = _normalize_market(stock.market)
     source = _get_monthly_revenue_source(db=db, market=market)
@@ -350,148 +355,168 @@ def ensure_stock_monthly_revenue_history(
         lookback_months=lookback_months,
     )
 
+    state = BackfillProgress(
+        owner='revenue_month', identity=[stock_id, source.id],
+        items=[v.isoformat() for v in months], counters=('fetched_count', 'cached_count', 'skipped_existing_count', 'inserted_count', 'updated_count', 'error_count'),
+        checkpoint=checkpoint, resume_state=resume_state,
+    )
+    results = state.results
     session = new_session()
-    results: list[dict] = []
-    fetched_count = 0
-    cached_count = 0
-    skipped_existing_count = 0
-    inserted_count = 0
-    updated_count = 0
-    error_count = 0
 
-    for period in months:
-        existing = (
-            db.query(MonthlyRevenue.id)
-            .filter(MonthlyRevenue.source_id == source.id)
-            .filter(MonthlyRevenue.stock_id == stock_id)
-            .filter(MonthlyRevenue.period == period)
-            .first()
-        )
-
-        if skip_existing and existing is not None:
-            skipped_existing_count += 1
-            results.append(
-                {
-                    "period": period.isoformat(),
-                    "status": "skipped_existing",
-                    "raw_result_id": None,
-                    "message": "Skipped because monthly revenue row already exists.",
-                    "error_message": None,
-                }
+    try:
+        for item_index, item in enumerate(state.items):
+            if item_index < state.completed:
+                continue
+            period = date.fromisoformat(item)
+            existing = (
+                db.query(MonthlyRevenue.id)
+                .filter(MonthlyRevenue.source_id == source.id)
+                .filter(MonthlyRevenue.stock_id == stock_id)
+                .filter(MonthlyRevenue.period == period)
+                .first()
             )
-            continue
 
-        try:
-            raw_result = None
-            cells = None
-            for company_type in (0, 1):
-                url = _history_url(
-                    market=market,
-                    period=period,
-                    company_type=company_type,
-                )
-                candidate_raw_result = _get_cached_raw_result(
-                    db=db,
-                    source_id=source.id,
-                    url=url,
-                )
-                if candidate_raw_result is not None:
-                    cached_count += 1
-                else:
-                    raw_text, status_code, content_type = _fetch_month_html(
-                        session=session,
-                        url=url,
-                    )
-                    fetched_count += 1
-                    candidate_raw_result = _create_raw_result(
-                        db=db,
-                        source_id=source.id,
-                        url=url,
-                        raw_text=raw_text,
-                        status_code=status_code,
-                        content_type=content_type,
-                    )
-
-                candidate_cells = _stock_row_from_html(
-                    candidate_raw_result.raw_text or "",
-                    stock_id=stock_id,
-                )
-                if candidate_cells is not None:
-                    raw_result = candidate_raw_result
-                    cells = candidate_cells
-                    break
-
-            if cells is None:
-                db.commit()
+            if skip_existing and existing is not None:
+                state.totals['skipped_existing_count'] += 1
                 results.append(
                     {
                         "period": period.isoformat(),
-                        "status": "no_data",
-                        "raw_result_id": raw_result.id if raw_result is not None else None,
-                        "message": "Stock row was not found in MOPS monthly revenue page.",
+                        "status": "skipped_existing",
+                        "raw_result_id": None,
+                        "message": "Skipped because monthly revenue row already exists.",
                         "error_message": None,
                     }
                 )
+                if checkpoint is not None:
+                    # Existing-period branch owns only coverage reads.
+                    if db.new or db.dirty or db.deleted:
+                        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                    db.rollback()
+                state.advance()
                 continue
 
-            payload = _monthly_revenue_payload(
-                source_id=source.id,
-                raw_result_id=raw_result.id,
-                period=period,
-                stock_id=stock_id,
-                stock=stock,
-                market=market,
-                cells=cells,
-            )
-            mutation = _upsert_monthly_revenue(db=db, payload=payload)
-            db.commit()
+            totals_before = state.totals.copy()
+            try:
+                raw_result = None
+                cells = None
+                for company_type in (0, 1):
+                    url = _history_url(
+                        market=market,
+                        period=period,
+                        company_type=company_type,
+                    )
+                    candidate_raw_result = _get_cached_raw_result(
+                        db=db,
+                        source_id=source.id,
+                        url=url,
+                    )
+                    if candidate_raw_result is not None:
+                        state.totals['cached_count'] += 1
+                    else:
+                        raw_text, status_code, content_type = _fetch_month_html(
+                            session=session,
+                            url=url,
+                        )
+                        state.totals['fetched_count'] += 1
+                        candidate_raw_result = _create_raw_result(
+                            db=db,
+                            source_id=source.id,
+                            url=url,
+                            raw_text=raw_text,
+                            status_code=status_code,
+                            content_type=content_type,
+                        )
 
-            if mutation == "inserted":
-                inserted_count += 1
-            else:
-                updated_count += 1
+                    candidate_cells = _stock_row_from_html(
+                        candidate_raw_result.raw_text or "",
+                        stock_id=stock_id,
+                    )
+                    if candidate_cells is not None:
+                        raw_result = candidate_raw_result
+                        cells = candidate_cells
+                        break
 
-            results.append(
-                {
-                    "period": period.isoformat(),
-                    "status": mutation,
-                    "raw_result_id": raw_result.id,
-                    "message": "MOPS monthly revenue row saved.",
-                    "error_message": None,
-                }
-            )
-        except Exception as exc:
-            db.rollback()
-            error_count += 1
-            results.append(
-                {
-                    "period": period.isoformat(),
-                    "status": "error",
-                    "raw_result_id": None,
-                    "message": "MOPS monthly revenue history backfill failed.",
-                    "error_message": str(exc),
-                }
-            )
+                if cells is None:
+                    saved_raw_id = raw_result.id if raw_result is not None else None
+                    db.commit()
+                    results.append(
+                        {
+                            "period": period.isoformat(),
+                            "status": "no_data",
+                            "raw_result_id": saved_raw_id,
+                            "message": "Stock row was not found in MOPS monthly revenue page.",
+                            "error_message": None,
+                        }
+                    )
+                    state.advance()
+                    continue
 
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+                payload = _monthly_revenue_payload(
+                    source_id=source.id,
+                    raw_result_id=raw_result.id,
+                    period=period,
+                    stock_id=stock_id,
+                    stock=stock,
+                    market=market,
+                    cells=cells,
+                )
+                mutation = _upsert_monthly_revenue(db=db, payload=payload)
+                saved_raw_id = raw_result.id
+                db.commit()
+
+                if mutation == "inserted":
+                    state.totals['inserted_count'] += 1
+                else:
+                    state.totals['updated_count'] += 1
+
+                results.append(
+                    {
+                        "period": period.isoformat(),
+                        "status": mutation,
+                        "raw_result_id": saved_raw_id,
+                        "message": "MOPS monthly revenue row saved.",
+                        "error_message": None,
+                    }
+                )
+            except Exception as exc:
+                db.rollback()
+                state.totals.update(totals_before)
+                state.checkpoint()  # Retry this period after owner rollback.
+                state.totals['error_count'] += 1
+                results.append(
+                    {
+                        "period": period.isoformat(),
+                        "status": "error",
+                        "raw_result_id": None,
+                        "message": "MOPS monthly revenue history backfill failed.",
+                        "error_message": str(exc),
+                    }
+                )
+
+            state.advance()
+
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+    finally:
+        session.close()
 
     status = "success"
-    if error_count:
-        status = "partial_success" if inserted_count or updated_count or skipped_existing_count else "error"
+    if state.totals['error_count']:
+        status = "partial_success" if state.totals['inserted_count'] or state.totals['updated_count'] or state.totals['skipped_existing_count'] else "error"
 
     return {
         "status": status,
         "stock_id": stock_id,
         "market": market,
         "source_id": source.id,
-        "requested_period_count": len(months),
-        "fetched_count": fetched_count,
-        "cached_count": cached_count,
-        "skipped_existing_count": skipped_existing_count,
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-        "error_count": error_count,
+        "requested_period_count": len(state.items),
+        "fetched_count": state.totals['fetched_count'],
+        "cached_count": state.totals['cached_count'],
+        "skipped_existing_count": state.totals['skipped_existing_count'],
+        "inserted_count": state.totals['inserted_count'],
+        "updated_count": state.totals['updated_count'],
+        "error_count": state.totals['error_count'],
         "results": results,
     }
 

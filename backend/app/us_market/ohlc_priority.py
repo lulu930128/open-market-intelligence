@@ -5,7 +5,10 @@ from datetime import date, datetime, timezone
 from time import monotonic
 from typing import Callable, Iterable
 
+from app.utils.owner_checkpoint import OwnerWork, OwnerOutcomeUnknown
+
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.models import PortfolioHolding, USWatchlistGroup, USWatchlistItem
@@ -99,6 +102,8 @@ def reconcile_us_priority_ohlc(
     repair: bool = True,
     required_symbols: Iterable[str] | None = None,
     continuation_remaining_count: int | None = None,
+    continuation=None,
+    resume_state=None,
 ) -> dict:
     """Run a bounded priority read and optional explicit Shared-platform repair."""
 
@@ -163,6 +168,17 @@ def reconcile_us_priority_ohlc(
     rotated_symbols = rotated_symbols[:remaining]
     symbols = pinned_symbols + rotated_symbols
     run_symbols = symbols[:max_symbols]
+    identity = dict(contract=repr(PRIORITY_DAILY_RESEARCH_CONTRACT), date=expected_date.isoformat(),
+        release=expected_us_completed_daily_state(now=decision_time).expected_trade_date.isoformat(),
+        universe=list(universe_symbols),
+        budget=dict(symbols=max_symbols, calls=max_external_calls, runtime=max_runtime_seconds, attempts=max_provider_attempts),
+        options=[list(critical_symbols), list(normalized_required_symbols), normalized_cursor,
+                 continuation_remaining_count, repair])
+    work = OwnerWork("us_priority_symbols", identity, list(run_symbols),
+        continuation=continuation, resume_state=resume_state,
+        context={"rotatable": list(rotatable_symbols), "remaining": remaining, "cursor": normalized_cursor or None,
+                 "stopped_reason": "complete_scan"})
+    run_symbols = tuple(work.state["items"])
     operation_rollout = (
         build_us_daily_operation_rollout_state(
             symbols=run_symbols,
@@ -180,111 +196,104 @@ def reconcile_us_priority_ohlc(
             )
 
         resolved_platform_factory = _rollout_platform_factory
-    started = monotonic()
-    checked_count = 0
-    satisfied_count = 0
-    repaired_count = 0
-    provider_call_count = 0
-    unresolved: list[dict] = []
-    errors: list[dict] = []
-    stopped_reason = "complete_scan"
-    last_processed_symbol = normalized_cursor or None
-    rotated_checked = 0
-
-    for index, symbol in enumerate(run_symbols, start=1):
-        if monotonic() - started >= max_runtime_seconds:
+    tick = monotonic()
+    outcomes = [row["outcome"] for row in work.state["results"]]
+    unresolved = [row["unresolved"] for row in outcomes if row["unresolved"] is not None]
+    errors = [row["error"] for row in outcomes if row["error"] is not None]
+    unknown_usage = any(row["usage_unknown"] for row in outcomes)
+    stopped_reason = work.state["context"]["stopped_reason"]
+    last_processed_symbol = work.state["context"]["cursor"]
+    work.notify("save")
+    work.notify("checkpoint")
+    for index, symbol in enumerate(run_symbols[len(work.state["results"]):], start=len(work.state["results"]) + 1):
+        if unknown_usage:
+            break
+        if work.state["elapsed"] + monotonic() - tick >= max_runtime_seconds:
             stopped_reason = "runtime_budget_exhausted"
             break
         if progress_callback is not None:
-            progress_callback(
-                index - 1,
-                max(len(run_symbols), 1),
-                f"Checking priority US OHLC {symbol}.",
-            )
-
-        chart_db = resolved_session_factory()
+            progress_callback(index - 1, max(len(run_symbols), 1), f"Checking priority US OHLC {symbol}.")
+        remaining_external_calls = max_external_calls - work.state["totals"]["calls"]
+        reserved = min(max_provider_attempts, remaining_external_calls) if repair else 0
+        # Reserve before opening the chart Session; never write the Job ledger
+        # while an opaque Shared read/ensure scope still holds a transaction.
+        work.begin(reserved)
+        error = None
+        unresolved_item = None
+        history_satisfied = False
+        repaired = False
+        used = 0
+        acquiring = False
+        try:
+            chart_db = resolved_session_factory()
+        except Exception as exc:
+            raise OwnerOutcomeUnknown("US_PRIORITY_SESSION_OPEN_UNKNOWN") from exc
         try:
             platform = resolved_platform_factory(chart_db)
-            platform_result = platform.read(
-                symbol=symbol,
+            platform_result = platform.read(symbol=symbol,
                 bars=PRIORITY_DAILY_RESEARCH_CONTRACT.minimum_bar_count,
-                to_date=to_date,
-                now=requested_at,
-            )
-            history_satisfied = bool(
-                platform_result.temporal_postcondition_satisfied
-                and platform_result.coverage_postcondition_satisfied
-            )
-            remaining_external_calls = max_external_calls - provider_call_count
-            if not history_satisfied and repair and remaining_external_calls > 0:
-                platform_result = platform.ensure_history_coverage(
-                    symbol=symbol,
+                to_date=to_date, now=requested_at)
+            history_satisfied = bool(platform_result.temporal_postcondition_satisfied
+                and platform_result.coverage_postcondition_satisfied)
+            if not history_satisfied and repair and reserved > 0:
+                acquiring = True
+                platform_result = platform.ensure_history_coverage(symbol=symbol,
                     bars=PRIORITY_DAILY_RESEARCH_CONTRACT.minimum_bar_count,
-                    to_date=to_date,
-                    now=requested_at,
-                    max_provider_calls=min(
-                        max_provider_attempts,
-                        remaining_external_calls,
-                    ),
-                )
-                provider_call_count += int(
-                    platform_result.result.acquisition.external_calls
-                    if platform_result.result.acquisition is not None
-                    else 0
-                )
-                history_satisfied = bool(
-                    platform_result.temporal_postcondition_satisfied
-                    and platform_result.coverage_postcondition_satisfied
-                )
-                if history_satisfied:
-                    repaired_count += 1
+                    to_date=to_date, now=requested_at, max_provider_calls=reserved)
+                actual = (platform_result.result.acquisition.external_calls
+                    if platform_result.result.acquisition is not None else None)
+                if type(actual) is not int or not 0 <= actual <= reserved:
+                    raise RuntimeError("US_PRIORITY_PROVIDER_USAGE_UNKNOWN")
+                used = actual
+                history_satisfied = bool(platform_result.temporal_postcondition_satisfied
+                    and platform_result.coverage_postcondition_satisfied)
+                repaired = history_satisfied
             elif not history_satisfied and repair:
                 stopped_reason = "external_call_budget_exhausted"
         except Exception as exc:
-            chart_db.rollback()
-            errors.append(
-                {
-                    "symbol": symbol,
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
-            checked_count += 1
-            if symbol in rotatable_symbols:
-                last_processed_symbol = symbol
-                rotated_checked += 1
-            stopped_reason = "per_symbol_failure"
-            continue
+            try:
+                chart_db.rollback()
+            except Exception as rollback_exc:
+                raise OwnerOutcomeUnknown("US_PRIORITY_ROLLBACK_UNKNOWN") from rollback_exc
+            if isinstance(exc, SQLAlchemyError):
+                raise OwnerOutcomeUnknown("US_PRIORITY_PERSISTENCE_UNKNOWN") from exc
+            error = {"symbol": symbol, "error_type": type(exc).__name__, "message": str(exc)}
+            errors.append(error)
+            if acquiring:
+                used = reserved  # Unknown consumption never refunds admission.
+                unknown_usage = True
+            stopped_reason = "provider_usage_unknown" if acquiring else "per_symbol_failure"
         finally:
-            chart_db.close()
-        checked_count += 1
-        if history_satisfied:
-            satisfied_count += 1
-        else:
-            unresolved.append(
-                {
-                    "symbol": symbol,
-                    "coverage_status": platform_result.projection.get("coverage_status"),
-                    "latest_trade_date": platform_result.projection.get("latest_trade_date"),
-                    "expected_trade_date": platform_result.projection.get("expected_trade_date"),
-                    "reason": (
-                        "shared_core_postcondition_unsatisfied"
-                        if repair
-                        else "repair_not_requested"
-                    ),
-                }
-            )
+            try:
+                chart_db.close()
+            except Exception as exc:
+                raise OwnerOutcomeUnknown("US_PRIORITY_SESSION_CLOSE_UNKNOWN") from exc
+        if error is None and not history_satisfied:
+            unresolved_item = {"symbol": symbol,
+                "coverage_status": platform_result.projection.get("coverage_status"),
+                "latest_trade_date": platform_result.projection.get("latest_trade_date"),
+                "expected_trade_date": platform_result.projection.get("expected_trade_date"),
+                "reason": "shared_core_postcondition_unsatisfied" if repair else "repair_not_requested"}
+            unresolved.append(unresolved_item)
             stopped_reason = "shared_core_postcondition_unsatisfied"
-        if symbol in rotatable_symbols:
+        rotated = symbol in rotatable_symbols
+        if rotated:
             last_processed_symbol = symbol
-            rotated_checked += 1
-
+        work.state["context"].update(cursor=last_processed_symbol, stopped_reason=stopped_reason)
+        work.state["elapsed"] += monotonic() - tick
+        tick = monotonic()
+        work.finish(dict(checked=1, satisfied=int(history_satisfied), repaired=int(repaired),
+                         calls=used, rotated=int(rotated)),
+                    dict(error=error, unresolved=unresolved_item, usage_unknown=unknown_usage))
+        work.notify("save")
+        work.notify("checkpoint")
         if progress_callback is not None:
-            progress_callback(
-                index,
-                max(len(run_symbols), 1),
-                f"Checked {index}/{len(run_symbols)} priority US symbols.",
-            )
+            progress_callback(index, max(len(run_symbols), 1), f"Checked {index}/{len(run_symbols)} priority US symbols.")
+    checked_count = work.state["totals"]["checked"]
+    satisfied_count = work.state["totals"]["satisfied"]
+    repaired_count = work.state["totals"]["repaired"]
+    provider_call_count = work.state["totals"]["calls"]
+    rotated_checked = work.state["totals"]["rotated"]
 
     if (
         stopped_reason in {"complete_scan", "shared_core_postcondition_unsatisfied"}
@@ -323,8 +332,9 @@ def reconcile_us_priority_ohlc(
         "repair_available": True,
         "repair_requested": repair,
         "repaired_count": repaired_count,
-        "external_call_count": provider_call_count,
-        "provider_call_count": provider_call_count,
+        "external_call_count": None if unknown_usage else provider_call_count,
+        "external_call_budget_used": provider_call_count,
+        "provider_call_count": None if unknown_usage else provider_call_count,
         "unresolved_count": max(len(universe_symbols) - satisfied_count, 0),
         "unscanned_count": max(len(universe_symbols) - checked_count, 0),
         "continuation_remaining_count": max(remaining - rotated_checked, 0),
@@ -338,7 +348,7 @@ def reconcile_us_priority_ohlc(
         "stopped_reason": stopped_reason,
         "cursor_symbol": last_processed_symbol,
         "checked_at": datetime.now(timezone.utc),
-        "runtime_seconds": round(monotonic() - started, 3),
+        "runtime_seconds": round(work.state["elapsed"] + monotonic() - tick, 3),
         "message": (
             "Priority US OHLC cache-only continuity audit completed."
             if status == "completed"

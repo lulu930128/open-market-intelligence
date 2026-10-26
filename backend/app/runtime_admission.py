@@ -80,6 +80,12 @@ class DetachedAdmission:
         with self._lock:
             self._workers.remove(token)
 
+    def observation(self):
+        """Memory-only retention count, including starts without completion proof."""
+        with self._lock:
+            return {"retained_worker_count": len(self._workers),
+                    "admission_paused": self._lease is not None}
+
     def pause_if_idle(self):
         with self._lock:
             if self._lease is not None:
@@ -112,11 +118,10 @@ class OwnedWorkThread(Thread):
                 raise RuntimeError("threads can only be started once")
             self._admission_owner = detached_admission
             self._admission_token = self._admission_owner.enter()
-            try:
-                super().start()
-            except BaseException:
-                self._admission_owner.leave(self._admission_token)
-                raise
+            # start() can fail after native dispatch but before its caller sees
+            # success. Only run()'s finally proves completion; an exception or
+            # is_alive()==False cannot safely release this reservation.
+            super().start()
 
     def run(self):
         try:

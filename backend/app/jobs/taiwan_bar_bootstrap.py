@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.db.models import JobRun
 from app.jobs import service as job_service
+from app.jobs.owner_continuation import owner_continuation_arguments
+from app.utils.owner_checkpoint import OwnerWork, OwnerOutcomeUnknown
 from app.jobs.taiwan_intraday_demand import enqueue_consumer_demand, enqueue_intraday_materialization_demand
 from app.jobs.job_types import (
     TAIWAN_INDEX_DAILY_BOOTSTRAP_JOB_TYPE,
@@ -46,24 +48,57 @@ def run_taiwan_intraday_bar_bootstrap_job(
     max_symbols: int,
 ) -> None:
     def worker(db: Session, progress: job_service.ProgressCallback):
+        continuation_args = owner_continuation_arguments(db, "tw_bootstrap_children")
         progress(0, max_symbols, "Running bounded Taiwan Base-1m bootstrap.")
         plan = resolve_taiwan_tier_a_target_plan(db, operation_profile="production_intraday",
             max_symbols=max_symbols, configured_symbols=symbols or None)
+        requested_at = datetime.now(TAIWAN_TZ)
+        target_date = taiwan_presentation_session(requested_at)["trade_date"].isoformat()
+        items = list(plan.get("symbols") or [])
+        work = OwnerWork("tw_bootstrap_children",
+            dict(contract="tw.bootstrap.parent.v1", date=target_date, release=target_date,
+                universe=items, budget=dict(symbols=max_symbols, calls=0, runtime=180, attempts=0),
+                options=[list(symbols), max_symbols]), items, **continuation_args,
+            context={"requested_at": requested_at.isoformat(), "target_plan": plan})
+        requested_at = datetime.fromisoformat(work.state["context"]["requested_at"])
+        work.notify("save")
+        work.notify("checkpoint")
+        for symbol in work.state["items"][len(work.state["results"]):]:
+            if datetime.now(TAIWAN_TZ) >= requested_at + timedelta(seconds=180):
+                break
+            work.begin(0)
+            try:
+                child, created = enqueue_intraday_materialization_demand(db, stock_id=symbol,
+                    requested_at=requested_at, consumer="operator", max_external_calls=2)
+            except Exception as exc:
+                raise OwnerOutcomeUnknown("TW_BOOTSTRAP_CHILD_ADMISSION_UNKNOWN") from exc
+            work.finish(dict(admitted=1, calls=0),
+                {"symbol": symbol, "job_id": child.id if child else None,
+                 "status": child.status if child else "skipped", "created": created})
+            # Child admission/dispatch has returned; its own state machine owns
+            # completion. A crash in the admission gap leaves inflight blocked.
+            work.notify("save")
+            work.notify("checkpoint")
         results = []
-        for symbol in plan.get("symbols") or []:
-            child, created = enqueue_intraday_materialization_demand(db, stock_id=symbol,
-                requested_at=datetime.now(TAIWAN_TZ), consumer="operator", max_external_calls=2)
-            results.append({"symbol": symbol, "job_id": child.id if child else None,
-                "status": child.status if child else "skipped", "created": created})
+        for entry in work.state["results"]:
+            item = dict(entry["outcome"])
+            child = db.get(JobRun, item["job_id"], populate_existing=True) if item["job_id"] is not None else None
+            item["status"] = child.status if child else "skipped"
+            results.append(item)
         # The compatibility parent records fan-out, never claims child coverage.
-        payload = {"status": "pending", "results": results, "target_plan": plan,
-                   "postcondition_met": bool(results) and all(item["status"] == "success" for item in results)}
+        payload = {"status": "pending", "results": results, "target_plan": work.state["context"]["target_plan"],
+                   "owner_continuation_v1": work.state,
+                   "remaining_symbols": work.state["items"][len(results):],
+                   "admitted_count": len(results),
+                   "children_completed_count": sum(item["status"] == "success" for item in results),
+                   "postcondition_met": bool(results) and len(results) == len(work.state["items"])
+                       and all(item["status"] == "success" for item in results)}
         if payload["postcondition_met"]:
             payload["status"] = "success"
         progress(
             len(results),
             max_symbols,
-            "Taiwan Base-1m bootstrap finished.",
+            "Taiwan Base-1m child admission finished; coverage follows child outcomes.",
         )
         if not payload["postcondition_met"]:
             raise job_service.JobExecutionError(

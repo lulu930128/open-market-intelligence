@@ -489,6 +489,7 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 float(request.get("sleep_seconds", 1.0)),
                 int(request.get("max_consecutive_errors", 5)),
                 int(request.get("error_backoff_seconds", 1800)),
+                bool(request.get("grouped_daily", False)),
             ),
             request,
         )

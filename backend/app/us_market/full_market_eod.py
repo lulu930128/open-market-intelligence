@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice, USStockMaster
@@ -26,6 +27,7 @@ from app.market_data.eod_coverage import (
 from app.us_market.daily_market_state import expected_us_completed_daily_state
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.daily_price_eligibility import us_daily_sql_eligibility_filters
+from app.utils.owner_checkpoint import OwnerOutcomeUnknown
 
 
 class USFullMarketEodLifecycle:
@@ -131,15 +133,22 @@ class USFullMarketEodLifecycle:
         *,
         symbol: str,
         expected_trade_date: date,
+        max_external_calls: int = 2,
     ) -> dict[str, Any]:
         try:
             refreshed = USDailyOhlcvPlatform(db).refresh(
                 symbol=symbol,
                 bars=5,
                 to_date=expected_trade_date,
+                max_provider_calls=max_external_calls,
             )
-        except Exception:
-            db.rollback()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception as rollback_exc:
+                raise OwnerOutcomeUnknown("US_EOD_PROVIDER_ROLLBACK_UNKNOWN") from rollback_exc
+            if isinstance(exc, SQLAlchemyError):
+                raise OwnerOutcomeUnknown("US_EOD_PROVIDER_PERSISTENCE_UNKNOWN") from exc
             raise
         return {
             "status": (
@@ -147,6 +156,10 @@ class USFullMarketEodLifecycle:
             ),
             "postcondition_met": refreshed.postcondition_satisfied,
             "projection": refreshed.projection,
+            "external_call_count": (
+                refreshed.result.acquisition.external_calls
+                if refreshed.result.acquisition is not None else None
+            ),
         }
 
 

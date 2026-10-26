@@ -1966,6 +1966,7 @@ def evaluate_pending_radar_v2_outcomes(
     as_of_trade_date: date | None = None,
     now: datetime | None = None,
     work_slice: RadarOutcomeWorkSlice | None = None,
+    checkpoint=None,
 ) -> dict[str, Any]:
     from app.watchlists.radar_outcome_v2_service import (
         evaluate_radar_outcome_v2, measure_outcome_phase,
@@ -2043,6 +2044,7 @@ def evaluate_pending_radar_v2_outcomes(
                     horizons=missing_horizons,
                     commit=True,
                     timing_callback=timing,
+                    **({"checkpoint": checkpoint} if checkpoint is not None else {}),
                     now=attempt_at,
                     outcome_contract_version=str(
                         contract["outcome_contract_version"]
@@ -2177,6 +2179,7 @@ def evaluate_pending_radar_v2_outcomes(
                     horizons=due_horizons,
                     commit=True,
                     timing_callback=timing,
+                    **({"checkpoint": checkpoint} if checkpoint is not None else {}),
                     now=attempt_at,
                     outcome_contract_version=str(
                         contract["outcome_contract_version"]

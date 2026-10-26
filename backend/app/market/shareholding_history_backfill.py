@@ -11,6 +11,8 @@ from requests.adapters import HTTPAdapter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.utils.backfill_checkpoint import BackfillProgress
+
 from app.db.models import RawFetchResult, ShareholdingDistributionWeekly, SourceRegistry
 from app.http_client import new_session
 from app.observability.provider_http import (
@@ -277,132 +279,161 @@ def ensure_stock_shareholding_history(
     lookback_weeks: int = 52,
     sleep_seconds: float = 0.1,
     skip_existing: bool = True,
+    *, checkpoint=None, resume_state: dict | None = None,
 ) -> dict:
+    if checkpoint is not None and (db.new or db.dirty or db.deleted):
+        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
     source = _get_tdcc_source(db)
     session = _new_tdcc_session()
-    dates, form_base = _load_query_form(session)
-    selected_dates = []
+    try:
+        dates, form_base = _load_query_form(session)
+        selected_dates = []
 
-    for date_value in dates:
-        current_date = _parse_yyyymmdd(date_value)
+        for date_value in dates:
+            current_date = _parse_yyyymmdd(date_value)
 
-        if from_date is not None and current_date < from_date:
-            continue
+            if from_date is not None and current_date < from_date:
+                continue
 
-        if to_date is not None and current_date > to_date:
-            continue
+            if to_date is not None and current_date > to_date:
+                continue
 
-        selected_dates.append((date_value, current_date))
+            selected_dates.append((date_value, current_date))
 
-    selected_dates = selected_dates[:lookback_weeks]
-    results: list[dict] = []
-    fetched_count = 0
-    skipped_existing_count = 0
-    inserted_count = 0
-    error_count = 0
-
-    for date_value, current_date in selected_dates:
-        existing_count = _existing_level_count(
-            db=db,
-            source_id=source.id,
-            stock_id=stock_id,
-            data_date=current_date,
+        selected_dates = selected_dates[:lookback_weeks]
+        state = BackfillProgress(
+            owner='shareholding_week', identity=[stock_id, source.id],
+            items=[v.isoformat() for _, v in selected_dates], counters=('fetched_count', 'skipped_existing_count', 'inserted_count', 'error_count'),
+            checkpoint=checkpoint, resume_state=resume_state,
         )
+        results = state.results
 
-        if skip_existing and existing_count >= 15:
-            skipped_existing_count += 1
-            results.append(
-                {
-                    "date": current_date.isoformat(),
-                    "status": "skipped_existing",
-                    "inserted_count": 0,
-                    "existing_row_count": existing_count,
-                    "error_message": None,
-                }
-            )
-            continue
+    except BaseException:
+        session.close()
+        raise
 
-        try:
-            response = _fetch_stock_shareholding_html(
-                session=session,
-                form_base=form_base,
-                stock_id=stock_id,
-                date_value=date_value,
-            )
-            _refresh_form_base_from_html(form_base=form_base, html=response.text)
-            fetched_count += 1
-            raw_result = _create_raw_result(
+    try:
+        for item_index, item in enumerate(state.items):
+            if item_index < state.completed:
+                continue
+            current_date = date.fromisoformat(item)
+            date_value = current_date.strftime("%Y%m%d")
+            existing_count = _existing_level_count(
                 db=db,
                 source_id=source.id,
-                raw_text=response.text,
-                status_code=response.status_code,
-            )
-            parsed_rows = _parse_shareholding_rows(
-                html=response.text,
-                source_id=source.id,
-                raw_result_id=raw_result.id,
                 stock_id=stock_id,
                 data_date=current_date,
             )
-            date_inserted_count = 0
 
-            for row in parsed_rows:
-                exists = (
-                    db.query(ShareholdingDistributionWeekly.id)
-                    .filter(ShareholdingDistributionWeekly.source_id == row.source_id)
-                    .filter(ShareholdingDistributionWeekly.stock_id == row.stock_id)
-                    .filter(ShareholdingDistributionWeekly.data_date == row.data_date)
-                    .filter(ShareholdingDistributionWeekly.holding_level == row.holding_level)
-                    .first()
+            if skip_existing and existing_count >= 15:
+                state.totals['skipped_existing_count'] += 1
+                results.append(
+                    {
+                        "date": current_date.isoformat(),
+                        "status": "skipped_existing",
+                        "inserted_count": 0,
+                        "existing_row_count": existing_count,
+                        "error_message": None,
+                    }
+                )
+                if checkpoint is not None:
+                    # Existing-period branch owns only coverage reads.
+                    if db.new or db.dirty or db.deleted:
+                        raise RuntimeError("JOB_CHECKPOINT_UNEXPECTED_WRITES")
+                    db.rollback()
+                state.advance()
+                continue
+
+            totals_before = state.totals.copy()
+            try:
+                response = _fetch_stock_shareholding_html(
+                    session=session,
+                    form_base=form_base,
+                    stock_id=stock_id,
+                    date_value=date_value,
+                )
+                _refresh_form_base_from_html(form_base=form_base, html=response.text)
+                state.totals['fetched_count'] += 1
+                raw_result = _create_raw_result(
+                    db=db,
+                    source_id=source.id,
+                    raw_text=response.text,
+                    status_code=response.status_code,
+                )
+                parsed_rows = _parse_shareholding_rows(
+                    html=response.text,
+                    source_id=source.id,
+                    raw_result_id=raw_result.id,
+                    stock_id=stock_id,
+                    data_date=current_date,
+                )
+                date_inserted_count = 0
+
+                for row in parsed_rows:
+                    exists = (
+                        db.query(ShareholdingDistributionWeekly.id)
+                        .filter(ShareholdingDistributionWeekly.source_id == row.source_id)
+                        .filter(ShareholdingDistributionWeekly.stock_id == row.stock_id)
+                        .filter(ShareholdingDistributionWeekly.data_date == row.data_date)
+                        .filter(ShareholdingDistributionWeekly.holding_level == row.holding_level)
+                        .first()
+                    )
+
+                    if exists:
+                        continue
+
+                    db.add(row)
+                    date_inserted_count += 1
+
+                saved_raw_id = raw_result.id if raw_result is not None else None
+                db.commit()
+                state.totals['inserted_count'] += date_inserted_count
+                results.append(
+                    {
+                        "date": current_date.isoformat(),
+                        "status": "success",
+                        "inserted_count": date_inserted_count,
+                        "existing_row_count": existing_count,
+                        "raw_result_id": saved_raw_id,
+                        "error_message": None,
+                    }
+                )
+            except Exception as exc:
+                db.rollback()
+                state.totals.update(totals_before)
+                state.checkpoint()  # Retry this period after owner rollback.
+                state.totals['error_count'] += 1
+                results.append(
+                    {
+                        "date": current_date.isoformat(),
+                        "status": "error",
+                        "inserted_count": 0,
+                        "existing_row_count": existing_count,
+                        "error_message": str(exc),
+                    }
                 )
 
-                if exists:
-                    continue
+            state.advance()
 
-                db.add(row)
-                date_inserted_count += 1
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
-            db.commit()
-            inserted_count += date_inserted_count
-            results.append(
-                {
-                    "date": current_date.isoformat(),
-                    "status": "success",
-                    "inserted_count": date_inserted_count,
-                    "existing_row_count": existing_count,
-                    "raw_result_id": raw_result.id,
-                    "error_message": None,
-                }
-            )
-        except Exception as exc:
-            db.rollback()
-            error_count += 1
-            results.append(
-                {
-                    "date": current_date.isoformat(),
-                    "status": "error",
-                    "inserted_count": 0,
-                    "existing_row_count": existing_count,
-                    "error_message": str(exc),
-                }
-            )
-
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+    finally:
+        session.close()
 
     status = "success"
-    if error_count:
-        status = "partial_success" if inserted_count or skipped_existing_count else "error"
+    if state.totals['error_count']:
+        status = "partial_success" if state.totals['inserted_count'] or state.totals['skipped_existing_count'] else "error"
 
     return {
         "status": status,
         "stock_id": stock_id,
         "available_date_count": len(dates),
-        "requested_date_count": len(selected_dates),
-        "fetched_count": fetched_count,
-        "skipped_existing_count": skipped_existing_count,
-        "inserted_count": inserted_count,
-        "error_count": error_count,
+        "requested_date_count": len(state.items),
+        "fetched_count": state.totals['fetched_count'],
+        "skipped_existing_count": state.totals['skipped_existing_count'],
+        "inserted_count": state.totals['inserted_count'],
+        "error_count": state.totals['error_count'],
         "results": results,
     }
 
