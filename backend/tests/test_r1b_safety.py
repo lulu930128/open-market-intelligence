@@ -146,38 +146,92 @@ def test_diagnostic_failure_never_falls_through_to_run(tmp_path):
     assert "private_token" not in result.stdout
 
 
-def test_bundle_exact_restore_drift_and_existing_destination_fail_closed(tmp_path, monkeypatch):
-    path = ROOT / "docs/exec-plans/active/us-r0-r5-20261009/R1B-preserve.py"
-    spec = importlib.util.spec_from_file_location("r1b_preserve_test", path)
-    helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
-    source = tmp_path / "source"
-    source.mkdir()
+def test_canonical_backup_exact_restore_drift_and_existing_destination_fail_closed(tmp_path, monkeypatch):
+    # The retired local WIP ZIP helper was never a production owner. Exercise
+    # the schema-maintenance backup owner and the tracked rehearsal path guard.
+    import hashlib
+    import shutil
+    import sqlite3
+
+    spec = importlib.util.spec_from_file_location(
+        "r1b_canonical_backup", ROOT / "scripts/backup-omi-sqlite.py",
+    )
+    backup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backup)
+    spec = importlib.util.spec_from_file_location(
+        "r1b_rehearsal_guard", ROOT / "scripts/omi-r1-backup-supervisor.py",
+    )
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    monkeypatch.setattr(guard, "BASE", tmp_path)
+    directory = tmp_path / ("r1c-" + "a" * 32)
+    directory.mkdir()
+    source = guard.checked_path(directory / "source.sqlite3")
     payload = b"\xef\xbb\xbfWIP\r\n\x00exact bytes\n"
-    (source / "sample.py").write_bytes(payload)
-    info = (source / "sample.py").stat()
-    entries = [dict(path="sample.py", sha256=helper.guards.sha(payload), size_bytes=len(payload), mtime_ns=info.st_mtime_ns)]
-    identity = dict(tracked_changed=1, untracked_files=0)
-    monkeypatch.setattr(helper, "ROOT", source)
-    monkeypatch.setattr(helper.guards, "identity", lambda: identity)
-    monkeypatch.setattr(helper.guards, "git", lambda *args: b"fixture diff")
-    monkeypatch.setattr(helper, "manifest", lambda _: (entries, []))
-    sid = powershell('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value').stdout.strip()
-    destination = tmp_path / "bundle"
-    result = helper.snapshot(destination, sid)
-    assert result["restore_sha_all_passed"]
-    assert (destination / "restore-proof/sample.py").read_bytes() == payload
-    assert (source / "sample.py").read_bytes() == payload
-    archive_before = (destination / "intended-wip.zip").read_bytes()
-    with pytest.raises(OSError):
-        helper.snapshot(destination, sid)
-    assert (destination / "intended-wip.zip").read_bytes() == archive_before
-    (source / "sample.py").write_bytes(b"parallel edit")
-    with pytest.raises(RuntimeError, match="drift"):
-        helper.snapshot(tmp_path / "drift", sid)
-    assert not (tmp_path / "drift/result.json").exists()
-    with pytest.raises(RuntimeError):
-        helper.guards.guard_path(source, "../sample.py")
-    for unsafe in (".env", "data/example.db", "logs/a.log", ".secrets/token.json"):
-        with pytest.raises(RuntimeError):
-            helper.guards.safe_name(unsafe)
+    with sqlite3.connect(source) as db:
+        db.execute("CREATE TABLE alembic_version(version_num TEXT)")
+        db.execute("INSERT INTO alembic_version VALUES ('fixture_revision')")
+        db.execute("CREATE TABLE evidence(value BLOB)")
+        db.execute("INSERT INTO evidence VALUES (?)", (payload,))
+    before = source.read_bytes()
+    output = guard.checked_path(directory / "backup.sqlite3")
+
+    def run(destination):
+        return backup.backup_sqlite_database(
+            source=source, output=guard.checked_path(destination),
+            integrity_check="full", max_seconds=10,
+        )
+
+    receipt = run(output)
+    restored = directory / "independent-restore.sqlite3"
+    shutil.copyfile(output, restored)
+    with sqlite3.connect(restored.as_uri() + "?mode=ro", uri=True) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert db.execute("SELECT value FROM evidence").fetchone()[0] == payload
+    assert receipt["contract_version"] == "omi.sqlite-backup.v1"
+    assert receipt["snapshot"]["revision"] == "fixture_revision"
+    assert receipt["sha256"] == hashlib.sha256(restored.read_bytes()).hexdigest()
+    assert receipt["size_bytes"] == restored.stat().st_size
+    assert source.read_bytes() == before
+    published = output.read_bytes()
+    with pytest.raises(ValueError, match="refusing to overwrite existing backup"):
+        run(output)
+    assert output.read_bytes() == published
+    assert source.read_bytes() == before
+
+    snapshot = backup._database_snapshot
+    calls = []
+
+    def mutate_after_source_snapshot(connection):
+        observed = snapshot(connection)
+        calls.append(observed)
+        if len(calls) == 1:
+            # A real concurrent revision change between observation and copy.
+            with sqlite3.connect(source) as writer:
+                writer.execute("UPDATE alembic_version SET version_num = 'parallel_edit'")
+        return observed
+
+    monkeypatch.setattr(backup, "_database_snapshot", mutate_after_source_snapshot)
+    drift = directory / "drift.sqlite3"
+    with pytest.raises(ValueError, match="backup snapshot differs from source"):
+        run(drift)
+    assert len(calls) == 2
+    assert calls[0]["revision"] == "fixture_revision"
+    assert calls[1]["revision"] == "parallel_edit"
+    assert not drift.exists()
+    partial = directory / "drift.sqlite3.partial"
+    retained = partial.read_bytes()
+    with pytest.raises(ValueError, match="partial backup already exists"):
+        run(drift)
+    assert partial.read_bytes() == retained
+    with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as db:
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "parallel_edit"
+        assert db.execute("SELECT value FROM evidence").fetchone()[0] == payload
+    assert output.read_bytes() == published
+
+    # Rejected paths must fail lexically, before even inspecting the filesystem.
+    monkeypatch.setattr(Path, "lstat", lambda *_: pytest.fail("rejected path inspected"))
+    for unsafe in (directory / "../../escape.sqlite3", directory / "../escape.sqlite3",
+                   directory / ".env", directory / "data/example.db"):
+        with pytest.raises(guard.Closed):
+            guard.checked_path(unsafe)
