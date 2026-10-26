@@ -101,6 +101,39 @@ def test_application_import_uses_the_captured_bytes(tmp_path, monkeypatch):
         snapshot.find_spec("app.late")
 
 
+@pytest.mark.parametrize("fault", ["file_reparse", "parent_reparse", "stat_denied", "attributes_missing"])
+def test_application_snapshot_rejects_unverified_windows_paths(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+    import stat
+
+    path = Path(__file__).resolve().parents[1] / "owned_backend_entry.py"
+    spec = importlib.util.spec_from_file_location("owned_entry_guard_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    app = tmp_path / "backend/app"
+    app.mkdir(parents=True)
+    sample = app / "sample.py"
+    sample.write_text("VALUE = 'unread'\n", encoding="utf-8")
+    original = Path.lstat
+    target = app if fault == "parent_reparse" else sample
+
+    def guarded_stat(candidate, *args, **kwargs):
+        value = original(candidate, *args, **kwargs)
+        if candidate != target:
+            return value
+        if fault == "stat_denied":
+            raise PermissionError("fixture denied")
+        if fault == "attributes_missing":
+            return SimpleNamespace(st_mode=value.st_mode)
+        return SimpleNamespace(st_mode=value.st_mode,
+                               st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+    monkeypatch.setattr(Path, "lstat", guarded_stat)
+    with pytest.raises((RuntimeError, PermissionError, AttributeError)):
+        module.ApplicationSource()
+
+
 @pytest.fixture
 def restart_runtime(tmp_path, monkeypatch):
     """Isolated owner process state; never configures or stops the live Backend."""

@@ -1663,8 +1663,8 @@ class IntradayContractRemediationTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["latest_price"], 43_640.0)
-        self.assertEqual(result["selected_candidate"], "intraday_last_trade")
+        self.assertEqual(result["latest_price"], 43_634.19)
+        self.assertEqual(result["selected_candidate"], "index_summary")
         self.assertEqual(
             result["official_close_status"],
             "closing_auction_pending",

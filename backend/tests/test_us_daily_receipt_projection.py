@@ -69,9 +69,17 @@ def test_large_receipt_projection_preserves_lineage_fairness_and_instrument_sema
                 row.trade_volume, row.volume_unit, row.volume_status = None, None, "not_applicable"
             db.commit()
     result, _ = read_without_payload(engine, query)
-    assert result.rows_examined == result.rows_accepted == 16
-    assert result.rejections == ()
-    assert {series.provider for series in result.series} == {"alpaca", "yahoo_chart"}
+    assert result.rows_examined == 16
+    if instrument_type is InstrumentType.INDEX:
+        # The production candidate inventory does not admit Alpaca indices.
+        assert result.rows_accepted == 8
+        assert len(result.rejections) == 8
+        assert {item.reason_code for item in result.rejections} == {"US_DAILY_PROVIDER_UNREGISTERED"}
+        assert {series.provider for series in result.series} == {"yahoo_chart"}
+    else:
+        assert result.rows_accepted == 16
+        assert result.rejections == ()
+        assert {series.provider for series in result.series} == {"alpaca", "yahoo_chart"}
     for series in result.series:
         assert len(series.bars) == 8
         assert series.source == f"{series.provider}.daily.fixture"

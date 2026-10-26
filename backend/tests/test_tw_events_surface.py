@@ -206,7 +206,7 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
             question_intent="general",
             effective_mode="data_only",
         )
-        self.assertEqual(plan.reader_profile, "quote_only")
+        self.assertEqual(plan.reader_profile, "capability_graph")
         self.assertIn("company.profile", plan.selected_capabilities)
 
     def test_event_calendar_applies_explicit_instrument_filters(self) -> None:
@@ -368,23 +368,23 @@ class TaiwanEventSurfaceTests(unittest.TestCase):
             effective_mode="data_only",
         )
 
-        self.assertEqual(plan.reader_profile, "event_only")
+        self.assertEqual(plan.reader_profile, "capability_graph")
         self.assertFalse(plan.external_refresh_allowed)
         self.assertIn(
-            "get_taiwan_stock_event_summary",
+            "events",
             plan.required_readers,
         )
         self.assertNotIn(
-            "get_taiwan_stock_event_history",
+            "intraday",
             plan.required_readers,
         )
         self.assertNotIn(
-            "get_taiwan_disposition_status",
+            "disposition",
             plan.required_readers,
         )
-        self.assertIn(
-            "list_stock_ohlc_chart_data",
-            plan.excluded_readers,
+        self.assertNotIn(
+            "technical_reports",
+            plan.required_readers,
         )
 
     def test_event_only_execution_dispatches_to_bounded_reader(self) -> None:

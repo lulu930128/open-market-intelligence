@@ -998,12 +998,18 @@ def read_breadth_price_states(db: Session, *, venue: str, requested_at: datetime
                    RawFetchResult.fetched_at <= visible_at)
            .order_by(TaiwanCurrentBreadthSnapshot.event_at.desc(), TaiwanCurrentBreadthSnapshot.id.desc())
            .limit(-1).subquery())
-    row = (db.query(projection)
-           .select_from(visible)
-           .join(TaiwanCurrentBreadthSnapshot, TaiwanCurrentBreadthSnapshot.id == visible.c.id)
-           .filter(func.json_valid(column) == 1)
-           .order_by(visible.c.event_at.desc(), visible.c.id.desc())
-           .first())
+    # Older SQLite versions sort/evaluate every visible JSON payload before
+    # applying LIMIT. Resolve ordered metadata first, then decode only until
+    # the first valid receipt; malformed-latest fallback remains intact.
+    row = None
+    candidates = (db.query(visible.c.id)
+                  .order_by(visible.c.event_at.desc(), visible.c.id.desc()))
+    for (candidate_id,) in candidates:
+        row = (db.query(projection)
+               .filter(TaiwanCurrentBreadthSnapshot.id == candidate_id)
+               .filter(func.json_valid(column) == 1).first())
+        if row is not None:
+            break
     if row is None or not row[0]:
         return {}
     try:

@@ -34,7 +34,7 @@ if ([Omi.OwnedShutdown.ProductionSession]::ApplicationRelease('ROOT') -eq 'old-l
 
 
 @pytest.mark.parametrize('mutation', ['edit', 'add', 'delete', 'abort-protocol'])
-def test_before_prepare_refusal_is_not_terminal_and_uuid_is_retained(tmp_path, mutation):
+def test_graceful_before_prepare_refusal_is_not_terminal_and_uuid_is_retained(tmp_path, mutation):
     app = tmp_path / 'backend/app'
     app.mkdir(parents=True)
     (app / 'example.py').write_text('# old', encoding='utf-8')
@@ -48,11 +48,14 @@ Set-Field 'stops' ([Collections.Generic.Dictionary[string,Omi.OwnedShutdown.Prod
 $pin=[Omi.OwnedShutdown.ProductionSession]::ApplicationRelease('ROOT')
 MUTATION
 $id=[Guid]::NewGuid().ToString('D')
-$result=$session.StopForRestartAsync($id,$pin).GetAwaiter().GetResult()
+# Exercise the graceful reducer. The public lifecycle API additionally owns
+# the documented 180-second cutoff, so awaiting it here would test that timer.
+$graceful=$type.GetMethod('Stop',$flags,$null,@([string],[string]),$null)
+$result=$graceful.Invoke($session,@($id,$pin))
 if ($result.State -ne 'blocked' -or -not $result.StopNotSent -or $result.Rearmed -or
     $result.ExactExit -or $session.Terminal -or -not $session.Alive -or
     $result.PreflightStage -ne 'BEFORE_PREPARE') {throw 'LOCAL_REFUSAL_STRANDED_OWNER'}
-if (-not [object]::ReferenceEquals($result,$session.StopForRestartAsync($id,$pin).GetAwaiter().GetResult())) {throw 'UUID_REPLAY'}
+if (-not [object]::ReferenceEquals($result,$graceful.Invoke($session,@($id,$pin)))) {throw 'UUID_REPLAY'}
 '''.replace('ROOT', str(tmp_path)).replace('MUTATION', {
         'edit': f"[IO.File]::AppendAllText('{app / 'example.py'}','# changed')",
         'add': f"[IO.File]::WriteAllText('{app / 'added.py'}','# added')",
@@ -98,7 +101,7 @@ if ($frame.action -ne 'ABORT_PREPARE' -or $frame.target_release_id -or $frame.re
 @pytest.mark.parametrize('phase', ['readiness', 'after-stop', 'after-start'])
 def test_launcher_freezes_successor_release_at_each_boundary(tmp_path, phase):
     fault = {
-        'readiness': "$original | Add-Member -Force ScriptMethod VerifyReadiness {$script:ApplicationRelease='changed';return $true}",
+        'readiness': "function Assert-OmiSchemaCompatibility {$script:ApplicationRelease='changed'}",
         'after-stop': "$original | Add-Member -Force ScriptMethod StopForRestartAsync {param($id,$pin);$task=$this.StopAsync($id);$script:ApplicationRelease='changed';return $task}",
         'after-start': "$script:BaseFactory=(Get-Item Function:New-OmiProductionOwnedBackend).ScriptBlock; function New-OmiProductionOwnedBackend {$value=& $script:BaseFactory;$value.ReleaseId='wrong';return $value}",
     }[phase]

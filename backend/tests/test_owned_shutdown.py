@@ -45,7 +45,7 @@ def test_owned_shutdown(scenario, fault):
         'scope': 'DISPOSABLE_ONLY', 'launcher_exit': launcher.returncode,
         'child': proof, 'runner': runner_proof,
     }, indent=2), encoding='utf-8')
-    assert launcher.returncode == (77 if fault == 'owner-crash' else 0), (stdout.decode(errors='replace'), stderr.decode(errors='replace'))
+    assert launcher.returncode == (77 if fault == 'owner-crash' else 0), stdout.decode(errors='replace') + stderr.decode(errors='replace')
     assert proof and proof['retained_handle_signalled']
     assert runner_proof and runner_proof['retained_handle_signalled']
     assert proof['start'] == identity['child_created']
@@ -83,7 +83,10 @@ def test_production_scope_cannot_use_fixture_or_boolean_authority():
         'approval': True, 'graceful': True}).encode() + b'\n', timeout=10)
     assert process.returncode == 79
     assert b'READY' not in out
-    assert b'PRODUCTION_ADMISSION_AUTHORITY_UNAVAILABLE' in err
+    failure = json.loads(out)
+    assert failure['state'] == 'START_FAILED'
+    assert failure['reason'] == 'OWNED_START_EXIT_CONFIRMED'
+    assert failure['child_started'] == 'false'
 
 
 def test_actual_startup_failure_never_attests_ready_or_respawns():
@@ -121,8 +124,8 @@ def test_production_restart_keeps_restart_only_gates_before_shared_stop():
 
     launcher = (ROOT / 'scripts/omi-launcher.ps1').read_text(encoding='utf-8-sig')
     body = launcher.split('function Invoke-OwnedBackendRestart {', 1)[1].split('\nfunction ', 1)[0]
-    stop = body.index('$old.StopAsync($RequestId)')
-    for gate in ('Assert-OmiManualBackendStartOwner', 'RestartBlocker', 'VerifyReadiness',
+    stop = body.index('$old.StopWithinDeadlineAsync($RequestId, $targetRelease, $Deadline)')
+    for gate in ('Assert-OmiManualBackendStartOwner', 'Assert-OmiSchemaCompatibility', 'Assert-OmiBackendApplicationRelease',
                  'BeginAuthenticatedOwnedRestart'):
         assert body.index(gate) < stop
     for forbidden in ('HumanApprovalIssuer', 'StopDisposable', 'Stop-ProcessTree',
@@ -132,8 +135,11 @@ def test_production_restart_keeps_restart_only_gates_before_shared_stop():
 def test_transport_terminal_order_and_no_force():
     source = (ROOT / 'scripts/OmiOwnedShutdown.cs').read_text()
     assert source.index('latched = true;') < source.index('Persist(root, "terminal-intent.json"') < source.index('Wire.Send(child.StandardInput, request)')
+    transport = source.split('public static class Runner {', 1)[1]
     for forbidden in ('taskkill', '.Kill(', 'Stop-Process', 'cmd.exe /'):
-        assert forbidden not in source
+        assert forbidden not in transport
+    cutoff = source.split('StopEvidence ForceRetainedStop(', 1)[1].split('StopEvidence StopOnce(', 1)[0]
+    assert cutoff.index('RetainedIdentityMatches()') < cutoff.index('process.Kill()')
     assert 'child.WaitForExit' in source and 'var retained = child.Handle' in source
     assert 'retained = Process.Start(info); var handle = retained.Handle' in source
     production = source.split('ProductionSession(string repository', 1)[1].split('bool ConfirmStartupExit', 1)[0]

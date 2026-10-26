@@ -126,7 +126,7 @@ def test_priority_persists_deduplicates_expires_and_rejects_unknown(db):
     assert request_market_refresh_priority(db, market="TW", symbol="UNKNOWN", now=now)["status"] == "not_registered"
 
 
-def test_priority_can_arrive_between_symbols_and_preserves_background_dispatch(db):
+def test_priority_can_arrive_between_owner_batches_and_preserves_background_dispatch(db):
     symbols = tuple("ABCDEFG")
     db.add_all([USStockMaster(symbol=s, exchange="NYSE", asset_type="stock", is_active=True) for s in symbols])
     db.commit()
@@ -138,8 +138,15 @@ def test_priority_can_arrive_between_symbols_and_preserves_background_dispatch(d
     def priorities():
         return ("G", "F", "E", "D") if calls else ()
     with patch.object(US_FULL_MARKET_EOD_LIFECYCLE, "refresh_symbol", side_effect=refresh):
+        # Each resumable owner freezes its admitted work. A newly arrived
+        # priority is consumed by the next batch, preserving the fifth slot.
+        reconcile_eod_coverage(
+            db, market="US", expected_trade_date=EXPECTED, max_symbols=1,
+            max_runtime_seconds=30, sleep_seconds=0, us_port=US_FULL_MARKET_EOD_LIFECYCLE,
+            priority_symbols=priorities,
+        )
         result = reconcile_eod_coverage(
-            db, market="US", expected_trade_date=EXPECTED, max_symbols=5,
+            db, market="US", expected_trade_date=EXPECTED, max_symbols=4,
             max_runtime_seconds=30, sleep_seconds=0, us_port=US_FULL_MARKET_EOD_LIFECYCLE,
             priority_symbols=priorities,
         )

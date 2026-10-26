@@ -1261,7 +1261,7 @@ def build_query_plan(
             required_capabilities=(), optional_capabilities=(), excluded_capabilities=(),
             required_readers=compile_tw_stock_read_plan(selected_capability_set),
             excluded_readers=(), freshness_scope=tuple(sorted(selected_capability_set)),
-            external_refresh_allowed=True, requested_domains=requested_domains,
+            external_refresh_allowed=effective_mode != "data_only", requested_domains=requested_domains,
             excluded_domains=excluded_domains, matched_positive_terms=positive_terms,
             matched_negative_terms=negative_terms, capability_selection_mode=capability_selection_mode,
             selected_action_reason="Taiwan stock selection compiles to deduplicated canonical read nodes.",

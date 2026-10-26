@@ -56,11 +56,13 @@ def test_new_successful_acquisition_replaces_cached_failure_health(clock, monkey
     assert cached.detail_code == "TWSE_MIS_BREADTH_AVAILABLE"
 
 
-def test_history_partial_does_not_reclassify_complete_selected_session():
+def test_history_partial_does_not_reclassify_complete_selected_session(monkeypatch):
     from test_tw_bar_service import _db, _seed_session, TAIPEI
     from app.market.tw_intraday_capabilities import NSTOCK_INTRADAY_PROVIDER, NSTOCK_INTRADAY_SOURCE, NSTOCK_INTRADAY_PARSER_VERSION
     from app.market.tw_bar_service import TaiwanBarService
     from app.market.tw_intraday_platform import project_taiwan_intraday_bars
+    monkeypatch.setattr("app.market.tw_bar_service.get_taiwan_disposition_status",
+                        lambda *args, **kwargs: {"cache_status": "current", "is_active": False})
     db, engine = _db()
     try:
         for day, count in [(date(2026, 10, 7), 2), (date(2026, 10, 8), 265)]:
@@ -100,7 +102,8 @@ def test_completed_tpex_reference_usability_does_not_imply_official(authority, o
         "completed_daily_provider": "tpex_derived" if not official else "tpex"}
     truth = resolve_taiwan_index_truth(intraday=None, index_snapshot=snapshot,
         calendar_status=_calendar(), index_id="TPEX", acquisition_policy="cache_only")
-    assert truth.decision_usable is True
+    assert truth.research_usable is True
+    assert truth.decision_usable is official
     assert truth.selected_finalization == "final"
     assert truth.official_close_confirmed is confirmed
     assert truth.provisional_estimate is (not official)

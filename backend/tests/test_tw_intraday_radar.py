@@ -82,6 +82,9 @@ def test_6442_golden_full_universe_discovers_before_0910_without_known_symbol_re
         high, low = max(high, bar["high_price"]), min(low, bar["low_price"])
         rows = [observation(symbol, at, price=None, volume=0, market="TWSE" if i % 2 == 0 else "TPEX")
                 for i, symbol in enumerate(symbols)]
+        for row in rows:
+            # Synthetic verified no-trade observations, not missing prices.
+            row["actual_trade_reason_code"] = "ACTUAL_TRADE_EVIDENCE_MISSING"
         rows[0] = observation(fixture["stock_id"], at, bar["close_price"], fixture["previous_close"], cumulative / 1000)
         rows[0].update(high_price=high, low_price=low, open_price=fixture["bars"][0]["open_price"])
         persist_taiwan_intraday_stock_states(db, rows=rows, now=at)

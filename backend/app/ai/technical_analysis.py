@@ -1142,7 +1142,10 @@ def _technical_price_levels(
         "latest_price": _round_price(latest_price),
         "basis_timeframe": (
             "intraday_with_daily_structure"
-            if resolved_price is not None
+            if resolved_price is not None and resolved.get("source_kind") not in {
+                "session_close", "official_close", "latest_completed_session_close",
+                "completed_daily_close",
+            }
             else "daily"
         ),
         "price_basis_date": price_basis_date,

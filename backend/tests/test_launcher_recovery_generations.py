@@ -14,8 +14,8 @@ def test_restart_refuses_before_stop_and_keeps_old_generation(tmp_path, failure)
 $before=$script:OwnedBackendSession
 function Assert-OmiSchemaCompatibility { param($ExpectedRelease,$DatabasePath,$SchemaLockPath,[switch]$Upgrade)
     if ('FAILURE' -ne 'source') {throw 'RESTART_COMPATIBILITY_NOT_ATTESTED'}
+    $script:ApplicationRelease='dirty-candidate'
 }
-if ('FAILURE' -eq 'source') {$script:ApplicationRelease='dirty-candidate'}
 try {Invoke-OwnedBackendRestart -RequestId ([Guid]::NewGuid().ToString('D')) -Deadline ([object]::new());throw 'UNSAFE_STOP'}
 catch {if ($_.Exception.Message -notin @('RESTART_SOURCE_CHANGED','RESTART_COMPATIBILITY_NOT_ATTESTED')) {throw}}
 if ($script:Calls.Contains('backend-stop') -or $script:SpawnCount -or

@@ -157,7 +157,7 @@ def test_explicit_optional_quote_supplement_remains_authoritative():
                            selection={"required": ["quote.auction"], "optional": ["news.events"]})
     plan = query_plan.build_query_plan(payload=payload, scope_type="stock", target_market="TW",
                                        question_intent="quote", effective_mode="data_only")
-    assert plan.reader_profile == "standard"
+    assert plan.reader_profile == "capability_graph"
     assert "quote.auction" in plan.selected_capabilities
     assert "news.events" in plan.optional_selected_capabilities
 
@@ -167,6 +167,12 @@ def persist_volume(db, day, scope="full_market_registered_stock_universe", versi
     for item in payload["indices"]:
         item["breadth"].update(scope=scope, version=version, official_flag=False, source="twse_mis_live_breadth",
             trade_value_is_estimate=True, trade_value_semantics="estimated_latest_price_x_cumulative_volume_lots")
+        total = item["breadth"]["total_count"]
+        item["breadth"].update(
+            acquisition_diagnostics={"acquisition_complete": True, "failed_batch_count": 0,
+                "skipped_batch_count": 0, "fallback_used": False, "received_count": total},
+            coverage_reason_counts={"advance": total, "decline": 0, "unchanged": 0, "valid_no_trade": 0},
+        )
     persist_taiwan_market_minute_state(db, payload=payload)
     return db.query(TaiwanMarketMinuteState).filter_by(trade_date=day).all()
 

@@ -70,6 +70,7 @@ def test_us_descriptors_are_market_owned_and_capability_specific() -> None:
     assert "intraday.bars" in US_PROVIDER_DESCRIPTORS[0].capabilities
     assert "daily.ohlcv" not in US_PROVIDER_DESCRIPTORS[0].capabilities
     assert us_provider_order("daily.ohlcv") == (
+        "massive",
         "yahoo_chart",
         "alpaca",
     )

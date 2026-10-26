@@ -28,6 +28,14 @@ def command(directory, scenario, *, service='r1e-fixture', opt_in=True):
 
 
 def execute(args):
+    # Render ErrorRecord messages directly: the console formatter truncates
+    # long runner paths/messages differently on GitHub's Windows host.
+    if '-File' in args:
+        offset = args.index('-File')
+        invocation = ' '.join(value if value.startswith('-') else
+                              "'" + value.replace("'", "''") + "'" for value in args[offset + 1:])
+        script = '& ' + invocation + ' 2>&1 | ForEach-Object { $_.ToString() }; exit $LASTEXITCODE'
+        args = args[:offset] + ['-EncodedCommand', base64.b64encode(script.encode('utf-16-le')).decode()]
     # communicate(timeout) on Popen never terminates a child. No run(timeout),
     # context-manager cleanup, terminate(), taskkill or kill() fallback.
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

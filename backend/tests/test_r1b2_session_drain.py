@@ -251,10 +251,13 @@ def test_stop_caller_cancel_and_double_stop_share_deadline(database):
     asyncio.run(scenario())
 
 
-def test_late_close_cannot_pass_original_deadline(database):
+def test_late_close_cannot_pass_original_deadline(database, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(owner.time, "monotonic", lambda: clock[0])
     with owner.owned_session("api_request"):
         deadline = time.monotonic()
         owner.begin_session_scope_drain()
+        clock[0] = deadline + 1
     assert owner.session_scope_drain_status(deadline=deadline).state == "timeout"
 
 

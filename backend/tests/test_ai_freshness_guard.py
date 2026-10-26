@@ -2301,6 +2301,10 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         "stock_id": "2330",
                         "close_price": 2310.0,
                     },
+                    "compact": {"quote": {"decision_price": {
+                        "value": 2310.0, "decision_usable": True,
+                        "trade_date": "2026-06-12", "execution_usable": False,
+                    }}},
                     "chart": {
                         "points": [
                             {"time": "2026-05-18", "low": 2260.0, "high": 2450.0, "close": 2320.0},
@@ -2373,6 +2377,10 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         "stock_id": "6449",
                         "close_price": 445.0,
                     },
+                    "compact": {"quote": {"decision_price": {
+                        "value": 445.0, "decision_usable": True,
+                        "trade_date": "2026-06-16", "execution_usable": False,
+                    }}},
                     "technical_reports": {
                         "daily": {
                             "timeframe": "daily",

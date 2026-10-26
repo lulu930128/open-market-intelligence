@@ -26,16 +26,20 @@ def test_429_preserves_success_and_separates_unattempted_batches(monkeypatch):
     diagnostics = {}
     try:
         messages, failed, attempts = mis._fetch_messages(["2330", "3711", "2454"], "TWSE", 10, diagnostics=diagnostics)
-        assert messages == [{"c": "2330"}]
+        assert len(messages) == 1 and messages[0]["c"] == "2330"
+        assert datetime.fromisoformat(messages[0]["_omi_received_at"]).tzinfo is not None
         assert failed == 1 and attempts == 2
         assert diagnostics["skipped_batch_count"] == 1
         assert diagnostics["attempted_batch_count"] == 2
-        assert diagnostics["batch_failures"] == [{"batch_ordinal": 2, "attempted": True, "reason": "rate_limited", "http_status": 429}]
+        assert diagnostics["batch_failures"] == [
+            {"batch_ordinal": 2, "attempted": True, "reason": "rate_limited", "http_status": 429},
+            {"batch_ordinal": 3, "attempted": False, "reason": "guard_open"},
+        ]
     finally:
         mis.reset_twse_mis_current_breadth_provider()
 
 
-@pytest.mark.parametrize("error,reason", [(Timeout(), "timeout"), (ValueError("malformed"), "parse_error")])
+@pytest.mark.parametrize("error,reason", [(Timeout("private_token"), "timeout"), (ValueError("private_token"), "parse_error")])
 def test_failure_reason_is_safe_and_specific(monkeypatch, error, reason):
     mis.reset_twse_mis_current_breadth_provider()
     def fail(*args, **kwargs):
@@ -45,7 +49,9 @@ def test_failure_reason_is_safe_and_specific(monkeypatch, error, reason):
     try:
         assert mis._fetch_messages(["2330"], "TWSE", 10, diagnostics=diagnostics) == ([], 1, 1)
         assert diagnostics["batch_failures"][0]["reason"] == reason
-        assert "2330" not in str(diagnostics)
+        assert "private_token" not in str(diagnostics)
+        assert "2330" not in str(diagnostics["batch_failures"])
+        assert diagnostics["scan_start_code"] == "2330"
     finally:
         mis.reset_twse_mis_current_breadth_provider()
 

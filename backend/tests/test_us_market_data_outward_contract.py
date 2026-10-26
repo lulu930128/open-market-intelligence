@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.ai import agentic_execution, data_quality_contract
-from app.ai.capability_contract import normalize_selection, project_selected_data
+from app.ai.capability_contract import CAPABILITIES, normalize_selection, project_selected_data
 from app.ai.capability_projection_registry import CAPABILITY_PROJECTION_REGISTRY
 from app.ai.market_context.us_context import _latest_tool_result
 from app.market_data.contracts import (
@@ -79,7 +79,7 @@ def _batch():
     )
 
 
-def test_us_breadth_is_truthfully_unsupported_before_projection_exists() -> None:
+def test_us_breadth_has_registered_market_projection() -> None:
     selection = normalize_selection(
         selection={"include": ["market.breadth"]},
         output="evidence_only",
@@ -89,12 +89,18 @@ def test_us_breadth_is_truthfully_unsupported_before_projection_exists() -> None
         question_intent="general",
         target_market="US",
     )
-    assert "market.breadth" not in selection["required"]
-    assert selection["unsupported_capabilities"][0]["capability"] == "market.breadth"
-    assert selection["unsupported_capabilities"][0]["reason_code"] == "unsupported_market"
+    assert "market.breadth" in selection["required"]
+    assert selection["unsupported_capabilities"] == []
+    assert dict(CAPABILITIES["market.breadth"].market_schema_versions)["US"] == "us.market.breadth.v1"
+    projected, unavailable = project_selected_data(
+        response={"target": {"type": "market", "market": "US"}, "result": {"data": {}}},
+        selection=selection,
+    )
+    assert "market.breadth" not in projected
+    assert "market.breadth" in unavailable
 
 
-def test_us_market_aggregates_stay_unsupported_while_coverage_gate_is_closed() -> None:
+def test_us_market_aggregates_preserve_partial_coverage_in_projection() -> None:
     selection = normalize_selection(
         selection={
             "include": ["market.breadth", "market.sectors", "market.hot_groups"]
@@ -111,11 +117,18 @@ def test_us_market_aggregates_stay_unsupported_while_coverage_gate_is_closed() -
         item["capability"]: item["reason_code"]
         for item in selection["unsupported_capabilities"]
     }
-    assert unsupported == {
-        "market.breadth": "unsupported_market",
-        "market.sectors": "unsupported_market",
-        "market.hot_groups": "unsupported_market",
-    }
+    assert unsupported == {}
+    partial = {"status": "partial", "sample_only": True, "decision_usable": False}
+    context = {"data": {"breadth": partial, "market": {"sectors": partial},
+                        "screening": {"hot_groups": partial}}}
+    projected, unavailable = project_selected_data(
+        response={"target": {"type": "market", "market": "US"}, "result": context},
+        selection=selection,
+    )
+    assert unavailable == ["data.freshness"]
+    for capability in ("market.breadth", "market.sectors", "market.hot_groups"):
+        assert capability in selection["required"]
+        assert projected[capability] == partial
 
 
 def test_resolved_us_quote_uses_neutral_schema_and_lineage() -> None:

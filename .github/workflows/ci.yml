@@ -92,10 +92,14 @@ jobs:
         run: .\.venv\Scripts\python.exe -m compileall backend\app
 
       - name: Run backend unit tests
+        shell: powershell
         env:
           PYTHONPATH: backend
           PYTHONDONTWRITEBYTECODE: "1"
-        run: .\.venv\Scripts\python.exe scripts\ci-backend-shards.py --shard ${{ matrix.shard }} --shards 8
+        run: |
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          Get-Command Get-FileHash -ErrorAction Stop | Out-Null
+          .\.venv\Scripts\python.exe scripts\ci-backend-shards.py --shard ${{ matrix.shard }} --shards 8
 
       - name: Upload backend collection and test receipts
         if: always()

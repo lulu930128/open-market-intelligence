@@ -29,7 +29,7 @@ $identity = [Collections.Generic.Dictionary[string,string]]::new()
 $owner = [Diagnostics.Process]::GetCurrentProcess()
 foreach ($entry in @{ instance=[Guid]::NewGuid().ToString('D'); nonce=('a'*64); launcher_pid=$owner.Id.ToString(); launcher_created=(Created $owner);
     host='127.0.0.1'; port='65431'; release_id='offline' }.GetEnumerator()) { $identity[$entry.Key] = $entry.Value }
-""".replace('PYTHON', sys.executable.replace("'", "''"))
+""".replace('PYTHON', getattr(sys, '_base_executable', sys.executable).replace("'", "''"))
 
 
 @pytest.mark.parametrize('fault', ['', 'child-survives', 'runner-code', 'child-code', 'wrong-uuid', 'no-proof', 'no-child'])

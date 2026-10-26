@@ -11,12 +11,14 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# Conservative seconds from CI run 40290503629. These are scheduling hints,
+# Conservative seconds from CI run 40295990844 (owner ledgers hit the cutoff).
+# Schema setup is now transactional, but retain headroom until CI remeasures it.
+# These are scheduling hints,
 # never a test allowlist; discovery below owns the complete test inventory.
 SLOW_FILE_SECONDS = {
-    "backend/tests/test_job_cooperative_quiescence.py": 540,
-    "backend/tests/test_job_dedupe.py": 480,
-    "backend/tests/test_job_owner_ledgers.py": 540,
+    "backend/tests/test_job_cooperative_quiescence.py": 1355,
+    "backend/tests/test_us_gb_durable_routes.py": 900,
+    "backend/tests/test_job_owner_ledgers.py": 1680,
 }
 
 

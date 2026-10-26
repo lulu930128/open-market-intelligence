@@ -269,8 +269,15 @@ namespace Omi.RuntimeControl {
             string temp = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".tmp");
             receipt.updated_at = DateTime.UtcNow.ToString("o");
             var bytes = Encoding.UTF8.GetBytes(json.Serialize(receipt));
+            // Elevated Windows runner tokens otherwise give new files the
+            // Administrators owner, which our exact-SID readback rejects.
+            // Bind the private ACL at creation, before any receipt bytes exist.
+            var security = new FileSecurity();
+            security.SetOwner(sid);
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
             try {
-                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)) {
+                using (var stream = new FileStream(temp, FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.WriteThrough, security)) {
                     stream.Write(bytes, 0, bytes.Length);
                     stream.Flush(true);
                 }

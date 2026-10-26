@@ -69,14 +69,15 @@ def test_old_breadth_cannot_create_a_new_complete_minute():
         payload = market_summary_payload(date(2026, 9, 9), hour=9, minute=18,
             twse_trade_value=144312276164, tpex_trade_value=44570705063)
         persist_taiwan_market_minute_state(db, payload=payload)
+        original = read_taiwan_market_volume_state(db)
         payload["as_of"] = "2026-09-09T09:19:55+08:00"
         for item in payload["indices"]:
             item["current_data_core"]["index"]["as_of"] = payload["as_of"]
         persist_taiwan_market_minute_state(db, payload=payload)
         rows = db.query(TaiwanMarketMinuteState).filter(TaiwanMarketMinuteState.minute_at >= datetime(2026, 9, 9, 9, 19)).all()
-        assert {row.trade_value_quality_status for row in rows} == {"component_time_mismatch"}
+        assert rows == []  # New index timestamps cannot advance old value evidence.
         result = read_taiwan_market_volume_state(db)
-        assert result["current_cumulative_trade_value"] is None
+        assert result["current_cumulative_trade_value"] == original["current_cumulative_trade_value"]
         assert result["one_minute_trade_value_change"] is None
     engine.dispose()
 

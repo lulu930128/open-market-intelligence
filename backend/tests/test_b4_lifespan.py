@@ -86,7 +86,7 @@ SCENARIOS = ['normal','double-signal','wrong-pid','wrong-start','wrong-instance'
 def test_lifespan_handshake(scenario):
     directory = OUT / (scenario+'-'+uuid.uuid4().hex)
     execution = execute(directory, scenario)
-    assert execution['child_exit'], execution
+    assert execution['child_exit'], execution['stderr'] or json.dumps(execution)
     assert execution['child_exit']['retained_handle_signalled']
     proof = execution['child_exit']
     if scenario in {'runner-crash','parent-disappearance'}:

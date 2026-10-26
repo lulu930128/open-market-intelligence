@@ -8,6 +8,7 @@ import hashlib
 import importlib.abc
 import importlib.util
 from pathlib import Path
+import stat
 import sys
 import types
 
@@ -22,7 +23,12 @@ class ApplicationSource(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         digest = hashlib.sha256()
         paths = sorted((ROOT / "backend" / "app").rglob("*.py"), key=lambda path: path.as_posix())
         for path in paths:
-            if path.is_symlink() or any(p.is_junction() for p in path.parents):
+            # lstat exposes reparse attributes on both Python 3.11 and 3.13.
+            # Do not treat an unavailable attribute or failed stat as safe.
+            if path.is_symlink() or (sys.platform == "win32" and any(
+                p.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                for p in (path, *path.parents)
+            )):
                 raise RuntimeError("SOURCE_REPARSE_REFUSED")
             name = path.relative_to(ROOT).as_posix()
             data = path.read_bytes()

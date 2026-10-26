@@ -543,7 +543,7 @@ def test_production_registration_passes_owner_pause_to_audit_before_database_ope
 def test_due_dispatch_yields_between_durable_jobs_without_duplicate_admission(monkeypatch):
     # Scheduler work may resume later; a pause is not a cancellation of a
     # previously committed queue/dispatch command.
-    pending = [SimpleNamespace(id=n, status="queued") for n in (1, 2, 3)]
+    pending = [SimpleNamespace(id=n, status="queued", result_json=None) for n in (1, 2, 3)]
     pause = Event()
     submitted = []
 

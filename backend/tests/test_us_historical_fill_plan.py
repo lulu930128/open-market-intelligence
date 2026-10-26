@@ -14,7 +14,10 @@ def build_case(complete=False, day="2026-09-04"):
     payload = {"requested_trade_date": day, "session_scope": "regular", "interval": "1m",
                "point_count": 390 if complete else 333, "is_partial": not complete,
                "session_coverage": {"coverage_status": "complete" if complete else "partial",
-                                    "missing_slot_count": 0 if complete else 57}}
+                                    "trade_date": day, "requested_scope": "regular",
+                                    "missing_slot_count": 0 if complete else 57,
+                                    "gap_count": 0, "duplicate_count": 0,
+                                    "non_monotonic_count": 0, "off_grid_count": 0}}
     canonical = {"ok": True, "request_status": "completed",
                  "target": {"type": "us_stock", "id": "TSM", "market": "US"},
                  "evidence": {}, "execution": {}}

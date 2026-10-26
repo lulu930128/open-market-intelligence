@@ -333,10 +333,13 @@ test.describe("G4 source browser", () => {
     let mode: "held" | "mismatch" | "success" = "held";
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
+    let releaseMismatch!: () => void;
+    const mismatchHeld = new Promise<void>((resolve) => { releaseMismatch = resolve; });
     await mockG4Detail(page, async ({ path }) => {
       if (!path.endsWith("/research/AAPL")) return null;
       const requestedMode = mode;
       if (requestedMode === "held") await held;
+      if (requestedMode === "mismatch") await mismatchHeld;
       return { body: usMarketResearchResponse(requestedMode === "mismatch" ? "SSO" : "AAPL") };
     });
     await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
@@ -349,6 +352,8 @@ test.describe("G4 source browser", () => {
     await expect(panel.getByRole("img")).toBeVisible();
     mode = "mismatch";
     await state.getByRole("button", { name: "重試", exact: true }).press("Enter");
+    await expect(state).toHaveAttribute("role", "status");
+    releaseMismatch();
     await expect(state).toHaveAttribute("role", "alert");
     mode = "success";
     await state.getByRole("button", { name: "重試", exact: true }).press("Enter");

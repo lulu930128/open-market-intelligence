@@ -102,6 +102,7 @@ def test_alphavantage_daily_cannot_reenter_production_inventory() -> None:
         "alpaca",
     ]
     assert [item.provider_key for item in US_DAILY_CANDIDATE_DESCRIPTORS] == [
+        "massive",
         "yahoo_chart",
         "alpaca",
     ]

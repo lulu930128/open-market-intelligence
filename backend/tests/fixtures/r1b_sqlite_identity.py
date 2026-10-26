@@ -149,6 +149,8 @@ def run(case='success'):
     # Fixed task-private parent; no production target/port/PID input surface.
     parent = Path(__file__).absolute().parents[3] / '.tmp/us-g0-b1-20261011'
     for component in [*reversed(parent.parents), parent]:
+        if not component.exists():
+            component.mkdir()
         if component.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise EvidenceUnavailable('Private parent is reparse')
     root = Path(tempfile.mkdtemp(prefix='sqlite-fixture-', dir=parent))

@@ -19,9 +19,9 @@ def test_query_plan_records_map_dependencies_without_dropping_mixed_selection(ex
     )
     plan = build_query_plan(payload=payload, scope_type="stock", question_intent="general", effective_mode="data_only", target_market="TW")
     if extra:
-        assert "build_tw_stock_technical_evidence" in plan.required_readers
+        assert "technical_evidence" in plan.required_readers
     else:
-        assert plan.required_readers == ("get_stock", "build_tw_stock_price_map")
+        assert plan.required_readers == ("identity", "selected_freshness", "price_map")
     assert plan.external_refresh_allowed is False
 
 

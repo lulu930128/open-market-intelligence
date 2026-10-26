@@ -747,7 +747,7 @@ if (($script:called -join ' ') -notmatch '/T /F') { throw 'expected forced legac
 
 def test_powershell_identity_exit_and_respawn_checkpoint_matrix(tmp_path):
     root = Path(__file__).resolve().parents[2]
-    contract = str(root / "docs/exec-plans/active/us-r0-r5-20261009/R1D-Handshake-Contract.ps1").replace("'", "''")
+    contract = str(root / "backend/tests/fixtures/r1d_handshake_contract.ps1").replace("'", "''")
     script = tmp_path / "mock-handshake.ps1"
     script.write_text(". '" + contract + "'\n" + r"""
 $ErrorActionPreference='Stop'

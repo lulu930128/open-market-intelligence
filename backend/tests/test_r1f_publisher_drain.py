@@ -433,6 +433,8 @@ def test_late_exit_observation_cannot_upgrade_expired_deadline(monkeypatch):
     task = publisher._READ_MODEL_PUBLISH_TASKS["TSM"]
     deadline = time.monotonic()
     task.thread.join(2)
+    # Windows Python 3.11 monotonic resolution can report the same tick.
+    monkeypatch.setattr(publisher.time, "monotonic", lambda: deadline + 1)
     result = asyncio.run(publisher.drain_intraday_publishers(deadline=deadline))
     assert result.state == "timeout" and not result.drained
     assert result.last_exit_observed_at > deadline

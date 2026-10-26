@@ -34,7 +34,7 @@ def test_oct12_twse_current_tpex_stale_receipt_replays_without_inventing_daily(d
     executor = TaiwanOfficialDailyAcquisitionExecutor(fetchers={
         TPEX_DAILY_RESOURCE_ID: fetch, TWSE_RWD_DAILY_RESOURCE_ID: fetch,
     }, clock=lambda: now)
-    stale = refresh_taiwan_official_daily_venue(db, venue="TPEX", trade_date=now.date(), requested_at=now, acquisition=executor)
+    stale = refresh_taiwan_official_daily_venue(db, venue="TPEX", trade_date=now.date(), requested_at=now, acquisition=executor, max_external_calls=1)
     assert stale["parsed_count"] == 0
     assert stale["replaced_trade_dates"] == []
     assert db.query(MarketDailyPrice).filter(MarketDailyPrice.stock_id == "3324").count() == 0

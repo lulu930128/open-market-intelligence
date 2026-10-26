@@ -33,7 +33,11 @@ def wait_idle():
 @pytest.fixture
 def database(tmp_path, monkeypatch):
     engine = create_engine("sqlite:///" + (tmp_path / "jobs.sqlite").as_posix(), poolclass=NullPool)
-    Base.metadata.create_all(engine)
+    # sqlite3 legacy transaction mode otherwise commits every DDL statement.
+    # Keep durable, independent databases without hundreds of schema fsyncs.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
 
     def factory():
         # A different thread must acquire the fence even during Session creation.

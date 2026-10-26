@@ -1024,7 +1024,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             interval="1m",
             db=self.db,
             persist_history=False,
+            now=mock_intraday.call_args.kwargs["now"],
         )
+        self.assertIsNotNone(mock_intraday.call_args.kwargs["now"].tzinfo)
         compact = context["data"]["compact"]
         self.assertEqual(context["as_of"], "2026-06-02T09:31:00-04:00")
         self.assertEqual(compact["quote"]["price"], 91.35)
@@ -1119,7 +1121,9 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             interval="1m",
             db=self.db,
             persist_history=False,
+            now=mock_intraday.call_args.kwargs["now"],
         )
+        self.assertIsNotNone(mock_intraday.call_args.kwargs["now"].tzinfo)
         quote = context["data"]["compact"]["quote"]
         self.assertEqual(context["as_of"], "2026-07-20T16:00:00-04:00")
         self.assertEqual(quote["status"], "historical")

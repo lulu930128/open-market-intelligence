@@ -24,7 +24,10 @@ from test_us_eod_durable import fixture_route, MISSING
 @pytest.fixture
 def rig(tmp_path):
     engine = create_engine('sqlite:///' + (tmp_path / 'gb.sqlite').as_posix())
-    Base.metadata.create_all(engine)
+    # Explicit transaction avoids one durable commit per DDL statement.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("BEGIN")
+        Base.metadata.create_all(connection)
     with Session(engine) as db:
         db.add(USStockMaster(symbol='SSO', exchange='NYSE', is_etf=True))
         db.commit()

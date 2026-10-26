@@ -34,12 +34,13 @@ EXPECTED = {
 
 
 @pytest.fixture(scope="module")
-def matrix():
+def matrix(tmp_path_factory):
     rows = []
+    directory = tmp_path_factory.mktemp("r1c-evidence")
     yield rows
     # Unique immutable evidence per run, including failures. Never overwrite history.
     stamp = str(time.time_ns())
-    file = ROOT / "docs/exec-plans/active/us-r0-r5-20261009" / ("R1C-matrix-" + stamp + ".json")
+    file = directory / ("R1C-matrix-" + stamp + ".json")
     with file.open("x", encoding="utf-8") as f:
         json.dump(rows, f, indent=2)
 
@@ -230,6 +231,14 @@ def test_resource_probe_positive_only(mode):
 
 
 def test_offline_guard_active():
-    import socket
-    with pytest.raises(RuntimeError, match="offline guard"):
-        socket.getaddrinfo("r1c.invalid", 443)
+    import subprocess
+    import sys
+    # The guard is process-local; exercise its real entry in a fresh child
+    # instead of depending on another test runner having installed it globally.
+    probe = subprocess.run([sys.executable, "-c",
+        "import sys; sys.path.insert(0, 'backend/tests'); "
+        "import g3_offline_guard; g3_offline_guard.install(); "
+        "import socket; socket.getaddrinfo('r1c.invalid', 443)"],
+        cwd=ROOT, capture_output=True, text=True, timeout=15)
+    assert probe.returncode != 0
+    assert "G3 offline guard denied socket.getaddrinfo" in probe.stderr

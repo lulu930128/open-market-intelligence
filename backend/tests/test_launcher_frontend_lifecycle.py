@@ -3,6 +3,7 @@
 Never execute the launcher entrypoint or contact production OMI endpoints.
 """
 import subprocess
+import shutil
 import sys
 
 import pytest
@@ -154,15 +155,19 @@ def test_real_termination_helper_only_targets_retained_birth_pid_once(tmp_path, 
     _run_isolated_launcher(tmp_path, TREE_SETUP + load_functions(('Invoke-FrontendTreeTermination',)) +
         f"$script:Fault='{fault}'\n" + r"""
 $script:Kills=0
-function Start-Process {
-    param($FilePath,$ArgumentList,$WindowStyle,[switch]$PassThru)
-    if ($FilePath -ne (Join-Path $env:SystemRoot 'System32\taskkill.exe') -or
-        ($ArgumentList -join ' ') -cne '/PID 41001 /T /F' -or $WindowStyle -ne 'Hidden') {throw 'WRONG_TARGET'}
+$script:LastFrontendStop=[pscustomobject]@{Nodes=@()}
+function Get-OmiCutoffSnapshot {return $script:Rows}
+function Test-OmiCutoffCreation {param($Observed,$Expected) return $Observed -eq $Expected}
+function Get-OmiCutoffTree {param($Identity,$Rows)
+    if ($Identity.Pid -ne 41001 -or $Rows.Count -ne 3) {throw 'WRONG_CAPTURE'}
+    return [pscustomobject]@{Process=$script:Root;Pid=41001}
+}
+function Stop-OmiCapturedTree {
+    param($Identity)
+    if ($Identity.Pid -ne 41001 -or $Identity.Nodes.Count -ne 1 -or
+        -not [object]::ReferenceEquals($Identity.Process,$script:Root)) {throw 'WRONG_TARGET'}
     $script:Kills++
-    $helper=[pscustomobject]@{ExitCode=0}
-    $helper | Add-Member ScriptMethod WaitForExit {param($timeout) return $timeout -eq 5000}
-    $helper | Add-Member ScriptMethod Dispose {}
-    return $helper
+    return @{State='exited'}
 }
 switch ($script:Fault) {
     'pid' {$script:FrontendRunnerIdentity.Pid=49000}
@@ -535,19 +540,21 @@ if ($script:Terminations -ne 1 -or $script:Spawns -or -not $script:SafeStopAttem
 
 
 def test_disposable_legacy_retry_runner_tree_exit_and_port_release(tmp_path):
-    # Real legacy runner + cmd + Python child, private temporary files, port 0.
+    # Real legacy runner + Node child, private temporary files, port 0.
     # The child exits once to prove retry was active before the entire tree stop.
-    child = tmp_path / 'frontend_child.py'
+    node = shutil.which('node')
+    assert node, 'Disposable frontend fixture requires the Windows runner Node.js'
+    child = tmp_path / 'frontend' / 'server.js'
+    child.parent.mkdir()
     child.write_text(
-        'import pathlib, socket, time\n'
-        f'root=pathlib.Path({str(tmp_path)!r})\n'
-        'marker=root/"attempt"\n'
-        'if not marker.exists():\n'
-        ' marker.write_text("1"); raise SystemExit(17)\n'
-        's=socket.socket(); s.bind(("127.0.0.1",0)); s.listen()\n'
-        '(root/"port").write_text(str(s.getsockname()[1]))\n'
-        'until=time.monotonic()+35\n'
-        'while time.monotonic()<until: time.sleep(.1)\n', encoding='utf-8')
+        'const fs=require("fs"), path=require("path"), net=require("net");\n'
+        'const root=path.dirname(__dirname), marker=path.join(root,"attempt");\n'
+        'if (!fs.existsSync(marker)) {fs.writeFileSync(marker,"1");process.exit(17);}\n'
+        'const server=net.createServer();\n'
+        'server.listen(0,"127.0.0.1",()=>fs.writeFileSync(path.join(root,"port"),String(server.address().port)));\n'
+        'setTimeout(()=>server.close(),35000);\n', encoding='utf-8')
+    command = child.parent / 'npm.cmd'
+    command.write_text(f'@"{node}" "{child}"\r\n', encoding='utf-8')
     quote = lambda value: str(value).replace("'", "''")
     harness = tmp_path / 'disposable-tree.ps1'
     harness.write_text(r"""
@@ -558,13 +565,18 @@ if ($errors.Count) {throw 'PARSE_FAILED'}
 """.replace('LAUNCHER', quote(LAUNCHER)) + load_functions(FUNCTIONS + (
         'Get-ListeningProcessIdsOnPort', 'Test-TcpPortBindable',
     )) + r"""
+$cutoffAst=[Management.Automation.Language.Parser]::ParseFile('CUTOFF',[ref]$tokens,[ref]$errors)
+if ($errors.Count) {throw 'CUTOFF_PARSE_FAILED'}
+foreach ($definition in $cutoffAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$false)) {
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
 function Write-LauncherLog {param($Message,$Level)}
 $script:OwnsMutex=$true
 $script:Mutex=[pscustomobject]@{SafeWaitHandle=[pscustomobject]@{IsClosed=$false;IsInvalid=$false}}
 $script:FrontendHost='127.0.0.1'
 $script:RepoRoot='ROOT'
 $script:ServiceRunner='RUNNER'
-$script:FrontendProcess=Start-LoggedService -ServiceName frontend -FilePath 'PYTHON' -Arguments @('CHILD') -WorkingDirectory 'ROOT'
+$script:FrontendProcess=Start-LoggedService -ServiceName frontend -FilePath 'COMMAND' -Arguments @('run','dev') -WorkingDirectory 'ROOT'
 $runner=$script:FrontendProcess
 try {
     $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -572,6 +584,10 @@ try {
     $script:FrontendPort=[int](Get-Content -LiteralPath 'ROOT/port')
     if ($script:FrontendPort -in @(3000,8400)) {throw 'PRODUCTION_PORT_FORBIDDEN'}
     Assert-FrontendSafeStopAvailable
+    # Expose the inner reason only in this isolated diagnostic harness.
+    . ([scriptblock]::Create('function Stop-FrontendService {' +
+        (Get-Item Function:Stop-FrontendService).ScriptBlock.ToString().Replace(
+            "throw 'FRONTEND_STOP_UNCONFIRMED'", 'throw ("FRONTEND_STOP_UNCONFIRMED: " + $_.Exception.Message + " stage=" + $stage)') + '}'))
     Stop-FrontendService -RequireSafeStop
     if (-not $runner.HasExited -or $script:LastFrontendStop.State -ne 'stopped') {throw 'TREE_EXIT_UNCONFIRMED'}
     Start-Sleep -Milliseconds 600
@@ -586,8 +602,9 @@ try {
     }
     $runner.Dispose()
 }
-""".replace('ROOT', quote(tmp_path)).replace('RUNNER', quote(SERVICE_RUNNER))
-        .replace('PYTHON', quote(sys.executable)).replace('CHILD', quote(child)), encoding='utf-8-sig')
+""".replace('CUTOFF', quote(LAUNCHER.parent / 'apply-omi-update.ps1'))
+        .replace('ROOT', quote(tmp_path)).replace('RUNNER', quote(SERVICE_RUNNER))
+        .replace('COMMAND', quote(command)), encoding='utf-8-sig')
     result = subprocess.run([_powershell(), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                              '-File', str(harness)], capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr

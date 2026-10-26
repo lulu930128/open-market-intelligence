@@ -76,7 +76,7 @@ def test_public_ask_reads_real_canonical_auction(db, monkeypatch, symbol, kind, 
         selection={"required": ["quote.auction"]} if kind == "explicit" else {},
     ))
     auction = response["evidence"]["data"]["quote.auction"]
-    assert response["execution"]["query_plan"]["reader_profile"] == ("standard" if kind == "mixed" else "quote_only")
+    assert response["execution"]["query_plan"]["reader_profile"] == "capability_graph"
     assert auction["indicative_match_price"] == 1178
     assert auction["provider"] == "twse_mis"
     assert auction["change_reference"]["auction_change"] == 8

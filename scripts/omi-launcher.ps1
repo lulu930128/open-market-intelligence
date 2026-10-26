@@ -2575,6 +2575,7 @@ function Invoke-FrontendTreeTermination {
 function Stop-FrontendService {
     param([switch]$RequireSafeStop)
     # The compatibility switch no longer selects a weaker legacy force path.
+    if ($script:FrontendStopUnconfirmed) { throw 'FRONTEND_STOP_UNCONFIRMED' }
     $stage = 'ownership-preflight'
     try {
         if ($null -ne $script:FrontendProcess) { Assert-FrontendRunnerIdentity -Identity $script:FrontendRunnerIdentity }
