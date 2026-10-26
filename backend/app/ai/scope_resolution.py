@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import Any
 
@@ -1072,6 +1072,12 @@ def _iter_us_symbol_mentions(question: str) -> list[tuple[str, str, bool]]:
 
     for match in US_PLAIN_SYMBOL_PATTERN.finditer(question):
         raw_symbol = match.group(1)
+        # A requested timestamp field is not a ticker mention. Explicit $TIME
+        # and exchange-qualified symbols are collected separately above.
+        if raw_symbol.casefold() == "time" and re.search(
+            r"\bevent\s+$", question[:match.start(1)], flags=re.IGNORECASE,
+        ):
+            continue
         normalized_symbol = normalize_us_symbol(raw_symbol)
         if raw_symbol.upper() != raw_symbol and len(normalized_symbol) <= 2:
             continue
@@ -1080,8 +1086,10 @@ def _iter_us_symbol_mentions(question: str) -> list[tuple[str, str, bool]]:
     return mentions
 
 
-def _resolve_us_stock_symbol_from_question(db: Session | None, question: str) -> ScopeResolution | None:
-    has_context = _question_has_us_symbol_context(question)
+def _resolve_us_stock_symbol_from_question(
+    db: Session | None, question: str, *, market: str = "",
+) -> ScopeResolution | None:
+    has_context = market == "us" or _question_has_us_symbol_context(question)
     candidates: list[tuple[ScopeResolution, bool]] = []
 
     for symbol, source, explicit_marker in _iter_us_symbol_mentions(question):
@@ -1641,6 +1649,44 @@ def _clarify_scope(scope_type: str, question: str, reason: str) -> ScopeResoluti
     )
 
 
+def _reconcile_question_stock_params(
+    resolution: ScopeResolution, payload: AiAskRequest,
+) -> ScopeResolution:
+    """Corroborate a parsed identity; data parameters must not retarget it."""
+    if resolution.clarification_required or resolution.error_code:
+        return resolution
+    market = str(payload.market_data_params.get("market") or "").strip().lower()
+    symbol = str(payload.market_data_params.get("symbol") or "").strip().upper()
+    scope_market = {"stock": "tw", "us_stock": "us"}
+    resolved_market = scope_market.get(resolution.selected_scope_type)
+    if resolved_market is None or market not in scope_market.values():
+        return resolution
+    if market != resolved_market or (symbol and symbol != resolution.selected_scope_id):
+        candidates = resolution.candidates + (
+            _resolution_candidate(
+                scope_type=next(scope for scope, value in scope_market.items() if value == market),
+                scope_id=symbol or None,
+                confidence="medium",
+                source="market_data_params",
+            ),
+        )
+        return ScopeResolution(
+            selected_scope_type=resolution.selected_scope_type,
+            confidence="low",
+            source="target_conflict",
+            candidates=candidates,
+            clarification_required=True,
+            clarification_question="問句標的與 market_data_params 的市場或代碼不同，請確認要查詢哪個標的。",
+            clarification_reason="Question target conflicts with explicit market_data_params market/symbol.",
+        )
+    if symbol:
+        return replace(
+            resolution, confidence="high",
+            assumption=((resolution.assumption or "") + " 問句標的與 market_data_params 的市場及代碼一致。").strip(),
+        )
+    return resolution
+
+
 def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution:
     requested_target_type = _request_target_type(payload)
     requested_target = _request_target(payload)
@@ -2171,9 +2217,31 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             candidates=(),
         )
 
-    us_entity_resolution = _resolve_us_stock_symbol_from_question(db, question)
+    us_entity_resolution = _resolve_us_stock_symbol_from_question(
+        db, question,
+        market=str(payload.market_data_params.get("market") or "").strip().lower(),
+    )
+    tw_entity_resolution = _resolve_tw_stock_from_question(db, question)
+    if tw_entity_resolution is not None and us_entity_resolution is not None:
+        if tw_entity_resolution.clarification_required:
+            return tw_entity_resolution
+        if tw_entity_resolution.selected_scope_type == "stock":
+            return ScopeResolution(
+                selected_scope_type="stock",
+                confidence="low",
+                source="target_conflict",
+                candidates=tw_entity_resolution.candidates + us_entity_resolution.candidates,
+                clarification_required=True,
+                clarification_question="問句同時包含台股與美股標的，請確認要查詢哪個市場及代碼。",
+                clarification_reason="Explicit Taiwan and US question targets require disambiguation.",
+            )
     if us_entity_resolution is not None:
-        return us_entity_resolution
+        return _reconcile_question_stock_params(us_entity_resolution, payload)
+
+    if tw_entity_resolution is not None:
+        reconciled = _reconcile_question_stock_params(tw_entity_resolution, payload)
+        if reconciled.clarification_required:
+            return reconciled
 
     if (
         _contains_hint(question, FRESHNESS_HINTS)
@@ -2181,7 +2249,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     ):
         tw_stock_resolution = _resolve_tw_stock_from_question(db, question)
         if tw_stock_resolution is not None:
-            return tw_stock_resolution
+            return _reconcile_question_stock_params(tw_stock_resolution, payload)
 
     if _contains_hint(question, FRESHNESS_HINTS):
         stock_id = _first_stock_id_in_text(question)
@@ -2279,7 +2347,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
 
     tw_stock_resolution = _resolve_tw_stock_from_question(db, question)
     if tw_stock_resolution is not None:
-        return tw_stock_resolution
+        return _reconcile_question_stock_params(tw_stock_resolution, payload)
 
     us_symbol_resolution = _resolve_us_stock_symbol_from_question(db, question)
     if us_symbol_resolution is not None:

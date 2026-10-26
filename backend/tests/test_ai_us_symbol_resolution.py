@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.ai import agentic_tools, scope_resolution
-from app.ai.schemas import AiAskV4Request
+from app.ai.schemas import AiAskRequest, AiAskV4Request
 from app.db.models import Base, USStockMaster
 from app.db.session import get_db
 from app.errors import unhandled_exception_handler
@@ -33,6 +33,93 @@ from test_us_intraday_shared_core import _yahoo_bars_payload
 
 NOW = datetime(2026, 10, 11, 8, tzinfo=timezone.utc)
 INCLUDE = ['target.identity', 'intraday.bars', 'quote.snapshot', 'data.freshness']
+
+
+P2_QUESTION = '測試 2026-10-21 開盤前試撮：2330 台積電當下合法的 indicative match price、試撮量、event time、來源與有效性。'
+
+
+@pytest.fixture
+def p2_master(monkeypatch):
+    # Only the identity lookup is stubbed; request validation and canonical
+    # question parsing remain real. No database or provider is constructed.
+    identities = {
+        symbol: SimpleNamespace(security_name=symbol, sec_company_name=None)
+        for symbol in ('TIME', 'TSM', 'AAPL')
+    }
+    monkeypatch.setattr(scope_resolution, '_get_us_stock', lambda db, symbol: identities.get(symbol))
+
+    def denied(*args, **kwargs):
+        raise AssertionError('P2 target resolution must not perform external IO')
+
+    monkeypatch.setattr('socket.socket.connect', denied)
+    monkeypatch.setattr('socket.getaddrinfo', denied)
+
+
+@pytest.mark.parametrize('request_type', [AiAskRequest, AiAskV4Request])
+@pytest.mark.parametrize('question', [P2_QUESTION, '台股 2330 台積電 盤前試撮報價'])
+def test_p2_original_request_resolves_taiwan(p2_master, question, request_type):
+    payload = request_type(
+        question=question,
+        contract_version='omi.decision.v4',
+        market_data_params={'market': 'tw', 'symbol': '2330', 'trade_date': '2026-10-21'},
+    )
+    result = scope_resolution._resolve_scope(None, payload)
+    assert (result.selected_scope_type, result.selected_scope_id) == ('stock', '2330')
+    assert not result.clarification_required
+    assert result.confidence == 'high'
+
+
+@pytest.mark.parametrize('question,params,expected', [
+    (P2_QUESTION, {}, ('stock', '2330')),
+    ('2330 event time 與試撮報價', {}, ('stock', '2330')),
+    ('台積電 event time 與試撮報價', {}, ('stock', '2330')),
+    ('台股 2330 EVENT TIME 與試撮報價', {'market': 'tw', 'symbol': '2330'}, ('stock', '2330')),
+    ('美股 TIME ETF 報價與 event time', {'market': 'us', 'symbol': 'TIME'}, ('us_stock', 'TIME')),
+    ('US stock TIME ETF quote', {'market': 'us'}, ('us_stock', 'TIME')),
+    ('$TIME 報價與 event time', {}, ('us_stock', 'TIME')),
+    ('NYSE:TIME 報價', {}, ('us_stock', 'TIME')),
+    ('TIME ETF 報價', {'market': 'us'}, ('us_stock', 'TIME')),
+    ('TSM ADR 報價與 event time', {'market': 'us', 'symbol': 'TSM'}, ('us_stock', 'TSM')),
+    ('台積電 ADR 報價', {'market': 'us'}, ('us_stock', 'TSM')),
+    ('AAPL 股價', {'market': 'us', 'symbol': 'AAPL'}, ('us_stock', 'AAPL')),
+    ('日股 7203.T 報價與 event time', {'market': 'jp', 'symbol': '7203.T'}, ('jp_stock', '7203.T')),
+    ('韓股 005930 報價與 event time', {'market': 'kr', 'symbol': '005930'}, ('kr_stock', '005930.KS')),
+])
+def test_p2_market_identity_regression(p2_master, question, params, expected):
+    result = scope_resolution._resolve_scope(None, AiAskRequest(question=question, market_data_params=params))
+    assert not result.clarification_required
+    assert (result.selected_scope_type, result.selected_scope_id) == expected
+
+
+@pytest.mark.parametrize('question,params', [
+    (P2_QUESTION, {'market': 'tw', 'symbol': '3406'}),
+    (P2_QUESTION, {'market': 'tw', 'symbol': 'INVALID'}),
+    (P2_QUESTION, {'market': 'us', 'symbol': 'TIME'}),
+    (P2_QUESTION, {'market': 'us'}),
+    ('美股 TIME ETF 報價', {'market': 'tw', 'symbol': '2330'}),
+    ('TSM ADR 報價', {'market': 'tw', 'symbol': '2330'}),
+    ('台股 3406 報價', {'market': 'tw', 'symbol': '2330'}),
+    ('2330 台積電與 $TIME 報價', {}),
+    ('2330 台積電與美股 TIME ETF 報價', {'market': 'tw', 'symbol': '2330'}),
+    ('2330 台積電與 TSM ADR 報價', {}),
+    ('3406 台積電 event time 與試撮報價', {'market': 'tw', 'symbol': '2330'}),
+])
+def test_p2_conflicts_require_clarification(p2_master, question, params):
+    result = scope_resolution._resolve_scope(None, AiAskRequest(question=question, market_data_params=params))
+    assert result.clarification_required
+    assert result.selected_scope_id is None
+    assert result.source == 'target_conflict'
+    assert len(result.candidates) >= 2
+    assert result.clarification_reason
+
+
+def test_p2_explicit_us_target_retains_authority(p2_master):
+    result = scope_resolution._resolve_scope(None, AiAskRequest(
+        question='TIME ETF event time', target={'type': 'us_stock', 'id': 'TIME'},
+        market_data_params={'market': 'us', 'symbol': 'TIME'},
+    ))
+    assert (result.selected_scope_type, result.selected_scope_id) == ('us_stock', 'TIME')
+    assert result.source == 'explicit_request'
 
 
 def request_payload(question, target=None):
