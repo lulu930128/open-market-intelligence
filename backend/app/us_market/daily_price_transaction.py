@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
+from sqlalchemy import tuple_
+from app.utils.owner_checkpoint import OwnerOutcomeUnknown
 
 from sqlalchemy.orm import Session
 
@@ -22,6 +25,7 @@ from app.market_data.integration_contracts import (
     RefreshRequirementV1,
 )
 from app.us_market.market_data.descriptors import (
+    MASSIVE_GROUPED_DAILY_RESOURCE_ID,
     us_daily_descriptor_for_resource,
     us_provider_auth_type,
 )
@@ -46,6 +50,36 @@ def _same_value(current: object, incoming: object) -> bool:
 class USDailyPriceTransaction:
     def __init__(self, db: Session) -> None:
         self._db = db
+
+    def reconcile_bar_acquisition(self, acquisition: BarAcquisitionResult) -> str:
+        """Read-only proof after an uncertain commit; never replay external IO."""
+        from app.us_market.daily_price_eligibility import us_daily_exact_volume
+
+        with self._db.no_autoflush:
+            for receipt in acquisition.receipts:
+                raw = (self._db.query(RawFetchResult).join(SourceRegistry)
+                       .filter(SourceRegistry.source_name == receipt.source,
+                               RawFetchResult.content_hash == receipt.content_hash,
+                               RawFetchResult.parser_version == receipt.parser_version).first())
+                if raw is None:
+                    return "unknown"
+            by_key = {}
+            keys = [(o.lineage.provider, o.instrument.symbol, o.end_at.date()) for o in acquisition.observations]
+            for offset in range(0, len(keys), 250):
+                for row in self._db.query(USDailyPrice).filter(
+                    tuple_(USDailyPrice.provider, USDailyPrice.symbol, USDailyPrice.trade_date).in_(keys[offset:offset + 250])
+                ).all():
+                    by_key[(row.provider, row.symbol, row.trade_date)] = row
+            for observation, key in zip(acquisition.observations, keys):
+                row = by_key.get(key)
+                if row is None or row.raw_payload_hash != observation.lineage.content_hash or row.price_basis != "raw":
+                    return "unknown"
+                if any(Decimal(str(getattr(row, field))) != getattr(observation, field)
+                       for field in ("open_price", "high_price", "low_price", "close_price")):
+                    return "unknown"
+                if us_daily_exact_volume(row) != (observation.volume.value if observation.volume else None):
+                    return "unknown"
+        return "committed" if acquisition.receipts else "unknown"
 
     def _source(self, receipt: RawFetchReceiptV1) -> SourceRegistry:
         source = (
@@ -122,6 +156,10 @@ class USDailyPriceTransaction:
         observations_inserted = 0
         observations_updated = 0
         observations_unchanged = 0
+        if self._db.new or self._db.dirty or self._db.deleted:
+            raise ValueError("US daily transaction requires a clean Session")
+        commit_started = False
+        grouped = any(receipt.resource_id == MASSIVE_GROUPED_DAILY_RESOURCE_ID for receipt in acquisition.receipts)
         try:
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
@@ -133,6 +171,17 @@ class USDailyPriceTransaction:
                 raw_ids.append(raw.id)
                 receipts_written += int(created)
 
+            # Bounded batch lookup, not one SELECT per stock. No destructive replacement.
+            identities = {(o.lineage.provider, o.instrument.symbol, o.end_at.date()) for o in acquisition.observations}
+            if len(identities) != len(acquisition.observations):
+                raise ValueError("duplicate canonical observation identity")
+            existing = {}
+            keys = sorted(identities)
+            for offset in range(0, len(keys), 250):
+                for row in self._db.query(USDailyPrice).filter(
+                    tuple_(USDailyPrice.provider, USDailyPrice.symbol, USDailyPrice.trade_date).in_(keys[offset:offset + 250])
+                ).all():
+                    existing[(row.provider, row.symbol, row.trade_date)] = row
             for observation in acquisition.observations:
                 if observation.instrument.market is not Market.US:
                     raise ValueError("US daily transaction requires market=US")
@@ -156,13 +205,7 @@ class USDailyPriceTransaction:
                 if observation.lineage.content_hash != raw.content_hash:
                     raise ValueError("canonical observation content hash mismatches receipt")
                 trade_date = observation.end_at.date()
-                row = (
-                    self._db.query(USDailyPrice)
-                    .filter(USDailyPrice.provider == observation.lineage.provider)
-                    .filter(USDailyPrice.symbol == observation.instrument.symbol)
-                    .filter(USDailyPrice.trade_date == trade_date)
-                    .first()
-                )
+                row = existing.get((observation.lineage.provider, observation.instrument.symbol, trade_date))
                 volume_status = observation.volume_status
                 if volume_status is None:
                     raise ValueError("US daily canonical bar requires volume_status")
@@ -179,13 +222,20 @@ class USDailyPriceTransaction:
                     raise ValueError("stock/ETF daily volume must be observed shares")
                 if observation.price_basis != "raw":
                     raise ValueError("US daily canonical bar requires explicit raw price basis")
-                volume = int(observation.volume.value) if observation.volume else None
+                exact_volume = observation.volume.value if observation.volume else None
+                volume_text = format(exact_volume, "f") if exact_volume is not None else None
+                if volume_text is not None and len(volume_text) > 64:
+                    raise ValueError("canonical volume exceeds exact storage bound")
+                volume = (int(exact_volume) if exact_volume is not None
+                          and exact_volume == exact_volume.to_integral_value()
+                          and exact_volume <= 9223372036854775807 else None)
                 incoming = {
                     "open_price": float(observation.open_price),
                     "high_price": float(observation.high_price),
                     "low_price": float(observation.low_price),
                     "close_price": float(observation.close_price),
                     "trade_volume": volume,
+                    "trade_volume_decimal": volume_text,
                     "source_id": source.id,
                     "raw_result_id": raw.id,
                     "raw_payload_hash": raw.content_hash,
@@ -195,7 +245,7 @@ class USDailyPriceTransaction:
                     "event_at": observation.lineage.event_at.astimezone(timezone.utc),
                     "finalization": observation.finalization.value,
                     "price_basis": observation.price_basis,
-                    "volume_unit": "shares" if volume is not None else None,
+                    "volume_unit": "shares" if exact_volume is not None else None,
                     "volume_status": volume_status,
                 }
                 if row is None:
@@ -223,9 +273,15 @@ class USDailyPriceTransaction:
                     else:
                         observations_written += 1
                         observations_updated += 1
+            commit_started = True
             self._db.commit()
-        except Exception:
-            self._db.rollback()
+        except Exception as exc:
+            try:
+                self._db.rollback()
+            except Exception as rollback_exc:
+                raise OwnerOutcomeUnknown("US_DAILY_ROLLBACK_OUTCOME_UNKNOWN") from rollback_exc
+            if commit_started and grouped:
+                raise OwnerOutcomeUnknown("US_DAILY_COMMIT_OUTCOME_UNKNOWN_RECONCILE_BEFORE_RETRY") from exc
             raise
         return PersistenceSummary(
             attempted=True,

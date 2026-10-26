@@ -83,7 +83,7 @@ class ProviderCapabilityDescriptorV2(CanonicalModel):
     max_timeout_seconds: int = Field(default=30, ge=1, le=120)
     max_external_calls_per_attempt: int = Field(default=1, ge=0, le=20)
     max_subscriptions_per_attempt: int = Field(default=0, ge=0, le=8)
-    max_symbols_per_call: int = Field(default=1, ge=1, le=5_000)
+    max_symbols_per_call: int = Field(default=1, ge=1, le=20_000)
     max_range_days: int = Field(default=1, ge=1, le=3650)
     supports_dated_queries: bool = False
     supports_current_date_window: bool = False
@@ -150,7 +150,7 @@ class ProviderResourceRouteV2(CanonicalModel):
     timeout_seconds: int = Field(ge=1, le=120)
     max_external_calls: int = Field(ge=0, le=20)
     max_subscriptions: int = Field(ge=0, le=8)
-    max_symbols: int = Field(ge=1, le=5_000)
+    max_symbols: int = Field(ge=1, le=20_000)
     max_range_days: int = Field(ge=1, le=3650)
     limitations: tuple[ReasonCode, ...] = Field(default=(), max_length=16)
 

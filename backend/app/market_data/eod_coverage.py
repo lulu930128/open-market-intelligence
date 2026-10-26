@@ -590,12 +590,22 @@ def persist_eod_coverage(
         db.add(row)
 
     detail = computation.detail()
+    coverage_detail = dict(detail)
     if computation.market == "TW":
         detail["published_breadth"] = computation.published_breadth
     detail["dataset_lifecycle"] = _lifecycle_detail(
         evaluate_eod_lifecycle(computation)
     )
     previous_detail = _decode_detail(row.detail_json)
+    # The US owner materializes its distribution in this same checkpoint. A
+    # routine coverage reconcile must not erase it, nor carry it across a
+    # changed universe/date or changed member qualification. Reads never repair.
+    snapshot = previous_detail.get("us_sector_distribution")
+    if (computation.market == "US" and isinstance(snapshot, dict)
+            and snapshot.get("expected_trade_date") == computation.expected_trade_date.isoformat()
+            and snapshot.get("coverage", {}).get("universe_hash") == computation.universe_hash
+            and all(previous_detail.get(key) == value for key, value in coverage_detail.items())):
+        detail["us_sector_distribution"] = snapshot
     for key in ("repair", "last_error", "last_provider_failure"):
         if key in previous_detail:
             detail[key] = previous_detail[key]

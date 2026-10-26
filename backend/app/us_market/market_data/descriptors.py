@@ -284,6 +284,20 @@ TWELVE_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     limitations=("PARTIAL_US_MARKET_VOLUME", "PERSONAL_INTERNAL_USE_ONLY"),
 )
 
+MASSIVE_GROUPED_DAILY_RESOURCE_ID = "massive.stocks.grouped.1d"
+MASSIVE_GROUPED_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
+    provider_key="massive", market=Market.US, capability_id="daily.ohlcv",
+    resource_id=MASSIVE_GROUPED_DAILY_RESOURCE_ID, authority=AuthorityClass.VENDOR,
+    target_kinds=(DescriptorTargetKind.DATASET,), dataset_ids=("us.daily.ohlcv.full_market",),
+    instrument_types=(InstrumentType.STOCK,), intervals=("1d",),
+    supported_sessions=(MarketSession.CLOSED,), acquisition_modes=(AcquisitionMode.FETCH,),
+    priority=95, can_produce_final=True, max_timeout_seconds=30,
+    max_external_calls_per_attempt=1, max_symbols_per_call=20_000, max_range_days=1,
+    allow_unknown_health=True,
+    limitations=("API_KEY_REQUIRED", "BASIC_NEXT_ET_DAY_RELEASE", "RAW_PRICE_BASIS"),
+)
+
+
 US_DAILY_PROVIDER_DESCRIPTORS = (
     YAHOO_DAILY_DESCRIPTOR,
     ALPACA_SIP_DAILY_DESCRIPTOR,
@@ -298,6 +312,7 @@ US_DAILY_ALPACA_ROLLOUT_DESCRIPTORS = (
 )
 
 US_DAILY_CANDIDATE_DESCRIPTORS = (
+    MASSIVE_GROUPED_DAILY_DESCRIPTOR,
     YAHOO_DAILY_DESCRIPTOR,
     ALPACA_SIP_DAILY_DESCRIPTOR,
 )

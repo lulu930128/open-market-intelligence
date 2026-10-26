@@ -2647,7 +2647,7 @@ class AiCapabilityContractTests(unittest.TestCase):
                         "kr_index",
                         "crypto_market",
                     ],
-                    "supported_markets": ["TW"],
+                    "supported_markets": list(capability_contract.CAPABILITIES["market.breadth"].markets),
                     "message": (
                         "market.breadth is not supported for target "
                         "scope=stock, market=TW."

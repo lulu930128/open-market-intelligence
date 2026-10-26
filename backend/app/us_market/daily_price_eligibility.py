@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import or_
+from sqlalchemy import or_, func, cast, Numeric
+from decimal import Decimal, InvalidOperation
 
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
 from app.market_data.contracts import AuthorityClass, BarFinalization, InstrumentType
@@ -20,6 +21,15 @@ US_DAILY_REGISTERED_PROVIDERS = tuple(
 class USDailyEligibilityIssue:
     reason_code: str
     missing_fields: tuple[str, ...] = ()
+
+
+def us_daily_exact_volume(row):
+    value = row.trade_volume_decimal if row.trade_volume_decimal is not None else row.trade_volume
+    try:
+        parsed = Decimal(str(value))
+        return parsed if parsed.is_finite() and parsed >= 0 else None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 def us_daily_candidate_issue(
@@ -77,13 +87,13 @@ def us_daily_candidate_issue(
         valid_volume = (
             row.volume_status == "not_applicable"
             and row.trade_volume is None
+            and row.trade_volume_decimal is None
             and row.volume_unit is None
         )
     else:
         valid_volume = (
             row.volume_status == "observed"
-            and row.trade_volume is not None
-            and row.trade_volume >= 0
+            and us_daily_exact_volume(row) is not None
             and row.volume_unit == "shares"
         )
     if not valid_volume:
@@ -147,8 +157,8 @@ def us_daily_sql_eligibility_filters(
         )
     return filters + (
         USDailyPrice.volume_status == "observed",
-        USDailyPrice.trade_volume.isnot(None),
-        USDailyPrice.trade_volume >= 0,
+        func.coalesce(USDailyPrice.trade_volume_decimal, USDailyPrice.trade_volume).isnot(None),
+        cast(func.coalesce(USDailyPrice.trade_volume_decimal, USDailyPrice.trade_volume), Numeric) >= 0,
         USDailyPrice.volume_unit == "shares",
     )
 

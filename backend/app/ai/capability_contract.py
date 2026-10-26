@@ -147,6 +147,8 @@ class CapabilitySpec:
     default_fields: tuple[str, ...]
     default_limit: int
     schema_version: str = "omi.capability.v1"
+    market_schema_versions: tuple[tuple[str, str], ...] = ()
+    market_scopes: tuple[tuple[str, tuple[str, ...]], ...] = ()
     compatibility_schema_versions: tuple[str, ...] = ()
     fill_operations: tuple[tuple[str, str], ...] = ()
     writes_cache: bool = False
@@ -162,6 +164,9 @@ class CapabilitySpec:
     side_effect_policy: str = "read_only"
     refresh_strategies: tuple[tuple[str, str], ...] = ()
     refresh_requires_market_open_scopes: tuple[str, ...] = ()
+
+    def schema_version_for_market(self, market: str | None) -> str:
+        return dict(self.market_schema_versions).get(str(market or "").upper(), self.schema_version)
 
     def as_public_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -2881,6 +2886,22 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         scopes=ALL_MARKET_SCOPES,
         paths=("compact.breadth", "data.breadth", "data.market_breadth"),
         fields=(
+            "facts_usable",
+            "schema_version",
+            "sample_only",
+            "expected_trade_date",
+            "reference_trade_date",
+            "evaluated_at",
+            "classification_coverage",
+            "counts",
+            "provenance",
+            "limitations",
+            "intraday",
+            "freshness_status",
+            "is_intraday",
+            "data_mode",
+            "industries",
+            "execution_grade_usable",
             "as_of",
             "trade_date",
             "status",
@@ -2977,6 +2998,22 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "freshness",
         ),
         default_fields=(
+            "facts_usable",
+            "schema_version",
+            "sample_only",
+            "expected_trade_date",
+            "reference_trade_date",
+            "evaluated_at",
+            "classification_coverage",
+            "counts",
+            "provenance",
+            "limitations",
+            "intraday",
+            "freshness_status",
+            "is_intraday",
+            "data_mode",
+            "industries",
+            "execution_grade_usable",
             "as_of",
             "trade_date",
             "status",
@@ -3059,7 +3096,9 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "freshness",
         ),
         default_limit=10,
-        markets=("TW",),
+        markets=("TW", "US"),
+        market_schema_versions=(("US", "us.market.breadth.v1"),),
+        market_scopes=(("US", ("market",)),),
     ),
     CapabilitySpec(
         capability_id="market.indices",
@@ -3554,6 +3593,21 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         scopes=("market",),
         paths=("compact.market.sectors", "data.market.sectors"),
         fields=(
+            "facts_usable",
+            "schema_version",
+            "market",
+            "sample_only",
+            "expected_trade_date",
+            "reference_trade_date",
+            "evaluated_at",
+            "classification_coverage",
+            "counts",
+            "provenance",
+            "limitations",
+            "intraday",
+            "freshness_status",
+            "decision_usable",
+            "industries",
             "facts_usable_for_ranking",
             "observation_received_freshness",
             "last_trade_recency",
@@ -3583,6 +3637,21 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_fields=(
+            "facts_usable",
+            "schema_version",
+            "market",
+            "sample_only",
+            "expected_trade_date",
+            "reference_trade_date",
+            "evaluated_at",
+            "classification_coverage",
+            "counts",
+            "provenance",
+            "limitations",
+            "intraday",
+            "freshness_status",
+            "decision_usable",
+            "industries",
             "facts_usable_for_ranking",
             "observation_received_freshness",
             "last_trade_recency",
@@ -3610,13 +3679,15 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_limit=100,
-        title="Taiwan sector performance",
+        title="Market sector performance",
         description=(
             "Taiwan sector performance with explicit ranking basis and coverage. "
             "The v1 fallback is labeled as an OMI local stock-sample aggregate, "
             "not an official full-market sector-index ranking."
         ),
-        markets=("TW",),
+        markets=("TW", "US"),
+        market_schema_versions=(("US", "us.market.sectors.v1"),),
+        market_scopes=(("US", ("market",)),),
         frequency="intraday_or_daily",
         unit_semantics="percent_counts_and_twd",
         event_time_basis=(
@@ -4401,6 +4472,19 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "data.screening.hot_groups",
         ),
         fields=(
+            "schema_version",
+            "market",
+            "sample_only",
+            "expected_trade_date",
+            "reference_trade_date",
+            "evaluated_at",
+            "classification_coverage",
+            "counts",
+            "provenance",
+            "limitations",
+            "intraday",
+            "is_full_market",
+            "industries",
             "lane",
             "provisional",
             "price_semantics",
@@ -4442,6 +4526,20 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_fields=(
+            "schema_version",
+            "market",
+            "sample_only",
+            "expected_trade_date",
+            "reference_trade_date",
+            "evaluated_at",
+            "classification_coverage",
+            "counts",
+            "provenance",
+            "limitations",
+            "intraday",
+            "is_intraday",
+            "is_full_market",
+            "industries",
             "lane",
             "provisional",
             "price_semantics",
@@ -4480,13 +4578,15 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "warnings",
         ),
         default_limit=100,
-        title="Taiwan intraday hot groups",
+        title="Market hot groups",
         description=(
             "Intraday industry and user-curated watchlist group metrics with "
             "explicit membership provenance; group membership is never "
             "inferred by the answer model."
         ),
-        markets=("TW",),
+        markets=("TW", "US"),
+        market_schema_versions=(("US", "us.market.hot_groups.v1"),),
+        market_scopes=(("US", ("market",)),),
         parameter_schema={
             "type": "object",
             "properties": {
@@ -5405,6 +5505,9 @@ def _compatible(
     if not spec.markets:
         return True
     normalized_market = _target_market(scope_type, target_market)
+    market_scopes = dict(spec.market_scopes).get(normalized_market)
+    if market_scopes is not None and scope_type not in market_scopes:
+        return False
     return normalized_market in spec.markets
 
 
@@ -6325,8 +6428,10 @@ def capability_resolution_for(
     *,
     scope_type: str,
     capability_id: str,
+    target_market: str | None = None,
 ) -> capability_resolution_registry.CapabilityResolutionSpec | None:
-    return CAPABILITY_RESOLUTION_REGISTRY.get((scope_type, capability_id))
+    base = CAPABILITY_RESOLUTION_REGISTRY.get((scope_type, capability_id))
+    return capability_resolution_registry.market_resolution(base, target_market=target_market)
 
 
 def domains_for_selection(selection: dict[str, Any]) -> tuple[str, ...]:
@@ -6803,10 +6908,31 @@ def project_selected_data(
             continue
         raw_value = _canonical_capability_value(capability_id, raw_value)
         fields = tuple(field_map.get(capability_id) or spec.default_fields)
+        if isinstance(raw_value, dict) and raw_value.get("schema_version") == dict(spec.market_schema_versions).get("US") and raw_value.get("market") == "US":
+            fields = tuple(dict.fromkeys((*fields, "schema_version", "market", "sample_only",
+                "data_mode", "decision_usable", "coverage", "classification_coverage",
+                "expected_trade_date", "reference_trade_date", "as_of", "limitations",
+                "counts", "avg_return_pct", "median_return_pct", "provenance", "freshness_status",
+                "projection_policy", "group_count")))
         raw_limit = limit_map.get(
             capability_id,
             limit_map.get(aliases.get(capability_id, ""), spec.default_limit),
         )
+        if isinstance(raw_value, dict) and raw_value.get("schema_version") == dict(spec.market_schema_versions).get("US") and raw_value.get("market") == "US":
+            # Group limits apply to leading groups, never recursively to the
+            # reference lineage, warnings, or already-bounded member samples.
+            value = {key: raw_value[key] for key in fields if key in raw_value}
+            group_projection = dict(raw_value.get("group_projection") or {})
+            for key in ("items", "industries", "groups"):
+                if isinstance(value.get(key), list):
+                    available = group_projection.get(key, {}).get("available_count", len(value[key]))
+                    value[key] = value[key][:int(raw_limit)]
+                    group_projection[key] = {"available_count": available, "returned_count": len(value[key]),
+                                             "truncated": available > len(value[key])}
+            value["group_projection"] = group_projection
+            value["truncated"] = any(item["truncated"] for item in group_projection.values())
+            projected[capability_id] = value
+            continue
         if capability_id == "news.company_documents":
             # The integration already bounds items/bytes. Generic recursive list
             # limits would drop co-mentioned companies or truncate original titles.
@@ -7133,6 +7259,7 @@ def build_manifest(
         resolution = capability_resolution_for(
             scope_type=scope_type,
             capability_id=capability_id,
+            target_market=target.get("market") or target.get("id"),
         )
         fill_operation = resolution.operation if resolution else None
         resolution_mode = (
@@ -7181,7 +7308,7 @@ def build_manifest(
         capabilities.append(
             {
                 "capability": capability_id,
-                "schema_version": spec.schema_version,
+                "schema_version": spec.schema_version_for_market(target.get("market") or target.get("id")),
                 "domain": spec.domain,
                 "slot": spec.slot,
                 "required": capability_id in required,
@@ -7663,6 +7790,7 @@ def build_fill_plan(
         resolution_spec = capability_resolution_for(
             scope_type=scope_type,
             capability_id=capability_id,
+            target_market=target.get("market") or target.get("id"),
         )
         if spec is None or resolution_spec is None:
             unfillable_actions.append(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+from dataclasses import dataclass
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +22,37 @@ SEC_ARCHIVES_DOCUMENT_URL_TEMPLATE = (
 SEC_FORM13F_DATASETS_PAGE_URL = (
     "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
 )
+
+
+@dataclass(frozen=True)
+class SecSicClassification:
+    sic: str
+    description: str
+
+
+def sec_cik_identity(value: object) -> str | None:
+    text = str(value)
+    if not re.fullmatch(r"[0-9]{1,10}", text) or int(text) == 0:
+        return None
+    return text.zfill(10)
+
+
+def parse_sec_sic_classification(payload: dict, *, cik: str, symbol: str) -> SecSicClassification:
+    """Validate issuer and exact ticker identity; never infer GICS or aliases."""
+    if not isinstance(payload, dict):
+        raise ValueError("MALFORMED_PAYLOAD")
+    if sec_cik_identity(cik) is None or sec_cik_identity(payload.get("cik")) != sec_cik_identity(cik):
+        raise ValueError("CIK_MISMATCH")
+    tickers = payload.get("tickers")
+    if not isinstance(tickers, list) or symbol not in tickers:
+        raise ValueError("TICKER_MISMATCH")
+    sic = str(payload.get("sic", ""))
+    if not re.fullmatch(r"[0-9]{4}", sic) or sic == "0000":
+        raise ValueError("INVALID_SIC")
+    description = payload.get("sicDescription")
+    if not isinstance(description, str) or description.strip().lower() in {"", "none", "null", "n/a", "unknown", "-"}:
+        raise ValueError("MISSING_SIC_DESCRIPTION")
+    return SecSicClassification(sic=sic, description=description.strip())
 
 
 def _json_object(

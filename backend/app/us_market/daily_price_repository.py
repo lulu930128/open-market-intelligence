@@ -29,7 +29,7 @@ from app.market_data.contracts import (
     SourceLineage,
 )
 from app.us_market.market_data.descriptors import US_DAILY_CANDIDATE_DESCRIPTORS
-from app.us_market.daily_price_eligibility import us_daily_candidate_issue
+from app.us_market.daily_price_eligibility import us_daily_candidate_issue, us_daily_exact_volume
 from app.us_market.symbols import us_symbol_storage_candidates
 from app.us_market.trading_calendar import us_session_close_time
 
@@ -143,12 +143,38 @@ class USDailyBarRepository:
         descriptors=US_DAILY_CANDIDATE_DESCRIPTORS,
     ) -> None:
         self._db = db
+        self._preloaded = None
+        self._descriptors = descriptors
         self._priorities = {
             descriptor.provider_key: descriptor.priority
             for descriptor in descriptors
         }
 
+    def preload_market_pair(self, *, start_date, end_date, available_at):
+        """One bounded two-session join; never duplicate large raw payload text."""
+        from app.db.models import USStockMaster
+        from app.us_market.catalog_store import us_common_stock_universe_filters
+
+        query = (self._db.query(USDailyPrice, RawFetchResult, SourceRegistry)
+            .options(Load(RawFetchResult).load_only(RawFetchResult.id, RawFetchResult.source_id,
+                RawFetchResult.fetched_at, RawFetchResult.parser_version, RawFetchResult.content_hash, raiseload=True))
+            .join(USStockMaster, USStockMaster.symbol == USDailyPrice.symbol)
+            .outerjoin(RawFetchResult, RawFetchResult.id == USDailyPrice.raw_result_id)
+            .outerjoin(SourceRegistry, SourceRegistry.id == USDailyPrice.source_id)
+            .filter(*us_common_stock_universe_filters(), USDailyPrice.trade_date.in_((start_date, end_date)))
+            .filter(or_(RawFetchResult.id.is_(None), RawFetchResult.fetched_at <= _aware_utc(available_at)))
+            .order_by(USDailyPrice.symbol, USDailyPrice.provider, USDailyPrice.trade_date, USDailyPrice.id))
+        rows = query.limit(160_001).all()
+        if len(rows) > 160_000:
+            raise CandidateReadLimitExceeded("US market pair exceeds canonical row bound")
+        self._preloaded = {}
+        for item in rows:
+            self._preloaded.setdefault(item[0].symbol, []).append(item)
+
     def load_daily_bars(self, query: DailyBarCandidateQuery) -> DailyBarCandidateRead:
+        if self._preloaded is not None:
+            rows = self._preloaded.get(query.instrument.symbol, [])
+            return self._decode_rows(query, rows)
         instrument = query.instrument
         if instrument.market is not Market.US:
             raise ValueError("US daily repository requires market=US")
@@ -189,6 +215,10 @@ class USDailyBarRepository:
             priorities=self._priorities,
         )
 
+        return self._decode_rows(query, rows)
+
+    def _decode_rows(self, query, rows):
+        instrument = query.instrument
         bars_by_source: dict[tuple[str, str], list[BarObservation]] = {}
         storage_ids: dict[tuple[str, str], list[int]] = {}
         raw_ids: dict[tuple[str, str], list[int]] = {}
@@ -203,7 +233,8 @@ class USDailyBarRepository:
                 raw,
                 source,
                 instrument_type=instrument.instrument_type,
-                registered_providers=tuple(self._priorities),
+                registered_providers=tuple(d.provider_key for d in self._descriptors
+                                           if instrument.instrument_type in d.instrument_types),
             )
             if issue is not None:
                 rejections.append(
@@ -242,7 +273,7 @@ class USDailyBarRepository:
                 volume = None
                 if instrument.instrument_type is not InstrumentType.INDEX:
                     volume = Quantity(
-                        value=Decimal(row.trade_volume),
+                        value=us_daily_exact_volume(row),
                         unit=QuantityUnit.SHARE,
                     )
                 bar = BarObservation(

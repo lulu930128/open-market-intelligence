@@ -20,6 +20,8 @@ from app.ai import ask_policy
 from app.ai.market_date_request import parse_market_trade_date, requested_us_trade_date, requests_us_daily_close
 from app.ai.schemas import AiAskRequest
 from app.us_market.market_indices import read_us_market_indices
+from app.us_market.sector_distribution import read_us_sector_distribution
+from app.ai.market_context.us_distribution import US_DISTRIBUTION_CAPABILITIES, merge_us_distribution_context
 
 
 _request_target_id = scope_resolution._request_target_id
@@ -405,15 +407,29 @@ def _read_market_context(
     symbol, label = reference
     if market == "US":
         evaluated_at = datetime.now(timezone.utc)
-        result = agentic_tools.read_us_stock_context(
-            db=db,
-            symbol=symbol,
-            tool_runs=tool_runs,
-            market_data_params=_us_market_data_params(
-                payload,
-                policy=policy,
-            ),
+        params = _us_market_data_params(payload, policy=policy)
+        distribution_requested = {
+            capability for capability in US_DISTRIBUTION_CAPABILITIES
+            if _requests_capability(payload, capability_id=capability, policy=policy)
+        }
+        selected = set(params.get("requested_capabilities") or [])
+        distribution_only = bool(distribution_requested) and not (
+            selected - US_DISTRIBUTION_CAPABILITIES - {"target.identity", "data.freshness"}
         )
+        result = {} if distribution_only else agentic_tools.read_us_stock_context(
+            db=db, symbol=symbol, tool_runs=tool_runs, market_data_params=params,
+        )
+        if distribution_requested:
+            result = merge_us_distribution_context(
+                result, read_us_sector_distribution(db, now=evaluated_at),
+                distribution_requested, params.get("capability_parameters"),
+                limits=params.get("capability_limits"),
+            )
+            if distribution_only:
+                result["target"] = {"type": "market", "id": "US", "market": "US", "label": "US Market"}
+                result["scope"] = {"type": "market", "market": "US"}
+                result["data"]["compact"]["target"] = result["target"]
+                return "omi.read_market_overview", result
         if _requests_capability(
             payload,
             capability_id="market.indices",
@@ -475,6 +491,13 @@ def _build_market_context_brief(
     policy: dict[str, Any] | None,
 ) -> tuple[str, dict[str, Any]]:
     market = _requested_market(payload)
+    if market == "US" and any(
+        _requests_capability(payload, capability_id=capability, policy=policy)
+        for capability in US_DISTRIBUTION_CAPABILITIES
+    ):
+        # The existing decision pipeline composes the answer from the same
+        # market-owned evidence; a representative stock report is not breadth.
+        return _read_market_context(db, payload, tool_runs=tool_runs, policy=policy)
     if market == "TW":
         return "omi.generate_market_brief", reports.build_market_brief(
             db=db,

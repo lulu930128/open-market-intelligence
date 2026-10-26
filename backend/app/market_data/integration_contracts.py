@@ -381,7 +381,7 @@ class RefreshRequirementV1(CanonicalModel):
     max_provider_attempts: int = Field(ge=1, le=8)
     max_external_calls: int = Field(ge=1, le=20)
     timeout_seconds: int = Field(ge=1, le=120)
-    max_symbols: int = Field(ge=1, le=5_000)
+    max_symbols: int = Field(ge=1, le=20_000)
     max_range_days: int = Field(ge=1, le=3650)
     postcondition: str = Field(min_length=1, max_length=256)
 
@@ -508,10 +508,10 @@ class PersistenceSummary(CanonicalModel):
     attempted: bool = False
     committed: bool = False
     receipts_written: int = Field(default=0, ge=0, le=20)
-    observations_written: int = Field(default=0, ge=0, le=5000)
-    observations_inserted: int = Field(default=0, ge=0, le=5000)
-    observations_updated: int = Field(default=0, ge=0, le=5000)
-    observations_unchanged: int = Field(default=0, ge=0, le=5000)
+    observations_written: int = Field(default=0, ge=0, le=20_000)
+    observations_inserted: int = Field(default=0, ge=0, le=20_000)
+    observations_updated: int = Field(default=0, ge=0, le=20_000)
+    observations_unchanged: int = Field(default=0, ge=0, le=20_000)
     raw_result_ids: tuple[int, ...] = Field(default=(), max_length=20)
     limitations: tuple[str, ...] = ()
 

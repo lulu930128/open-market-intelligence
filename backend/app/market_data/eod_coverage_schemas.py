@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EODCoverageCheckpointRead(BaseModel):
@@ -52,8 +52,15 @@ class EODCoverageListRead(BaseModel):
 
 
 class EODCoverageReconcileRequest(BaseModel):
+    @model_validator(mode="after")
+    def validate_grouped_scope(self):
+        if self.grouped_daily and (self.market != "US" or not self.repair):
+            raise ValueError("grouped daily requires US repair command")
+        return self
+
     market: Literal["TW", "US"]
     repair: bool = True
+    grouped_daily: bool = False
     expected_trade_date: date | None = None
     max_symbols: int = Field(default=250, ge=1, le=500)
     max_runtime_seconds: int = Field(default=600, ge=30, le=1800)

@@ -49,6 +49,7 @@ QUEUED_TASKS = frozenset({
     ('app.jobs.backfill_tasks', 'run_us_daily_price_quality_repair_job'),
     ('app.jobs.backfill_tasks', 'run_us_watchlist_resource_refresh_job'),
     ('app.jobs.backfill_tasks', 'run_us_sec_form4_sync_job'),
+    ('app.jobs.backfill_tasks', 'run_us_sec_sic_sync_job'),
     ('app.jobs.backfill_tasks', 'run_us_sec_13f_quarter_sync_job'),
     ('app.jobs.backfill_tasks', 'run_us_sec_13f_history_sync_job'),
     ('app.jobs.backfill_tasks', 'run_us_sec_13f_mapping_sync_job'),

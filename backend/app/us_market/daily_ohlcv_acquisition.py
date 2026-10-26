@@ -231,6 +231,92 @@ def _completed_daily_requirement_satisfied(
 
 
 class USDailyOhlcvAcquisitionExecutor:
+    def acquire_grouped_daily(self, requirement, plan, *, instruments):
+        """Dataset-scoped port using the same receipts, health and canonical bars."""
+        from app.us_market.market_data.descriptors import MASSIVE_GROUPED_DAILY_RESOURCE_ID
+        from app.us_market.providers.massive import fetch_massive_grouped_daily_payload, require_grouped_daily_available
+        from app.us_market.providers.canonical import canonical_massive_grouped_daily_payload
+
+        if plan.requirement != requirement or len(plan.routes) != 1:
+            raise ValueError("grouped daily requires exactly one planned route")
+        route = plan.routes[0]
+        if (route.resource_id != MASSIVE_GROUPED_DAILY_RESOURCE_ID or not route.fetch_allowed
+                or route.max_external_calls != 1 or requirement.from_date != requirement.to_date
+                or len(instruments) > route.max_symbols):
+            raise ValueError("invalid grouped daily acquisition bounds")
+        checked = self._clock()
+        called = False
+        receipts = ()
+        diagnostics = {"status": "blocked", "eligible_count": len(instruments)}
+        try:
+            require_grouped_daily_available(trade_date=requirement.to_date, now=checked)
+            injected = self._fetchers.get(route.resource_id)
+            if injected is None and not str(self._settings.massive_api_key or "").strip():
+                raise USProviderDataError(provider="massive", code="MASSIVE_API_KEY_NOT_CONFIGURED",
+                                          category="configuration", message="Massive key is not configured")
+            called = True
+            if injected:
+                fetched = injected(route, requirement)
+            else:
+                payload, url = fetch_massive_grouped_daily_payload(
+                    trade_date=requirement.to_date, now=checked, api_key=self._settings.massive_api_key,
+                    timeout_seconds=route.timeout_seconds,
+                )
+                fetched = USProviderPayload(payload, url)
+            fetched_at = self._clock()
+            # Decimal JSON tokens are retained as exact decimal strings in the
+            # normalized receipt; canonical shares never pass through float/int.
+            raw_text = json.dumps(fetched.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            digest = hashlib.sha256(raw_text.encode()).hexdigest()
+            receipt = RawFetchReceiptV1(provider="massive", source="massive.stocks.grouped.1d",
+                resource_id=route.resource_id, fetched_at=fetched_at, method="GET", url=fetched.url,
+                status_code=200, content_type="application/json", content_hash=digest,
+                raw_text=raw_text, parser_version="massive.stocks.grouped.v2")
+            receipts = (receipt,)
+            batch = canonical_massive_grouped_daily_payload(
+                payload=fetched.payload, instruments=instruments, trade_date=requirement.to_date, fetched_at=fetched_at)
+            diagnostics = batch.diagnostics
+            complete = diagnostics["status"] == "complete"
+            limitations = () if complete else ("MASSIVE_GROUPED_PARTIAL",)
+            bars = tuple(bar.model_copy(update={"lineage": bar.lineage.model_copy(update={"content_hash": digest})})
+                         for bar in batch.bars)
+            receipts = (receipt.model_copy(update={"error_message": None if complete else json.dumps(diagnostics, sort_keys=True)}),)
+            health = _health(route, checked_at=fetched_at, connection=ConnectionStatus.CONNECTED,
+                             operational=OperationalStatus.HEALTHY if complete else OperationalStatus.DEGRADED,
+                             freshness=EvidenceFreshness.FRESH if bars else EvidenceFreshness.MISSING,
+                             detail_code="MASSIVE_GROUPED_COMPLETE" if complete else "MASSIVE_GROUPED_PARTIAL")
+            status = AcquisitionStatus.COMPLETED if complete else AcquisitionStatus.PARTIAL
+        except Exception as exc:
+            health, code = _failure_health(route, checked_at=checked, error=exc)
+            if isinstance(exc, ValueError):
+                code = "MASSIVE_GROUPED_INVALID_PAYLOAD"
+                health = health.model_copy(update={"detail_code": code})
+            diagnostics = {**diagnostics, "reason": code}
+            limitations, bars, status = (code,), (), AcquisitionStatus.FAILED if called else AcquisitionStatus.NOT_ATTEMPTED
+            if receipts:
+                receipts = tuple(r.model_copy(update={"error_message": code}) for r in receipts)
+            elif called:
+                failure = provider_http_failure(exc)
+                status_code = failure.http_status_code if failure else {
+                    "entitlement": 403, "auth": 401, "rate_limit": 429,
+                }.get(getattr(exc, "category", ""))
+                # A normalized failure receipt deliberately omits response bodies,
+                # exception text and request headers, which may contain credentials.
+                raw_text = json.dumps({"kind": "normalized_failure", "trade_date": requirement.to_date.isoformat(),
+                                       "code": code, "checked_at": checked.isoformat()}, sort_keys=True)
+                receipts = (RawFetchReceiptV1(provider="massive", source="massive.stocks.grouped.1d",
+                    resource_id=route.resource_id, fetched_at=checked, method="GET",
+                    url=f"https://api.massive.com/v2/aggs/grouped/locale/us/market/stocks/{requirement.to_date.isoformat()}",
+                    status_code=status_code, content_type="application/json",
+                    content_hash=hashlib.sha256(raw_text.encode()).hexdigest(), raw_text=raw_text,
+                    parser_version="massive.stocks.grouped.v2", error_message=code),)
+        return BarAcquisitionResult(
+            summary=AcquisitionSummary(attempted=called, status=status,
+                providers_attempted=("massive",) if called else (),
+                resource_attempts=(AcquisitionResourceAttempt(provider="massive", resource_id=route.resource_id),) if called else (),
+                external_calls=int(called), subscriptions_created=0, elapsed_ms=0, limitations=limitations),
+            observations=bars, receipts=receipts, provider_health=(health,)), diagnostics
+
     def __init__(
         self,
         *,

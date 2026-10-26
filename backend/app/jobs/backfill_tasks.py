@@ -1048,6 +1048,22 @@ def run_us_watchlist_resource_refresh_job(
     run_tracked_job(job_id, worker)
 
 
+def run_us_sec_sic_sync_job(job_id: int, symbols: list[str] | None = None, coverage_request: dict | None = None) -> None:
+    from app.us_market.classification_sync import USSicSyncRequest, sync_us_sic_classification
+
+    def worker(db: Session, progress: ProgressCallback):
+        if coverage_request is not None:
+            from app.us_market.classification_sync import USSicCoverageSyncRequest, sync_us_sic_coverage
+            return sync_us_sic_coverage(db, request=USSicCoverageSyncRequest.model_validate(coverage_request),
+                                       progress_callback=progress)
+        request = USSicSyncRequest(symbols=symbols)
+        progress(0, len(symbols), "Refreshing bounded SEC SIC classifications.")
+        result = sync_us_sic_classification(db, request=request, progress_callback=progress)
+        return result.model_dump(mode="json")
+
+    run_tracked_job(job_id, worker)
+
+
 def run_us_sec_form4_sync_job(
     job_id: int,
     scope: str,

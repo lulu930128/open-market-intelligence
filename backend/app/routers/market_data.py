@@ -39,6 +39,7 @@ def reconcile_eod_coverage(payload: EODCoverageReconcileRequest, db: Session = D
         db,
         market=payload.market,
         repair=payload.repair,
+        grouped_daily=payload.grouped_daily,
         expected_trade_date=payload.expected_trade_date,
         max_symbols=payload.max_symbols,
         max_runtime_seconds=payload.max_runtime_seconds,

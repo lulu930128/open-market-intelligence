@@ -1,5 +1,78 @@
 # OMI Backend Architecture
 
+## 美股 SIC 分類補齊與 EOD coverage 讀取
+
+`POST /api/us-market/stocks/sync-sec-sic` 接受 1–16 個明確股票代號，以既有
+JobService 回傳 202／JobRun。排序去重的 scope 沿用 active-job dedupe；沒有自動排程。
+Task 使用既有 SEC Submissions adapter、Request Policy 與 `USStockMaster.cik`，
+驗證 CIK、exact ticker、四位 SIC 與非空描述；不合格股票或來源失敗逐項回報。
+每檔至多兩次 HTTP attempts，整批至多 32 次，未開始的 queued task 才沿既有
+resumption protocol 恢復；進行中的 IO 沒有新增可重播 checkpoint。
+
+分類資料由既有 Company Profile Writer 一次提交，失敗 rollback；Job progress
+由原 JobService 保存，不能把 progress commit 當分類寫入完成。Profile provider
+為 `sec_edgar_sic`，保存 source URL、payload hash 與 fetched time；SIC major group
+呈現為 `SIC nnxx`，industry 為 `SIC nnnn · description`，不是 GICS mapping。
+有效 AlphaVantage profile 優先，其他有效 provider profile 次之，SEC SIC 作 fallback；
+保留原始 provider rows，不跨來源拼接 sector／industry。分類有效日期仍 unknown。
+Outward 分組保留 provider 與 taxonomy，不合併不同 taxonomy，且不暴露 raw payload hash。
+
+EOD coverage 先以原 canonical eligibility 取得指定日的 usable symbols；這些股票的
+latest eligible date 已確定等於指定日，因此歷史 MAX query 只掃剩餘股票。
+無 current symbols 時沿用原 universe scope，單一 IN predicate；沒有新 cache、index
+或 migration。價格 selection、lineage、交易日與品質 gate 不變。收益取決於 current
+coverage。G2 producer 已移除 alphabetical 64-symbol 截斷，以兩個明確交易日批次
+載入候選，逐 identity 重用原 CandidateReader／Gateway selection；不逐股查 DB。
+全 universe 的價格漲跌與 unknown 分區不以是否已有分類作篩選。Sector／industry
+保留 source taxonomy；相對強弱是群組等權均值減去該 snapshot 全部可比較股票的
+等權均值，並附 benchmark count。Raw price return 不等同 total return；沒有可驗證
+成交額時維持 null，VWAP × volume 不冒充來源回報成交額，更不是資金淨流入。
+
+G2 snapshot 由原 EOD Job 經 `USFullMarketEodLifecycle.publish_distribution` 交給
+原 `persist_eod_coverage(detail_extra=...)` writer，存在同一 coverage checkpoint。
+一般 reconcile 只在同一 universe hash／expected date、完整 coverage detail 與 member
+qualification 均相符時保留快照；任何上述變更使快照失效，由原 EOD owner 重新物化。
+`GET /api/us-market/sectors`、AI `market.sectors`／`market.hot_groups`／`market.breadth`
+共用此 cache-only snapshot；GET 不掃全市場、不產生 snapshot、不 refresh。
+沒有 snapshot 時 universe／分類 counts 是 unknown；舊 snapshot 保留原價格／比較日期，
+另標當前 expected session 與 stale。UI 只在 mount／manual read 請求，不跟隨秒級 quote polling。
+`data_mode=eod_market_snapshot` 與 `sample_only=false` 表示採樣截斷已移除，不表示資料完整；
+價格、可比較價格、分類 coverage 及 `decision_usable=false` 仍分開保留。
+`omi.decision.v4` 的 US projection 先依 selection limits 裁切，每個 group list 最多
+5 組且至多 5KB、每組最多 1 個 member；保留完整雙日 price lineage。可因 bytes bound
+省略 member 或減少 groups，但不裁切全市場 aggregate counts／coverage／quality。
+`group_projection` 公開原始 available、returned、truncated；`projection_policy` 說明界限。
+這些是 materialized snapshot 的展示界限，不是計算 universe 的採樣，也不重新分組。
+
+`POST /api/us-market/stocks/sync-sec-sic-coverage` 延伸同一 SIC Job／Profile Writer。
+每頁最多 128 個待分類股票，以既有最多 16 檔 command 分批提交，受時間預算限制。
+Cursor 綁定 StockMaster symbol／CIK hash；成功 profile 可跳過，來源失敗的 batch 不推進
+cursor，回傳 retry symbols。Missing CIK／無效 SIC 保留原因與 coverage 缺口；scan complete
+不等同 classification complete。既有 SEC company mapping 同步仍是 CIK owner；本路徑不另建 mapping。
+
+## 美股 grouped EOD command
+
+既有 `/api/market-data/eod-coverage/reconcile` 加入明示 `grouped_daily=true`，只允許 US
+repair command，沿用 EOD JobService／target dedupe；預設排程不自動啟用新 provider。
+每次只有一個 exact trade date、一次 Massive grouped request，無逐股 fallback 或 pagination。
+日期、Basic 歷史範圍及 NY 次日午夜 gate 在 IO 前檢查。Shared refresh planner 使用
+dataset-scoped descriptor；US daily acquisition 產生 canonical BarObservation／RawFetchReceipt，
+原 daily transaction 批次 upsert。單日 universe 上限 20,000 是操作界限，不是市場 inventory。
+
+請求固定 `adjusted=false`，回應必須明示 `adjusted is False`，否則保留失敗 receipt 且不寫 bars。
+精確 ET 日期、OHLC、非負 shares、duplicate、missing、count mismatch 與 universe 外股票
+分開計數；403、429、auth、configuration、partial 不隱藏。Grouped Job 保留 30 分鐘 cooldown，
+同交易日曾有外部 attempt 或 unknown outcome 時要求核對後再處理，不能自動重播。
+Commit acknowledgement 不明先用同一 receipt hash／完整 observations 核對，不重新 fetch。
+
+Alembic 0093 在原 `us_daily_price` 增加 exact decimal shares 字串欄位，原整數欄位只保存
+可精確表示的整數；fractional shares 不截斷，原有價格／來源／receipt identity 不變。
+Grouped HTTP JSON 使用 Decimal 解析小數；normalized raw receipt 以精確十進位字串
+保留這些 token，canonical volume 與 persistence 不經 binary float。
+正式 DB 必須先受控備份並完成獨立 migration 驗收，再交 Reviewer 走正式 restart。
+Launcher-owned startup 只檢查 schema at head，不執行 migration；restart-only 不能採用 0093。
+Source fixtures 不證明 entitlement、正式 universe coverage、Runtime 或 Live 已驗收。
+
 ## Taiwan 漸進式 workspace reads
 
 `market/tw_workspace.py` 與 `market/tw_market_dashboard.py` 提供 backend-owned、cache-only

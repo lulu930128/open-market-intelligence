@@ -1333,6 +1333,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -1788,6 +1790,8 @@
           "us_stock": "us.refresh_quote"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -1911,6 +1915,8 @@
         ],
         "fill_operations": {},
         "frequency": "intraday",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -2025,6 +2031,8 @@
         ],
         "fill_operations": {},
         "frequency": "intraday",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -2146,6 +2154,8 @@
         ],
         "fill_operations": {},
         "frequency": "session_boundary",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -2212,6 +2222,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -2609,6 +2621,8 @@
           "us_stock": "us.refresh_intraday_bars"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -2802,6 +2816,8 @@
           "us_stock": "us.refresh_daily_price"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -2991,6 +3007,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW",
           "US"
@@ -3100,6 +3118,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW",
           "US"
@@ -3167,6 +3187,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3237,6 +3259,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3295,6 +3319,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3391,6 +3417,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3468,6 +3496,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3542,6 +3572,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3615,6 +3647,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3718,6 +3752,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -3794,6 +3830,8 @@
           "stock": "tw.refresh_institutional"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -3866,6 +3904,8 @@
           "stock": "tw.refresh_margin"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -3940,6 +3980,8 @@
           "stock": "tw.refresh_broker_branch"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -3988,6 +4030,8 @@
           "stock": "tw.refresh_shareholding"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4044,6 +4088,8 @@
           "us_stock": "us.refresh_insider_transactions"
         },
         "frequency": "event",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "US"
         ],
@@ -4116,6 +4162,8 @@
           "stock": "tw.refresh_revenue"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4198,6 +4246,8 @@
           "us_stock": "us.refresh_sec_facts"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4291,6 +4341,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4369,6 +4421,8 @@
         ],
         "fill_operations": {},
         "frequency": "decision_snapshot",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -4449,6 +4503,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -4539,6 +4595,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4652,6 +4710,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4749,6 +4809,8 @@
         ],
         "fill_operations": {},
         "frequency": "atlas_scheduler_owned",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4839,6 +4901,8 @@
         ],
         "fill_operations": {},
         "frequency": "atlas_scheduler_owned",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4893,6 +4957,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -4919,6 +4985,22 @@
         "capability_id": "market.breadth",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable",
+          "schema_version",
+          "sample_only",
+          "expected_trade_date",
+          "reference_trade_date",
+          "evaluated_at",
+          "classification_coverage",
+          "counts",
+          "provenance",
+          "limitations",
+          "intraday",
+          "freshness_status",
+          "is_intraday",
+          "data_mode",
+          "industries",
+          "execution_grade_usable",
           "as_of",
           "trade_date",
           "status",
@@ -5006,6 +5088,22 @@
         "domain": "breadth",
         "event_time_basis": "capability_defined",
         "fields": [
+          "facts_usable",
+          "schema_version",
+          "sample_only",
+          "expected_trade_date",
+          "reference_trade_date",
+          "evaluated_at",
+          "classification_coverage",
+          "counts",
+          "provenance",
+          "limitations",
+          "intraday",
+          "freshness_status",
+          "is_intraday",
+          "data_mode",
+          "industries",
+          "execution_grade_usable",
           "as_of",
           "trade_date",
           "status",
@@ -5103,8 +5201,23 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [
+          [
+            "US",
+            "us.market.breadth.v1"
+          ]
+        ],
+        "market_scopes": [
+          [
+            "US",
+            [
+              "market"
+            ]
+          ]
+        ],
         "markets": [
-          "TW"
+          "TW",
+          "US"
         ],
         "parameter_schema": {
           "additionalProperties": false,
@@ -5194,6 +5307,8 @@
         ],
         "fill_operations": {},
         "frequency": "intraday",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW",
           "US"
@@ -5262,6 +5377,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -5358,6 +5475,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -5536,6 +5655,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -5629,6 +5750,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -5702,6 +5825,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -5731,6 +5856,21 @@
         "capability_id": "market.sectors",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "facts_usable",
+          "schema_version",
+          "market",
+          "sample_only",
+          "expected_trade_date",
+          "reference_trade_date",
+          "evaluated_at",
+          "classification_coverage",
+          "counts",
+          "provenance",
+          "limitations",
+          "intraday",
+          "freshness_status",
+          "decision_usable",
+          "industries",
           "facts_usable_for_ranking",
           "observation_received_freshness",
           "last_trade_recency",
@@ -5763,6 +5903,21 @@
         "domain": "sectors",
         "event_time_basis": "taiwan_provider_event_time_or_completed_trade_date",
         "fields": [
+          "facts_usable",
+          "schema_version",
+          "market",
+          "sample_only",
+          "expected_trade_date",
+          "reference_trade_date",
+          "evaluated_at",
+          "classification_coverage",
+          "counts",
+          "provenance",
+          "limitations",
+          "intraday",
+          "freshness_status",
+          "decision_usable",
+          "industries",
           "facts_usable_for_ranking",
           "observation_received_freshness",
           "last_trade_recency",
@@ -5793,8 +5948,23 @@
         ],
         "fill_operations": {},
         "frequency": "intraday_or_daily",
+        "market_schema_versions": [
+          [
+            "US",
+            "us.market.sectors.v1"
+          ]
+        ],
+        "market_scopes": [
+          [
+            "US",
+            [
+              "market"
+            ]
+          ]
+        ],
         "markets": [
-          "TW"
+          "TW",
+          "US"
         ],
         "parameter_schema": {
           "additionalProperties": false,
@@ -5814,7 +5984,7 @@
         ],
         "side_effect_policy": "scheduler_owned_cache_read_or_daily_fallback",
         "slot": "market_sectors",
-        "title": "Taiwan sector performance",
+        "title": "Market sector performance",
         "unit_semantics": "percent_counts_and_twd",
         "writes_cache": false
       },
@@ -5896,6 +6066,8 @@
         ],
         "fill_operations": {},
         "frequency": "intraday",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -5985,6 +6157,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6051,6 +6225,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6140,6 +6316,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6196,6 +6374,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -6259,6 +6439,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6337,6 +6519,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6523,6 +6707,8 @@
         ],
         "fill_operations": {},
         "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6605,6 +6791,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6790,6 +6978,8 @@
         ],
         "fill_operations": {},
         "frequency": "rolling_minute_state",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -6889,6 +7079,20 @@
         "capability_id": "market.hot_groups",
         "compatibility_schema_versions": [],
         "default_fields": [
+          "schema_version",
+          "market",
+          "sample_only",
+          "expected_trade_date",
+          "reference_trade_date",
+          "evaluated_at",
+          "classification_coverage",
+          "counts",
+          "provenance",
+          "limitations",
+          "intraday",
+          "is_intraday",
+          "is_full_market",
+          "industries",
           "lane",
           "provisional",
           "price_semantics",
@@ -6932,6 +7136,19 @@
         "domain": "screening",
         "event_time_basis": "taiwan_provider_event_time",
         "fields": [
+          "schema_version",
+          "market",
+          "sample_only",
+          "expected_trade_date",
+          "reference_trade_date",
+          "evaluated_at",
+          "classification_coverage",
+          "counts",
+          "provenance",
+          "limitations",
+          "intraday",
+          "is_full_market",
+          "industries",
           "lane",
           "provisional",
           "price_semantics",
@@ -6974,8 +7191,23 @@
         ],
         "fill_operations": {},
         "frequency": "rolling_minute_state",
+        "market_schema_versions": [
+          [
+            "US",
+            "us.market.hot_groups.v1"
+          ]
+        ],
+        "market_scopes": [
+          [
+            "US",
+            [
+              "market"
+            ]
+          ]
+        ],
         "markets": [
-          "TW"
+          "TW",
+          "US"
         ],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7010,7 +7242,7 @@
         ],
         "side_effect_policy": "scheduler_owned_cache_read_only",
         "slot": "market_hot_groups",
-        "title": "Taiwan intraday hot groups",
+        "title": "Market hot groups",
         "unit_semantics": "group_returns_counts_twd_and_ratios",
         "writes_cache": false
       },
@@ -7030,6 +7262,7 @@
           "available_cumulative_trade_value",
           "trade_value_available",
           "trade_value_complete",
+          "trade_value_qualification",
           "trade_value_coverage_status",
           "trade_value_authority_status",
           "trade_value_status",
@@ -7071,6 +7304,7 @@
           "available_cumulative_trade_value",
           "trade_value_available",
           "trade_value_complete",
+          "trade_value_qualification",
           "trade_value_status",
           "included_markets",
           "missing_markets",
@@ -7099,6 +7333,8 @@
         ],
         "fill_operations": {},
         "frequency": "intraday",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [
           "TW"
         ],
@@ -7144,6 +7380,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7204,6 +7442,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7279,6 +7519,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7358,6 +7600,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7420,6 +7664,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7472,6 +7718,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7540,6 +7788,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7584,6 +7834,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7631,6 +7883,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7679,6 +7933,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7733,6 +7989,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7805,6 +8063,8 @@
           "crypto_asset": "crypto.refresh_order_book"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7877,6 +8137,8 @@
           "crypto_asset": "crypto.refresh_derivatives"
         },
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7935,6 +8197,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -7989,6 +8253,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -8053,6 +8319,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -8123,6 +8391,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -8179,6 +8449,8 @@
         ],
         "fill_operations": {},
         "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
         "markets": [],
         "parameter_schema": {
           "additionalProperties": false,
@@ -8202,10 +8474,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "e557cd226ebf0bb3a57a99a25647ebc8f49010b1aff27bc3c151abee27c19dfc",
+    "x-omi-capability-registry-digest": "1b651b5cdbbd2fa820f5f796aacb891acd252ac14965c918290c81510159255a",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "e557cd226ebf0bb3a57a99a25647ebc8f49010b1aff27bc3c151abee27c19dfc",
+    "x-omi-public-contract-digest": "1b651b5cdbbd2fa820f5f796aacb891acd252ac14965c918290c81510159255a",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -8548,7 +8820,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "e557cd226ebf0bb3a57a99a25647ebc8f49010b1aff27bc3c151abee27c19dfc",
+  "digest": "1b651b5cdbbd2fa820f5f796aacb891acd252ac14965c918290c81510159255a",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

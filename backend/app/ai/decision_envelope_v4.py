@@ -930,6 +930,7 @@ def _compact_manifest(manifest: dict[str, Any]) -> None:
             key: deepcopy(item[key])
             for key in (
                 "capability",
+                "schema_version",
                 "required",
                 "status",
                 "status_class",
@@ -3904,7 +3905,7 @@ def _rejected_envelope(
         "capability_schema_versions": {
             capability_id: capability_contract.CAPABILITIES[
                 capability_id
-            ].schema_version
+            ].schema_version_for_market(_dict(canonical.get("target")).get("market"))
             for capability_id in (
                 *selection.get("required", []),
                 *selection.get("optional", []),
@@ -4077,7 +4078,7 @@ def build(
     capability_schema_versions = {
         capability_id: capability_contract.CAPABILITIES[
             capability_id
-        ].schema_version
+        ].schema_version_for_market(_dict(canonical.get("target")).get("market"))
         for capability_id in (
             *selection.get("required", []),
             *selection.get("optional", []),

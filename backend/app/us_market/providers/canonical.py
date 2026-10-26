@@ -35,6 +35,88 @@ from app.us_market.volume_semantics import normalize_yahoo_intraday_volume
 
 
 US_EASTERN = ZoneInfo("America/New_York")
+
+
+@dataclass(frozen=True)
+class MassiveGroupedDailyBatch:
+    bars: tuple[BarObservation, ...]
+    diagnostics: dict
+
+
+def canonical_massive_grouped_daily_payload(
+    *, payload: Mapping[str, Any], instruments: Mapping[str, InstrumentKey],
+    trade_date: date, fetched_at: datetime,
+) -> MassiveGroupedDailyBatch:
+    """Exact-date, raw-only conversion; universe admission belongs to StockMaster."""
+    from collections import Counter
+    from app.us_market.providers.massive import require_grouped_daily_available
+
+    require_grouped_daily_available(trade_date=trade_date, now=fetched_at)
+    if payload.get("adjusted") is not False:
+        raise ValueError("MASSIVE_GROUPED_RAW_BASIS_REQUIRED")
+    if payload.get("status") != "OK":
+        raise ValueError("MASSIVE_GROUPED_STATUS_NOT_OK")
+    results = payload.get("results")
+    if not isinstance(results, list) or len(results) > 20_000:
+        raise ValueError("MASSIVE_GROUPED_RESULTS_INVALID_OR_OVERSIZE")
+    symbols = Counter(row.get("T") for row in results if isinstance(row, dict) and isinstance(row.get("T"), str))
+    rejected = Counter()
+    bars = []
+    for row in results:
+        if not isinstance(row, dict) or not isinstance(row.get("T"), str):
+            rejected["MALFORMED_ROW"] += 1
+            continue
+        symbol = row["T"]
+        instrument = instruments.get(symbol)
+        if instrument is None:
+            rejected["OUTSIDE_ELIGIBLE_STOCKMASTER_UNIVERSE"] += 1
+            continue
+        if symbols[symbol] != 1:
+            rejected["DUPLICATE_SYMBOL"] += 1
+            continue
+        if instrument.instrument_type is not InstrumentType.STOCK or instrument.market is not Market.US:
+            raise ValueError("MASSIVE_GROUPED_REQUIRES_ADMITTED_US_STOCKS")
+        try:
+            if isinstance(row.get("t"), bool):
+                raise ValueError("invalid timestamp")
+            event_at = _massive_unix_datetime(row.get("t"))
+            if event_at.astimezone(US_EASTERN).date() != trade_date:
+                raise ValueError("wrong ET session")
+        except (ValueError, TypeError, OverflowError):
+            rejected["INVALID_ET_SESSION_TIMESTAMP"] += 1
+            continue
+        prices = _positive_ohlc(*(row.get(key) for key in ("o", "h", "l", "c")))
+        volume = _decimal(row.get("v"))
+        if prices is None or volume is None or volume < 0 or isinstance(row.get("v"), bool):
+            rejected["INVALID_OHLC_OR_SHARES"] += 1
+            continue
+        if len(format(volume, "f")) > 64:
+            rejected["SHARES_PRECISION_STORAGE_BOUND"] += 1
+            continue
+        bars.append(BarObservation(
+            instrument=instrument,
+            lineage=_lineage(provider="massive", source="massive.stocks.grouped.1d",
+                             event_at=event_at, fetched_at=fetched_at,
+                             raw_contract_version="massive.stocks.grouped.v2"),
+            interval="1d", start_at=datetime.combine(trade_date, time(9, 30), tzinfo=US_EASTERN),
+            end_at=datetime.combine(trade_date, us_session_close_time(trade_date), tzinfo=US_EASTERN),
+            open_price=prices[0], high_price=prices[1], low_price=prices[2], close_price=prices[3],
+            volume=Quantity(value=volume, unit=QuantityUnit.SHARE), volume_status="observed",
+            price_basis="raw", finalization=BarFinalization.FINAL,
+            limitations=("RAW_PRICE_RETURN_CORPORATE_ACTION_UNVERIFIED",),
+        ))
+    admitted = {bar.instrument.symbol for bar in bars}
+    count_matches = type(payload.get("resultsCount")) is int and payload["resultsCount"] == len(results)
+    incomplete = bool(set(instruments) - admitted) or not count_matches or bool(payload.get("next_url"))
+    incomplete = incomplete or any(k != "OUTSIDE_ELIGIBLE_STOCKMASTER_UNIVERSE" for k in rejected)
+    return MassiveGroupedDailyBatch(tuple(bars), {
+        "status": "partial" if incomplete or not instruments else "complete",
+        "trade_date": trade_date.isoformat(), "price_basis": "raw", "volume_unit": "shares",
+        "eligible_count": len(instruments), "received_count": len(results), "accepted_count": len(bars),
+        "missing_count": len(set(instruments) - admitted), "rejected_counts": dict(rejected),
+        "provider_count_matches": count_matches, "pagination_unfollowed": bool(payload.get("next_url")),
+        "turnover_status": "unavailable", "turnover_reason": "VWAP_TIMES_VOLUME_IS_NOT_REPORTED_TURNOVER",
+    })
 _INTERVAL_DURATION = {
     "1m": timedelta(minutes=1),
     "1d": timedelta(days=1),

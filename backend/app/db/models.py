@@ -4719,6 +4719,9 @@ class USDailyPrice(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    # Exact canonical shares; legacy integer remains null for fractional values.
+    trade_volume_decimal: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     source_id: Mapped[int | None] = mapped_column(
         ForeignKey("source_registry.id"), nullable=True, index=True
     )

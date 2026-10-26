@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.us_market.classification_sync import USSicSyncRequest, USSicCoverageSyncRequest
 from app.jobs import backfill_tasks
 from app.jobs.job_types import (
     US_INDEX_INTRADAY_VOLUME_REPAIR_JOB_TYPE,
@@ -15,6 +16,7 @@ from app.jobs.job_types import (
     US_SEC_13F_MAPPING_SYNC_JOB_TYPE,
     US_SEC_13F_QUARTER_SYNC_JOB_TYPE,
     US_SEC_FORM4_SYNC_JOB_TYPE,
+    US_SEC_SIC_SYNC_JOB_TYPE,
 )
 from app.jobs.schemas import JobRunRead
 from app.routers.market_family_helpers import (
@@ -50,6 +52,7 @@ from app.us_market.market_indices import (
     USMarketIndicesSnapshot,
     read_us_market_indices,
 )
+from app.us_market.sector_distribution import USSectorDistributionRead, read_us_sector_distribution
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
@@ -871,6 +874,26 @@ def sync_us_stock_sec_company_data(db: Session = Depends(get_db)):
         raise _fetch_error(exc) from exc
 
 
+@router.post("/stocks/sync-sec-sic-coverage", response_model=JobRunRead, status_code=202)
+def sync_us_stock_sic_coverage(request: USSicCoverageSyncRequest, db: Session = Depends(get_db)):
+    payload = request.model_dump(mode="json")
+    return enqueue_serialized_job(db=db, job_type=US_SEC_SIC_SYNC_JOB_TYPE,
+        target="US:classification_coverage", request={"coverage_request": payload},
+        progress_total=request.max_symbols, message="Queued bounded SEC SIC universe page.",
+        task=backfill_tasks.run_us_sec_sic_sync_job, task_args=(None, payload))
+
+
+@router.post("/stocks/sync-sec-sic", response_model=JobRunRead, status_code=202)
+def sync_us_stock_sic(request: USSicSyncRequest, db: Session = Depends(get_db)):
+    symbols = sorted(set(request.symbols))
+    return enqueue_serialized_job(
+        db=db, job_type=US_SEC_SIC_SYNC_JOB_TYPE,
+        target=",".join(symbols), request={"symbols": symbols},
+        progress_total=len(symbols), message="Queued bounded SEC SIC classification sync.",
+        task=backfill_tasks.run_us_sec_sic_sync_job, task_args=(symbols,),
+    )
+
+
 @router.get("/source-health", response_model=USSourceHealthRead)
 def get_us_source_health(
     symbol: str | None = None,
@@ -1173,6 +1196,12 @@ def repair_us_ohlc_history_api(
         max_provider_calls=max_provider_calls,
         force_full=force_full,
     )
+
+
+@router.get("/sectors", response_model=USSectorDistributionRead)
+def get_us_sector_distribution_api(db: Session = Depends(get_db)):
+    """Read the materialized US EOD universe snapshot; never acquire or persist."""
+    return read_us_sector_distribution(db)
 
 
 @router.get("/indices", response_model=USMarketIndicesSnapshot)

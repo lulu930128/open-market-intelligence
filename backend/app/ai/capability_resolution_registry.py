@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Iterable, Mapping, Protocol
 
 from app.ai import public_contract
@@ -81,6 +81,21 @@ class CapabilityResolutionSpec:
 PUBLIC_SCOPE_TYPES = tuple(
     dict.fromkeys(spec.internal_scope for spec in public_contract.TARGET_SPECS)
 )
+
+
+def market_resolution(base: CapabilityResolutionSpec | None, *, target_market: str | None):
+    """Keep one capability while dispatching its market-owned read contract."""
+    if base is not None and base.scope_type == "market" and str(target_market or "").upper() == "US" and base.capability_id in {
+        "market.sectors", "market.hot_groups", "market.breadth",
+    }:
+        return replace(
+            base, resolution_mode="cache_only", operation=None, produces=(), depends_on=(),
+            provider_contract_ids=(),
+            freshness_owner="us_completed_daily_state", side_effect_policy="read_only",
+            trust_requirement="canonical_completed_bars_and_provider_reported_classification",
+            market_session_policy="latest_completed_session_sample_only", backgroundable=False,
+        )
+    return base
 
 # These operations already exist in the backend allowlist but were not part of
 # the legacy granular fill-operation registry.  They are canonical owners for

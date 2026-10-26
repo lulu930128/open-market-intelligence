@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import USStockMaster, utc_now
 from app.us_market.errors import USStockNotFoundError
 from app.us_market.sources import USSymbolRecord, normalize_us_symbol
+
+
+def us_common_stock_universe_filters() -> tuple:
+    """One active ordinary-stock scope for coverage and classification reads.
+
+    Older master rows have an unknown ETF flag; asset_type=stock remains their
+    positive identity evidence. An explicit ETF flag always excludes the row.
+    """
+    return (
+        USStockMaster.is_active.is_(True),
+        func.lower(USStockMaster.asset_type) == "stock",
+        USStockMaster.is_etf.is_not(True),
+        USStockMaster.is_test_issue.is_(False),
+        # Nasdaq's non-ETF list also contains preferred shares, rights, warrants
+        # and units. Preserve unknown names, exclude explicitly identified types.
+        ~func.lower(func.coalesce(USStockMaster.security_name, "")).like("% preferred%"),
+        ~func.lower(func.coalesce(USStockMaster.security_name, "")).like("% warrant%"),
+        ~func.lower(func.coalesce(USStockMaster.security_name, "")).like("% rights%"),
+        ~func.lower(func.coalesce(USStockMaster.security_name, "")).like("% units%"),
+    )
 
 def _apply_symbol_record(stock: USStockMaster, record: USSymbolRecord) -> None:
     stock.security_name = record.security_name or stock.security_name

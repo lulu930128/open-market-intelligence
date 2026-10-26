@@ -146,10 +146,11 @@ class USDailyOhlcvPlatform:
         allow_acquisition: bool,
         max_provider_calls: int = 0,
         require_history_coverage: bool = False,
+        identity: USInstrumentIdentity | None = None,
     ) -> USDailyPlatformResult:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
-        identity = resolve_us_instrument_identity(self._db, symbol)
+        identity = identity or resolve_us_instrument_identity(self._db, symbol)
         current_state = expected_us_completed_daily_state(now=now)
         expected_date = (
             previous_us_trading_day(to_date, include_value=True)
@@ -260,6 +261,32 @@ class USDailyOhlcvPlatform:
             temporal_postcondition_satisfied=temporal_postcondition,
             coverage_postcondition_satisfied=coverage_postcondition,
         )
+
+    def read_market_pair(self, *, expected_date: date, now: datetime) -> dict:
+        """Batch IO, unchanged candidate reader and Gateway selection per identity."""
+        from app.db.models import USStockMaster
+        from app.market_data.contracts import InstrumentKey, InstrumentType, Market
+        from app.us_market.catalog_store import us_common_stock_universe_filters
+
+        repository = USDailyBarRepository(self._db)
+        repository.preload_market_pair(start_date=previous_us_trading_day(expected_date, include_value=False),
+                                      end_date=expected_date, available_at=now)
+        platform = USDailyOhlcvPlatform(self._db)
+        platform._reader = USCompletedDailyCandidateReader(repository)
+        members = self._db.query(USStockMaster.symbol, USStockMaster.exchange).filter(*us_common_stock_universe_filters()).all()
+        if len(members) > 20_000:
+            raise ValueError("US market pair exceeds universe bound")
+        results = {}
+        for member in members:
+            if not member.exchange:
+                results[member.symbol] = None
+                continue
+            identity = USInstrumentIdentity(instrument=InstrumentKey(market=Market.US,
+                symbol=member.symbol, venue=member.exchange, instrument_type=InstrumentType.STOCK),
+                identity_source="us_stock_master", volume_applicability="required")
+            results[member.symbol] = platform._run(symbol=member.symbol, bars=2, now=now,
+                to_date=expected_date, allow_acquisition=False, identity=identity)
+        return results
 
     def read(
         self,

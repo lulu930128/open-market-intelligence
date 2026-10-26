@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
+import json
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.db.models import JobRun
 from app.config import settings
@@ -29,8 +31,49 @@ def run_eod_coverage_reconcile_job(
     sleep_seconds: float,
     max_consecutive_errors: int,
     error_backoff_seconds: int,
+    grouped_daily: bool = False,
 ) -> None:
     def worker(db: Session, progress: job_service.ProgressCallback):
+        if grouped_daily:
+            if market.strip().upper() != "US" or not repair:
+                raise ValueError("grouped daily requires US repair command")
+            from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day
+            now = datetime.now(timezone.utc)
+            trade_date = expected_trade_date or previous_us_trading_day(now.astimezone(US_MARKET_TIMEZONE).date(), include_value=False)
+            # The existing job ledger supplies cross-job cooldown; no new quota store.
+            recent = (db.query(JobRun).filter(JobRun.job_type == MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE,
+                      JobRun.target == "US:full_market_stock_universe", JobRun.id != job_id,
+                      JobRun.started_at >= now - timedelta(minutes=30)).all())
+            if any(json.loads(job.request_json or "{}").get("grouped_daily") for job in recent):
+                raise job_service.JobExecutionError("US grouped EOD cooldown; no provider request admitted.",
+                    result={"status": "blocked", "reason": "GROUPED_EOD_COOLDOWN", "external_call_count": 0})
+            # A prior attempt on this date is not authorization to replay after
+            # a 403 or an unknown outcome. Reconciliation is an operator gate.
+            previous = (db.query(JobRun).filter(JobRun.job_type == MARKET_EOD_COVERAGE_RECONCILE_JOB_TYPE,
+                        JobRun.target == "US:full_market_stock_universe", JobRun.id != job_id,
+                        JobRun.started_at.isnot(None),
+                        func.json_extract(JobRun.request_json, "$.grouped_daily") == 1).order_by(JobRun.id.desc()).all())
+            for job in previous:
+                request = json.loads(job.request_json or "{}")
+                if not request.get("grouped_daily"):
+                    continue
+                result = json.loads(job.result_json or "{}")
+                # A configuration/date/cooldown rejection made no provider call.
+                if result.get("external_call_count") == 0:
+                    continue
+                from app.us_market.daily_price_repository import _aware_utc
+                prior_date = request.get("expected_trade_date") or previous_us_trading_day(
+                    _aware_utc(job.started_at).astimezone(US_MARKET_TIMEZONE).date(), include_value=False).isoformat()
+                if prior_date == trade_date.isoformat():
+                    raise job_service.JobExecutionError("US grouped date already attempted; reconcile before retry.",
+                        result={"status": "blocked", "reason": "GROUPED_DATE_ALREADY_ATTEMPTED",
+                                "prior_job_id": job.id, "external_call_count": 0})
+            acquisition = US_FULL_MARKET_EOD_LIFECYCLE.refresh_grouped_daily(db, trade_date=trade_date, now=now)
+            snapshot = US_FULL_MARKET_EOD_LIFECYCLE.publish_distribution(db, now=now)
+            result = {"market": "US", "trade_date": trade_date.isoformat(), **acquisition, "snapshot": snapshot}
+            if acquisition["status"] != "complete":
+                raise job_service.JobExecutionError("US grouped EOD incomplete; inspect receipt and coverage.", result=result)
+            return result
         result = reconcile_eod_coverage(
             db,
             market=market,
@@ -59,6 +102,8 @@ def run_eod_coverage_reconcile_job(
                 else None
             ),
         )
+        if market.strip().upper() == "US":
+            result["distribution_snapshot"] = US_FULL_MARKET_EOD_LIFECYCLE.publish_distribution(db)
         if result.get("postcondition_met") is not True and not (
             result.get("continuation_required") is True
             and result.get("status") == "partial"
@@ -86,6 +131,7 @@ def enqueue_eod_coverage_reconcile(
     *,
     market: str,
     repair: bool = True,
+    grouped_daily: bool = False,
     expected_trade_date: date | None = None,
     max_symbols: int = 250,
     max_runtime_seconds: int = 600,
@@ -95,6 +141,8 @@ def enqueue_eod_coverage_reconcile(
     message: str = "Queued full-market EOD coverage reconciliation.",
 ) -> tuple[JobRun, bool]:
     normalized = normalize_coverage_market(market)
+    if grouped_daily and (normalized != "US" or not repair):
+        raise ValueError("grouped daily requires US repair command")
     bounds = eod_reconcile_bounds(normalized)
     effective_max_symbols = min(
         max(int(max_symbols), 1),
@@ -116,6 +164,7 @@ def enqueue_eod_coverage_reconcile(
     request = {
         "market": normalized,
         "repair": repair,
+        "grouped_daily": grouped_daily,
         "expected_trade_date": expected_trade_date,
         "max_symbols": effective_max_symbols,
         "max_runtime_seconds": effective_max_runtime_seconds,
@@ -140,6 +189,7 @@ def enqueue_eod_coverage_reconcile(
             sleep_seconds,
             max_consecutive_errors,
             error_backoff_seconds,
+            grouped_daily,
         ),
     )
 

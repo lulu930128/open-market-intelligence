@@ -1,12 +1,14 @@
-"""Bounded Massive Indices REST client with secret-safe typed failures."""
+"""Bounded Massive REST client with secret-safe typed failures."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
 
 from app.us_market.market_data.massive_symbols import massive_index_provider_symbol
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, is_us_trading_day
 
 from ._http import get as provider_get
 from .errors import USProviderDataError
@@ -90,8 +92,12 @@ def _get_payload(
         },
         timeout_seconds=timeout_seconds,
     )
+    status_code = int(getattr(response, "status_code", 200))
+    if status_code >= 400:
+        _payload_or_raise({}, status_code=status_code)
     try:
-        payload = response.json()
+        # Preserve fractional shares before binary float parsing can round them.
+        payload = response.json(parse_float=Decimal) if resource == "stocks_grouped_daily" else response.json()
     except (TypeError, ValueError) as exc:
         raise _provider_error(
             code="MASSIVE_INVALID_JSON_PAYLOAD",
@@ -119,6 +125,37 @@ def fetch_massive_index_snapshot_payload(
         resource="indices_snapshot",
         target=symbol,
         params={"ticker.any_of": provider_symbol},
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def require_grouped_daily_available(*, trade_date: date, now: datetime) -> None:
+    """Stocks Basic REST releases a session only after the following ET midnight."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Massive grouped requested_at must be timezone-aware")
+    if not is_us_trading_day(trade_date):
+        raise _provider_error(code="MASSIVE_NON_TRADING_DATE", category="eligibility")
+    local_date = now.astimezone(US_MARKET_TIMEZONE).date()
+    if trade_date >= local_date:
+        raise _provider_error(code="MASSIVE_BASIC_SESSION_NOT_RELEASED", category="eligibility")
+    # Basic exposes two years. Do not spend quota on an ineligible historical range.
+    try:
+        earliest = local_date.replace(year=local_date.year - 2)
+    except ValueError:
+        earliest = local_date.replace(year=local_date.year - 2, day=28)
+    if trade_date < earliest:
+        raise _provider_error(code="MASSIVE_BASIC_HISTORY_NOT_ENTITLED", category="eligibility")
+
+
+def fetch_massive_grouped_daily_payload(
+    *, trade_date: date, now: datetime, api_key: str, timeout_seconds: int,
+) -> tuple[dict[str, Any], str]:
+    require_grouped_daily_available(trade_date=trade_date, now=now)
+    # No retry or pagination: one grouped request consumes one bounded call.
+    return _get_payload(
+        f"{MASSIVE_BASE_URL}/v2/aggs/grouped/locale/us/market/stocks/{trade_date.isoformat()}",
+        api_key=api_key, resource="stocks_grouped_daily", target=trade_date.isoformat(),
+        params={"adjusted": "false", "include_otc": "false"},
         timeout_seconds=timeout_seconds,
     )
 

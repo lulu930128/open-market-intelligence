@@ -1,6 +1,30 @@
 schema_version = 1
 
 [[rules]]
+id = "us_eod_distribution_read_boundary"
+kind = "python_forbidden_import"
+description = "US EOD snapshot builder composes batched canonical reads; GET reads its existing checkpoint; no provider, scheduler or consumer ownership."
+roots = ["backend/app/us_market/sector_distribution.py", "backend/app/us_market/classification.py"]
+extensions = [".py"]
+forbidden_prefixes = ["app.us_market.providers", "app.us_market.classification_sync", "app.jobs", "app.ai", "app.routers", "requests", "httpx"]
+
+[[rules]]
+id = "us_sic_command_existing_owners"
+kind = "python_forbidden_import"
+description = "SEC SIC command delegates acquisition and persistence; no HTTP client, job framework or consumer ownership."
+roots = ["backend/app/us_market/classification_sync.py"]
+extensions = [".py"]
+forbidden_prefixes = ["requests", "httpx", "urllib", "sqlite3", "app.jobs", "app.ai", "app.routers"]
+
+[[rules]]
+id = "us_eod_distribution_no_write"
+kind = "python_forbidden_call"
+description = "US EOD projection and checkpoint reads cannot acquire or persist; the existing EOD job owns materialization."
+roots = ["backend/app/us_market/sector_distribution.py", "backend/app/us_market/classification.py"]
+extensions = [".py"]
+forbidden_call_names = ["commit", "flush", "rollback", "refresh", "enqueue", "create_all", "execute", "persist"]
+
+[[rules]]
 id = "job_cooperative_protocol_has_no_runtime_owner"
 kind = "python_forbidden_import"
 description = "Job stop/checkpoint protocol and continuation codec cannot own executors, DB IO, providers or runtime control."
