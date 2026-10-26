@@ -15,7 +15,10 @@ from test_tw_public_quote_platform import db
 from test_tw_official_daily_platform import FakeResponse
 
 
-def test_oct12_twse_current_tpex_stale_receipt_replays_without_inventing_daily(db):
+def test_oct12_twse_current_tpex_stale_receipt_replays_without_inventing_daily(db, monkeypatch):
+    def reject_default_fetch(*args, **kwargs):
+        raise AssertionError("Replay must use only explicitly supplied fixture fetchers")
+    monkeypatch.setattr("app.market.daily_ohlcv_acquisition._default_fetch", reject_default_fetch)
     fixture = json.loads((Path(__file__).parent / "fixtures/tw_market_data/g6_daily_received_excerpt.json").read_text(encoding="utf-8"))
     tpex_text = json.dumps(fixture["tpex"], ensure_ascii=False)
     twse_text = json.dumps(fixture["twse"], ensure_ascii=False)
