@@ -595,6 +595,15 @@ def classify_observation(
                 "Value represents the explicitly requested historical completed "
                 "session, not the latest session or a live quote."
             )
+        elif (market_key == "resource"
+              and source_status.get("owner") == "resource_market.source_health"):
+            # Resource owner already resolved the event-time/session target.
+            # Do not reinterpret delayed futures through stock live windows.
+            state = source_freshness_status if source_freshness_status in {
+                "delayed", "latest_completed_session", "stale",
+            } and event_at is not None else "stale"
+            observation_mode = "session_close" if state == "latest_completed_session" else "cached_snapshot"
+            reason = "Backend commodity event-time policy; Yahoo remains watch-only best-effort delayed."
         elif continuous:
             observation_mode = (
                 "on_demand_snapshot" if received_at is not None else "cached_snapshot"

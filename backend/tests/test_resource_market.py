@@ -312,6 +312,7 @@ class ResourceMarketTests(unittest.TestCase):
                 instrument_type="futures",
                 contract_key="front_month",
                 last_price=2400.0,
+                event_time=fetched_at,
                 fetched_at=fetched_at,
             )
         )
@@ -371,6 +372,7 @@ class ResourceMarketTests(unittest.TestCase):
                 instrument_type="futures",
                 contract_key="front_month",
                 last_price=2400.0,
+                event_time=fetched_at,
                 fetched_at=fetched_at,
             )
         )
@@ -387,7 +389,7 @@ class ResourceMarketTests(unittest.TestCase):
         quote_entry = next(entry for entry in health["entries"] if entry["resource"] == "quote")
         self.assertEqual(quote_entry["status"], "delayed")
         self.assertEqual(quote_entry["age_seconds"], 7200)
-        self.assertEqual(quote_entry["stale_seconds"], 4 * 60 * 60)
+        self.assertEqual(quote_entry["stale_seconds"], 2 * 60 * 60)
         self.assertEqual(quote_entry["session_status"], "open")
 
     def test_fx_quote_health_uses_weekend_session_contract(self) -> None:

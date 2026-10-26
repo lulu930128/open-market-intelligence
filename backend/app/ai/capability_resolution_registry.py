@@ -102,6 +102,8 @@ def market_resolution(base: CapabilityResolutionSpec | None, *, target_market: s
 # the scoped capabilities below; activation in fill planning is intentionally
 # handled by the capability-contract facade rather than by consumers.
 SCOPED_COMPOSITE_OPERATIONS: dict[tuple[str, str], str] = {
+    ("resource_asset", "quote.snapshot"): "resource.refresh_quote_daily",
+    ("resource_asset", "daily.ohlcv"): "resource.refresh_quote_daily",
     ("stock", "cross_market.overnight"): "cross_market.refresh_context",
     ("stock", "cross_market.relations"): "cross_market.refresh_context",
     ("stock", "cross_market.parity"): "cross_market.refresh_context",
@@ -111,6 +113,7 @@ SCOPED_COMPOSITE_OPERATIONS: dict[tuple[str, str], str] = {
     ("us_stock", "corporate.actions"): "us.refresh_corporate_actions",
 }
 COMPOSITE_OPERATION_PRODUCES: dict[str, tuple[str, ...]] = {
+    "resource.refresh_quote_daily": ("quote.snapshot", "daily.ohlcv"),
     "cross_market.refresh_context": (
         "cross_market.overnight",
         "cross_market.relations",

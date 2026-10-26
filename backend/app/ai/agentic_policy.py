@@ -30,6 +30,12 @@ class ToolDefinition:
 
 
 ALLOWED_TOOLS: dict[str, ToolDefinition] = {
+    "resource.refresh_quote_daily": ToolDefinition(
+        name="resource.refresh_quote_daily",
+        description="Refresh one subscribed watch-only commodity quote and needed daily bars with one bounded chart request.",
+        external_fetch=True,
+        writes_cache=True,
+    ),
     "tw.refresh_stock_evidence": ToolDefinition(
         name="tw.refresh_stock_evidence",
         description=(

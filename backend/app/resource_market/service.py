@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import time
+from datetime import timedelta
 from threading import RLock
 from typing import Any
 
@@ -257,15 +259,21 @@ def _matching_resource_instruments(symbols: str | None) -> list:
 def _upsert_resource_quote(
     db: Session,
     record: ResourceQuoteRecord,
+    *,
+    reject_older: bool = False,
 ) -> ResourceQuoteSnapshot:
-    row = (
+    query = (
         db.query(ResourceQuoteSnapshot)
         .filter(ResourceQuoteSnapshot.provider == record.provider)
         .filter(ResourceQuoteSnapshot.symbol == record.symbol)
         .filter(ResourceQuoteSnapshot.instrument_type == record.instrument_type)
         .filter(ResourceQuoteSnapshot.contract_key == record.contract_key)
-        .one_or_none()
     )
+    row = (query.populate_existing() if reject_older else query).one_or_none()
+    if reject_older and row and row.event_time and record.event_time:
+        from app.resource_market.source_health import _as_utc
+        if _as_utc(record.event_time) < _as_utc(row.event_time):
+            raise ValueError("resource_quote_event_time_regressed")
     values = {
         "exchange": record.exchange,
         "provider_symbol": record.provider_symbol,
@@ -493,6 +501,9 @@ def refresh_resource_quotes(
     db: Session,
     *,
     symbols: str | None = None,
+    answer_refresh: bool = False,
+    include_daily: bool = False,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     instruments = _matching_resource_instruments(symbols)
     requested_count = len(instruments)
@@ -520,14 +531,36 @@ def refresh_resource_quotes(
         try:
             payload, source_url = fetch_yahoo_chart_payload_for_interval(
                 instrument=instrument,
-                interval="1m",
+                interval="1d" if answer_refresh else "1m",
+                **({"range_value": "5d", "timeout_seconds": timeout_seconds} if answer_refresh else {}),
             )
             record = parse_yahoo_quote_record(
                 payload,
                 instrument=instrument,
                 source_url=source_url,
             )
-            _write_with_retry(db, lambda record=record: _upsert_resource_quote(db, record))
+            daily_records = []
+            if answer_refresh:
+                if (record.last_price is None or not math.isfinite(record.last_price)
+                        or record.event_time is None):
+                    raise ValueError("resource_quote_price_or_event_time_missing")
+                from app.resource_market.source_health import _as_utc
+                if _as_utc(record.event_time) > _as_utc(utc_now()) + timedelta(minutes=5):
+                    raise ValueError("resource_quote_event_time_in_future")
+                if include_daily and not market_data_subscription_skip_reason(
+                    db, key=instrument.key, resource="ohlcv"
+                ):
+                    daily_records = parse_yahoo_ohlcv_records(
+                        payload, instrument=instrument, interval="1d", source_url=source_url, limit=5,
+                    )
+                    if not daily_records:
+                        warnings.append(f"{instrument.symbol}: requested daily bars missing from provider response")
+            def persist():
+                # Recheck ordering inside the existing serialized write owner.
+                _upsert_resource_quote(db, record, **({"reject_older": True} if answer_refresh else {}))
+                if daily_records:
+                    _upsert_resource_ohlcv_many(db, daily_records)
+            _write_with_retry(db, persist)
             refreshed_count += 1
             events.append(
                 {
@@ -579,6 +612,51 @@ def refresh_resource_quotes(
         "errors": errors,
         "message": "Resource quotes refreshed from Yahoo chart.",
     }
+
+
+def refresh_resource_for_answer(
+    db: Session, *, symbol: str, allow_external_fetch: bool,
+    realtime_policy: str, before_answer: bool, budget: dict[str, int],
+    requested_capabilities: tuple[str, ...],
+) -> dict[str, Any]:
+    """One explicit, authorized command; all ordinary resource readers stay pure."""
+    from app.resource_market.source_health import build_resource_source_health
+
+    receipt: dict[str, Any] = {"tool": "resource.refresh_quote_daily", "status": "skipped",
+                               "external_fetches": 0, "writes_cache": False}
+    def skip(reason):
+        return {**receipt, "reason": reason}
+    if not allow_external_fetch or realtime_policy != "prefer_live" or not before_answer:
+        return skip("external_refresh_not_authorized")
+    if any(budget.get(key, 0) <= 0 for key in ("max_calls", "max_external_fetches", "max_total_seconds")):
+        return skip("tool_budget_exhausted")
+    instruments = list_resource_instruments(root_folder="commodity", symbol=symbol)
+    if not symbol.strip() or len(instruments) != 1:
+        return skip("unsupported_commodity")
+    instrument = instruments[0]
+    if not {"quote.snapshot", "daily.ohlcv"}.intersection(requested_capabilities):
+        return skip("no_quote_or_daily_capability_selected")
+    reason = market_data_subscription_skip_reason(db, key=instrument.key, resource="quote")
+    if reason:
+        return skip(reason)
+    health = build_resource_source_health(db, symbols=instrument.symbol, intervals="1d", include_events=False)
+    entries = {entry["resource"]: entry for entry in health["entries"]}
+    quote_needed = "quote.snapshot" in requested_capabilities and not entries["quote"]["ok"]
+    daily_needed = "daily.ohlcv" in requested_capabilities and not entries["ohlcv"]["ok"]
+    if not quote_needed and not daily_needed:
+        return skip("selected_evidence_within_session_target")
+    daily_allowed = not market_data_subscription_skip_reason(db, key=instrument.key, resource="ohlcv")
+    if not quote_needed and not daily_allowed:
+        return skip("daily_subscription_disabled")
+    result = refresh_resource_quotes(
+        db, symbols=instrument.symbol, answer_refresh=True,
+        include_daily=daily_needed and daily_allowed,
+        timeout_seconds=min(10, budget["max_total_seconds"]),
+    )
+    after = build_resource_source_health(db, symbols=instrument.symbol, intervals="1d", include_events=False)
+    return {**receipt, "status": result["status"], "external_fetches": 1,
+            "writes_cache": result["refreshed_count"] > 0, "result_summary": result,
+            "freshness_after": after, "produces": ["quote.snapshot", *(["daily.ohlcv"] if daily_needed and daily_allowed else [])]}
 
 
 def refresh_resource_ohlcv(

@@ -229,12 +229,15 @@ def fetch_yahoo_chart_payload_for_interval(
     *,
     instrument: ResourceInstrument,
     interval: str,
+    range_value: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> tuple[dict[str, Any], str]:
     normalized_interval = normalize_resource_interval(interval)
     return fetch_yahoo_chart_payload(
         provider_symbol=instrument.provider_symbol,
-        range_value=YAHOO_RANGE_BY_INTERVAL[normalized_interval],
+        range_value=range_value or YAHOO_RANGE_BY_INTERVAL[normalized_interval],
         interval=YAHOO_INTERVAL_MAP[normalized_interval],
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -288,6 +291,19 @@ def parse_yahoo_quote_record(
     event_time = _parse_timestamp(meta.get("regularMarketTime"))
     if event_time is None and latest_index is not None:
         event_time = _parse_timestamp(_list_value(timestamps, latest_index))
+    if instrument.root_folder == "commodity":
+        # A metadata price may only borrow its own timestamp, never a daily
+        # bar's timestamp. Otherwise use a matched close/time pair.
+        meta_price = _parse_float(meta.get("regularMarketPrice"))
+        meta_time = _parse_timestamp(meta.get("regularMarketTime"))
+        if meta_price is not None and meta_time is not None:
+            last_price, event_time = meta_price, meta_time
+        else:
+            close_index = _latest_valid_index(closes)
+            last_price = _parse_float(_list_value(closes, close_index)) if close_index is not None else None
+            event_time = _parse_timestamp(_list_value(timestamps, close_index)) if close_index is not None else None
+        price_change = last_price - previous_close if last_price is not None and previous_close is not None else None
+        price_change_pct = price_change / previous_close * 100 if price_change is not None and previous_close not in (None, 0) else None
 
     return ResourceQuoteRecord(
         provider=YAHOO_CHART_PROVIDER,

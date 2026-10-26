@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -107,6 +107,38 @@ def read_resource_asset_context(
 
     quote_status = _health_status(source_health, "quote")
     chart_status = _health_status(source_health, "ohlcv")
+    if instrument.get("root_folder") == "commodity":
+        health_entries = {entry["resource"]: entry for entry in source_health.get("entries", [])}
+        quote_health = health_entries.get("quote", {})
+        chart_health = health_entries.get("ohlcv", {})
+        # Provider delay is not cache staleness. Keep the two axes separate.
+        quote_status = "partial" if quote_health.get("ok") else quote_status
+        chart_status = "partial" if chart_health.get("ok") else chart_status
+        if quote_payload:
+            for field in ("event_time", "fetched_at"):
+                value = quote_payload.get(field)
+                if isinstance(value, datetime):
+                    quote_payload[field] = (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+            quote_payload.update({
+                "status": (quote_health.get("freshness") or {}).get("status", "unknown"),
+                "freshness": quote_health.get("freshness") or {},
+                "source_status": {
+                    "owner": "resource_market.source_health",
+                    "provider_status": instrument.get("provider_status"),
+                    "freshness_status": (quote_health.get("freshness") or {}).get("status", "unknown"),
+                    "decision_usable": False,
+                },
+                "source": instrument.get("provider"),
+                "quote_time": quote_payload.get("event_time"),
+                "quote_time_basis": "source_event_time",
+                "market_status": (quote_health.get("freshness") or {}).get("session_status", "unknown"),
+                "is_live": False, "is_realtime": False, "decision_usable": False,
+                "price_decision_usable": False,
+                "volume_unit": None, "volume_status": "unit_unverified",
+                "volume_decision_usable": False,
+                "limitations": ["watch_only", "front_month", "best_effort_delayed",
+                                "volume_unit_missing", "commodity_holiday_and_halt_calendar_unverified"],
+            })
     missing: list[str] = []
     warnings = [
         "Resource market data is watch-only and must not be used for order execution.",

@@ -44,6 +44,7 @@ def execute_tool_stages(
     run_tw_watchlist_tool_session: Callable[..., dict[str, Any]],
     run_crypto_asset_tool_session: Callable[..., dict[str, Any]] | None = None,
     run_regional_market_tool_session: Callable[..., dict[str, Any]] | None = None,
+    run_resource_asset_tool_session: Callable[..., dict[str, Any]] | None = None,
 ) -> ToolStageState:
     query_plan = query_plan or {}
     tool_plan: dict[str, Any] = {}
@@ -89,6 +90,28 @@ def execute_tool_stages(
     continuation_selected = bool(
         payload.continuation.get("selected_action_ids")
     )
+
+    if (
+        scope_type == "resource_asset"
+        and run_resource_asset_tool_session is not None
+        and query_plan.get("realtime_policy") == "prefer_live"
+        and payload.allow_external_fetch
+        and policy.get("can_external_fetch") is True
+        and refresh_before_answer_enabled(payload)
+        and query_plan.get("external_refresh_allowed", True)
+    ):
+        tool_session = progress.run_tool_session(
+            scope_type=scope_type,
+            operation=lambda: run_resource_asset_tool_session(
+                symbol=require_scope_id(payload, scope_type), policy=policy,
+                raw_budget=payload.tool_budget,
+                requested_capabilities=selected_v4_capabilities or (),
+                realtime_policy=query_plan["realtime_policy"], before_answer=True,
+            ),
+        )
+        tool_plan = tool_session["tool_plan"]
+        tool_runs = tool_session["tool_runs"]
+        warnings.extend(tool_session.get("warnings") or [])
 
     us_market_params = (
         payload.market_data_params

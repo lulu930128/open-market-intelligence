@@ -1185,6 +1185,35 @@ def read_crypto_context(
     )
 
 
+def run_resource_asset_tool_session(
+    *, db: Session, symbol: str, policy: dict[str, Any], raw_budget: dict[str, Any],
+    requested_capabilities: tuple[str, ...], realtime_policy: str, before_answer: bool,
+) -> dict[str, Any]:
+    budget = normalize_tool_budget(raw_budget)
+    # A literal zero time budget must not be raised to the shared minimum of 1s.
+    try:
+        if "max_total_seconds" in raw_budget and int(raw_budget["max_total_seconds"]) <= 0:
+            budget["max_total_seconds"] = 0
+    except (TypeError, ValueError):
+        pass  # Invalid values retain the existing normalized default.
+    receipt = resource_market_service.refresh_resource_for_answer(
+        db, symbol=symbol, allow_external_fetch=policy.get("can_external_fetch") is True,
+        realtime_policy=realtime_policy, before_answer=before_answer, budget=budget,
+        requested_capabilities=requested_capabilities,
+    )
+    summary = receipt.get("result_summary") or {}
+    warnings = [f"Resource refresh failed: {item['message']}" for item in summary.get("errors", [])]
+    warnings.extend(summary.get("warnings") or [])
+    receipt.update({"provider": "yahoo_chart", "external_fetch": bool(receipt["external_fetches"]),
+                    "requested_capabilities": list(requested_capabilities),
+                    "error_message": "; ".join(warnings) or receipt.get("reason"),
+                    "evidence_status": next((entry.get("status") for entry in
+                        (receipt.get("freshness_after") or {}).get("entries", [])
+                        if entry.get("resource") == "quote"), "unverified")})
+    return {"tool_plan": {"strategy": "bounded_resource_refresh", "budget": budget},
+            "tool_runs": [receipt], "warnings": warnings}
+
+
 def read_resource_asset_context(
     db: Session,
     *,

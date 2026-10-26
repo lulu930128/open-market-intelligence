@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -54,6 +55,7 @@ RESOURCE_QUOTE_HEALTH_COLUMNS = (
     ResourceQuoteSnapshot.id,
     ResourceQuoteSnapshot.provider_symbol,
     ResourceQuoteSnapshot.event_time,
+    ResourceQuoteSnapshot.last_price,
     ResourceQuoteSnapshot.fetched_at,
 )
 RESOURCE_OHLCV_HEALTH_COLUMNS = (
@@ -150,6 +152,80 @@ def _quote_stale_seconds(*, provider_status: str, session_status: str) -> int:
     if session_status == SESSION_CLOSED:
         threshold = max(threshold, RESOURCE_CLOSED_SESSION_QUOTE_STALE_SECONDS)
     return threshold
+
+
+def commodity_freshness(*, exchange: str, event_time: datetime | None,
+                        now: datetime, daily: bool = False) -> dict[str, Any]:
+    """Event-time policy for watch-only futures; never infer time from receipt.
+
+    Regular Globex hours only. Special holiday hours and instrument halts are
+    not verified by this calendar and must remain visible to consumers.
+    """
+    limitations = ["best_effort_delayed", "watch_only",
+                  "commodity_holiday_and_halt_calendar_unverified"]
+    try:
+        tz = ZoneInfo(EXCHANGE_TIMEZONE_BY_EXCHANGE[exchange])
+    except (KeyError, ZoneInfoNotFoundError):
+        return {"status": "unknown", "usable": False, "session_status": "unknown",
+                "event_time": event_time.isoformat() if event_time else None,
+                "reason_codes": ["exchange_timezone_unavailable"], "limitations": limitations}
+    local = _as_utc(now).astimezone(tz)
+    session = _exchange_session_status(exchange, now)
+    close = local.replace(hour=17, minute=0, second=0, microsecond=0)
+    if close > local:
+        close -= timedelta(days=1)
+    while close.weekday() >= 5:
+        close -= timedelta(days=1)
+    reference = local if session == SESSION_OPEN else close
+    age = _age_seconds(now, event_time)
+    lag = _age_seconds(reference, event_time)
+    reasons = []
+    if event_time is None:
+        status = "missing"
+        reasons.append("source_event_time_missing")
+    elif _as_utc(event_time) > _as_utc(now) + timedelta(minutes=5):
+        status = "stale"
+        reasons.append("source_event_time_in_future")
+    elif daily:
+        bar_local = _as_utc(event_time).astimezone(tz)
+        data_date = bar_local.date() + timedelta(days=int(bar_local.hour >= 18))
+        status = "delayed" if data_date >= close.date() else "stale"
+        reasons.append("daily_bar_not_official_settlement")
+    else:
+        status = "delayed" if lag is not None and lag <= 7200 else "stale"
+    if status == "delayed" and session != SESSION_OPEN:
+        status = "latest_completed_session"
+    if status == "stale":
+        reasons.append("source_event_time_behind_required_session")
+    return {"status": status, "usable": status in {"delayed", "latest_completed_session"},
+            "session_status": session, "event_time": _as_utc(event_time).isoformat() if event_time else None,
+            "event_age_seconds": age, "required_session_lag_seconds": lag,
+            "stale_after_seconds": 7200 if not daily else None,
+            "required_as_of": reference.isoformat(), "latest_completed_session": close.isoformat(),
+            "reason_codes": reasons, "limitations": limitations}
+
+
+def _commodity_health_entry(*, instrument, latest, row_count: int, now: datetime,
+                            interval: str | None = None) -> ResourceSourceHealthEntry:
+    freshness = commodity_freshness(
+        exchange=instrument.exchange, now=now, daily=interval == "1d",
+        event_time=(latest.bar_time if interval else latest.event_time) if latest else None,
+    )
+    if not interval and latest and (latest.last_price is None or not math.isfinite(latest.last_price)):
+        freshness.update(status="missing", usable=False)
+        freshness["reason_codes"].append("source_price_missing")
+    return ResourceSourceHealthEntry(
+        resource="ohlcv" if interval else "quote", provider=instrument.provider,
+        target=f"{instrument.symbol}:{interval}" if interval else instrument.symbol,
+        status="delayed" if freshness["usable"] else "stale" if latest else "empty",
+        ok=freshness["usable"], row_count=row_count,
+        latest_fetched_at=latest.fetched_at if latest else None,
+        latest_data_key=freshness.get("event_time"),
+        data_quality=PROVIDER_BEST_EFFORT if freshness["usable"] else freshness["status"],
+        reason=f"Commodity source event freshness={freshness['status']}; calendar is regular-hours only.",
+        age_seconds=freshness.get("event_age_seconds"), stale_seconds=freshness.get("stale_after_seconds"),
+        session_status=freshness["session_status"], freshness=freshness,
+    )
 
 
 def _status_for_latest(
@@ -297,6 +373,9 @@ def _quote_entry(db: Session, *, instrument, now: datetime) -> ResourceSourceHea
         else None
     )
     latest_fetched_at = latest.fetched_at if latest else None
+    if instrument.root_folder == "commodity":
+        return _commodity_health_entry(instrument=instrument, latest=latest,
+                                       row_count=row_count, now=now)
     if (instrument.exchange or "").strip().upper() == "FX":
         freshness = evaluate_fx_freshness(
             purpose="spot_quote",
@@ -406,6 +485,10 @@ def _ohlcv_entry(
             ),
             None,
         )
+    elif instrument.root_folder == "commodity":
+        latest = query.options(load_only(*RESOURCE_OHLCV_HEALTH_COLUMNS)).order_by(
+            ResourceOhlcvBar.bar_time.desc(), ResourceOhlcvBar.id.desc()
+        ).first()
     else:
         latest = (
             query.options(load_only(*RESOURCE_OHLCV_HEALTH_COLUMNS))
@@ -416,6 +499,9 @@ def _ohlcv_entry(
             else None
         )
     latest_fetched_at = latest.fetched_at if latest else None
+    if instrument.root_folder == "commodity" and interval == "1d":
+        return _commodity_health_entry(instrument=instrument, latest=latest,
+                                       row_count=row_count, now=now, interval=interval)
     if is_fx:
         data_date = (
             fx_daily_data_date(latest.bar_time, latest.raw_payload_json)

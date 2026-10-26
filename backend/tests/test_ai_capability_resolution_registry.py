@@ -75,12 +75,8 @@ class CapabilityResolutionRegistryTest(unittest.TestCase):
         self.assertEqual(
             canonical_operations
             - capability_contract.EXECUTABLE_FILL_OPERATIONS,
-            {
-                "cross_market.refresh_context",
-                "tw.refresh_watchlist_evidence",
-                "us.refresh_company_profile",
-                "us.refresh_corporate_actions",
-            },
+            set(capability_resolution_registry.COMPOSITE_OPERATION_PRODUCES)
+            - capability_contract.EXECUTABLE_FILL_OPERATIONS,
         )
 
     def test_scope_specific_resolution_does_not_overstate_refreshability(

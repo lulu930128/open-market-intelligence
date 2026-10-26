@@ -492,6 +492,10 @@ def ask(
             db=db,
             **kwargs,
         ),
+        run_resource_asset_tool_session=lambda **kwargs: agentic_tools.run_resource_asset_tool_session(
+            db=db,
+            **kwargs,
+        ),
     )
     tool_plan = tool_stage.tool_plan
     tool_runs = tool_stage.tool_runs
