@@ -3,7 +3,6 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.config import settings
 from app.db.models import Base
 from app.db.admission import attach_sqlite_admission
 
@@ -13,7 +12,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = config.attributes.get("database_url") or settings.database_url
+database_url = config.attributes.get("database_url")
+if not database_url:
+    from app.config import settings
+    database_url = settings.database_url
 config.set_main_option("sqlalchemy.url", database_url)
 target_metadata = Base.metadata
 
@@ -31,6 +33,15 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        # The maintenance owner owns BEGIN IMMEDIATE, commit and rollback.
+        # Never close, commit or replace its connection here.
+        context.configure(connection=supplied, target_metadata=target_metadata,
+                          transactional_ddl=True)
+        with context.begin_transaction():
+            context.run_migrations()
+        return
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

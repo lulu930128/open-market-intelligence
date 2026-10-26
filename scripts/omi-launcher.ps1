@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("Run", "Activate", "Exit", "RestartServices", "Diagnose")]
+    [ValidateSet("Run", "Activate", "Exit", "RestartServices", "RestartBackend", "Diagnose")]
     [string]$LauncherAction = "Run",
     [ValidateRange(1, 65535)][int[]]$DiagnosticPorts = @(8400, 3000)
 )
@@ -181,6 +181,8 @@ $script:ExitEventName = "OpenMarketIntelligenceLauncherExit"
 $script:ExitEvent = $null
 $script:RestartEventName = "OpenMarketIntelligenceLauncherRestartServices"
 $script:RestartEvent = $null
+$script:RestartBackendEventName = "OpenMarketIntelligenceLauncherRestartBackend"
+$script:RestartBackendEvent = $null
 $script:ActivationTimer = $null
 $script:TaskbarListener = $null
 $script:IsPackagedRelease = Test-Path -LiteralPath (Join-Path $script:RepoRoot "release-manifest.json")
@@ -203,8 +205,13 @@ $script:OwnedBackendSession = $null
 $script:OwnedBackendStartAttempted = $false
 $script:RetiredBackendSessions = [Collections.Generic.List[object]]::new()
 $script:ManualBackendStartAttemptedSession = $null
+$script:FailedStartRecoveryAttempted = $false
 $script:LastBackendStartError = $null
 $script:FrontendProcess = $null
+$script:FrontendRunnerIdentity = $null
+$script:LastFrontendStop = $null
+$script:FrontendStopUnconfirmed = $false
+$script:LastFullServiceRestart = $null
 $script:LastStatusText = $null
 $script:BackendStopExpected = $false
 $script:BackendRecoveryInProgress = $false
@@ -312,12 +319,14 @@ if (-not $script:OwnsMutex) {
         "Activate" { $script:ActivationEventName }
         "Exit" { $script:ExitEventName }
         "RestartServices" { $script:RestartEventName }
+        "RestartBackend" { $script:RestartBackendEventName }
     }
     $requestedAction = switch ($LauncherAction) {
         "Run" { "Run" }
         "Activate" { "activation" }
         "Exit" { "exit" }
-        "RestartServices" { "service restart" }
+        "RestartServices" { "Backend + Frontend restart" }
+        "RestartBackend" { "Backend restart" }
     }
     $actionSignaled = $false
     try {
@@ -350,7 +359,7 @@ if (-not $script:OwnsMutex) {
     exit 2
 }
 
-if ($LauncherAction -in @("Activate", "Exit", "RestartServices")) {
+if ($LauncherAction -in @("Activate", "Exit", "RestartServices", "RestartBackend")) {
     Write-LauncherLog "Launcher action '$LauncherAction' found no existing tray owner; no service lifecycle action was required." "WARN"
     if ($script:OwnsMutex) {
         $script:Mutex.ReleaseMutex()
@@ -381,6 +390,11 @@ $script:RestartEvent = New-Object System.Threading.EventWaitHandle(
     $false,
     [System.Threading.EventResetMode]::AutoReset,
     $script:RestartEventName
+)
+$script:RestartBackendEvent = New-Object System.Threading.EventWaitHandle(
+    $false,
+    [System.Threading.EventResetMode]::AutoReset,
+    $script:RestartBackendEventName
 )
 
 Write-LauncherLog "Launcher started. repo_root=$($script:RepoRoot)"
@@ -1504,16 +1518,29 @@ function Start-LoggedService {
         "-LauncherPid $PID"
     ) -join " "
 
-    return Start-Process `
+    $process = Start-Process `
         -FilePath "powershell.exe" `
         -ArgumentList $runnerArguments `
         -WorkingDirectory $script:RepoRoot `
         -WindowStyle Hidden `
         -PassThru
+    if ($ServiceName -ceq 'frontend') {
+        # Retain the actual birth handle, never adopt a PID discovered by health.
+        $script:FrontendProcess = $process
+        $null = $process.Handle
+        $script:FrontendRunnerIdentity = [pscustomobject]@{
+            Process=$process; Pid=$process.Id; Created=$process.StartTime.ToUniversalTime();
+            Path=$process.Path; Arguments=$runnerArguments; LauncherPid=$PID;
+            Handle=$process.Handle; LauncherCreated=[Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime()
+        }
+        $script:FrontendStopUnconfirmed = $false
+    }
+    return $process
 }
 
 function Start-Backend {
     if ($script:SafeStopAttempted) { throw 'SAFE_STOP_NO_START_OR_RECOVERY' }
+    if (-not $script:OwnsMutex) { throw 'BACKEND_START_OWNER_NOT_ATTESTED' }
     if ($null -ne $script:OwnedBackendSession -and $script:OwnedBackendSession.StartupFailure) {
         throw $script:OwnedBackendSession.StartupFailure
     }
@@ -1540,8 +1567,12 @@ function Start-Backend {
 
     if (-not $script:BackendReload -and -not $script:IsPackagedRelease) {
         if ($script:OwnedBackendStartAttempted) { throw 'OWNED_START_NO_AUTOMATIC_REPLAY' }
+        Assert-OmiProductionBackendStartPreflight
+        # From this point a factory exception may hide a spawned Runner/child.
+        # Never clear this latch merely because no session was returned.
         $script:OwnedBackendStartAttempted = $true
         $script:OwnedBackendSession = New-OmiProductionOwnedBackend
+        if ($null -eq $script:OwnedBackendSession) { throw 'OWNED_START_UNKNOWN' }
         $script:BackendProcess = $script:OwnedBackendSession.RunnerProcess
         if ($script:OwnedBackendSession.StartupFailure) { throw $script:OwnedBackendSession.StartupFailure }
         Write-LauncherLog "Owned Backend started runner=$($script:BackendProcess.Id) child=$($script:OwnedBackendSession.ChildPid)."
@@ -1549,8 +1580,11 @@ function Start-Backend {
         return
     }
 
-    if (Select-AvailableBackendPortForStart -ExpectedPythonPath $python) {
-        return
+    # Legacy/reload cold starts may use a free fixed endpoint, but service
+    # actions must never reach the historical port-owner force cleanup.
+    if (@(Get-ListeningProcessIdsOnPort -Port $script:BackendPort -RequireObservation).Count -ne 0) { throw 'FIXED_PORT_NOT_FREE' }
+    if (-not (Test-TcpPortBindable -Port $script:BackendPort -HostName $script:BackendHost -ServiceName 'Backend' -Quiet)) {
+        throw 'FIXED_PORT_NOT_BINDABLE'
     }
 
     Invoke-BackendPythonRuntimeCheck -PythonPath $python
@@ -1571,7 +1605,9 @@ function Start-Backend {
 }
 
 function Start-OmiBackendAfterExactStop {
+    param([string]$ExpectedRelease)
     Assert-OmiManualBackendStartOwner
+    if ($ExpectedRelease) { Assert-OmiBackendApplicationRelease -ExpectedRelease $ExpectedRelease }
     $old = $script:OwnedBackendSession
     if (-not $script:SafeStopAttempted -or $null -eq $old -or
         -not [object]::ReferenceEquals($script:BackendProcess, $old.RunnerProcess) -or
@@ -1590,8 +1626,22 @@ function Start-OmiBackendAfterExactStop {
     $script:ManualBackendStartAttemptedSession = $old
     $script:LastBackendStartError = 'BACKEND_START_UNCONFIRMED'
     $old.DisposeAfterConfirmedStop()
+    return Start-OmiBackendSuccessor -ExpectedRelease $ExpectedRelease
+}
+
+function Start-OmiBackendSuccessor {
+    param([string]$ExpectedRelease)
+    # Called only after the original owner has consumed a retirement gate.
+    if (-not $script:ServiceStartRequestInProgress -or $null -eq $script:ManualBackendStartAttemptedSession -or
+        $script:RetiredBackendSessions.Count -eq 0 -or
+        -not [object]::ReferenceEquals($script:ManualBackendStartAttemptedSession,
+            $script:RetiredBackendSessions[$script:RetiredBackendSessions.Count - 1])) {
+        throw 'BACKEND_START_RETIREMENT_REQUIRED'
+    }
     $script:OwnedBackendStartAttempted = $true
-    $next = New-OmiProductionOwnedBackend
+    if ($script:SchemaSuccessorPending) { $script:SchemaSuccessorAttempted = $true }
+    $script:BackendFactoryAttemptCount++
+    $next = New-OmiProductionOwnedBackend -ExpectedRelease $ExpectedRelease
     if ($null -eq $next) { throw 'BACKEND_START_UNCONFIRMED' }
     $script:OwnedBackendSession = $next
     $script:BackendProcess = $next.RunnerProcess
@@ -1605,6 +1655,10 @@ function Start-OmiBackendAfterExactStop {
     }
     if (-not $pending.GetAwaiter().GetResult()) { throw 'BACKEND_START_READINESS_UNCONFIRMED' }
     Assert-OmiManualBackendStartOwner
+    if ($ExpectedRelease) {
+        Assert-OmiBackendApplicationRelease -ExpectedRelease $ExpectedRelease
+        if ($next.ReleaseId -cne $ExpectedRelease) { throw 'RESTART_RELEASE_NOT_ADOPTED' }
+    }
     $identity = Get-OmiOwnedBackendIdentity
     if (-not [object]::ReferenceEquals($next, $script:OwnedBackendSession) -or
         -not [object]::ReferenceEquals($script:BackendProcess, $next.RunnerProcess) -or
@@ -1623,11 +1677,310 @@ function Start-OmiBackendAfterExactStop {
     return $identity
 }
 
+function Assert-OmiFailedStartProcessExclusion {
+    # Read-only inventory; missing command lines/permissions are unknown, not empty.
+    # Never open/adopt a discovered process handle or touch the Frontend tree.
+    $rows = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%.exe' OR Name = 'uvicorn.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'cmd.exe'" -Property ProcessId,CommandLine -OperationTimeoutSec 3 -ErrorAction Stop)
+    if (@($rows | Where-Object { $_.ProcessId -eq $PID }).Count -ne 1) { throw 'FAILED_START_PROCESS_OBSERVATION_UNKNOWN' }
+    foreach ($row in $rows) {
+        if ($row.ProcessId -eq $PID) { continue }
+        if ($row.ProcessId -le 0 -or [string]::IsNullOrWhiteSpace($row.CommandLine)) { throw 'FAILED_START_PROCESS_OBSERVATION_UNKNOWN' }
+        if ($row.CommandLine -match 'owned_backend_entry\.py|uvicorn\s+app\.main:app' -or
+            ($row.CommandLine -match 'run-service-logged\.ps1' -and $row.CommandLine -match '-ServiceName\s+"?backend\b')) {
+            throw 'FAILED_START_OTHER_BACKEND_PRESENT'
+        }
+    }
+}
+
+function Start-OmiBackendAfterFailedStart {
+    param([Parameter(Mandatory = $true)][string]$RequestId)
+    $RequestId=[Guid]::ParseExact($RequestId,'D').ToString('D')
+    Assert-OmiManualBackendStartOwner
+    if (-not $script:ServiceStartRequestInProgress) { throw 'FAILED_START_MANUAL_GUARD_REQUIRED' }
+    $old = $script:OwnedBackendSession
+    if ([object]::ReferenceEquals($old, $script:ManualBackendStartAttemptedSession) -or
+        $script:OwnedBackendRestartRequests.Contains($RequestId)) { throw 'FAILED_START_RECOVERY_REPLAY' }
+    if ($null -eq $old -or -not $script:OwnedBackendStartAttempted -or
+        -not [object]::ReferenceEquals($script:BackendProcess, $old.RunnerProcess) -or
+        -not $old.CanRecoverFailedStart) { throw 'FAILED_START_RECOVERY_NOT_ATTESTED' }
+    $targetRelease = Get-OmiBackendApplicationRelease
+    Assert-OmiSchemaCompatibility -ExpectedRelease $targetRelease
+    Assert-OmiProductionBackendStartPreflight
+    Assert-OmiFailedStartProcessExclusion
+    Assert-OmiManualBackendStartOwner
+    Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
+    # One retirement per retained generation; a new failed generation must prove
+    # its own exact exit. Unknown factory results cannot manufacture that proof.
+    $null=$script:OwnedBackendRestartRequests.Add($RequestId)
+    $script:FailedStartRecoveryAttempted = $true
+    $script:SafeStopAttempted = $true
+    $script:RetiredBackendSessions.Add($old)
+    $script:ManualBackendStartAttemptedSession = $old
+    $script:LastBackendStartError = 'FAILED_START_RECOVERY_UNCONFIRMED'
+    Write-LauncherLog "Manual failed-start recovery accepted request=$RequestId; original startup failure retained."
+    $old.RetireFailedStart($RequestId, $targetRelease)
+    Assert-OmiFailedStartProcessExclusion
+    return Start-OmiBackendSuccessor -ExpectedRelease $targetRelease
+}
+
+function Write-OmiSchemaOperation {
+    param([string]$Path, $Record, [switch]$Create)
+    $Record.updated_at=[DateTime]::UtcNow.ToString('o')
+    $mode = if ($Create) { [IO.FileMode]::CreateNew } else { [IO.FileMode]::Append }
+    $file = [IO.FileStream]::new($Path, $mode, [IO.FileAccess]::Write, [IO.FileShare]::Read,
+        4096, [IO.FileOptions]::WriteThrough)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($Record | ConvertTo-Json -Depth 8 -Compress) + "`n")
+        $file.Write($bytes, 0, $bytes.Length); $file.Flush($true)
+    } finally { $file.Dispose() }
+}
+
+function Get-OmiSchemaWorkerOutcome {
+    param([string]$Path, [string]$RequestId)
+    # Diagnostic only: never grants Apply/start/replay authority.
+    try {
+        $info=[IO.FileInfo]::new($Path)
+        if (-not $info.Exists -or $info.Length -gt 262144) { return 'UNKNOWN' }
+        $text=[IO.File]::ReadAllText($Path)
+        if (-not $text.EndsWith("`n")) { return 'UNKNOWN' }
+        $sequence=0; $last=$null
+        foreach ($line in ($text.TrimEnd("`n") -split "`n")) {
+            $row=$line | ConvertFrom-Json
+            $sequence++
+            if ($row.contract -cne 'omi.schema-apply.v1' -or $row.request_id -cne $RequestId -or
+                $row.sequence -ne $sequence -or $row.retry_allowed -isnot [bool] -or $row.retry_allowed) { return 'UNKNOWN' }
+            $last=$row
+        }
+        if ($last.migration -ceq 'COMMITTED' -and $last.phase -cin @('COMMITTED','FAILED')) { return 'COMMITTED' }
+        if ($last.phase -ceq 'FAILED' -and $last.migration -ceq 'NOT_ATTEMPTED') { return 'NOT_ATTEMPTED' }
+        if ($last.phase -ceq 'FAILED' -and $last.migration -ceq 'FAILED_TRANSACTION_REQUIRES_INSPECTION') {
+            return 'FAILED_TRANSACTION_REQUIRES_INSPECTION'
+        }
+    } catch { }
+    return 'UNKNOWN'
+}
+
+function Invoke-OwnedSchemaUpgrade {
+    param([Parameter(Mandatory=$true)][string]$RequestId,
+        [Parameter(Mandatory=$true)][string]$DatabasePath,
+        [Parameter(Mandatory=$true)][string]$SchemaLockPath,[switch]$RemoteRequest)
+    $RequestId=[Guid]::ParseExact($RequestId,'D').ToString('D')
+    if ($script:IsShuttingDown -or $script:ServiceStartRequestInProgress -or
+        $script:ServiceStopInProgress -or ($script:RuntimeControlInProgress -and -not $RemoteRequest) -or
+        $script:BackendRecoveryInProgress -or $script:FrontendHealthRecoveryInProgress) {
+        throw 'SERVICE_OPERATION_IN_PROGRESS'
+    }
+    $existingReceipt=Join-Path (Join-Path $script:RuntimeControlStore 'schema-maintenance') ($RequestId + '.operation.jsonl')
+    if ((Test-Path -LiteralPath $existingReceipt) -or $script:OwnedBackendRestartRequests.Contains($RequestId)) { throw 'SCHEMA_MAINTENANCE_NO_REPLAY' }
+    Assert-OmiSchemaRecoveryAdmission
+    $script:ServiceStartRequestInProgress = $true
+    $timerEnabled = $null -ne $script:Timer -and $script:Timer.Enabled
+    $activationEnabled = $null -ne $script:ActivationTimer -and $script:ActivationTimer.Enabled
+    $record = $null; $receipt = $null; $intentCreated=$false; $terminalPersisted=$false
+    $effectsPossible=$false
+    $previousSchemaFailure=$script:SchemaMaintenanceFailed
+    $previousSafeStop=$script:SafeStopAttempted
+    $previousStopExpected=$script:BackendStopExpected
+    $previousReadySession=$script:RestartReadyBackendSession
+    $script:SchemaSuccessorAttempted=$false
+    try {
+        if ($null -ne $script:Timer) { $script:Timer.Stop() }
+        if ($null -ne $script:ActivationTimer) { $script:ActivationTimer.Stop() }
+        # Every admission, including refusal, has a durable, non-overwriting intent.
+        $directory = Join-Path $script:RuntimeControlStore 'schema-maintenance'
+        [void][IO.Directory]::CreateDirectory($directory)
+        $receipt = Join-Path $directory ($RequestId + '.operation.jsonl')
+        $record = [ordered]@{contract='omi.schema-operation.v1'; request_id=$RequestId;
+            phase='INTENT'; status='UNKNOWN'; retry_allowed=$false; sequence=1;
+            migration_outcome='NOT_ATTEMPTED'; successor_outcome='NOT_ATTEMPTED';
+            frontend_interrupted=$false; admission=$null; stop=$null; after=$null;
+            worker_receipt=(Join-Path $directory ($RequestId + '.apply.jsonl'))}
+        Write-OmiSchemaOperation -Path $receipt -Record $record -Create
+        $intentCreated=$true
+        $null=$script:OwnedBackendRestartRequests.Add($RequestId)
+        $script:SchemaRecoveryFence=@{Path=$receipt;TerminalHash=$null;NoEffects=$false;WorkerSettled=$false}
+        $script:SchemaMaintenanceAttempted = $true
+        $script:SchemaMaintenanceFailed = $true
+        Assert-OmiManualBackendStartOwner
+        $old = $script:OwnedBackendSession
+        if ($null -eq $old -or -not [object]::ReferenceEquals($script:BackendProcess, $old.RunnerProcess)) {
+            throw 'SCHEMA_OWNER_AMBIGUOUS'
+        }
+        $targetRelease = Get-OmiBackendApplicationRelease
+        Assert-OmiSchemaCompatibility -ExpectedRelease $targetRelease -Upgrade -DatabasePath $DatabasePath -SchemaLockPath $SchemaLockPath
+        $failedStart = [bool]$old.StartupFailure
+        $schemaRelease = Get-OmiSchemaSourceRelease
+        $record.admission = if ($failedStart) { 'FAILED_START_EXACT_EXIT' } else { 'RUNNING_GRACEFUL_STOP' }
+        $record.target_release = $targetRelease
+        $record.schema_source_release = $schemaRelease
+        $record.before = @{pid=$old.ChildPid; created_at=$old.ChildCreated}
+        $record.phase='ADMISSION'; $record.sequence++
+        Write-OmiSchemaOperation -Path $receipt -Record $record
+        if ($failedStart) {
+            if (-not $old.CanRecoverFailedStart) { throw 'SCHEMA_FAILED_START_NOT_ATTESTED' }
+            Assert-OmiFailedStartProcessExclusion
+            $old.AdmitFailedStartSchemaMaintenance($RequestId, $targetRelease)
+        } elseif ($old.CanStartAfterStop) {
+            Assert-OmiFailedStartProcessExclusion
+            $old.AdmitStoppedSchemaMaintenance($RequestId,$targetRelease)
+            $record.admission='RETAINED_GRACEFUL_EXIT'
+        } else {
+            if (-not $old.HasRetainedIdentity -or ($null -ne $old.LastStop -and -not $old.CanResumeAfterSchemaStopRefusal) -or $old.Terminal) {
+                throw 'SCHEMA_RUNNING_OWNER_NOT_ATTESTED'
+            }
+            $effectsPossible=$true # From first possible STOP dispatch, delivery can be unknown.
+            $script:SafeStopAttempted=$true
+            $script:RestartReadyBackendSession=$null
+            $script:BackendStopExpected=$true
+            $pending=$old.StopForSchemaMaintenanceAsync($RequestId, $targetRelease)
+            while (-not $pending.IsCompleted) { Start-Sleep -Milliseconds 25 }
+            $stop=$pending.GetAwaiter().GetResult()
+            $record.stop=@{request_id=$stop.RequestId; state=$stop.State; reason=$stop.Reason;
+                exact_exit=$stop.ExactExit; forced=$stop.Forced; before_pid=$stop.BeforePid;
+                before_created=$stop.BeforeCreated}
+            if ($old.CanResumeAfterSchemaStopRefusal -and $stop.RequestId -ceq $RequestId) {
+                $effectsPossible=$false # Native retained STOP-not-sent/rearm evidence, not an inferred reset.
+            }
+            if ($stop.RequestId -cne $RequestId -or -not $stop.ExactExit -or $stop.Forced -or
+                $stop.ForcedExitConfirmed -or $stop.Rearmed -or $stop.State -cne 'stopped' -or
+                $stop.Reason -cne 'LIFESPAN_AND_EXACT_EXIT' -or
+                $stop.BeforePid -ne $old.ChildPid -or $stop.BeforeCreated -cne $old.ChildCreated -or
+                -not $old.CanStartAfterStop) { throw 'SCHEMA_GRACEFUL_EXIT_REQUIRED' }
+        }
+        Assert-OmiManualBackendStartOwner
+        Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
+        $record.phase='APPLY_STOPPED'; $record.sequence++
+        $record.migration_outcome='UNKNOWN'
+        Write-OmiSchemaOperation -Path $receipt -Record $record
+        try {
+            $effectsPossible=$true
+            $script:SafeStopAttempted=$true
+            $script:RestartReadyBackendSession=$null
+            $script:BackendStopExpected=$true
+            $pending=$old.ApplyStoppedSchemaAsync($RequestId, $targetRelease, $schemaRelease, $DatabasePath, $SchemaLockPath,
+                (Join-Path $directory ($RequestId + '.backup.db')), $record.worker_receipt)
+            while (-not $pending.IsCompleted) { Start-Sleep -Milliseconds 25 }
+            $applied=$pending.GetAwaiter().GetResult()
+        } finally {
+            $record.migration_outcome=Get-OmiSchemaWorkerOutcome -Path $record.worker_receipt -RequestId $RequestId
+        }
+        # Receipt observation alone cannot authorize a successor after a lost
+        # worker channel. Require the retained worker's validated terminal reply.
+        if (-not $applied -or $record.migration_outcome -cne 'COMMITTED') { throw 'SCHEMA_APPLY_UNCONFIRMED' }
+        Assert-OmiManualBackendStartOwner
+        Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
+        $record.phase='STARTING_ONCE'; $record.sequence++
+        $record.successor_outcome='STARTING'
+        Write-OmiSchemaOperation -Path $receipt -Record $record
+        $script:SchemaSuccessorPending=$true
+        if ($failedStart) {
+            Assert-OmiFailedStartProcessExclusion
+            Assert-OmiProductionBackendStartPreflight
+            $script:FailedStartRecoveryAttempted=$true
+            $script:RetiredBackendSessions.Add($old)
+            $script:ManualBackendStartAttemptedSession=$old
+            $old.RetireFailedStart($RequestId, $targetRelease)
+            $verified=Start-OmiBackendSuccessor -ExpectedRelease $targetRelease
+        } else {
+            $verified=Start-OmiBackendAfterExactStop -ExpectedRelease $targetRelease
+        }
+        $record.after=@{pid=$verified.pid; created_at=$verified.created_at; release=$targetRelease; readyz='VERIFIED'}
+        $record.phase='COMPLETE'; $record.status='SUCCEEDED'; $record.sequence++
+        $record.successor_outcome='VERIFIED'
+        Write-OmiSchemaOperation -Path $receipt -Record $record
+        $terminalPersisted=$true
+        $script:SchemaMaintenanceFailed=$false
+    } catch {
+        if ($intentCreated) {
+            $script:SchemaMaintenanceFailed=$true
+            $script:RestartReadyBackendSession=$null
+            if ($null -ne $record) {
+                $record.failed_phase=$record.phase; $record.phase='FAILED'; $record.sequence++
+                if ($script:SchemaSuccessorAttempted -and $record.successor_outcome -ne 'VERIFIED') {
+                    $record.successor_outcome='FAILED_UNCONFIRMED'
+                }
+                elseif ($record.successor_outcome -eq 'STARTING') { $record.successor_outcome='NOT_ATTEMPTED' }
+                $record.status = switch ($record.migration_outcome) {
+                    'COMMITTED' {
+                        if ($record.successor_outcome -eq 'VERIFIED') { 'UNKNOWN_RECONCILIATION_REQUIRED' }
+                        elseif ($script:SchemaSuccessorAttempted) { 'MIGRATED_START_FAILED' }
+                        else { 'MIGRATED_START_UNVERIFIED' }
+                    }
+                    'NOT_ATTEMPTED' { 'BLOCKED_NO_DB_CHANGE' }
+                    default { 'UNKNOWN_RECONCILIATION_REQUIRED' }
+                }
+                $record.error_type=$_.Exception.GetType().Name
+                $record.next_action=if (-not $effectsPossible -or ($null -ne $old -and $old.SchemaWorkerSettled -and
+                    $record.migration_outcome -cin @('NOT_ATTEMPTED','COMMITTED'))) {
+                    'CheckStart_then_new_UUID_with_retained_generation'
+                } else {'ReadOperation_and_Plan_then_reconcile_worker_and_generation'}
+                Write-OmiSchemaOperation -Path $receipt -Record $record
+                $terminalPersisted=$true
+            }
+        }
+        if (-not $effectsPossible) {
+            # Pure preflight refusal consumes only this schema request. Restore
+            # normal maintenance admission; no STOP/worker/factory was dispatched.
+            $script:SchemaMaintenanceFailed=$previousSchemaFailure
+            $script:SafeStopAttempted=$previousSafeStop
+            $script:BackendStopExpected=$previousStopExpected
+            $script:RestartReadyBackendSession=$previousReadySession
+        }
+        throw
+    } finally {
+        if ($intentCreated) {
+            $script:LastSchemaOperation=$record
+            $script:SchemaRecoveryFence=@{Path=$receipt;
+                TerminalHash=$(if ($terminalPersisted) {Get-OmiSchemaReceiptHash -Path $receipt} else {$null});
+                NoEffects=(-not $effectsPossible);WorkerSettled=($null -ne $old -and $old.SchemaWorkerSettled -and
+                    $record.migration_outcome -cin @('NOT_ATTEMPTED','COMMITTED'))}
+        }
+        try {
+            [System.Windows.Forms.Application]::DoEvents()
+            foreach ($event in @($script:RunEvent,$script:RestartEvent,$script:RestartBackendEvent,$script:ExitEvent)) {
+                if ($null -ne $event) { [void]$event.Reset() }
+            }
+        } finally {
+            $script:SchemaSuccessorPending=$false
+            $script:ServiceStartRequestInProgress=$false
+            if ($timerEnabled) { $script:Timer.Start() }
+            if ($activationEnabled) { $script:ActivationTimer.Start() }
+        }
+    }
+}
+
+function Invoke-OmiConfiguredSchemaUpgrade {
+    param([string]$RequestId=([Guid]::NewGuid().ToString('D')),[switch]$RemoteRequest)
+    Assert-OmiManualBackendStartOwner
+    Assert-OmiSchemaRecoveryAdmission
+    $release=Get-OmiBackendApplicationRelease
+    try {
+        $target=Assert-OmiSchemaCompatibility -ExpectedRelease $release -Upgrade -PassThru
+        if ($null -eq $target.configured_target -or
+            [string]::IsNullOrWhiteSpace($target.configured_target.database_path) -or
+            [string]::IsNullOrWhiteSpace($target.configured_target.schema_lock_path)) { throw 'NO_CONFIGURED_TARGET' }
+        # Canonical paths are private inspector output, never request fields.
+        $database=Get-OmiIdentityPath -Path $target.configured_target.database_path
+        $lock=Get-OmiIdentityPath -Path $target.configured_target.schema_lock_path
+        if ([IO.Path]::GetFileName($lock) -cne 'schema.lock') { throw 'NO_CONFIGURED_TARGET' }
+    } catch { throw 'SCHEMA_CONFIGURED_TARGET_UNAVAILABLE' }
+    Invoke-OwnedSchemaUpgrade -RequestId $RequestId -DatabasePath $database -SchemaLockPath $lock -RemoteRequest:$RemoteRequest
+}
+
+function Show-OmiSchemaUpgrade {
+    # A tray click is local intent; it uses the same configured target and gates.
+    Invoke-OmiConfiguredSchemaUpgrade
+}
+
 function Invoke-BackendStartRequest {
-    # Only the dedicated tray click calls this. SafeStopAttempted stays sticky:
+    param([switch]$FailedStartRecovery,[string]$RequestId=([Guid]::NewGuid().ToString('D')),[switch]$RemoteRequest)
+    Assert-OmiSchemaRecoveryAdmission
+    $RequestId=[Guid]::ParseExact($RequestId,'D').ToString('D')
+    # Dedicated tray clicks or approved, dequeued Controller intent call this.
+    # SafeStopAttempted stays sticky for automatic paths:
     # automatic recovery and the Controller's old destructive queue stay fenced.
     if ($script:IsShuttingDown -or $script:ServiceStartRequestInProgress -or
-        $script:ServiceStopInProgress -or $script:RuntimeControlInProgress -or
+        $script:ServiceStopInProgress -or ($script:RuntimeControlInProgress -and -not $RemoteRequest) -or
         $script:BackendRecoveryInProgress -or $script:FrontendHealthRecoveryInProgress) {
         throw 'SERVICE_OPERATION_IN_PROGRESS'
     }
@@ -1637,7 +1990,15 @@ function Invoke-BackendStartRequest {
     try {
         if ($null -ne $script:Timer) { $script:Timer.Stop() }
         if ($null -ne $script:ActivationTimer) { $script:ActivationTimer.Stop() }
-        $null = Start-OmiBackendAfterExactStop
+        if ($FailedStartRecovery) {
+            $null = Start-OmiBackendAfterFailedStart -RequestId $RequestId
+        } else {
+            if ($script:OwnedBackendRestartRequests.Contains($RequestId)) {throw 'BACKEND_START_NO_REPLAY'}
+            $null=$script:OwnedBackendRestartRequests.Add($RequestId)
+            $release=$script:OwnedBackendSession.ReleaseId
+            Assert-OmiSchemaCompatibility -ExpectedRelease $release
+            $null = Start-OmiBackendAfterExactStop -ExpectedRelease $release
+        }
         Write-LauncherLog 'Backend started after explicit tray request; owned READY and HTTP readiness verified; Frontend unchanged.'
     }
     catch {
@@ -1650,7 +2011,7 @@ function Invoke-BackendStartRequest {
             # Drain queued UI clicks while all entrypoints remain fenced, then
             # discard named events. Controller pending requests are never taken.
             [System.Windows.Forms.Application]::DoEvents()
-            foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:ExitEvent)) {
+            foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:RestartBackendEvent, $script:ExitEvent)) {
                 if ($null -ne $event) { [void]$event.Reset() }
             }
         }
@@ -1663,7 +2024,10 @@ function Invoke-BackendStartRequest {
 }
 
 function Invoke-OwnedBackendRestart {
-    param([Parameter(Mandatory = $true)][string]$RequestId, [switch]$RemoteRequest)
+    param([Parameter(Mandatory = $true)][string]$RequestId, [switch]$RemoteRequest, $Deadline = $null)
+    Assert-OmiSchemaRecoveryAdmission
+    if ($null -eq $Deadline) { $Deadline = [Omi.OwnedShutdown.LifecycleDeadline]::new() }
+    if ($RemoteRequest) { $Deadline = $script:RuntimeController.OwnedRestartDeadline($RequestId) }
     $null = [Guid]::ParseExact($RequestId, 'D')
     if ($script:IsShuttingDown -or $script:ServiceStartRequestInProgress -or
         $script:ServiceStopInProgress -or $script:BackendRecoveryInProgress -or
@@ -1674,23 +2038,21 @@ function Invoke-OwnedBackendRestart {
     $script:ServiceStartRequestInProgress = $true
     $timerEnabled = $null -ne $script:Timer -and $script:Timer.Enabled
     $activationEnabled = $null -ne $script:ActivationTimer -and $script:ActivationTimer.Enabled
-    $begun = $false; $stopped = $null; $next = $null; $verified = $null
+    $begun = $false; $stopped = $null; $next = $null; $verified = $null; $stopDispatched=$false
+    $factoryAttemptsBefore=[long]$script:BackendFactoryAttemptCount
+    $previousSafeStopAttempted = $script:SafeStopAttempted
+    $previousRestartReadySession = $script:RestartReadyBackendSession
     $blocker = 'OWNER_NOT_ATTESTED'
     try {
         if ($null -ne $script:Timer) { $script:Timer.Stop() }
         if ($null -ne $script:ActivationTimer) { $script:ActivationTimer.Stop() }
-        if ($RemoteRequest -and -not (Test-OmiRemoteRestartGeneration)) {
-            $blocker = 'ALL_WRITERS_DRAIN_UNAVAILABLE'; throw $blocker
-        }
-        Assert-OmiManualBackendStartOwner
+        if (-not $script:OwnsMutex) { throw 'OWNER_NOT_ATTESTED' }
         $old = $script:OwnedBackendSession
         $identity = Get-OmiOwnedBackendIdentity
-        if ($script:LastBackendStartError) { $blocker = 'READINESS_NOT_ATTESTED'; throw $blocker }
-        if ($null -eq $old -or $null -eq $identity -or $old.Terminal -or -not $old.Alive -or
+        if ($null -eq $old -or $null -eq $identity -or -not $old.HasRetainedIdentity -or
+            $old.Terminal -or -not $old.Alive -or $old.StartupFailure -or $script:LastBackendStartError -or
             -not [object]::ReferenceEquals($script:BackendProcess, $old.RunnerProcess) -or
             $identity.pid -ne $old.ChildPid -or $identity.created_at -cne $old.ChildCreated) { throw $blocker }
-        if ($old.RestartBlocker) { $blocker = $old.RestartBlocker; throw $blocker }
-        if (-not $old.VerifyReadiness()) { $blocker = 'READINESS_NOT_ATTESTED'; throw $blocker }
         # Consume the Controller's authenticated, dequeued remote intent once.
         # A dedicated tray click supplies local intent inside owner.
         if ($RemoteRequest -and -not $script:RuntimeController.BeginAuthenticatedOwnedRestart($RequestId, $identity)) { return }
@@ -1698,9 +2060,19 @@ function Invoke-OwnedBackendRestart {
         $begun = $true
         $script:LastBackendRestart = [pscustomobject]@{ RequestId=$RequestId; State='unknown';
             Reason='LIFECYCLE_FAILED'; Stop=$null; After=$null; PreflightStage=$null }
+        # The consumed intent selects the current disk application snapshot.
+        # The retained session still owns the OLD process/STOP wire identity;
+        # targetRelease is only the successor pin, never the old ReleaseId.
+        Assert-OmiManualBackendStartOwner
+        $targetRelease = Get-OmiBackendApplicationRelease
+        $blocker='RESTART_COMPATIBILITY_NOT_ATTESTED'
+        Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
+        Assert-OmiSchemaCompatibility -ExpectedRelease $targetRelease
         # Re-observe owner/source before STOP, with
         # the accepted request already consumed so ambiguity cannot replay it.
+        $blocker='OWNER_NOT_ATTESTED'
         Assert-OmiManualBackendStartOwner
+        Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
         $current = Get-OmiOwnedBackendIdentity
         if ($null -eq $current -or $current.pid -ne $identity.pid -or
             $current.created_at -cne $identity.created_at -or
@@ -1709,34 +2081,51 @@ function Invoke-OwnedBackendRestart {
         $script:SafeStopAttempted = $true
         $script:RestartReadyBackendSession = $null
         $script:BackendStopExpected = $true
-        $pending = $old.StopAsync($RequestId)
+        $stopDispatched=$true
+        $pending = $old.StopWithinDeadlineAsync($RequestId, $targetRelease, $Deadline)
         while (-not $pending.IsCompleted) {
-            [System.Windows.Forms.Application]::DoEvents()
+            if ($Deadline.ElapsedMilliseconds -gt 185000) { throw 'CUTOFF_RECEIPT_UNAVAILABLE' }
             Start-Sleep -Milliseconds 25
         }
         $stopped = $pending.GetAwaiter().GetResult()
         $script:LastBackendRestart.Stop = $stopped
         $script:LastBackendRestart.PreflightStage = $stopped.PreflightStage
-        if ($stopped.Rearmed) {
+        if ($stopped.Rearmed -or $stopped.StopNotSent) {
+            if ($stopped.RequestId -cne $RequestId -or $stopped.BeforePid -ne $old.ChildPid -or
+                $stopped.BeforeCreated -cne $old.ChildCreated -or $stopped.State -cne 'blocked' -or
+                $stopped.ExactExit -or $old.Terminal -or -not $old.Alive -or
+                -not [object]::ReferenceEquals($old, $script:OwnedBackendSession)) { throw 'REARM_NOT_ATTESTED' }
+            if (-not $stopped.Rearmed -and ($stopped.PreflightStage -cne 'BEFORE_PREPARE' -or
+                $stopped.Reason -cnotin @('RESTART_SOURCE_CHANGED', 'RESTART_ABORT_PROTOCOL_UNAVAILABLE'))) { throw 'REARM_NOT_ATTESTED' }
+            $script:SafeStopAttempted = $previousSafeStopAttempted
+            $script:RestartReadyBackendSession = $previousRestartReadySession
             $script:BackendStopExpected = $false
             $script:LastBackendRestart.State = 'blocked'
-            $script:LastBackendRestart.Reason = 'PREFLIGHT_REARMED'
-            $script:LastServiceStopError = "PREFLIGHT_REARMED stage=$($stopped.PreflightStage)"
+            $script:LastBackendRestart.Reason = $stopped.Reason
+            $script:LastServiceStopError = "$($stopped.Reason) stage=$($stopped.PreflightStage)"
             throw $script:LastServiceStopError
         }
-        if ($stopped.RequestId -cne $RequestId -or -not $stopped.ExactExit -or
-            $stopped.State -cne 'stopped' -or $stopped.Reason -cne 'LIFESPAN_AND_EXACT_EXIT' -or
+        if ($stopped.RequestId -cne $RequestId -or
+            (-not $stopped.ExactExit -and -not $stopped.ForcedExitConfirmed) -or
             -not [object]::ReferenceEquals($old, $script:OwnedBackendSession) -or -not $old.CanStartAfterStop) {
             throw 'PREVIOUS_EXACT_STOP_NOT_ATTESTED'
         }
-        $verified = Start-OmiBackendAfterExactStop
+        $verified = Start-OmiBackendAfterExactStop -ExpectedRelease $targetRelease
         $next = $script:OwnedBackendSession
         $script:LastBackendRestart.State = 'succeeded'
         $script:LastBackendRestart.Reason = 'SUCCEEDED'
     }
     catch {
+        if ($begun -and -not $stopDispatched) {
+            if ($_.Exception.Message -in @('RESTART_SOURCE_CHANGED', 'SOURCE_ADOPTION_NOT_ATTESTED')) {
+                $blocker=$_.Exception.Message
+            }
+            $script:LastBackendRestart.State='blocked'
+            $script:LastBackendRestart.Reason=$blocker
+            $script:LastBackendRestart.PreflightStage='BEFORE_STOP'
+        }
         if ($RemoteRequest -and -not $begun) { $script:RuntimeController.BlockOwnedRestart($RequestId, $blocker) }
-        Write-LauncherLog 'Owned Backend restart refused or unconfirmed; retained sessions; no retry or fallback.' 'WARN'
+        Write-LauncherLog 'Owned Backend restart refused or unconfirmed; retained sessions; no replay.' 'WARN'
         throw
     }
     finally {
@@ -1744,7 +2133,9 @@ function Invoke-OwnedBackendRestart {
             if ($begun) {
                 if (-not [object]::ReferenceEquals($old, $script:OwnedBackendSession)) { $next = $script:OwnedBackendSession }
                 $script:LastBackendRestart.After = $next
-                if ($RemoteRequest) { $script:RuntimeController.CompleteOwnedRestart($RequestId, $stopped, $next, $verified) }
+                if ($RemoteRequest) { $script:RuntimeController.CompleteOwnedRestart($RequestId, $stopped, $next, $verified,
+                    $(if (-not $stopDispatched) {$blocker} else {$null}),
+                    ([long]$script:BackendFactoryAttemptCount -gt $factoryAttemptsBefore)) }
                 Publish-OmiRuntimeControlStatus
             }
         }
@@ -1759,8 +2150,7 @@ function Invoke-OwnedBackendRestart {
         }
         finally {
             try {
-                [System.Windows.Forms.Application]::DoEvents()
-                foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:ExitEvent)) {
+                foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:RestartBackendEvent, $script:ExitEvent)) {
                     if ($null -ne $event) { [void]$event.Reset() }
                 }
             }
@@ -1774,8 +2164,38 @@ function Invoke-OwnedBackendRestart {
     Write-LauncherLog 'Backend restart completed; exact old exit and new owned HTTP readiness verified; Frontend unchanged.'
 }
 
+function Test-FrontendRecoveryAdmission {
+    param([switch]$HealthRecovery)
+    if ($script:FrontendStopUnconfirmed -or $script:LastBackendStartError -or
+        $script:ServiceStopInProgress -or $script:RuntimeControlInProgress -or $script:IsShuttingDown) { return $false }
+    if ($null -ne $script:LastFullServiceRestart -and
+        $script:LastFullServiceRestart.State -cne 'succeeded') { return $false }
+    # Initial service startup owns these guards; automatic recovery never does.
+    if (($HealthRecovery -or $script:SafeStopAttempted) -and
+        ($script:ServiceStartRequestInProgress -or $script:BackendRecoveryInProgress)) { return $false }
+    if (-not $script:SafeStopAttempted) { return $true }
+    # Read-only exception for the SAME retained live verified successor. Never
+    # rearm Backend admission or clear the sticky stop fence.
+    try { return (Test-OmiRemoteRestartGeneration) }
+    catch { return $false }
+}
+
 function Start-Frontend {
-    if ($script:SafeStopAttempted) { throw 'SAFE_STOP_NO_START_OR_RECOVERY' }
+    param([switch]$AfterConfirmedStop)
+    if ($AfterConfirmedStop) {
+        if (-not $script:ServiceStartRequestInProgress -or $null -eq $script:LastFrontendStop -or
+            $script:LastFrontendStop.State -cne 'stopped' -or $script:LastFrontendStop.StartAttempted -or
+            $null -ne $script:FrontendProcess -or $script:FrontendStopUnconfirmed -or
+            $script:LastFrontendStop.Port -ne $script:FrontendPort) { throw 'FRONTEND_START_NOT_ATTESTED' }
+        # One explicit attempt. Do not clear the Backend safe-stop/remote fence.
+        $script:LastFrontendStop.StartAttempted = $true
+        if (@(Get-ListeningProcessIdsOnPort -Port $script:FrontendPort -RequireObservation).Count -ne 0 -or
+            -not (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost -ServiceName 'Frontend')) {
+            throw 'FRONTEND_START_NOT_ATTESTED'
+        }
+    }
+    elseif (-not (Test-FrontendRecoveryAdmission)) { throw 'SAFE_STOP_NO_START_OR_RECOVERY' }
+    if (-not $AfterConfirmedStop) {
     $frontendHealth = Get-FrontendHealth
     if ($null -ne $frontendHealth -and (Test-FrontendHealthMatchesExpected -Health $frontendHealth)) {
         Write-LauncherLog "Frontend health endpoint already responds with the expected project/runtime; skipping frontend start."
@@ -1808,6 +2228,7 @@ function Start-Frontend {
     }
 
     Select-AvailableFrontendPortForStart
+    }
 
     if ($script:IsPackagedRelease) {
         $serverScript = Join-Path $script:FrontendDir "server.js"
@@ -1879,7 +2300,7 @@ function Start-Services {
     }
     catch {
         Write-LauncherLog "Backend start failed. error=$($_.Exception.Message)" "ERROR"
-        Show-Message "Backend failed to start. Check logs\launcher for details."
+        Show-Message "Backend failed to start: $($_.Exception.Message). Check logs\launcher for details."
         return
     }
 
@@ -1936,11 +2357,40 @@ function Invoke-BackendBindFailureRecovery {
 }
 
 function Stop-BackendService {
+    param($Deadline = $null)
+    if ($null -eq $Deadline) { $Deadline = [Omi.OwnedShutdown.LifecycleDeadline]::new() }
     # The tray owns this local action; it grants no remote restart authority.
     # Keep the original session/handles even after unknown or completed STOP.
     if (-not $script:OwnsMutex) { throw 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED' }
     $owned = $script:OwnedBackendSession
-    if ($null -eq $owned) { throw 'BACKEND_SAFE_STOP_OWNED_CHANNEL_REQUIRED' }
+    if ($null -eq $owned) {
+        # Only a structurally never-attempted cold owner may close without a
+        # Stop receipt. Null session alone says nothing about child existence.
+        if ($script:OwnedBackendStartAttempted -cne $false -or $script:BackendReload -or $script:IsPackagedRelease -or
+            $null -ne $script:BackendProcess -or $script:RetiredBackendSessions.Count -gt 0 -or
+            $null -ne $script:ManualBackendStartAttemptedSession) { throw 'BACKEND_SAFE_STOP_OWNED_CHANNEL_REQUIRED' }
+        if ($null -eq $script:Mutex -or $script:Mutex.SafeWaitHandle.IsClosed -or $script:Mutex.SafeWaitHandle.IsInvalid) {
+            throw 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED'
+        }
+        # This narrow no-op requires no Frontend history and no observed direct
+        # child of this Launcher, including an untracked Runner. Observation
+        # errors fail closed; no PID lookup/kill or port-owner cleanup follows.
+        if ($null -ne $script:FrontendProcess -or $null -ne $script:FrontendRunnerIdentity -or
+            ($null -ne $script:LastFrontendStop -and ($script:LastFrontendStop.State -cne 'stopped' -or
+                $null -ne $script:LastFrontendStop.Runner -or $script:LastFrontendStop.Nodes.Count -gt 0 -or
+                $script:LastFrontendStop.StartAttempted))) { throw 'BACKEND_COLD_STOP_NOT_ATTESTED' }
+        Assert-FrontendSafeStopAvailable
+        if (@(Get-FrontendProcessSnapshot | Where-Object { $_.ParentProcessId -eq $PID }).Count -ne 0) {
+            throw 'BACKEND_COLD_STOP_NOT_ATTESTED'
+        }
+        if (@(Get-ListeningProcessIdsOnPort -Port $script:BackendPort -RequireObservation).Count -ne 0) { throw 'FIXED_PORT_NOT_FREE' }
+        if (-not (Test-TcpPortBindable -Port $script:BackendPort -HostName $script:BackendHost -ServiceName 'Backend' -Quiet)) {
+            throw 'FIXED_PORT_NOT_BINDABLE'
+        }
+        $script:BackendStopExpected = $true
+        Write-LauncherLog 'OWNED_COLD_START_NOT_ATTEMPTED; empty owner observed; no Backend Safe Stop receipt.'
+        return
+    }
     if (-not [object]::ReferenceEquals($script:BackendProcess, $owned.RunnerProcess)) {
         throw 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED'
     }
@@ -1952,17 +2402,16 @@ function Stop-BackendService {
         return
     }
     $evidence = $owned.LastStop
-    if (-not $owned.Terminal) {
-        if (-not $owned.Alive) { throw 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED' }
+    if ($null -eq $evidence -or (-not $evidence.ExactExit -and -not $evidence.ForcedExitConfirmed)) {
         $script:BackendStopExpected = $true
         $requestId = [Guid]::NewGuid().ToString('D')
         Write-LauncherLog "Backend safe stop requested. request_id=$requestId"
         try {
-            $pending = $owned.StopAsync($requestId)
+            $pending = $owned.StopWithinDeadlineAsync($requestId, $null, $Deadline)
             while (-not $pending.IsCompleted) {
                 # Only UI messages run here. Lifecycle timers and entrypoints
                 # are fenced until this same request has returned evidence.
-                [System.Windows.Forms.Application]::DoEvents()
+                if ($Deadline.ElapsedMilliseconds -gt 185000) { throw 'CUTOFF_RECEIPT_UNAVAILABLE' }
                 Start-Sleep -Milliseconds 25
             }
             $evidence = $pending.GetAwaiter().GetResult()
@@ -1975,6 +2424,12 @@ function Stop-BackendService {
     }
     if ($null -eq $evidence) { throw 'BACKEND_SAFE_STOP_UNKNOWN' }
     Write-LauncherLog "Backend safe stop result. request_id=$($evidence.RequestId) state=$($evidence.State) reason=$($evidence.Reason) stage=$($evidence.PreflightStage)"
+    if ($evidence.ForcedExitConfirmed -and $evidence.State -eq 'forced_stopped') {
+        $script:BackendStopExpected = $true
+        $script:LastBackendStartError = $null
+        Write-LauncherLog "BACKEND_HARD_CUTOFF request_id=$($evidence.RequestId) pid=$($evidence.BeforePid) generation=$($evidence.ProcessGeneration) cutoff=$($evidence.CutoffAt) recovery=RECONCILIATION_REQUIRED" 'WARN'
+        return
+    }
     if ($evidence.Rearmed -and $evidence.State -eq 'blocked') {
         $script:BackendStopExpected = $false
         throw 'BACKEND_SAFE_STOP_PREFLIGHT_REARMED'
@@ -2015,50 +2470,177 @@ function Stop-LegacyBackendService {
     }
 }
 
-function Assert-FrontendSafeStopAvailable {
-        # The legacy frontend runner has no cooperative stop channel. Do not
-        # turn Backend success into authority to force or adopt a port owner.
-        if ($null -ne $script:FrontendProcess) {
-            try {
-                $exited = $script:FrontendProcess.HasExited
-                $exitCode = if ($exited) { $script:FrontendProcess.ExitCode } else { $null }
-            }
-            catch { throw 'FRONTEND_STOP_UNCONFIRMED' }
-            if (-not $exited) { throw 'FRONTEND_SAFE_STOP_UNAVAILABLE' }
-            if ($exitCode -ne 0) { throw 'FRONTEND_STOP_UNCONFIRMED' }
-        }
-        if (@(Get-ListeningProcessIdsOnPort -Port $script:FrontendPort).Count -ne 0 -or
-            -not (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost -ServiceName 'Frontend')) {
+function Get-FrontendProcessSnapshot {
+    # Failure is unknown, never an empty process inventory.
+    return @(Get-CimInstance Win32_Process -OperationTimeoutSec 3 -ErrorAction Stop |
+        Select-Object ProcessId, ParentProcessId, CreationDate)
+}
+
+function Get-FrontendCreationTicks {
+    param([DateTime]$Created)
+    # CIM exposes microseconds, Process.StartTime exposes 100 ns FILETIME ticks.
+    $ticks = $Created.ToUniversalTime().Ticks
+    return ($ticks - ($ticks % 10))
+}
+
+function Assert-FrontendRunnerIdentity {
+    param([Parameter(Mandatory = $true)]$Identity)
+    # Only the original birth handle grants termination authority. No PID lookup.
+    try {
+        if (-not $script:OwnsMutex -or $null -eq $script:Mutex -or $null -eq $script:Mutex.SafeWaitHandle -or
+            $script:Mutex.SafeWaitHandle.IsClosed -or $script:Mutex.SafeWaitHandle.IsInvalid -or
+            -not [object]::ReferenceEquals($Identity, $script:FrontendRunnerIdentity) -or
+            -not [object]::ReferenceEquals($Identity.Process, $script:FrontendProcess) -or
+            $Identity.LauncherPid -ne $PID -or
+            $Identity.LauncherCreated -ne [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime() -or
+            $Identity.Pid -le 0 -or $Identity.Pid -eq $PID -or $Identity.Process.Id -ne $Identity.Pid -or
+            $Identity.Handle -eq [IntPtr]::Zero -or $Identity.Process.Handle -ne $Identity.Handle -or
+            $Identity.Process.HasExited -or $Identity.Process.StartTime.ToUniversalTime() -ne $Identity.Created) {
             throw 'FRONTEND_STOP_UNCONFIRMED'
         }
+    }
+    catch { throw 'FRONTEND_STOP_UNCONFIRMED' }
+}
+
+function Assert-FrontendSafeStopAvailable {
+    try {
+        if ($script:FrontendStopUnconfirmed) { throw 'FRONTEND_STOP_UNCONFIRMED' }
+        if ($null -eq $script:FrontendProcess) {
+            if (@(Get-ListeningProcessIdsOnPort -Port $script:FrontendPort -RequireObservation).Count -ne 0 -or
+                -not (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost -ServiceName 'Frontend')) {
+                throw 'FRONTEND_STOP_UNCONFIRMED'
+            }
+            return
+        }
+        Assert-FrontendRunnerIdentity -Identity $script:FrontendRunnerIdentity
+    }
+    catch { throw 'FRONTEND_STOP_UNCONFIRMED' }
+}
+
+function Assert-FrontendListenerOwnership {
+    # Readiness evidence only: one snapshot, listener-to-root ancestry, no tree
+    # inventory/handles or pre/post termination scans. Never supplies a kill PID.
+    Assert-FrontendRunnerIdentity -Identity $script:FrontendRunnerIdentity
+    try {
+        $listeners = @(Get-ListeningProcessIdsOnPort -Port $script:FrontendPort -RequireObservation)
+        if ($listeners.Count -eq 0) { throw 'FRONTEND_OBSERVATION_UNAVAILABLE' }
+        $rows = @(Get-FrontendProcessSnapshot)
+    }
+    catch { throw 'FRONTEND_OBSERVATION_UNAVAILABLE' }
+    $identity = $script:FrontendRunnerIdentity
+    $root = @($rows | Where-Object { $_.ProcessId -eq $identity.Pid })
+    if ($root.Count -eq 0) { throw 'FRONTEND_OBSERVATION_UNAVAILABLE' }
+    if ($root.Count -ne 1 -or $root[0].ParentProcessId -ne $PID -or
+        (Get-FrontendCreationTicks $root[0].CreationDate) -ne (Get-FrontendCreationTicks $identity.Created)) {
+        throw 'FRONTEND_OWNER_MISMATCH'
+    }
+    foreach ($listener in $listeners) {
+        $seen = [Collections.Generic.HashSet[int]]::new()
+        $currentId = [int]$listener
+        $childCreated = [DateTime]::MaxValue
+        while ($true) {
+            if ($currentId -eq $PID) { throw 'FRONTEND_FOREIGN_LISTENER' }
+            if ($seen.Count -ge 256 -or -not $seen.Add($currentId)) { throw 'FRONTEND_OWNER_MISMATCH' }
+            $node = @($rows | Where-Object { $_.ProcessId -eq $currentId })
+            if ($node.Count -eq 0) { throw 'FRONTEND_OBSERVATION_UNAVAILABLE' }
+            if ($node.Count -ne 1 -or $null -eq $node[0].CreationDate -or
+                $node[0].CreationDate -gt $childCreated) { throw 'FRONTEND_OWNER_MISMATCH' }
+            if ($currentId -eq $identity.Pid) { break }
+            if ($node[0].ParentProcessId -le 0 -or
+                $node[0].CreationDate -lt $root[0].CreationDate) { throw 'FRONTEND_FOREIGN_LISTENER' }
+            $childCreated = $node[0].CreationDate
+            $currentId = [int]$node[0].ParentProcessId
+        }
+    }
+    Assert-FrontendRunnerIdentity -Identity $identity
+}
+
+function Invoke-FrontendTreeTermination {
+    param([Parameter(Mandatory = $true)]$Identity)
+    Assert-FrontendRunnerIdentity -Identity $Identity
+    $rows=@(Get-OmiCutoffSnapshot)
+    $root=@($rows | Where-Object { $_.ProcessId -eq $Identity.Pid })
+    if($root.Count -ne 1 -or $root[0].ParentProcessId -ne $PID -or
+        -not (Test-OmiCutoffCreation $root[0].CreationDate $Identity.Created)){throw 'FRONTEND_OWNER_MISMATCH'}
+    $captured=[pscustomobject]@{Process=$Identity.Process;Pid=$Identity.Pid;Created=$Identity.Created;
+        CommandLine=$root[0].CommandLine;ExecutablePath=$root[0].ExecutablePath;Nodes=@();Repo=$script:RepoRoot;RootRole='frontend_runner'}
+    $captured.Nodes=@(Get-OmiCutoffTree -Identity $captured -Rows $rows)
+    try {
+        $script:LastFrontendStop.Nodes=@(Stop-OmiCapturedTree -Identity $captured)
+    } finally {
+        foreach($node in $captured.Nodes){if(-not [object]::ReferenceEquals($node.Process,$Identity.Process)){$node.Process.Dispose()}}
+    }
 }
 
 function Stop-FrontendService {
     param([switch]$RequireSafeStop)
-
-    if ($RequireSafeStop) {
-        Assert-FrontendSafeStopAvailable
-        return
-    }
-    Stop-ProcessTree $script:FrontendProcess "frontend"
-    $script:FrontendProcess = $null
-
-    $frontendHealth = Get-FrontendHealth
-    if ($null -eq $frontendHealth) {
-        return
-    }
-
-    if (Test-FrontendHealthMatchesExpected -Health $frontendHealth) {
-        Write-LauncherLog "Frontend still responds after tracked stop; clearing expected frontend port owners."
-        Stop-FrontendPortOwners -Port $script:FrontendPort -Reason "launcher stop"
-        Start-Sleep -Milliseconds 750
-        if (Test-FrontendOk) {
-            Write-LauncherLog "Frontend health still responds after launcher stop cleanup." "WARN"
+    # The compatibility switch no longer selects a weaker legacy force path.
+    $stage = 'ownership-preflight'
+    try {
+        if ($null -ne $script:FrontendProcess) { Assert-FrontendRunnerIdentity -Identity $script:FrontendRunnerIdentity }
+        else { Assert-FrontendSafeStopAvailable }
+        $identity = $script:FrontendRunnerIdentity
+        $script:LastFrontendStop = [pscustomobject]@{ State='unknown'; Reason='FRONTEND_STOP_UNCONFIRMED';
+            Port=$script:FrontendPort; Runner=$identity; Nodes=@(); StartAttempted=$false }
+        if ($null -ne $script:FrontendProcess) {
+            $script:FrontendStopUnconfirmed = $true
+            $stage = 'tree-termination'
+            Invoke-FrontendTreeTermination -Identity $identity
         }
+        $stage = 'runner-exit-and-port-release'
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $runnerExited = $null -eq $script:FrontendProcess -or $identity.Process.HasExited
+            if ($runnerExited -and
+                @(Get-ListeningProcessIdsOnPort -Port $script:FrontendPort -RequireObservation).Count -eq 0 -and
+                (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost -ServiceName 'Frontend')) {
+                $script:LastFrontendStop.State = 'stopped'
+                $script:LastFrontendStop.Reason = 'OWNED_RUNNER_EXIT_AND_PORT_RELEASED'
+                $script:FrontendProcess = $null
+                $script:FrontendStopUnconfirmed = $false
+                Write-LauncherLog "Frontend stopped; owned runner exit and port release verified after tree termination. port=$($script:FrontendPort)"
+                return
+            }
+            Start-Sleep -Milliseconds 150
+        } while ($clock.ElapsedMilliseconds -lt 5000)
+        throw 'FRONTEND_STOP_UNCONFIRMED'
     }
-    else {
-        Write-LauncherLog "Frontend port still responds but does not match this launcher; leaving it running." "WARN"
+    catch {
+        $script:FrontendStopUnconfirmed = $true
+        if ($null -eq $script:LastFrontendStop) {
+            $script:LastFrontendStop = [pscustomobject]@{ State='unknown'; Reason='FRONTEND_STOP_UNCONFIRMED';
+                Port=$script:FrontendPort; Runner=$script:FrontendRunnerIdentity; Nodes=@(); StartAttempted=$false }
+        }
+        $script:LastFrontendStop.State = 'unknown'
+        $script:LastFrontendStop.Reason = 'FRONTEND_STOP_UNCONFIRMED'
+        Write-LauncherLog "FRONTEND_STOP_UNCONFIRMED stage=$stage port=$($script:FrontendPort); retained frontend evidence; no port cleanup or retry." 'WARN'
+        throw 'FRONTEND_STOP_UNCONFIRMED'
     }
+}
+
+function Restart-Frontend {
+    if (-not $script:ServiceStartRequestInProgress) { throw 'SERVICE_OPERATION_NOT_SERIALIZED' }
+    Stop-FrontendService -RequireSafeStop
+    Start-Frontend -AfterConfirmedStop
+    $identity = $script:FrontendRunnerIdentity
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Assert-FrontendRunnerIdentity -Identity $identity
+        try {
+            if (Test-FrontendOk) {
+                Assert-FrontendListenerOwnership
+                Assert-FrontendRunnerIdentity -Identity $identity
+                if ($clock.ElapsedMilliseconds -lt 30000) { return }
+            }
+        }
+        catch {
+            # Only unavailable observations may settle during the original budget.
+            # A known mismatch is terminal; unknown never becomes success.
+            if ($_.Exception.Message -cne 'FRONTEND_OBSERVATION_UNAVAILABLE') { throw }
+        }
+        Start-Sleep -Milliseconds 500
+    } while ($clock.ElapsedMilliseconds -lt 30000)
+    throw 'FRONTEND_START_READINESS_UNCONFIRMED'
 }
 
 function Clear-FrontendDevOutput {
@@ -2090,8 +2672,7 @@ function Clear-FrontendDevOutput {
 }
 
 function Invoke-FrontendHealthRecovery {
-    if ($script:SafeStopAttempted -or $script:ServiceStopInProgress -or $script:IsPackagedRelease -or
-        $script:IsShuttingDown -or
+    if (-not (Test-FrontendRecoveryAdmission -HealthRecovery) -or $script:IsPackagedRelease -or
         $script:FrontendHealthRecoveryInProgress) {
         return $false
     }
@@ -2130,7 +2711,8 @@ function Invoke-FrontendHealthRecovery {
 }
 
 function Stop-Services {
-    param([switch]$BackendOnly)
+    param([switch]$BackendOnly, $Deadline = $null)
+    if ($null -eq $Deadline) { $Deadline = [Omi.OwnedShutdown.LifecycleDeadline]::new() }
 
     if ($script:ServiceStopInProgress) { throw 'SAFE_STOP_IN_PROGRESS' }
     if ($script:RuntimeControlInProgress -or $script:ServiceStartRequestInProgress -or $script:BackendRecoveryInProgress -or $script:FrontendHealthRecoveryInProgress) {
@@ -2147,8 +2729,7 @@ function Stop-Services {
         if ($null -ne $script:ActivationTimer) { $script:ActivationTimer.Stop() }
         # Read-only preflight before any irreversible Backend command. Repeat
         # after STOP so a later Frontend start cannot become false full success.
-        if (-not $BackendOnly) { Assert-FrontendSafeStopAvailable }
-        Stop-BackendService
+        Stop-BackendService -Deadline $Deadline
         if ($BackendOnly) {
             if ($script:OwnedBackendSession.StartupExitConfirmed) {
                 Write-LauncherLog 'Backend startup failed and exited; Launcher retains ownership until explicit exit.'
@@ -2174,7 +2755,7 @@ function Stop-Services {
         try {
             # Coalesce clicks/Windows events queued while the UI pumped. A
             # rearmed refusal needs a later, explicit action, never auto retry.
-            foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:ExitEvent)) {
+            foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:RestartBackendEvent, $script:ExitEvent)) {
                 if ($null -ne $event) { [void]$event.Reset() }
             }
         }
@@ -2197,10 +2778,72 @@ function Reset-ServiceRecoveryState {
 }
 
 function Restart-Services {
+    $deadline = [Omi.OwnedShutdown.LifecycleDeadline]::new()
     Write-LauncherLog "Restart requested."
     if ($script:RuntimeControlInProgress -or $script:ServiceStopInProgress -or $script:IsShuttingDown) { throw 'SAFE_STOP_IN_PROGRESS' }
     if ($script:OwnedBackendStartAttempted -or $null -ne $script:OwnedBackendSession) {
-        throw 'OWNED_RESTART_NOT_AVAILABLE_FROM_TRAY'
+        if ($script:ServiceStartRequestInProgress -or $script:BackendRecoveryInProgress -or
+            $script:FrontendHealthRecoveryInProgress) { throw 'SERVICE_OPERATION_IN_PROGRESS' }
+        $requestId = [Guid]::NewGuid().ToString('D')
+        $script:LastFullServiceRestart = [pscustomobject]@{ RequestId=$requestId; State='unknown';
+            Stage='frontend-preflight'; Backend='unchanged'; Frontend='unchanged'; Reason=$null }
+        $timerEnabled = $null -ne $script:Timer -and $script:Timer.Enabled
+        $activationEnabled = $null -ne $script:ActivationTimer -and $script:ActivationTimer.Enabled
+        try {
+            if ($null -ne $script:Timer) { $script:Timer.Stop() }
+            if ($null -ne $script:ActivationTimer) { $script:ActivationTimer.Stop() }
+            $script:LastFullServiceRestart.Stage = 'backend-restart'
+            $script:LastFullServiceRestart.Backend = 'unconfirmed'
+            # Local UUID; no remote intent, changed transport or force fallback.
+            Invoke-OwnedBackendRestart -RequestId $requestId -Deadline $deadline
+            if ($null -eq $script:LastBackendRestart -or $script:LastBackendRestart.RequestId -cne $requestId -or
+                $script:LastBackendRestart.State -cne 'succeeded') { throw 'BACKEND_RESTART_UNCONFIRMED' }
+            $script:LastFullServiceRestart.Backend = 'ready'
+            # Backend's function has released its entry guard; no UI pumping or
+            # enabled timer occurs in the handoff to the Frontend phase.
+            $script:ServiceStartRequestInProgress = $true
+            $script:LastFullServiceRestart.Stage = 'frontend-restart'
+            $script:LastFullServiceRestart.Frontend = 'unconfirmed'
+            Restart-Frontend
+            $script:LastFullServiceRestart.Frontend = 'ready'
+            $script:LastFullServiceRestart.Stage = 'final-readiness'
+            if (-not $script:OwnedBackendSession.VerifyReadiness() -or -not (Test-HttpOk $script:BackendReadyUrl)) {
+                $script:LastFullServiceRestart.Backend = 'unconfirmed'
+                throw 'BACKEND_FINAL_READINESS_UNCONFIRMED'
+            }
+            $script:LastFullServiceRestart.Frontend = 'unconfirmed'
+            if (-not (Test-FrontendOk)) {
+                throw 'FRONTEND_START_READINESS_UNCONFIRMED'
+            }
+            Assert-FrontendRunnerIdentity -Identity $script:FrontendRunnerIdentity
+            $script:LastFullServiceRestart.Frontend = 'ready'
+            $script:LastFullServiceRestart.State = 'succeeded'
+            $script:LastFullServiceRestart.Stage = 'complete'
+            $script:LastFullServiceRestart.Reason = 'BOTH_READY'
+            Write-LauncherLog "Full service restart succeeded; both services ready. request_id=$requestId"
+        }
+        catch {
+            $script:LastFullServiceRestart.State = if ($script:LastFullServiceRestart.Stage -in @('frontend-restart', 'final-readiness')) { 'partial' } else { 'blocked_or_unconfirmed' }
+            $script:LastFullServiceRestart.Reason = $_.Exception.Message
+            $result = $script:LastFullServiceRestart
+            $message = "FULL_SERVICE_RESTART_INCOMPLETE request_id=$requestId state=$($result.State) stage=$($result.Stage) backend=$($result.Backend) frontend=$($result.Frontend) reason=$($result.Reason)"
+            Write-LauncherLog $message 'WARN'
+            throw $message
+        }
+        finally {
+            $script:ServiceStartRequestInProgress = $true
+            try {
+                foreach ($event in @($script:RunEvent, $script:RestartEvent, $script:RestartBackendEvent, $script:ExitEvent)) {
+                    if ($null -ne $event) { [void]$event.Reset() }
+                }
+            }
+            finally {
+                $script:ServiceStartRequestInProgress = $false
+                if ($timerEnabled) { $script:Timer.Start() }
+                if ($activationEnabled) { $script:ActivationTimer.Start() }
+            }
+        }
+        return
     }
     Stop-Services
     Reset-ServiceRecoveryState
@@ -2244,6 +2887,7 @@ function Invoke-ServiceStartRequest {
         return
     }
 
+    $restartRequested = $false
     $script:ServiceStartRequestInProgress = $true
     try {
         $backendHealth = Get-BackendHealth
@@ -2291,7 +2935,9 @@ function Invoke-ServiceStartRequest {
         }
         else {
             Write-LauncherLog "Explicit service start taking Restart-Services; tracked services remain alive. reason=$Reason"
-            Restart-Services
+            # Decide under the request guard; dispatch only after its finally
+            # has coalesced events and released it. Restart owns its own guard.
+            $restartRequested = $true
         }
     }
     catch {
@@ -2309,6 +2955,12 @@ function Invoke-ServiceStartRequest {
             $script:ServiceStartRequestInProgress = $false
         }
     }
+    if ($restartRequested) {
+        # Synchronous handoff: no DoEvents, wait or callback between guard
+        # release and Restart's admission. Its existing guards stay intact.
+        try { Restart-Services }
+        catch { Write-LauncherLog "Explicit service start failed. reason=$Reason error=$($_.Exception.Message)" 'ERROR' }
+    }
 }
 
 function Exit-Launcher {
@@ -2318,10 +2970,11 @@ function Exit-Launcher {
         return
     }
 
+    $deadline = [Omi.OwnedShutdown.LifecycleDeadline]::new()
     $script:IsShuttingDown = $true
     Write-LauncherLog "Exit requested. reason=$Reason"
     try {
-        Stop-Services
+        Stop-Services -Deadline $deadline
         $script:LauncherExitReady = $true
         [System.Windows.Forms.Application]::Exit()
     }
@@ -2396,6 +3049,23 @@ $startBackendItem.add_Click({
     catch { Show-Message $_.Exception.Message }
 })
 
+$recoverFailedBackendItem = New-Object System.Windows.Forms.MenuItem
+$recoverFailedBackendItem.Text = "Recover Failed Backend Start"
+$recoverFailedBackendItem.add_Click({
+    try {
+        Invoke-BackendStartRequest -FailedStartRecovery
+        Show-Message 'Backend recovery verified. Original startup failure retained; Frontend unchanged.'
+    }
+    catch { Show-Message $_.Exception.Message }
+})
+
+$schemaUpgradeItem = New-Object System.Windows.Forms.MenuItem
+$schemaUpgradeItem.Text = "Upgrade DB Schema"
+$schemaUpgradeItem.add_Click({
+    try { Show-OmiSchemaUpgrade }
+    catch { Show-Message 'DB schema upgrade refused or unconfirmed. Inspect schema-maintenance receipts; no automatic retry or restore.' }
+})
+
 $restartBackendItem = New-Object System.Windows.Forms.MenuItem
 $restartBackendItem.Text = "Restart Backend"
 $restartBackendItem.add_Click({
@@ -2407,7 +3077,7 @@ $restartBackendItem.add_Click({
 })
 
 $restartItem = New-Object System.Windows.Forms.MenuItem
-$restartItem.Text = "Restart Services"
+$restartItem.Text = "Restart Backend + Frontend"
 $restartItem.add_Click({ try { Restart-Services } catch { Show-Message $_.Exception.Message } })
 
 $stopItem = New-Object System.Windows.Forms.MenuItem
@@ -2455,6 +3125,8 @@ $exitItem.add_Click({
 [void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
 [void]$script:Menu.MenuItems.Add($startItem)
 [void]$script:Menu.MenuItems.Add($startBackendItem)
+[void]$script:Menu.MenuItems.Add($recoverFailedBackendItem)
+[void]$script:Menu.MenuItems.Add($schemaUpgradeItem)
 [void]$script:Menu.MenuItems.Add($restartItem)
 [void]$script:Menu.MenuItems.Add($restartBackendItem)
 [void]$script:Menu.MenuItems.Add($safeStopBackendItem)
@@ -2585,6 +3257,11 @@ $script:ActivationTimer.add_Tick({
         try { Restart-Services } catch { Show-Message $_.Exception.Message }
         return
     }
+    if ($null -ne $script:RestartBackendEvent -and $script:RestartBackendEvent.WaitOne(0)) {
+        try { Invoke-OwnedBackendRestart -RequestId ([Guid]::NewGuid().ToString('D')) }
+        catch { Write-LauncherLog "Backend restart request failed. error=$($_.Exception.Message)" 'WARN' }
+        return
+    }
     if ($null -ne $script:RunEvent -and $script:RunEvent.WaitOne(0)) {
         Write-LauncherLog "Secondary Run received by existing tray owner."
         Invoke-ServiceStartRequest -Reason "secondary-run"
@@ -2624,14 +3301,18 @@ $script:ActivationTimer.add_Tick({
     if ($null -ne $script:RestartEvent) {
         $script:RestartEvent.Dispose()
     }
+    if ($null -ne $script:RestartBackendEvent) { $script:RestartBackendEvent.Dispose() }
     if ($script:OwnsMutex) {
         $script:Mutex.ReleaseMutex()
     }
     $script:Mutex.Dispose()
-    Write-LauncherLog "Launcher stopped."
+    if ($null -ne $script:OwnedBackendSession -and $null -ne $script:OwnedBackendSession.LastStop -and $script:OwnedBackendSession.LastStop.Forced) {
+        Write-LauncherLog 'Launcher stopped after HARD_CUTOFF; recovery=RECONCILIATION_REQUIRED.' 'WARN'
+    } else { Write-LauncherLog "Launcher stopped." }
 })
 
 . (Join-Path $PSScriptRoot 'omi-runtime-control.ps1')
+. (Join-Path $PSScriptRoot 'apply-omi-update.ps1')
 Initialize-OmiRuntimeControl
 Start-Services
 $script:Timer.Start()

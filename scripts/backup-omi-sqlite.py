@@ -40,6 +40,9 @@ def _database_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
     return {
         "revision": str(revision_row[0]) if revision_row else None,
         "counts": counts,
+        "schema_sha256": hashlib.sha256(json.dumps(connection.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+        ).fetchall(), ensure_ascii=True, separators=(",", ":")).encode()).hexdigest(),
     }
 
 
@@ -216,6 +219,8 @@ def backup_sqlite_database(
     # link is exclusive on Windows and POSIX; replace/rename can overwrite a
     # destination that appeared after the preflight. Unsupported filesystems fail
     # closed with the verified partial retained, without an overwrite fallback.
+    with partial.open("r+b") as durable:
+        os.fsync(durable.fileno())
     os.link(partial, output)
     partial.unlink()
     return {

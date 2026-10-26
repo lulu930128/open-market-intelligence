@@ -266,7 +266,7 @@ def test_windows_syntax_and_production_refusal():
     launcher = (ROOT / "scripts/omi-launcher.ps1").read_text(encoding="utf-8-sig")
     restart = launcher.split('function Invoke-OwnedBackendRestart {', 1)[1].split('\nfunction ', 1)[0]
     commands = "\n".join(line for line in restart.splitlines() if not line.strip().startswith("#"))
-    assert 'Assert-OmiManualBackendStartOwner' in commands
+    assert '$script:OwnsMutex' in commands and '$old.HasRetainedIdentity' in commands
     assert ".BeginAuthenticatedOwnedRestart($RequestId, $identity)" in commands
     assert ".Begin(" not in commands
     for forbidden in ("Stop-BackendService", "Stop-Process", "Start-Backend", "Restart-Services"):
@@ -386,12 +386,14 @@ def test_api_pipe_launcher_preflight_refusal(tmp_path, monkeypatch, authorized, 
             runtime = None
         body = {**payload(), "expected_owner_id": owner["owner_id"]}
         response = call("POST", "/restart-backend", headers=authorized, json=body, runtime=runtime)
-        refused_at_dispatch = scenario in {"malformed", "unattested_client", "missing"}
+        refused_at_dispatch = scenario == "unattested_client"
         assert response.status_code == (409 if refused_at_dispatch else 202)
         accepted = response.json()
         assert accepted["state"] == ("blocked" if refused_at_dispatch else "accepted")
         if refused_at_dispatch:
             assert accepted["reason"] == "BACKEND_PREFLIGHT_NOT_ATTESTED"
+            assert accepted["backend_preflight"] is None
+        elif scenario in {"malformed", "missing"}:
             assert accepted["backend_preflight"] is None
         else:
             assert accepted["backend_preflight"] == report

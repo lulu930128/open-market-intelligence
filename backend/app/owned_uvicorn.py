@@ -143,6 +143,7 @@ async def serve_owned(app, *, fixture_owner=None, boot=None):
             loaded_release_identity="APPLICATION_SOURCE_SNAPSHOT",
             release_id=sys.modules["_omi_owned_release"].release_id,
             restart_blocker=runtime.owned_restart_preflight()["state"],
+            restart_abort_protocol="1",
         )
         app.state.owned_start = {key: serving_identity[key] for key in (
             "child_pid", "child_created", "instance", "host", "port", "release_id", "loaded_release_identity", "restart_blocker")}
@@ -201,6 +202,16 @@ async def serve_owned(app, *, fixture_owner=None, boot=None):
                     if state == "DISPOSABLE_DRAINED":
                         prepared = message.copy()
                     emit(dict(message, state=state))
+            elif message.get("action") == "ABORT_PREPARE" and fixture_owner is None and prepared is not None and all(
+                message.get(k) == prepared.get(k) for k in ("request_id", "deadline")
+            ) and not stop_requested:
+                # Only the same authenticated operation can undo its reversible
+                # PREPARE. No STOP, exit, or new admission owner is introduced.
+                rearmed = runtime.abort_owned_restart() and runtime.owned_restart_rearmed()
+                emit(dict(message, state="PREFLIGHT_REARMED" if rearmed else "REARM_UNKNOWN",
+                          rearmed="true" if rearmed else "false", stage="RESTART_SOURCE_CHANGED"))
+                if rearmed:
+                    prepared = None
             elif message.get("action") == "STOP" and prepared is not None and all(
                 message.get(k) == prepared.get(k) for k in ("request_id", "deadline")
             ) and not stop_requested:

@@ -42,7 +42,7 @@ namespace Omi.RuntimeControl {
         public string created_at;
         public string attestation = "PROCESS_IDENTITY";
     }
-    // Historical receipt compatibility only; never issued by this Controller.
+    // Historical receipt decoding only; never creates execution authority.
     public sealed class LocalApproval {
         public string decision;
         public string expires_at;
@@ -53,6 +53,14 @@ namespace Omi.RuntimeControl {
         public string schema = "omi.runtime-control.v1";
         public string request_id;
         public string action = "RestartBackend";
+        public string actor;
+        public Identity requester;
+        public string confirmation;
+        public string intent_consumed_at;
+        public string stop_outcome;
+        public string migration_outcome;
+        public string successor_outcome;
+        public string next_action;
         public string state;
         public string reason;
         public string owner_id;
@@ -63,6 +71,8 @@ namespace Omi.RuntimeControl {
         public string application_release_id;
         public string preflight_stage;
         public string rearm_evidence;
+        public Dictionary<string,object> stop_evidence;
+        public string recovery_state;
         public BackendPreflight backend_preflight;
         public Identity backend_preflight_identity;
         public string[] blockers;
@@ -86,7 +96,9 @@ namespace Omi.RuntimeControl {
             "CONTROLLER_RECOVERED_NO_REPLAY", "LIFECYCLE_FAILED", "NEW_IDENTITY_NOT_ATTESTED",
             "READINESS_NOT_ATTESTED", "SOURCE_ADOPTION_NOT_ATTESTED", "STORE_UNAVAILABLE", "BUSY",
             "BACKEND_PREFLIGHT_NOT_ATTESTED", "WRITER_ADMISSION_NOT_ATTESTED", "SAFE_START_UNAVAILABLE",
-            "OWNED_BOOTSTRAP_REQUIRED", "APPROVAL_DENIED", "NONTERMINAL_WRITER_PREFLIGHT_UNAVAILABLE", "PREFLIGHT_REARMED"
+            "OWNED_BOOTSTRAP_REQUIRED", "APPROVAL_DENIED", "NONTERMINAL_WRITER_PREFLIGHT_UNAVAILABLE", "PREFLIGHT_REARMED",
+            "RESTART_SOURCE_CHANGED", "RESTART_ABORT_PROTOCOL_UNAVAILABLE", "RESTART_COMPATIBILITY_NOT_ATTESTED",
+            "SCHEMA_CONFIGURED_TARGET_UNAVAILABLE"
         };
         volatile bool stopping;
         Thread thread;
@@ -95,19 +107,58 @@ namespace Omi.RuntimeControl {
         DateTime published;
         Identity backend;
         bool ownerAttested;
-        bool restartIntentAvailable;
         string active;
         // In-memory provenance is minted only after authenticated Dispatch persists
         // accepted. Neither historical receipt loading nor public reads recreate it.
         string authenticatedIntent;
         string takenIntent;
-        Stopwatch intentAge;
-        DateTime intentAcceptedAt;
-        const int IntentLifetimeSeconds = 30;
+        Process authenticatedCaller;
+        Identity authenticatedCallerIdentity;
+        string authenticatedAction;
+        Omi.OwnedShutdown.LifecycleDeadline operationDeadline;
         public string OwnerId { get; private set; }
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool GetNamedPipeClientProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint pid);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint pid);
+
+        // Read-only observation for the one-shot updater. It cannot queue work.
+        public static string ReadOwnerStatus(string name, Process owner) {
+            return RequestOwner(name, owner, "{\"action\":\"Status\",\"request_id\":\"\",\"expected_owner_id\":\"\",\"token\":\"\"}");
+        }
+        // Bounded client used by the existing local adapter, with retained server
+        // PID/creation handle. No HTTP, process discovery, shell or fallback.
+        public static string RequestOwner(string name, Process owner, string message) {
+            if (Encoding.UTF8.GetByteCount(message) >= Limit || message.IndexOf('\n') >= 0)
+                throw new ArgumentException("INVALID_REQUEST");
+            if (owner.Handle == IntPtr.Zero || owner.HasExited) throw new IOException("OWNER_NOT_ATTESTED");
+            using (var client = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous)) {
+                client.Connect(500);
+                uint pid;
+                if (owner.HasExited || !GetNamedPipeServerProcessId(client.SafePipeHandle, out pid) || pid != owner.Id)
+                    throw new IOException("UPDATE_SUCCESSOR_OWNER_MISMATCH");
+                var payload = Encoding.UTF8.GetBytes(message + "\n");
+                var write = client.BeginWrite(payload, 0, payload.Length, null, null);
+                using (var wait = write.AsyncWaitHandle) {
+                    if (!wait.WaitOne(500)) throw new IOException("UPDATE_STATUS_TIMEOUT");
+                    client.EndWrite(write);
+                }
+                var buffer = new byte[Limit]; int length = 0;
+                var watch = Stopwatch.StartNew();
+                while (length < Limit && watch.ElapsedMilliseconds < 1500) {
+                    var read = client.BeginRead(buffer, length, Limit - length, null, null);
+                    using (var wait = read.AsyncWaitHandle) {
+                        if (!wait.WaitOne(Math.Max(0, 1500 - (int)watch.ElapsedMilliseconds))) break;
+                        var count = client.EndRead(read);
+                        if (count == 0) break;
+                        length += count;
+                    }
+                    if (buffer[length - 1] == 10 && !owner.HasExited) return Encoding.UTF8.GetString(buffer, 0, length);
+                }
+                throw new IOException("UPDATE_STATUS_UNCONFIRMED");
+            }
+        }
 
         public static string[] UnavailableRestartGates() {
             // Implementation gaps, not mutable flags or reported capabilities.
@@ -115,15 +166,36 @@ namespace Omi.RuntimeControl {
                 "GRACEFUL_TRANSPORT_UNAVAILABLE", "SAFE_START_UNAVAILABLE",
                 "READINESS_NOT_ATTESTED", "SOURCE_ADOPTION_NOT_ATTESTED" };
         }
-        Identity PipeClient(NamedPipeServerStream server) {
+        Process PipeClient(NamedPipeServerStream server) {
+            Process process = null;
             try {
-                uint pid;
+                uint pid, retainedPid;
                 if (!GetNamedPipeClientProcessId(server.SafePipeHandle, out pid)) return null;
-                using (var process = Process.GetProcessById(checked((int)pid))) {
-                    if (process.HasExited) return null;
-                    return new Identity { pid = process.Id, created_at = process.StartTime.ToUniversalTime().ToString("o") };
-                }
+                process = Process.GetProcessById(checked((int)pid));
+                if (process.Handle == IntPtr.Zero || process.HasExited ||
+                    !GetNamedPipeClientProcessId(server.SafePipeHandle, out retainedPid) || pid != retainedPid)
+                    throw new IOException("PIPE_CLIENT_NOT_ATTESTED");
+                return process;
+            } catch { if (process != null) process.Dispose(); return null; }
+        }
+        Identity ClientIdentity(Process process) {
+            try {
+                if (process == null || process.Handle == IntPtr.Zero || process.HasExited) return null;
+                return new Identity { pid = process.Id, created_at = process.StartTime.ToUniversalTime().ToString("o") };
             } catch { return null; }
+        }
+        void ReleaseCaller() {
+            if (authenticatedCaller != null) authenticatedCaller.Dispose();
+            authenticatedCaller = null; authenticatedCallerIdentity = null; authenticatedAction = null;
+        }
+        static string Confirmation(string action) {
+            switch (action) {
+                case "RestartBackend": return "restart_backend";
+                case "StartBackend": return "start_backend";
+                case "RecoverFailedStart": return "recover_failed_start";
+                case "SchemaUpgrade": return "upgrade_schema";
+                default: return null;
+            }
         }
         bool SameIdentity(Identity left, Identity right) {
             return ValidIdentity(left) && ValidIdentity(right) && left.pid == right.pid
@@ -212,6 +284,9 @@ namespace Omi.RuntimeControl {
                 && identity.created_at != null && identity.created_at.Length <= 40
                 && DateTime.TryParse(identity.created_at, out parsed);
         }
+        static bool OfflineAction(string action) {
+            return action == "StartBackend" || action == "RecoverFailedStart" || action == "SchemaUpgrade";
+        }
         Receipt Read(string id) {
             string path = ReceiptPath(id);
             if (!File.Exists(path)) return Unknown(id, "NOT_FOUND");
@@ -221,7 +296,8 @@ namespace Omi.RuntimeControl {
             Guid owner;
             DateTime updated;
             if (value == null || value.schema != "omi.runtime-control.v1" || value.request_id != Id(id)
-                || value.action != "RestartBackend" || !states.Contains(value.state) || !reasons.Contains(value.reason)
+                || (value.action != "RestartBackend" && !OfflineAction(value.action)) || !states.Contains(value.state) || !reasons.Contains(value.reason)
+                || (OfflineAction(value.action) && ((value.actor != "authenticated_pipe_client" && value.actor != "launcher_local_operator") || !ValidIdentity(value.requester)))
                 || !Guid.TryParseExact(value.owner_id, "D", out owner) || !DateTime.TryParse(value.updated_at, out updated)
                 || (value.loaded_release_identity != "UNATTESTED" && value.loaded_release_identity != "APPLICATION_SOURCE_SNAPSHOT")
                 || (value.loaded_release_identity == "APPLICATION_SOURCE_SNAPSHOT" && !ValidTokenHash(value.application_release_id))
@@ -273,14 +349,14 @@ namespace Omi.RuntimeControl {
                 if (statusJson.Length > Limit) throw new ArgumentException("RESPONSE_TOO_LARGE");
                 var status = json.Deserialize<Dictionary<string, object>>(statusJson);
                 var restart = status.ContainsKey("restart") ? status["restart"] as Dictionary<string, object> : null;
-                restartIntentAvailable = (restart != null &&
-                    restart.ContainsKey("available") && Object.Equals(restart["available"], true));
+                // Writer/source/readiness observations are not admission authority.
+                // The authenticated exact owned Backend may request bounded stop.
                 // A locally started successor must retire accepted intent for
                 // the previous Backend before it can receive a fresh request.
                 // Running receipts belong to CompleteOwnedRestart instead.
                 if (active != null) {
                     var receipt = Read(active);
-                    if (receipt.state == "accepted" && (!attested || !SameIdentity(receipt.before, ownedBackend) || !restartIntentAvailable)) {
+                    if (receipt.action == "RestartBackend" && receipt.state == "accepted" && (!attested || !SameIdentity(receipt.before, ownedBackend))) {
                         receipt.state = "blocked"; receipt.reason = !attested || !SameIdentity(receipt.before, ownedBackend)
                             ? "OWNER_NOT_ATTESTED" : "ALL_WRITERS_DRAIN_UNAVAILABLE";
                         receipt.blockers = new[] { receipt.reason };
@@ -294,30 +370,43 @@ namespace Omi.RuntimeControl {
             }
         }
         public string Dispatch(string message) { return Dispatch(message, null); }
-        string Dispatch(string message, Identity pipeClient) {
+        string Dispatch(string message, Process caller) {
             lock (gate) {
                 try {
+                    var fields = json.Deserialize<Dictionary<string, object>>(message);
+                    if (fields == null) throw new ArgumentException();
+                    foreach (var field in fields) if (field.Value != null && !(field.Value is string)) throw new ArgumentException();
                     var request = json.Deserialize<Dictionary<string, string>>(message);
-                    if (request == null || (request.Count != 4 && !(request.Count == 5 && request.ContainsKey("backend_preflight")))
+                    var pipeClient = ClientIdentity(caller);
+                    if (request == null || (request.Count != 4 && !(request.Count == 5 && (request.ContainsKey("backend_preflight") || request.ContainsKey("confirmation"))))
                         || !request.ContainsKey("action") || !request.ContainsKey("request_id")
                         || !request.ContainsKey("expected_owner_id") || !request.ContainsKey("token")) throw new ArgumentException();
                     if (request.ContainsKey("backend_preflight") && request["action"] != "RestartBackend") throw new ArgumentException();
+                    bool offline = OfflineAction(request["action"]);
+                    if (request.ContainsKey("confirmation") && request["confirmation"] != Confirmation(request["action"])) throw new ArgumentException();
+                    if (offline && !request.ContainsKey("confirmation")) throw new ArgumentException();
                     if (request["action"] == "Status") return snapshot != null && (DateTime.UtcNow - published).TotalSeconds < 15
                         ? snapshot : "{\"schema\":\"omi.runtime-control.v1\",\"owner_id\":null,\"reason\":\"OWNER_NOT_ATTESTED\"}";
                     string id = Id(request["request_id"]);
                     if (request["action"] == "ReadOperation") return json.Serialize(Read(id));
-                    if (request["action"] != "RestartBackend") throw new ArgumentException();
+                    if (request["action"] != "RestartBackend" && !offline) throw new ArgumentException();
                     if (!Authorized(request["token"])) return "{\"schema\":\"omi.runtime-control.v1\",\"error\":\"RUNTIME_CONTROL_FORBIDDEN\"}";
                     // Exact replay returns the durable original, including after owner replacement.
                     var existing = Read(id);
                     if (existing.reason != "NOT_FOUND") {
+                        if (existing.action != request["action"]) return json.Serialize(Unknown(id, "CONTROLLER_RECOVERED_NO_REPLAY"));
                         if (request["expected_owner_id"] != existing.owner_id) return json.Serialize(Unknown(id, "OWNER_MISMATCH"));
                         return json.Serialize(existing);
                     }
                     if (request["expected_owner_id"] != OwnerId) return json.Serialize(Unknown(id, "OWNER_MISMATCH"));
+                    if (!ValidIdentity(pipeClient)) return json.Serialize(new Receipt { request_id = id, action = request["action"],
+                        owner_id = OwnerId, state = "blocked", reason = ownerAttested ? "BACKEND_PREFLIGHT_NOT_ATTESTED" : "OWNER_NOT_ATTESTED" });
+                    var acceptedDeadline = new Omi.OwnedShutdown.LifecycleDeadline();
                     int count = 0;
                     foreach (var ignored in Directory.EnumerateFiles(directory, "*.json")) if (++count >= Capacity) throw new IOException();
                     var receipt = new Receipt { request_id = id, owner_id = OwnerId, before = backend,
+                        action = request["action"], actor = "authenticated_pipe_client",
+                        requester = pipeClient, confirmation = Confirmation(request["action"]),
                         state = "accepted", reason = "ACCEPTED" };
                     // Bind observations to the OS pipe caller and the launcher's
                     // already-owned Backend. HTTP/model input cannot supply identity.
@@ -325,11 +414,10 @@ namespace Omi.RuntimeControl {
                         receipt.backend_preflight = ParsePreflight(request["backend_preflight"]);
                         if (receipt.backend_preflight != null) receipt.backend_preflight_identity = pipeClient;
                     }
-                    if (!ownerAttested || (DateTime.UtcNow - published).TotalSeconds >= 15) { receipt.state = "blocked"; receipt.reason = "OWNER_NOT_ATTESTED"; }
-                    else if (!restartIntentAvailable) { receipt.state = "blocked"; receipt.reason = "ALL_WRITERS_DRAIN_UNAVAILABLE"; }
+                    if ((!offline && !ownerAttested) || snapshot == null || (DateTime.UtcNow - published).TotalSeconds >= 15) { receipt.state = "blocked"; receipt.reason = "OWNER_NOT_ATTESTED"; }
                     else if (active != null) { receipt.state = "blocked"; receipt.reason = "BUSY"; }
-                    else if (!ValidPreflight(receipt.backend_preflight) || !receipt.backend_preflight.runtime_started
-                        || !SameIdentity(receipt.backend_preflight_identity, backend)) {
+                    else if ((backend != null && pipeClient.pid == backend.pid && !SameIdentity(pipeClient, backend)) ||
+                        (request.ContainsKey("backend_preflight") && !SameIdentity(pipeClient, backend))) {
                         receipt.state = "blocked"; receipt.reason = "BACKEND_PREFLIGHT_NOT_ATTESTED";
                     }
                     if (receipt.state == "blocked") {
@@ -338,10 +426,16 @@ namespace Omi.RuntimeControl {
                         blockers.AddRange(UnavailableRestartGates());
                         receipt.blockers = blockers.ToArray();
                     }
+                    if (receipt.state == "accepted") {
+                        ReleaseCaller();
+                        authenticatedCaller = Process.GetProcessById(pipeClient.pid);
+                        if (!SameIdentity(pipeClient, ClientIdentity(authenticatedCaller))) { ReleaseCaller(); throw new IOException(); }
+                        authenticatedCallerIdentity = pipeClient; authenticatedAction = receipt.action;
+                    }
                     Save(receipt); // Receipt is durable BEFORE queueing any owner action.
                     if (receipt.state == "accepted") {
                         active = id; authenticatedIntent = id; takenIntent = null;
-                        intentAcceptedAt = DateTime.UtcNow; intentAge = Stopwatch.StartNew();
+                        operationDeadline = acceptedDeadline;
                         pending.Enqueue(id);
                     }
                     return json.Serialize(receipt);
@@ -354,8 +448,7 @@ namespace Omi.RuntimeControl {
                     var id = pending.Peek();
                     var receipt = Read(id);
                     if (receipt.state == "accepted" && receipt.owner_id == OwnerId && active == id) {
-                        if (FreshAuthenticatedIntent(id) && ownerAttested && restartIntentAvailable && SameIdentity(receipt.before, backend) &&
-                            (DateTime.UtcNow - published).TotalSeconds < 15) {
+                        if (FreshAuthenticatedIntent(id) && (OfflineAction(receipt.action) || (ownerAttested && SameIdentity(receipt.before, backend)))) {
                             pending.Dequeue(); takenIntent = id; return id;
                         }
                         receipt.state = "blocked"; receipt.reason = "OWNER_NOT_ATTESTED";
@@ -365,6 +458,52 @@ namespace Omi.RuntimeControl {
                     pending.Dequeue();
                 }
                 return null;
+            }
+        }
+        public string PendingAction(string id) {
+            lock (gate) {
+                var receipt = Read(Id(id));
+                if (active != id || takenIntent != id || receipt.state != "accepted") throw new InvalidOperationException();
+                return receipt.action;
+            }
+        }
+        public bool BeginRemoteOperation(string id) {
+            lock (gate) {
+                var receipt = Read(Id(id));
+                if (!OfflineAction(receipt.action) || active != id || takenIntent != id ||
+                    receipt.state != "accepted" || receipt.owner_id != OwnerId) return false;
+                bool authenticated = FreshAuthenticatedIntent(id);
+                authenticatedIntent = null; takenIntent = null; ReleaseCaller();
+                receipt.state = authenticated ? "running" : "blocked";
+                receipt.reason = authenticated ? "RUNNING" : "OWNER_NOT_ATTESTED";
+                if (authenticated) receipt.intent_consumed_at = DateTime.UtcNow.ToString("o");
+                else active = null;
+                try { Save(receipt); } // One durable consume before any owner lifecycle action.
+                catch { active = null; throw; }
+                return authenticated;
+            }
+        }
+        public void CompleteRemoteOperation(string id, bool verified, string stop, string migration,
+                string successor, Identity after, string failure) {
+            lock (gate) {
+                var receipt = Read(Id(id));
+                if (!OfflineAction(receipt.action) || active != id || receipt.state != "running" || receipt.owner_id != OwnerId)
+                    throw new InvalidOperationException();
+                // Success requires the owner's freshly published exact new generation.
+                verified = verified && successor == "VERIFIED" && ownerAttested && SameIdentity(after, backend)
+                    && (receipt.before == null || !SameIdentity(receipt.before, after))
+                    && (DateTime.UtcNow - published).TotalSeconds < 15;
+                receipt.state = verified ? "succeeded" : "unknown";
+                receipt.reason = verified ? "SUCCEEDED" : "LIFECYCLE_FAILED";
+                receipt.stop_outcome = stop; receipt.migration_outcome = migration;
+                receipt.successor_outcome = successor; receipt.after = after;
+                receipt.next_action = verified ? "Status" : "ReadOperation_then_reconcile_retained_generation";
+                // Fixed diagnostics only; never persist arbitrary exception text or paths.
+                if (failure == "SCHEMA_CONFIGURED_TARGET_UNAVAILABLE") {
+                    receipt.reason = failure; receipt.state = "blocked";
+                    receipt.next_action = "Status_then_CheckStart_configured_target_diagnostics";
+                }
+                Save(receipt); active = null;
             }
         }
         public void BlockOwnedRestart(string id, string reason) {
@@ -377,10 +516,14 @@ namespace Omi.RuntimeControl {
             }
         }
         bool FreshAuthenticatedIntent(string id) {
-            var age = (DateTime.UtcNow - intentAcceptedAt).TotalSeconds;
-            return authenticatedIntent == id && intentAge != null
-                && intentAge.Elapsed.TotalSeconds < IntentLifetimeSeconds
-                && age >= 0 && age < IntentLifetimeSeconds;
+            // An accepted operation does not expire into a writer refusal. If
+            // dispatch was delayed, the same elapsed deadline cuts off at once.
+            var receipt = Read(id);
+            return authenticatedIntent == id && operationDeadline != null &&
+                authenticatedAction == receipt.action && receipt.confirmation == Confirmation(receipt.action) &&
+                receipt.actor == "authenticated_pipe_client" && receipt.local_approval == null && receipt.intent_consumed_at == null &&
+                SameIdentity(receipt.requester, authenticatedCallerIdentity) &&
+                SameIdentity(authenticatedCallerIdentity, ClientIdentity(authenticatedCaller));
         }
         public bool BeginAuthenticatedOwnedRestart(string id, Identity current) {
             id = Id(id);
@@ -395,16 +538,13 @@ namespace Omi.RuntimeControl {
                 catch { }
                 string reason = null;
                 if (!FreshAuthenticatedIntent(id) || !exact || !ownerAttested ||
-                    (DateTime.UtcNow - published).TotalSeconds >= 15 ||
                     !SameIdentity(current, backend) || !SameIdentity(current, receipt.before)) reason = "OWNER_NOT_ATTESTED";
-                else if (!restartIntentAvailable) reason = "ALL_WRITERS_DRAIN_UNAVAILABLE";
-                else if (!ValidPreflight(receipt.backend_preflight) || !receipt.backend_preflight.runtime_started ||
-                    !SameIdentity(current, receipt.backend_preflight_identity)) reason = "BACKEND_PREFLIGHT_NOT_ATTESTED";
                 else if (receipt.local_approval != null || (receipt.blockers != null && receipt.blockers.Length != 0))
                     reason = "CONTROLLER_RECOVERED_NO_REPLAY";
                 // Consume in-memory authority BEFORE saving. An ambiguous store
                 // failure can never be retried into STOP, even in this process.
-                authenticatedIntent = null; takenIntent = null; intentAge = null;
+                authenticatedIntent = null; takenIntent = null; ReleaseCaller();
+                receipt.intent_consumed_at = DateTime.UtcNow.ToString("o");
                 receipt.state = reason == null ? "running" : "blocked";
                 receipt.reason = reason ?? "RUNNING";
                 receipt.blockers = reason == null ? new string[0] : new[] { reason };
@@ -413,15 +553,29 @@ namespace Omi.RuntimeControl {
                 return reason == null;
             }
         }
+        public Omi.OwnedShutdown.LifecycleDeadline OwnedRestartDeadline(string id) {
+            lock (gate) {
+                if (active != id || operationDeadline == null) throw new InvalidOperationException("NO_ACCEPTED_DEADLINE");
+                return operationDeadline;
+            }
+        }
         public void CompleteOwnedRestart(string id, Omi.OwnedShutdown.ProductionSession.StopEvidence stopped,
-                                         Omi.OwnedShutdown.ProductionSession next, Identity verifiedIdentity) {
+                                         Omi.OwnedShutdown.ProductionSession next, Identity verifiedIdentity,
+                                         string beforeStopReason = null, bool successorAttempted = false) {
             lock (gate) {
                 var receipt = Read(id);
                 if (receipt.state != "running" || receipt.owner_id != OwnerId || active != id) throw new InvalidOperationException();
                 receipt.state = "unknown"; receipt.reason = "LIFECYCLE_FAILED";
+                receipt.stop_outcome = stopped == null ? "UNKNOWN" : stopped.State;
+                receipt.migration_outcome = "NOT_ATTEMPTED";
+                receipt.successor_outcome = next == null ? (successorAttempted ? "ATTEMPTED_UNCONFIRMED" : "NOT_ATTEMPTED") : "FAILED_UNCONFIRMED";
+                receipt.next_action = "ReadOperation_then_reconcile_retained_generation";
+                receipt.stop_evidence = stopped == null ? null : json.Deserialize<Dictionary<string,object>>(json.Serialize(stopped));
+                receipt.recovery_state = stopped != null && stopped.Forced ? "RECONCILIATION_REQUIRED" : null;
                 if (stopped != null && stopped.RequestId == id && stopped.BeforePid == receipt.before.pid &&
-                    stopped.BeforeCreated == receipt.before.created_at && stopped.ExactExit && !stopped.Rearmed &&
-                    stopped.State == "stopped" && stopped.Reason == "LIFESPAN_AND_EXACT_EXIT") {
+                    stopped.BeforeCreated == receipt.before.created_at && !stopped.Rearmed &&
+                    ((stopped.ExactExit && stopped.State == "stopped" && stopped.Reason == "LIFESPAN_AND_EXACT_EXIT") ||
+                     (stopped.ForcedExitConfirmed && stopped.State == "forced_stopped" && stopped.Reason == "HARD_CUTOFF_EXACT_OWNED_EXIT"))) {
                     if (next != null && next.Alive && next.ChildPid != receipt.before.pid && next.ChildCreated != receipt.before.created_at) {
                         receipt.after = new Identity { pid = next.ChildPid, created_at = next.ChildCreated };
                         receipt.reason = "READINESS_NOT_ATTESTED";
@@ -433,6 +587,7 @@ namespace Omi.RuntimeControl {
                             receipt.loaded_release_identity = "APPLICATION_SOURCE_SNAPSHOT";
                             receipt.application_release_id = next.ReleaseId;
                             receipt.state = "succeeded"; receipt.reason = "SUCCEEDED";
+                            receipt.successor_outcome = "VERIFIED"; receipt.next_action = "Status";
                         }
                     } else { receipt.state = "failed"; receipt.reason = "SAFE_START_UNAVAILABLE"; }
                 } else if (stopped != null && stopped.RequestId == id && stopped.BeforePid == receipt.before.pid &&
@@ -440,10 +595,31 @@ namespace Omi.RuntimeControl {
                     receipt.state = "blocked"; receipt.reason = "PREFLIGHT_REARMED";
                     receipt.preflight_stage = stopped.PreflightStage;
                     receipt.rearm_evidence = "INHERITED_OWNER_ACK_SAME_LIVE_PROCESS";
-                } else if (stopped != null && stopped.Reason == "ALL_WRITERS_DRAIN_UNAVAILABLE") receipt.reason = stopped.Reason;
+                } else if (!ApplyBeforePrepareRefusal(receipt, stopped) && stopped != null &&
+                           stopped.Reason == "ALL_WRITERS_DRAIN_UNAVAILABLE") receipt.reason = stopped.Reason;
+                if (stopped == null && (beforeStopReason == "RESTART_SOURCE_CHANGED" ||
+                    beforeStopReason == "RESTART_COMPATIBILITY_NOT_ATTESTED" ||
+                    beforeStopReason == "SOURCE_ADOPTION_NOT_ATTESTED" || beforeStopReason == "OWNER_NOT_ATTESTED")) {
+                    receipt.state = "blocked"; receipt.reason = beforeStopReason;
+                    receipt.stop_outcome = "NOT_ATTEMPTED"; receipt.preflight_stage = "BEFORE_STOP";
+                    receipt.next_action = beforeStopReason == "SOURCE_ADOPTION_NOT_ATTESTED"
+                        ? "Explicit_Launcher_update_required"
+                        : beforeStopReason == "OWNER_NOT_ATTESTED" ? "Status_then_reconcile_retained_owner"
+                        : "CheckStart_then_explicit_SchemaUpgrade_or_approved_release";
+                }
                 receipt.blockers = receipt.state == "succeeded" ? new string[0] : new[] { receipt.reason };
                 Save(receipt); active = null;
             }
+        }
+        internal static bool ApplyBeforePrepareRefusal(Receipt receipt, Omi.OwnedShutdown.ProductionSession.StopEvidence stopped) {
+            if (receipt.before == null || stopped == null || stopped.RequestId != receipt.request_id ||
+                stopped.BeforePid != receipt.before.pid || stopped.BeforeCreated != receipt.before.created_at ||
+                !stopped.StopNotSent || stopped.ExactExit || stopped.Rearmed || stopped.State != "blocked" ||
+                stopped.PreflightStage != "BEFORE_PREPARE" ||
+                (stopped.Reason != "RESTART_SOURCE_CHANGED" && stopped.Reason != "RESTART_ABORT_PROTOCOL_UNAVAILABLE")) return false;
+            receipt.state = "blocked"; receipt.reason = stopped.Reason;
+            receipt.preflight_stage = stopped.PreflightStage;
+            return true;
         }
         public void Start() {
             if (thread != null) throw new InvalidOperationException();
@@ -463,30 +639,32 @@ namespace Omi.RuntimeControl {
                         pipe = server;
                         listening.Set();
                         server.WaitForConnection();
-                        var bytes = new List<byte>();
-                        var watch = Stopwatch.StartNew();
-                        while (bytes.Count < Limit && watch.ElapsedMilliseconds < 1500) {
-                            var chunk = new byte[1024];
-                            var read = server.BeginRead(chunk, 0, chunk.Length, null, null);
-                            int count;
-                            using (var wait = read.AsyncWaitHandle) {
-                                if (!wait.WaitOne(Math.Max(1, 1500 - (int)watch.ElapsedMilliseconds))) break;
-                                count = server.EndRead(read);
-                            }
-                            if (count == 0) break;
-                            for (int i = 0; i < count; i++) bytes.Add(chunk[i]);
-                            if (bytes.Count > Limit) break;
-                            if (bytes[bytes.Count - 1] == 10) {
-                                var reply = Encoding.UTF8.GetBytes(Dispatch(Encoding.UTF8.GetString(bytes.ToArray()), PipeClient(server)) + "\n");
-                                var write = server.BeginWrite(reply, 0, reply.Length, null, null);
-                                using (var wait = write.AsyncWaitHandle) if (wait.WaitOne(500)) server.EndWrite(write);
-                                break;
+                        using (var caller = PipeClient(server)) {
+                            var bytes = new List<byte>();
+                            var watch = Stopwatch.StartNew();
+                            while (bytes.Count < Limit && watch.ElapsedMilliseconds < 1500) {
+                                var chunk = new byte[1024];
+                                var read = server.BeginRead(chunk, 0, chunk.Length, null, null);
+                                int count;
+                                using (var wait = read.AsyncWaitHandle) {
+                                    if (!wait.WaitOne(Math.Max(1, 1500 - (int)watch.ElapsedMilliseconds))) break;
+                                    count = server.EndRead(read);
+                                }
+                                if (count == 0) break;
+                                for (int i = 0; i < count; i++) bytes.Add(chunk[i]);
+                                if (bytes.Count > Limit) break;
+                                if (bytes[bytes.Count - 1] == 10) {
+                                    var reply = Encoding.UTF8.GetBytes(Dispatch(Encoding.UTF8.GetString(bytes.ToArray()), caller) + "\n");
+                                    var write = server.BeginWrite(reply, 0, reply.Length, null, null);
+                                    using (var wait = write.AsyncWaitHandle) if (wait.WaitOne(500)) server.EndWrite(write);
+                                    break;
+                                }
                             }
                         }
                     }
                 } catch { if (!stopping) Thread.Sleep(100); }
             }
         }
-        public void Dispose() { stopping = true; var current = pipe; if (current != null) current.Dispose(); if (thread != null) thread.Join(2500); }
+        public void Dispose() { stopping = true; var current = pipe; if (current != null) current.Dispose(); if (thread != null) thread.Join(2500); lock (gate) { ReleaseCaller(); } }
     }
 }

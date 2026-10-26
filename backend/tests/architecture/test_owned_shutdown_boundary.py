@@ -35,18 +35,20 @@ def test_no_public_or_legacy_route_to_disposable_authority():
     launcher = (ROOT / 'scripts/omi-launcher.ps1').read_text(encoding='utf-8-sig')
     restart = launcher.split('function Invoke-OwnedBackendRestart {', 1)[1].split('\nfunction ', 1)[0]
     assert 'BeginAuthenticatedOwnedRestart' in restart and 'CompleteOwnedRestart' in restart
-    assert 'Assert-OmiManualBackendStartOwner' in restart
+    assert '$script:OwnsMutex' in restart and '$old.HasRetainedIdentity' in restart
+    assert 'StopWithinDeadlineAsync' in restart
     assert '.Begin(' not in restart and '.Complete(' not in restart
     for call in ('Stop-BackendService ', 'Stop-ProcessTree ', 'Start-Backend '):
         assert call not in restart
 
 
-def test_local_stop_uses_retained_core_without_restart_or_force_fallback():
+def test_local_stop_uses_retained_deadline_core_without_restart_or_port_kill():
     source = (ROOT / 'scripts/omi-launcher.ps1').read_text(encoding='utf-8-sig')
     def body(name):
         return source.split(f'function {name} {{', 1)[1].split('\nfunction ', 1)[0]
     stop = body('Stop-BackendService')
-    assert '$owned.StopAsync($requestId)' in stop and '$owned.LastStop' in stop
+    assert '$owned.StopWithinDeadlineAsync($requestId, $null, $Deadline)' in stop and '$owned.LastStop' in stop
+    assert 'ForcedExitConfirmed' in stop
     assert 'ReferenceEquals' in stop and '$script:OwnsMutex' in stop
     for forbidden in ('Stop-ProcessTree', 'Stop-BackendPortOwners', 'Stop-LegacyBackendService',
                       'RestartBlocker', 'VerifyReadiness', 'Get-OmiLifecycleSourceId', 'Start-Backend'):
@@ -79,16 +81,18 @@ def test_manual_start_is_tray_only_and_keeps_existing_owner_and_queue_fence():
     launcher = (ROOT / 'scripts/omi-launcher.ps1').read_text(encoding='utf-8-sig')
     control = (ROOT / 'scripts/omi-runtime-control.ps1').read_text(encoding='utf-8-sig')
     start = launcher.split('function Start-OmiBackendAfterExactStop {', 1)[1].split('\nfunction ', 1)[0]
+    start += launcher.split('function Start-OmiBackendSuccessor {', 1)[1].split('\nfunction ', 1)[0]
     assert start.count('New-OmiProductionOwnedBackend') == 1
     assert 'CanStartAfterStop' in start and 'DisposeAfterConfirmedStop' in start
     assert '-RequireObservation' in start
-    assert launcher.count('Invoke-BackendStartRequest') == 2  # definition and local menu only
+    assert launcher.count('Invoke-BackendStartRequest') == 3  # definition and two local menu items only
     for forbidden in ('Start-Process', 'Start-Services', 'Start-Frontend', 'Stop-Frontend', 'TakePending',
                       '$script:SafeStopAttempted = $false', '$script:OwnedBackendSession = $null'):
         assert forbidden not in start
     owner = control.split('function Assert-OmiManualBackendStartOwner {', 1)[1].split('\nfunction ', 1)[0]
     assert 'SelectedHost' in owner and 'SelectedPort' in owner and '8400' not in owner
     tick = control.split('function Invoke-OmiRuntimeControlTick {', 1)[1]
-    assert tick.index('Test-OmiRemoteRestartGeneration') < tick.index('TakePending')
+    assert tick.index('ServiceStopInProgress') < tick.index('TakePending')
+    assert 'Test-OmiRemoteRestartGeneration' not in tick
     generation = control.split('function Test-OmiRemoteRestartGeneration {', 1)[1].split('\nfunction ', 1)[0]
     assert 'SafeStopAttempted' in generation and 'ReferenceEquals' in generation

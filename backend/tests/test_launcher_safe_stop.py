@@ -9,6 +9,9 @@ import pytest
 
 
 SETUP = r"""
+if (-not ('Omi.OwnedShutdown.LifecycleDeadline' -as [type])) {
+    Add-Type -Path (Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs') -ReferencedAssemblies @('System.Web.Extensions','System.Core')
+}
 Add-Type 'namespace System.Windows.Forms { public static class Application {
     public static int Exits; public static void Exit() { Exits++; }
     public static void DoEvents() { }
@@ -61,6 +64,15 @@ $script:OwnedBackendSession | Add-Member ScriptMethod StopAsync {
     $task = [Threading.Tasks.TaskCompletionSource[object]]::new()
     $task.SetResult($script:StopResult)
     return $task.Task
+}
+$script:OwnedBackendSession | Add-Member ScriptMethod StopWithinDeadlineAsync {
+    param($RequestId, $TargetRelease, $Deadline)
+    if ($this.Terminal -or -not $this.Alive) {
+        $task = [Threading.Tasks.TaskCompletionSource[object]]::new()
+        $task.SetResult($this.LastStop)
+        return $task.Task
+    }
+    return $this.StopAsync($RequestId)
 }
 """
 
@@ -174,7 +186,7 @@ if (-not $script:Timer.Enabled -or -not $script:ActivationTimer.Enabled -or
 @pytest.mark.parametrize('scenario,code', [
     ("$script:OwnsMutex = $false", 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED'),
     ("$script:OwnedBackendSession = $null", 'BACKEND_SAFE_STOP_OWNED_CHANNEL_REQUIRED'),
-    ("$script:OwnedBackendSession.Alive = $false", 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED'),
+    ("$script:OwnedBackendSession.Alive = $false", 'BACKEND_SAFE_STOP_UNKNOWN'),
     ("$script:BackendProcess = New-TestProcess", 'BACKEND_SAFE_STOP_OWNER_NOT_ATTESTED'),
     ("$script:StopResult.State='blocked'; $script:StopResult.ExactExit=$false; $script:StopResult.Rearmed=$true", 'BACKEND_SAFE_STOP_PREFLIGHT_REARMED'),
     ("$script:StopResult.State='unknown'; $script:StopResult.ExactExit=$false", 'BACKEND_SAFE_STOP_UNKNOWN'),
@@ -228,7 +240,7 @@ if ([System.Windows.Forms.Application]::Exits -ne 1 -or -not $script:LauncherExi
     assert result['calls'] == ['backend-stop', 'restore', 'frontend-stop', 'frontend-stop']
 
 
-def test_frontend_without_safe_channel_refuses_before_backend_and_retains_both(tmp_path):
+def test_frontend_without_safe_channel_retains_owner_after_backend_stop(tmp_path):
     result = _run_isolated_launcher(tmp_path, SETUP + r"""
 $script:FrontendProcess = New-TestProcess
 $frontend = $script:FrontendProcess
@@ -239,14 +251,15 @@ $evidence = $script:OwnedBackendSession.LastStop
 Exit-Launcher -Reason 'frontend-still-blocked'
 if (-not [object]::ReferenceEquals($evidence, $script:OwnedBackendSession.LastStop)) { throw 'BACKEND_REPLAYED' }
 """)
-    assert result['calls'].count('backend-stop') == 0
-    assert any('FRONTEND_SAFE_STOP_UNAVAILABLE' in line for line in result['logs'])
+    assert result['calls'].count('backend-stop') == 1
+    assert any('FRONTEND_STOP_UNCONFIRMED' in line for line in result['logs'])
 
 
 def test_restart_and_unapproved_cleanup_cannot_bypass_safe_stop(tmp_path):
     result = _run_isolated_launcher(tmp_path, SETUP + r"""
+function Invoke-OwnedBackendRestart { throw 'OWNER_NOT_ATTESTED' }
 try { Restart-Services; throw 'TRAY_RESTART_ACCEPTED' }
-catch { if ($_.Exception.Message -ne 'OWNED_RESTART_NOT_AVAILABLE_FROM_TRAY') { throw } }
+catch { if ($_.Exception.Message -notmatch 'FULL_SERVICE_RESTART_INCOMPLETE.*OWNER_NOT_ATTESTED') { throw } }
 $cleanup = $ast.Find({ param($node)
     $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'add_ApplicationExit'
 }, $true)
@@ -312,19 +325,20 @@ if ($null -ne $script:OwnedBackendSession.LastStop) { throw 'STARTUP_FAILURE_BEC
         assert not any('OWNED_START_EXIT_CONFIRMED' in line for line in result['logs'])
 
 
-def test_frontend_race_after_preflight_does_not_claim_full_exit(tmp_path):
+def test_frontend_failure_after_backend_stop_does_not_claim_full_exit(tmp_path):
     result = _run_isolated_launcher(tmp_path, SETUP + r"""
 $script:Checks = 0
-function Assert-FrontendSafeStopAvailable {
+function Stop-FrontendService {
+    param([switch]$RequireSafeStop)
     $script:Checks++
-    if ($script:Checks -gt 1) { throw 'FRONTEND_SAFE_STOP_UNAVAILABLE' }
+    throw 'FRONTEND_STOP_UNCONFIRMED'
 }
 Exit-Launcher -Reason 'frontend-race'
 if ([System.Windows.Forms.Application]::Exits -or -not $script:OwnedBackendSession.LastStop.ExactExit -or
-    $script:Checks -ne 2) { throw 'RACE_FALSE_SUCCESS' }
+    $script:Checks -ne 1) { throw 'RACE_FALSE_SUCCESS' }
 """)
     assert result['calls'] == ['backend-stop', 'restore']
-    assert any('FRONTEND_SAFE_STOP_UNAVAILABLE' in line for line in result['logs'])
+    assert any('FRONTEND_STOP_UNCONFIRMED' in line for line in result['logs'])
 
 
 @pytest.mark.parametrize('failed', [True, False])
@@ -356,7 +370,7 @@ catch { if ($_.Exception.Message -ne 'EXPECTED') { throw } }
 
 
 @pytest.mark.parametrize('state', ['stopped', 'unknown', 'rearmed', 'startup-exited'])
-def test_original_timer_publishes_status_without_dequeue_after_stop(tmp_path, state):
+def test_original_timer_publishes_status_and_polls_without_unrequested_dispatch(tmp_path, state):
     result = _run_isolated_launcher(tmp_path, SETUP + r"""
 . (Join-Path (Split-Path $ast.Extent.File) 'omi-runtime-control.ps1')
 function Get-OmiOwnedBackendIdentity { return [pscustomobject]@{pid=42; created_at='same-child'} }
@@ -372,11 +386,13 @@ $script:RuntimeController | Add-Member ScriptMethod Publish {
     param($json, $identity, $attested)
     $status = $json | ConvertFrom-Json
     $expected = if ($state -in @('stopped','startup-exited')) { 'stopped' } elseif ($state -eq 'rearmed') { 'observed' } else { 'unknown' }
-    if ($status.backend.status -ne $expected -or $status.restart.available -or
+    if ($status.backend.status -ne $expected -or $status.restart.available -ne ($state -eq 'rearmed') -or
         ($state -ne 'rearmed' -and ($attested -or $null -ne $identity))) { throw 'FALSE_STATUS_PROOF' }
     $script:Calls.Add('published')
 }
-$script:RuntimeController | Add-Member ScriptMethod TakePending { $script:Calls.Add('dequeued'); throw 'DESTRUCTIVE_DISPATCH' }
+$script:RuntimeController | Add-Member ScriptMethod TakePending { $script:Calls.Add('polled'); return $null }
+function Restart-Backend { throw 'UNREQUESTED_RESTART' }
+function Invoke-OmiRemoteControlOperation { throw 'UNREQUESTED_DISPATCH' }
 $script:RunEvent = $null
 $script:ExitEvent = $null
 $script:RestartEvent = $null
@@ -384,7 +400,7 @@ $timer = $ast.Find({ param($node) $node -is [Management.Automation.Language.Invo
     $node.Member.Value -eq 'add_Tick' -and $node.Expression.Extent.Text -eq '$script:ActivationTimer' }, $true)
 & $timer.Arguments[0].ScriptBlock.GetScriptBlock()
 """.replace(". (Join-Path", f"$state = '{state}'\n. (Join-Path", 1))
-    assert result['calls'] == ['published']
+    assert result['calls'] == ['published', 'polled']
 
 
 @pytest.mark.parametrize('fault', ['', 'interpreter', 'pid', 'creation', 'root', 'owner'])

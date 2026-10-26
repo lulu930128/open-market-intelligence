@@ -1,5 +1,458 @@
 # OMI runtime control v1 — source contract
 
+## 2026-10-26：操作／generation 恢復與 Backend 離線控制（Source）
+
+本節取代下方歷史 checkpoint 的「同 owner lifetime 只能一次 schema／failed-start recovery」限制。
+歷史 receipt 保留；沒有 hot reload、正式 DB migration 或跨應用 E2E 驗收。
+
+`SchemaMaintenanceAttempted`、`SchemaMaintenanceFailed`、`FailedStartRecoveryAttempted`
+只保留診斷用途，不再是全域永久 admission veto。自動 startup 的
+`OwnedBackendStartAttempted` 仍防止 factory 結果不明時自動再 spawn；明確 Start／Recovery
+走原 retained session 的 `CanStartAfterStop`／`CanRecoverFailedStart` 與退役 gate。
+同 UUID 不能重播，同 session 不能再次退役；新失敗 child 必須提供自己的原始收據與 exact exits。
+
+Schema operation 使用 CreateNew JSONL、終態 hash 及原 owner 記憶中的 worker 結果。
+純 preflight refusal 或 native STOP-not-sent／rearm 證據可重新檢查新 UUID。
+backup 等前置工作失敗時，必須同時有 retained worker exact exit、nonce-bound
+`FAILED / NOT_ATTEMPTED` reply、持久終態與未改寫 receipt，才能再進原 maintenance lane。
+新操作重新驗 DB/head/source、owner/process generation；不是清除布林後重跑。
+`COMMITTED` 必須有原 worker 成功 reply 才能繼續新 retained generation 的恢復。
+未知 transaction、lost reply、遺失／改寫 receipt 或未知 factory 仍拒絕危險操作；Status、
+ReadOperation 與 Plan 保持可用，要求 worker／DB／generation reconciliation，不自動 restore/stamp。
+
+普通 Restart 在消耗一次性 intent 後擷取當時磁碟 application release 作為 successor pin，
+不要求新版等於舊 session `ReleaseId`。舊 session 的 retained handles、PID／creation、
+loaded release 與 STOP protocol identity 保持不變；Runner 的私有 `target_release_id`
+只檢查新 target，不傳入舊 Backend 的 identity。Start-after-stop 仍使用原 session release。
+Stop 前先驗 Launcher loaded lifecycle source／Controller／endpoint，再由固定唯讀
+`CheckStart` 檢查 configured SQLite metadata/head 與原 loaded DB binding、owner UUID、PID。
+不相容時保留舊程序，普通 Restart 不 migration。PREPARE 前後、exact stop 後、factory 與
+readiness 均驗同一 target pin；source 中途變更不可重新取新 pin 或額外 start。
+原 180 秒 cutoff、owned exit 與 forced-stop reconciliation 保留。
+這是 hash-pinned restart，並未建立 immutable release store；不保證偵測檢查間改動後又還原的 source。
+Launcher lifecycle source 改動需另走明確 Launcher update；Backend Restart 不 hot reload owner。
+明確 SchemaUpgrade 在 Stop 前要求 configured target 與已知 behind revision；之後仍走
+原 graceful stop → schema.lock／SQLiteWriterLease (`BEGIN IMMEDIATE`) → verified backup／
+restore-copy → Alembic transaction → successor。普通 Restart 不 migration，maintenance 不強停。
+
+### 2026-10-26：OMI Search direct pipe 遠端 intent（Source）
+
+本節取代上一輪要求 `actor=launcher_local_operator` 及 Launcher 本機 Yes/No 的設計。
+遠端 Restart／Start／Recover／Schema 沒有 MessageBox、OpenFileDialog 或 approval boolean。
+唯一執行 owner 仍是原 Launcher；既有 Backend HTTP／pipe 路徑保留。
+
+同一 pipe `omi-runtime-<sha256(lowercase absolute repo root) 前 24 字元>`，不增加 manager、
+daemon、HTTP listener 或 generic shell。adapter 必須驗證並 retained 真 Launcher process handle，
+比對 pipe server PID／creation；同名 pipe 不構成身分。server 使用 current-user SID ACL、拒絕
+Network SID，驗證專用 token 的 SHA-256（constant-time compare），從 OS 取得 caller PID、
+保留 process handle／creation，並在消耗時重新核對。caller 需存活到 owner 消耗 intent。
+身分不依賴 caller 宣告的 actor、PID、argv、approval 或 writer report。
+
+每個 request 是單行 UTF-8 JSON，結尾 LF、frame <16384 bytes，無額外欄位。
+四個基本欄位固定為 `action,request_id,expected_owner_id,token`；值為字串。
+mutation 的 request_id 是新 D-format UUID，expected_owner_id 必須等於 Status 的 owner UUID。
+
+| action | confirmation／wire | 執行 gate |
+| --- | --- | --- |
+| Status | 四基本欄位；request_id、expected_owner_id、token 可為空字串 | SID pipe 唯讀；Backend offline 可用 |
+| ReadOperation | 四基本欄位；request_id 為既有 UUID | 唯讀原 receipt；不重建執行權 |
+| RestartBackend | 四欄相容格式，或加 `confirmation=restart_backend` | retained running Backend；Stop 前 source／schema／binding；原 PREPARE、writer fence、180s deadline、Stop／Start |
+| StartBackend | 五欄，`confirmation=start_backend` | 原 stopped exact-exit generation；原 release pin／start gate |
+| RecoverFailedStart | 五欄，`confirmation=recover_failed_start` | 原 failed-start receipt、retained handles、exact exits 與單次 retirement |
+| SchemaUpgrade | 五欄，`confirmation=upgrade_schema` | configured target、原 schema admission、備份、writer lease、transaction／rollback 與 successor gates |
+
+既有 OMI Search MCP `omi_restart_backend` 已在 tool 邊界要求 `confirmation=restart_backend`，
+既有四欄 pipe 省略 confirmation 只對 Restart 相容；Controller 將固定 action 正規化為同一
+confirmation 並寫入 receipt。它不是任意 action 的省略規則。若有提供 confirmation，必須完全
+吻合。Backend legacy wire 可另加 `backend_preflight` JSON 字串（五欄），只接受 OS caller
+恰為 retained Backend 的觀察；direct caller 不得冒報。不可同時傳 confirmation 與 preflight。
+
+Controller 先 durable accepted 再排入 single-flight。Launcher TakePending 後核對 retained caller，
+先消耗記憶體 authority，再 durable running，最後才進原 lifecycle；不彈本機確認。
+重送 UUID 只讀回同 action／owner 的原 receipt，不重排執行；跨 action／owner 不授權。
+歷史 local actor／approval 僅為 receipt 解碼相容，沒有 live intent，不能重建權限。
+新 receipt 的 `actor=authenticated_pipe_client` 由 Controller 產生，`requester` 是 OS PID／creation，
+`confirmation` 是固定值，`intent_consumed_at` 記錄一次性消耗。token 永不寫入 receipt／log。
+
+SchemaUpgrade 由 `Invoke-OmiConfiguredSchemaUpgrade` 呼叫固定私有 readonly
+`CheckStart --upgrade`。inspector 讀 Launcher checkout 的 configured database_url 與
+runtime_lock_dir/schema.lock，回傳經 canonical path／reparse／schema／binding 驗證的
+configured_target；不猜測路徑。原 owner 再驗 paths，呼叫 `Invoke-OwnedSchemaUpgrade` 一次，
+由現有 worker 重新驗 target、schema lock、SQLiteWriterLease、備份與 migration。
+若 selector 缺失、target 不安全、DB revision／binding 不相容，收到
+`blocked / SCHEMA_CONFIGURED_TARGET_UNAVAILABLE`，migration／successor 仍為 NOT_ATTEMPTED。
+ReadOperation 提供 `next_action=Status_then_CheckStart_configured_target_diagnostics`；Status／
+ReadOperation 可遠端讀取，CheckStart 是 Launcher 私有診斷，不是 generic remote command，
+不以新 UUID 盲目重送 migration。未知 worker／transaction／receipt 保留原 reconciliation fence。
+
+本 repo `Invoke-OmiLauncherCommand` 接受固定 Action、已驗證 retained Owner handle、
+ExpectedOwnerId、RequestId、Token，產生固定 confirmation；不讀／配置 credential，也不自行
+發現或接管 Launcher。只有同使用者、持有專用 runtime-control capability 的 adapter／既有
+Backend caller 能 mutation。僅知 pipe 名稱或 owner UUID 不足以授權。
+
+跨 repo 新 MCP tools 另任務接線，見 [精確 adapter 交接契約](../exec-plans/completed/remote-intent-20261026/WireContract.md)。
+`ApplyRelease` 不曝光。Source／isolated fixture 與 loaded Runtime／ChatGPT E2E 分開驗收；
+本輪未部署、restart 或操作正式 DB。Controller receipt 分列 stop／migration／successor，
+accepted／running 不代表完成。詳見 [本輪證據](../exec-plans/completed/remote-intent-20261026/Progress.md)。
+
+## DB Schema 單次升版（Source／fixture；Runtime／Live 未採用）
+
+`scripts/omi-schema-maintenance.py Plan` 是 OMI 自有唯讀診斷入口，使用原 Alembic graph，
+不載入 dotenv、不猜 DB 路徑。可選擇比對既有 loopback runtime 的 loaded configuration，
+但不把 fingerprint／readyz 當作 exact DB handle 或全 writer exclusion。
+`Gate` 保留舊 refusal 收據；`Status` 可唯讀檢視 Gate、worker 與外層 operation。
+普通 owned Restart 不執行 migration；schema mismatch 指向此診斷並保留 failed-start receipt。
+
+已載入新 source 的原 Launcher tray 提供 **Upgrade DB Schema**；點選即為本地 intent，
+與遠端 action 共用 configured target，沒有檔案挑選。原 owner 的 single-flight、timer／event fence 包住全程；
+不停止 Frontend，不使用 Apply Update。若載入 Launcher 新 source 需完整退出而影響 Frontend，
+必須另行允許 downtime，不能以這個 Backend-only action 暗中代辦 adoption。
+
+正常分支使用原 ProductionSession 的 graceful STOP protocol，不進 hard cutoff；必須有當次
+request 的 retained child／runner exact exit、原 graceful receipt 與 `CanStartAfterStop`。
+failed-start 分支使用 `CanRecoverFailedStart`／原私有 START_FAILED receipt、retained handles、
+creation／exit code 的獨立 admission，沒有偽造 StopEvidence。migration 成功後才
+`RetireFailedStart`，接原 `Start-OmiBackendSuccessor`，最多呼叫 factory 一次。
+普通 stop／forced-stop／舊 failed-start receipt 不能當新的升版授權。
+
+私有 `ApplyStopped` worker 不是公開 operator command：以 OS QueryFullProcessImageName、
+NtQueryInformationProcess／固定 PowerShell `-File` grammar，以及 NtQueryMutant 的實際
+Launcher mutex owner PID 驗證 parent，再與原 ProductionSession 的一次性 admission 做
+challenge handshake。PID／creation／caller JSON flags 本身不授權。worker 驗 configured
+DB／lock target，只輸出白名單結果；source pin 包含 application、Alembic 與 backup／worker。
+
+Backend exit 會釋放舊 lease，**不宣稱連續持有**。離線 worker 取得既有 ProcessFileLock
+`schema.lock`，並用 SQLiteWriterLease 在已初始化的 SQLAlchemy Connection 上取得
+`BEGIN IMMEDIATE`；取得前已完成的外部寫入會進入後續 backup。原 backup utility 以獨立
+readonly reader 複製／full integrity／schema snapshot／SHA-256，再驗獨立 restore-copy。
+restore-copy 永不覆蓋原 DB。Alembic `config.attributes["connection"]` 使用該 maintenance
+Connection，migration／head／integrity 檢查完成後才由 maintenance commit；SQL authorizer
+拒絕 migration 提早 COMMIT／ROLLBACK。其他 SQLite writers 在 reservation 持有期間被排除。
+
+外部 readers 可以存在；rollback journal reader 阻擋 commit 時明確失敗，不 retry。commit
+釋放 reservation 後到 successor ready 之間，外部 writer 可以再次寫入；不宣稱保護任意檔案
+寫入或 privileged interference。上述限制寫入 worker receipt，沒有不可達的 all-readers gate。
+
+operation 與 worker 分開 durable JSONL，exclusive create、sequence、request UUID、flush／fsync；
+同 request／同 owner 的升版 attempt 不重播。worker 只證明 migration，外層的
+`migration_outcome`／`successor_outcome` 分開：
+
+- `BLOCKED_NO_DB_CHANGE`：未進 migration；stop 結果仍另列，不把 DB 無變更當 runtime 健康。
+- `UNKNOWN_RECONCILIATION_REQUIRED`：worker／transaction outcome 未知，保留原檔與 receipt。
+- `MIGRATED_START_UNVERIFIED`：commit 已知，但未實際呼叫 successor factory，例如 IPC reply lost。
+- `MIGRATED_START_FAILED`：commit 已知，已呼叫 successor factory，但 identity／release／readyz 未全部通過。
+- `SUCCEEDED`／`COMPLETE`：migration committed 且原 successor 的 PID／creation／release／readyz 全部驗證。
+
+receipt 的唯讀觀察不授權 replay／start。stop／worker 可能已發生後失敗，保留 reconcile fence；
+純 preflight refusal 只消耗 schema request，恢復原日常 Restart admission。失敗不自動 restore、
+downgrade 或重試，不改原 failed-start 收據，不刪 DB／WAL／SHM／backup。SQLite 的正常
+transaction rollback 不等同於 restore／downgrade；實際殘留狀態仍需人工檢視。
+
+0092 對 baseline 已建立的同名 index 僅在 canonical SQL 定義相同時跳過；異質定義拒絕，
+沒有 drop/recreate／stamp。Source fixtures 的 empty→head 與 0092→0093 不代表正式 DB 驗收。
+詳見 [工程交接與離線證據](../exec-plans/active/schema-maintenance-20261025/Progress.md)。
+
+## 2026-10-25 明確人工 Failed-start Recovery（Source；Live 尚未採用）
+
+原 Launcher tray 的 **Recover Failed Backend Start** 是獨立人工入口，與 Start Backend
+共用 single-flight、timer／event fence 及 bounded successor startup。沒有 CLI／MCP
+recovery action、背景重試或 legacy fallback；Backend-only，不碰 Frontend。
+
+`ProductionSession.CanRecoverFailedStart` 不使用 StopEvidence，也不修改
+`CanStartAfterStop`。它要求原 owner PID／creation、child／runner retained handles、terminal、
+原始 START_FAILED memory receipt 與 private journal 一致、child 非零 exact exit、runner
+exit 79，且沒有 Stop／cutoff／readiness／退役歷史。遺失 handle／收據、事後僅靠
+RefreshStartupExit 觀察、IO／ACL／identity unknown 均拒絕；不補造成功 Stop 或更改
+StartupFailure。原 receipt 不會被 recovery intent 覆寫。
+
+Launcher 驗 Controller reference／owner UUID、mutex、loaded lifecycle digest、原固定
+endpoint、listener／bindability 及唯讀 process inventory。相關 process command line
+缺失或 CIM 失敗即拒絕；其他 Backend 或 runner 存在亦拒絕。此觀察不取代後續 DB
+maintenance 的全 writer exclusion／schema lock。
+
+新 request UUID 不得重用原 restart UUID 或 startup instance；每個 owner lifetime 最多
+消耗一次 failed-start recovery。C# 在同一 stopGate 內再核對證據與 successor release，
+先 latch，再以 CreateNew／write-through／Flush(true) 保存獨立 recovery intent，最後退役。
+IO／Dispose／factory 失敗仍消耗 attempt。新 session 使用原 factory 的新 instance／nonce；
+readyz、owned identity、release 與 publication 全部成功才顯示 recovery verified。
+
+這不是既有 Launcher 的 hot reload／handover。磁碟改好不代表原 loaded owner 可使用，
+舊 session 不能跨 owner 採用。若現有正式換版能力會退出 Frontend 或強切，而任務禁止
+這些動作，結果保持 SOURCE_READY／ADOPTION_BLOCKED，DB backup／migration／Start
+均不得越過 gate。單次證據見
+[執行紀錄](../exec-plans/active/launcher-failed-start-recovery-20261025/Progress.md)。
+
+## 2026-10-22 已授權的 graceful → 180 秒 hard cutoff（Source／隔離測試）
+
+使用者已明確授權 OMI 自有程序的有界強制終止。本節取代本文較早 checkpoint 的
+「drain 失敗永久 blocked／不 force」處置；原 graceful、Job checkpoint、writer 與資料
+完成語意仍保留。以下能力尚未採用至現役 Launcher，本輪沒有 Live stop/restart。
+
+| 操作 | 停止範圍 | 停止後行為 |
+| --- | --- | --- |
+| Exit Launcher | owned Backend／Runner、owned Frontend 應用樹、Launcher cleanup | 關閉，不重開 |
+| Stop Services | owned Backend／Runner、owned Frontend 應用樹 | Launcher 留存，服務保持停止 |
+| Restart Backend／MCP | retained Backend／Runner | 原 ProductionSession／Backend Gateway 啟動一次並驗證 generation／HTTP |
+| Restart Backend + Frontend | 同一 Launcher 的 Backend、Frontend | 原雙服務入口重啟並驗證兩者；不換 Launcher |
+| Apply Update | exact Launcher、正式 Backend／Frontend runner 與固定應用鏈 | 原 VBS 啟動一次；驗證新 Launcher、Backend，Frontend readiness 另列 UNVERIFIED |
+
+`LifecycleDeadline` 在 owner 接受操作時建立，production 固定 180000ms，採 Stopwatch。
+Exit → Stop Services → Backend、雙服務 restart → Backend restart 均傳同一物件。
+遠端 Controller 自 authenticated acceptance 開始計時，TakePending／Begin 不重設，
+不因舊 30 秒 intent age 再變成 writer refusal。已耗盡的 deadline 直接進強切。
+正式 Apply Update CLI `TimeoutSeconds` 僅接受 180；縮短只供 internal／隔離 fixture。
+
+內層既有 wire protocol 仍最多 120 秒，使用 `min(120s, outer remaining)`，沒有第二次
+PREPARE／STOP。rearmed、Job／Writer unknown 或 pipe send/read 卡住後等待原截止時間。
+ProductionSession 的獨立 Task 不持 stopGate 等待 IO，到期先終止 retained runner，
+再終止 retained child；不依賴 UI DoEvents。Launcher 有額外 5 秒收據返回上限；
+kill 後最多 3 秒 exact handle exit 觀察不是新的 graceful window。
+
+身份始終要求 PID、creation、原 retained handles／Launcher generation；不能靠埠、HTTP、
+模糊名稱或 ancestry alone 授予 kill。Frontend preflight 不再擋住 Backend 先停；
+Frontend 必須驗證 birth runner。未知或 foreign Frontend 保留並回報 identity failure，
+不宣稱完整 Exit。Backend-only 不碰 Frontend、Launcher 或其他 MCP。
+
+Controller 的 `restart.available=false`、typed preflight 缺失／UNKNOWN／runtime_started=false
+不再否決 token＋OS pipe client＋exact Backend owner 已認證的顯式 intent。保留 owner
+mismatch、單一 pending／active request、UUID 與 no replay。Router 只轉送，不以 writer
+availability 自行回 409。原 consumer/API 不取得 process ownership。
+
+強切收據是 `forced_stopped / HARD_CUTOFF_EXACT_OWNED_EXIT`、`ForcedExitConfirmed=true`、
+`ExactExit=false`；不產生 `LIFESPAN_AND_EXACT_EXIT`、writers drained 或 Job completed。
+保存 accepted/cutoff timestamp、elapsed、request、PID／creation／process generation、
+graceful reason／stage 與 `RECONCILIATION_REQUIRED`。Runner session journal 與 Controller
+receipt 保留 evidence；Controller 以 plain dictionary 讀回，不將 serialized data 變成
+StopEvidence authority。receipt IO 不阻止已授權的 exact termination；無法落盤時明示
+persistence unconfirmed，保留 memory evidence／Launcher log。
+
+不改 DB、JobRun、checkpoint、quota 或歷史 unknown。下次正式 startup 由原 interrupted
+cleanup／validated continuation owner 處理；HTTP ready 不代表對帳完成。啟動失敗保留
+「舊程序已停止／新程序不可用」的區別，不宣稱重啟成功。
+
+## 舊載入 Launcher 的一次性 Apply Update 入口
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '.\scripts\apply-omi-update.ps1' -TimeoutSeconds 180
+```
+
+這是 reviewer 決定 adoption 後的入口；本輪沒有執行。短命 helper 確認原 Launcher
+mutex 被持有，捕獲唯一 exact `-File <repo>\scripts\omi-launcher.ps1` 的 PID／creation／
+完整 commandline／retained handle。只納入同 repo、同 LauncherPid、正確 ServiceName／
+WorkingDirectory 的正式 runners，並沿 Backend owned Python entry／Frontend npm／Next
+固定應用鏈擴展。瀏覽器、Explorer、其他工具及其子樹保留，不阻擋 OMI owner 停止。
+不使用 `taskkill /T` 或 port cleanup；切斷前重查 generation，僅對 retained handles 操作。
+
+只送一次原 Exit event。正常退出要本次 terminal log、mutex release、原 owner 與 scope
+內 handles exit；舊版 blocked／rearmed／modal 不會重設期限。到期 one-shot cutoff，
+abandoned mutex 不冒充 graceful。snapshot/cut 間新增的 OMI child 導致 unconfirmed，
+不啟動另一套 owner。scope 內與排除 scope 的 ancestry 不互相代替。
+
+確認舊 owner 停止後釋放原 mutex、呼叫原 VBS 一次。唯一 read-only verifier 最多 110 秒，
+驗證新 Launcher PID／creation、OS pipe server、loaded lifecycle digest、application release、
+Backend PID／FILETIME／host／port、`/api/system/runtime-control/status`、
+`/api/system/readyz`，最後重查同 generation。404 明確報 route error；其他暫不可觀察在
+同一 observation budget 內重查，沒有第二次 spawn／kill。
+
+成功為 `UPDATE_BACKEND_READY`／exit 0，`update_applied=LAUNCHER_AND_BACKEND_VERIFIED`，
+`backend_readiness=VERIFIED`、`frontend_readiness=UNVERIFIED`，不是雙服務產品驗收。
+新 generation 未確認時 `NEW_START_UNVERIFIED` 或 `UPDATE_START_UNAVAILABLE`／exit 2；
+保留舊 owner stop 結果、VBS 次數與新服務不可用。收據位於
+`logs/launcher/updates/<request-id>.json`。證據見
+[本輪紀錄](../exec-plans/completed/lifecycle-hard-cutoff-20261022/Progress.md)。
+
+## 舊 Apply Update checkpoint（已由上述 180 秒強切政策取代）
+
+Lifecycle source 已改、舊 Launcher 回 `SOURCE_ADOPTION_NOT_ATTESTED` 時，在 repo root
+由已授權 PowerShell／Codex Bridge 執行單一命令：
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '.\scripts\apply-omi-update.ps1' -TimeoutSeconds 180
+```
+
+短命 helper 向現有 `OpenMarketIntelligenceLauncherExit` event **只送一次**，沿用舊 owner
+的 Exit → Safe Stop（Job 收尾、SQLite commit／rollback、Writer Drain、Backend exact exit）
+→ Frontend retained runner 停止 → Launcher cleanup。等待期間不開 log；原 mutex 正常釋放後，
+保留 400ms grace 給舊版 `Add-Content` 完成，再讀本次新增的 `Launcher stopped.` 一次。
+兩項證據齊全才呼叫原 `start-omi-launcher-hidden.vbs` 一次。它不讀 source digest，
+不熱更新舊 Launcher、不改 `RestartBackend` pin、不走 `RestartServices`，也不接管或終止程序。
+短命 update mutex 只防止同時執行兩個 helper；不新增服務、Controller、token 或 health gate。
+
+`EXIT_REQUESTED` 只是停止請求。exit 0／`OLD_OWNER_STOPPED_START_REQUESTED` 僅表示舊 owner
+正常交接，原 VBS 已呼叫一次；換版採用與 Backend／Frontend readiness 均標 `UNVERIFIED`。
+helper 不讀取新版啟動中的 log，不把啟動請求宣稱為整個版本已通過 Runtime／Live 驗收。
+沒有 owner 回 exit 3、不啟動；停止被拒、abandoned mutex、缺新 terminal log、權限／IO 錯誤
+或停止 deadline 到期回 exit 2、不重試。若 terminal log 未及在 grace 內完成，保守回
+`UPDATE_STOP_UNCONFIRMED`，不啟動；不靠重複讀取干擾最後 logger。VBS 呼叫失敗也不重試；
+逾時不撤銷已送出的 Exit，舊 owner 仍可能稍後完成停止。
+
+使用相同 Windows 使用者／session，換版期間不要同時開 Startup shortcut、手動啟動或繼續改
+lifecycle source。舊版 Exit 若無法安全收尾，helper 無法補救；舊 owner 原有的失敗訊息框也
+不會由 helper 關閉。這是有正常 Exit 能力的 owner 的換版／恢復入口，並非 crash 後強制清理。
+日常 Backend-only 重啟仍使用 `omi_restart_backend`／`RestartBackend`，不動 Frontend。
+
+## 2026-10-20 重啟名稱與 Frontend 啟動競態修復（Source，Runtime 未採用）
+
+日常「重啟 OMI」明確指 **Backend-only**：使用既有 `omi_restart_backend`、tray
+`Restart Backend`，或既有 Launcher 新增的 secondary action `RestartBackend`。
+這三個入口共用 `Invoke-OwnedBackendRestart`；不停止、探測或重啟 Frontend。
+OMI_search adapter 名稱、Backend runtime-control API schema 與原 source pin 保持不變。
+
+明確「重啟兩者」才使用 tray **Restart Backend + Frontend** 或原 CLI action
+`RestartServices`。舊 `RestartServices` 名稱保持相容，仍是完整 Backend→Frontend；
+不是 Backend-only alias。MCP runtime 不屬於這兩種操作的 scope。
+
+以下是已採用新 Launcher 後的操作命令，本次 source 工作沒有執行：
+
+```powershell
+# 日常重啟 OMI：Backend-only
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '.\scripts\omi-launcher.ps1' -LauncherAction RestartBackend
+# 明確重啟 Backend + Frontend：保留既有完整操作
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '.\scripts\omi-launcher.ps1' -LauncherAction RestartServices
+```
+
+`RestartBackend` 只向原 mutex owner 的 `OpenMarketIntelligenceLauncherRestartBackend`
+auto-reset event 發送一次，不另建 owner、不提示額外確認。沒有 owner 回 exit 3；舊 owner
+沒有該 event 或 signal 失敗回 exit 2，不能改送 `RestartServices`。exit 0 只證明 signal
+送達，完成仍須原 owner 的 terminal restart evidence。事件與 tray click 使用既有 guard、
+timer pause、finally event reset 合併操作期間重複事件；不重送、不重播。
+
+使用者提供的 10/20 時序：09:35:25 新 Frontend runner 出生，09:35:26 立即的 stop-proof
+觀察回 `FRONTEND_STOP_UNCONFIRMED`；Next 約 2.8 秒後 Ready，09:35:42 API/UI 健康。
+本次修復 source 中「啟動後立即全面 stop preflight」的競態，不推定歷史 CIM 權限拒絕就是
+當次根因。10/19 完整重啟成功的歷史驗收仍有效，但不代表此次修改已採用至 Runtime。
+
+新啟動先驗 retained handle／PID／creation／Launcher identity，再等待 HTTP healthy；
+只有 HTTP 與 listener 均可用時，才做一次 listener→root ancestry snapshot。HTTP 尚未
+Ready 不查 CIM；輪詢間隔 500ms，snapshot 暫不可用只在原 30 秒 deadline 內有界重觀察。
+已知 foreign listener、PID reuse／creation mismatch 或 generation 改變立即拒絕；deadline
+後仍 unknown 回 `FRONTEND_START_READINESS_UNCONFIRMED`。不增加 spawn／kill retry。
+最後保留正常 health 與已驗證 ownership；HTTP 200 本身不授予 ownership。
+
+本輪驗證限 AST／mock Windows、Backend restart/source-pin contract 與 architecture checker；
+不執行 native tree test、不連正式 endpoint、不讀寫 DB、不停止或重啟 OMI。
+**Source PASS 與 Runtime Adopted 分開；本輪 Runtime／Live／Product 仍為 UNVERIFIED。**
+操作換版與驗收步驟見 [操作者 runbook](../exec-plans/active/backend-manual-start-20261016/Adoption.md)。
+
+## 2026-10-19 Cold admission／Run dispatch 修復（Source／offline，未採用至 Runtime）
+
+`Start-Backend` 在 `OwnedBackendStartAttempted` 之前呼叫
+`Assert-OmiProductionBackendStartPreflight`，只觀察 Controller、owner／模式、lifecycle source、
+固定 port listener 與 bindability，不建立 session／store／Runner／child，也不 pump UI。
+此階段拒絕保留 `SOURCE_ADOPTION_NOT_ATTESTED`、`Controller unavailable`、
+`FIXED_PORT_NOT_FREE`／`FIXED_PORT_NOT_BINDABLE` 原因，Start Services 的提示也保留原因。
+尚未消耗 attempt 時，修正外部條件後可由下一次明確 Start 重新檢查；不提供自動重播。
+進入 factory 前仍先設不可逆 latch，factory 再做相同 preflight。包含第二次檢查的 race、
+constructor 例外、null 回傳或已啟動 child 的 unknown，都不能因 session 缺失而清 latch。
+本次未修改 ProductionSession／Runner 的生產握手、安全停止或 writer drain 契約。
+
+無 session 的 Stop／Exit 只有非常窄的 cold no-op：必須明確為 no-attempt、non-reload／
+non-packaged、持有原 mutex 且 handle 有效、沒有 Backend runner／retired session／manual
+start history、沒有 Frontend runner history 或 unknown stop。再確認 Frontend port 無 listener
+且可 bind、process snapshot 無本 Launcher 的直接 child（含未追蹤 Runner），以及 Backend
+selected port 無 listener 且可 bind。觀察失敗或任何證據缺失即拒絕。先前純空狀態的 no-op
+Frontend stop 可重查，因此 Stop Services 後仍可明確 Exit；不允許從有 runner 的歷史推定為空。
+成功記錄 `OWNED_COLD_START_NOT_ATTEMPTED`，不補造 `LIFESPAN_AND_EXACT_EXIT` receipt。
+Stop 的 sticky fence 仍保留；任何 factory-attempt／unknown 都不能走此例外。
+
+Run／Start Services 的 degraded 判斷在原 request guard 內完成；先在原 finally 合併 Run
+事件，再同步交給 `Restart-Services` 取得既有 lifecycle guard。交接中沒有 DoEvents、wait
+或 callback；Backend 與 Frontend 的 UI pump、finally event reset 仍受 guard 保護。
+直接 tray Restart Services 使用同一路徑。full-service UUID、Backend→Frontend 次序、
+sticky SafeStop、generation／source pin、後段 `partial` 與 unknown 不重播均不改。
+無 owner 的 Backend start 拒絕；legacy／reload cold start 也只接受空且可 bind 的固定 port，
+不再由 `Start-Services` 落入歷史 port-owner force cleanup／endpoint adoption／換 port。
+沒有 retained Owned channel 的 legacy Restart／Stop 仍拒絕。
+
+控制 scope 必須分開：遠端 `RestartBackend` 仍只處理 Backend；本機 `Restart Services`
+才協調 Backend 與 Frontend，MCP runtime 本身不在兩者的重啟範圍。
+第一次換版依 [Cold Adoption Gates](../exec-plans/active/backend-manual-start-20261016/Adoption.md)
+先結束舊 owner，再由原入口載入唯一新 Launcher；已有 Startup shortcut 時不可重複開啟。
+離線 AST／mock OS 驗證只證明控制路徑，Controller private store、正式 DB readiness、真實
+npm／Next subtree 與同 UUID Live receipt 仍待操作者驗收，不能宣稱 runtime adopted。
+
+## 2026-10-19 Launcher Frontend Stop／Full-Service Restart（Source／offline）
+
+Frontend 的 bounded termination 由原 Launcher 擁有（2026-10-20 簡化 source）。
+`Start-LoggedService` 在出生時保留同一 Process object、native handle、PID、creation 與
+Launcher PID／creation。停止前驗原 object reference、handle、PID／creation、Launcher
+identity 與有效 mutex；不從 port、HTTP 或 caller-supplied PID 接管 ownership。
+停止不做 CIM descendant inventory、不為 descendants 重新開 handles，也不做 pre/post
+多次 tree snapshots。唯一 target 是原 retained runner：`taskkill /PID <owned-runner> /T /F`。
+使用者已接受 force 結束該 Frontend 的 npm／cmd／Node 樹；Backend 永不走此路徑，仍須
+原 Job Quiescence、Writer Drain、receipt 與 Exact Exit。
+
+taskkill helper 最多等 5 秒；之後最多 5 秒確認 retained runner exit、selected Frontend port
+（預設 3000）無 listener 且可 bind。這只證明 runner exit／port release，不宣稱觀察到
+所有 detached descendants 的 exact exit。runner 未退出、listener 仍在、bind failure 或
+證據不足維持 `FRONTEND_STOP_UNCONFIRMED`／unknown，保留 evidence，封鎖 recovery，
+不重送 kill、不清 port。沒有 birth proof 或原 identity 不符不得終止。
+
+`Stop Services`／`Exit Launcher` 先做 Frontend 唯讀 preflight，再走原 Backend
+`Stop-BackendService` 的 Writer Drain／receipt／Exact Exit，成功後才實際停止 Frontend。
+後段失敗保留已完成的 Backend stop evidence 與 Launcher；不宣稱 atomic stop 或整組成功。
+`Safe Stop Backend` 維持 Frontend 不動。所有 Frontend stop 呼叫（含 legacy recovery）共用
+此 ownership 路徑，`-RequireSafeStop` 不再切換到另一條較弱的 port cleanup 路徑。
+
+Owned 模式本機 `Restart Services` 使用新 UUID 呼叫原 `Invoke-OwnedBackendRestart`，
+不使用 remote intent。原 ApplicationRelease pin、`StopForRestartAsync`、StopNotSent／
+ABORT_PREPARE／Rearm、失敗不重送及新 Backend readiness proof 均保留。
+Backend 未通過時 Frontend 保持原樣。通過後以原 operation guard 和暫停中的 timers 執行
+`Restart-Frontend` → confirmed stop → `Start-Frontend -AfterConfirmedStop` → owned listener
+與 `/omi-ui-health`，最後再觀察兩個服務的 readiness。
+這個一次性 start 僅接受同 port 的 confirmed stop，拒絕既有健康 endpoint adoption、換 port
+及重播；不清除 `SafeStopAttempted` 或 `RestartReadyBackendSession`，不改 remote Backend 契約。
+`LastFullServiceRestart` 與 log 留下 UUID、stage、Backend／Frontend 狀態、reason；只有兩者
+ready 才是 `succeeded/BOTH_READY`，後段失敗是 `partial`，不自動 rollback／retry。
+
+Frontend 自動 health recovery 與其正常 `Start-Frontend` 共用唯讀 admission guard。
+`SafeStopAttempted` 保持 sticky；設置後僅當 `Test-OmiRemoteRestartGeneration` 認證
+目前 Backend 是同一 retained live verified successor 才允許恢復。Backend start error、
+Frontend stop unknown、未成功的 full restart、停止／重啟中的操作或 Launcher shutdown
+仍拒絕；recovery 入口也拒絕進行中的 service start／Backend recovery。
+Frontend stop 後的正常 start 再驗一次，不把先前 admission 當成持續許可。
+此例外不解除 `Invoke-ServiceStartRequest`、Backend admission 或 legacy cleanup 的 fence。
+
+驗證表面是 Launcher AST source tests、synthetic ownership／port／failure fixtures，以及
+臨時目錄、隨機 port 的真實 legacy runner retry／整棵停止測試；不接觸正式 Backend、DB 或 provider。
+**Source／offline 驗證不等於 Live adoption。** 使用者提供的 10/19 10:09 正式觀察是
+`SOURCE_ADOPTION_NOT_ATTESTED`（disk/import hash mismatch），本次未重新探測或操作該 runtime。
+舊 Launcher 不會熱載入此能力；不能用更新後的檔案冒充舊 session 有 birth proof，或另開 Launcher
+接管現役 PID。正式換版仍需另行安排合法 cold adoption 與 tray Stop／Restart／Exit 驗收。
+10/19 09:12 Backend Restart receipt ACL 問題保持獨立，未推定由 Frontend 引起，也未改 ACL。
+
+## 2026-10-19 RestartBackend 的舊映像與新 Source（Source／offline）
+
+`ProductionSession.VerifyReadiness` 驗證 retained PID／creation、出生時 instance／endpoint／release
+與同程序的 serving status；磁碟上的新版 ApplicationRelease 不再否定舊程序的身分。
+Restart 在舊 readiness 前固定 successor ApplicationRelease，經 Session 送出前、Runner PREPARE 前、
+writer drain 後且 STOP 前重查。新 START 必須接受同一 pin，原 boot snapshot／loaded release、
+readyz 前後 source 檢查與最後 Launcher adoption 檢查仍保留。這是分階段 hash 檢查，不是檔案系統鎖。
+
+未送 PREPARE 的 source drift 產生 `blocked/RESTART_SOURCE_CHANGED`、`BEFORE_PREPARE`，
+不設 terminal；已接受 UUID 仍不能重播。Runner 已 PREPARE 但尚未送 STOP 時，只能透過原 inherited
+channel 發送同 identity／UUID／deadline 的 `ABORT_PREPARE`；Backend 呼叫既有
+`RuntimeCoordinator.abort_owned_restart` 並觀察 `owned_restart_rearmed`。
+只有同一存活 child 的 `PREFLIGHT_REARMED/rearmed=true` ack 才解除該次 terminal。
+錯誤、逾時或缺 proof 保持 unknown；不靠時間經過或缺少 guard 推定 rearm。
+原 PREPARE expiry 仍獨立撤銷可逆 admission，不授予 STOP。
+
+Launcher 只在綁定原 generation 的 StopNotSent／Rearmed 證據下恢復操作前的 SafeStop fence 與
+RestartReady session；真正送達未知仍 sticky。Controller 保留 before identity、固定 refusal reason、
+durable receipt 與原 UUID。`target_release_id` 只存在 Launcher→Runner pin，傳往 Backend 前移除，
+不取代舊 release、child identity 或 public request schema。
+
+新 Backend 的出生 READY 宣告 `restart_abort_protocol=1`。缺此能力的舊 generation 在 PREPARE 前
+回 `RESTART_ABORT_PROTOCOL_UNAVAILABLE`，不冒險進入無法確認撤銷的排空。
+這個 private seam 由 Owned transport 擁有；待所有可採用 generation 都具該協議並完成 Runtime
+驗收後才可考慮移除 compatibility refusal，不能用外部欄位偽造能力。
+
+現役 Launcher 已載入的 C#／PowerShell 不會隨檔案修改而更新。
+`Get-OmiLifecycleSourceId`、`Assert-OmiManualBackendStartOwner` 與 factory 的 source adoption gate
+保留；單次 Backend Restart 無法更新 Launcher，必須先另行規劃合法的 Launcher／Backend cold adoption。
+若舊 Launcher 的正常退出流程仍受 Frontend stop proof 或其他 gate 阻擋，應回報 blocker，不能強殺、
+注入、接管舊 PID 或改 ACL。本次未做正式服務 IO、重啟或 durable store 寫入驗收。
+
 ## 2026-10-17 遠端無人值守 RestartBackend（最新 Source，待重啟採用／Live 驗收）
 
 受專用 Token 保護的 MCP RestartBackend 在 Launcher 既有 Controller 內消耗一次性 authenticated intent，**不再跳出 Windows 本機 Yes/No 對話框**。Controller 只接受已驗證 Backend Pipe 身分、Launcher Owner、UUID 與 typed preflight 的請求；經 TakePending 後，於 30 秒意圖期限內持久保存 running，才進入原本的 Writer Drain → Safe Stop → Exact Exit → Start → Readiness → Receipt。原 blocked/unknown 收據不重播，舊 local_approval 欄位僅供歷史讀取。這是 Source 變更；現役 Launcher 不會熱載入，新版尚待隔離回歸與使用者重啟後的 MCP E2E。
@@ -14,7 +467,9 @@
 這不是新的 Scheduler 失敗，也不能僅從 EOD job outcome error
 推定哪個 Job Service 條件造成阻擋。
 
-正式 Job Service 只有單一 `pause_jobs_if_idle` Gate，檢查
+以下為當時的歷史政策；2026-10-22 的 Source 修正見本文「歷史 durable outcome 與執行 quiescence」。歷史 BLOCKED receipt 不追溯改寫。
+
+當時 Job Service 的 `pause_jobs_if_idle` Gate 檢查
 `_pending_tasks`、`_active_enqueues` 與 `_enqueue_failures`；
 其中 `_enqueue_failures` 是記錄入隊／Commit／Compensation 結果不明
 的持續性計數。這個計數非零不等於工作仍在執行，但也**不能**
@@ -154,18 +609,16 @@ Terminal 的 unknown 與 retained exact exit
 `ApplicationExit` cleanup 只接受已完成兩個服務停止檢查的 `LauncherExitReady`。
 這是正常 Launcher 流程的 guard，不是抵抗 OS 強制終止或系統關機的保證。
 
-沒有 Owned channel 的 legacy Backend 回 `BACKEND_SAFE_STOP_OWNED_CHANNEL_REQUIRED`。
+沒有 Owned channel 的 legacy Backend 回 `BACKEND_SAFE_STOP_OWNED_CHANNEL_REQUIRED`；
+只有上節定義的可證 no-attempt cold owner 可走無 receipt 的 no-op。
 `Stop-LegacyBackendService`、taskkill、port cleanup 與舊 recovery 保留在 source，正式 Safe Stop
-不呼叫它們，也不 bootstrap／接管現役程序。`Restart Services` 對 Owned session 明確回
-`OWNED_RESTART_NOT_AVAILABLE_FROM_TRAY`，不先停止一半服務再嘗試未完成的版本切換。
+不呼叫它們，也不 bootstrap／接管現役程序。`Restart Services` 的 Owned 接線現已由本頁
+2026-10-19 Frontend／Full-Service 增量取代舊 `OWNED_RESTART_NOT_AVAILABLE_FROM_TRAY` refusal。
 
-Frontend 的既有 runner 沒有合作式停機通道。全服務 Stop／Exit 在 Backend STOP 前先要求
-tracked runner（若有）已正常退出且 endpoint 可用；仍在執行時回
-`FRONTEND_SAFE_STOP_UNAVAILABLE`，其餘證據不足回 `FRONTEND_STOP_UNCONFIRMED`，兩個服務都保留。
-Backend STOP 後再用相同 owner 檢查一次；若 Frontend 在其間出現，保留已取得的 Backend
-停止證據、拒絕整組成功與 Launcher Exit，不強殺或假稱能原子停止。BackendOnly 不執行此
-Frontend 檢查；本輪不建立另一套 Frontend stop owner。故 **Backend Safe Stop 的
-Source 接線完成，不表示執行中的 Frontend 可正常合作式關閉，也不表示整組 Exit 已 live PASS**。
+Frontend 的既有 runner 仍沒有合作式停機通道；最新 source 以 retained ownership 驗證後的
+bounded termination 取代 live Frontend 必然回 `FRONTEND_SAFE_STOP_UNAVAILABLE` 的舊 gate。
+Backend STOP 前後仍重驗 Frontend；不確定時回 `FRONTEND_STOP_UNCONFIRMED`，保留 Launcher
+及 Backend 已有證據。BackendOnly 不執行 Frontend 檢查。**整組 Exit 尚未 Live 驗收**。
 
 驗證分開呈現：Launcher AST 隔離測試只證明順序／拒絕／timer／重入；真實 Runtime + Uvicorn
 使用暫存 DB 與無 socket 的 ASGI server 驗證 production PREPARE/STOP 分支；既有 disposable
@@ -244,7 +697,8 @@ retained session／唯一 listener identity 和 loaded lifecycle source。未證
 `SafeStopAttempted` 保持 sticky，沒有解除自動 recovery／舊 Controller pending Restart fence；
 timer 繼續 Publish，但不 TakePending。新的 Safe Stop 仍走原 Stop-Services -BackendOnly，
 使用新 owner 的新 UUID；成功 stop 清除該次 start-unconfirmed 顯示。操作中的 UI／named events
-在原 guard 內合併；依原 enabled state 恢復 timers。`Restart Services` 對 Owned 仍拒絕。
+在原 guard 內合併；依原 enabled state 恢復 timers。`Restart Services` 最新接線見本頁
+2026-10-19 Frontend／Full-Service 增量。
 
 磁碟更新不能熱載入現役 Launcher。換版與正式 cold-start／Live 驗收見
 [操作者換版程序](../exec-plans/active/backend-manual-start-20261016/Adoption.md)；
@@ -353,7 +807,33 @@ Launcher snapshot 超過 15 秒即不可作 owner proof；read 不刷新 snapsho
 Registered drain state 區分 NOT_REQUESTED、IN_PROGRESS、REGISTERED_DRAINED、INCOMPLETE、UNKNOWN；
 它不呼叫 stop、不關閉 admission，也不碰 DB/provider。Unknown writer inventory 仍由
 RuntimeDrainResult 的 source default 擁有，不在 transport 複製。
-`restart.blockers` 列出尚缺的 gate；`available` 仍為 false。
+`restart_preflight()` 與 POST 的 `backend_preflight` 嚴格保留上述五欄，
+符合既有 C# parser 的 exact-field 與 1024 字元上限，不含擴充診斷。
+以下診斷獨立放在 GET-only `serving_backend.writer_diagnostics`，
+由 `restart_diagnostics()` 提供；POST 不讀取此方法。
+`unknown_writer_count_basis=unattested_scope_categories` 與
+`unknown_writer_categories` 明示此 legacy count 是未證明涵蓋的類別數，
+不是實測程序／connection 數；保留原 count 與 all_writers_drained 的保守語意。
+`owned_restart_capability` 另提供既有 owned bootstrap／admission capability 的記憶體觀察，
+不代表 PREPARE 已執行。`owner_observations` 重用 Job owner 的 bounded quiescence
+觀察，並列出 HTTP admission、Session／Engine fence 與 prepare／commit flags。
+這些欄位是 process-local、非原子、非授權的診斷；空 Job／零 connection／retained lease
+均不能取代 request-bound PREPARE、STOP、exact exit 與 terminal receipt。
+
+`owner_observations.detached_workers.retained_worker_count` 是尚未取得完成證明的
+worker reservation 數，包含 Thread.start 結果不明，不能直接解讀為活躍 thread 數。
+`OwnedWorkThread` 在 native start 前保留 reservation，只有 `run()` 的 finally 能釋放；
+start 拋例外或 `is_alive()==False` 都不是未啟動／已完成的證明。已完成的 worker 不會
+因 start 晚到的例外被重新保留或重複釋放。MIS 同 venue IO slot 遵守相同限制：
+只有明確發生於 native start 前的 admission 拒絕可立即清除 slot；其他 start 例外
+保留原 Future，直到原 worker 實際完成。沒有完成證據時 PREPARE 保守停在
+DETACHED_WORKER_QUIESCENCE，回復可逆 admission，不取得 native SQLite lease，
+也不進入 terminal drain。此保守狀態可能需要人工查明，不能用清計數器恢復重啟資格。
+
+`restart.blockers`／`available` 由 Launcher 當下回覆決定。`available=true` 只表示正式
+控制入口可以接收經驗證的 intent，不代表 writers 已排空或已授權停止。
+`serving_backend.readiness=UNATTESTED` 是這個純記憶體 GET 的觀察範圍，
+不能當成 readyz 失敗，也不能改成 ready 以繞過獨立 readiness／source gate。
 
 ## Receipt schema 與 HTTP status
 
@@ -432,7 +912,9 @@ Crash 後 accepted/running 轉 unknown/CONTROLLER_RECOVERED_NO_REPLAY，不重�
 正式 non-reload／non-packaged cold start 使用同一 Runner 的 owned branch；固定 port 被占用就拒絕。
 Owned start attempt 一旦發出，舊 auto recovery（包括換 port、停止 Frontend）與舊強制停止入口
 均不可用。啟動握手失敗保留 Runner／child handle，無重試、無 port adoption。
-Frontend／MCP 不在 RestartBackend 控制範圍。Legacy menu 若企圖走 force stop 會被拒絕。
+Frontend 不在遠端／Backend-only `RestartBackend` 控制範圍；本機 full-service restart
+由 Launcher 協調，見本頁最新章節。MCP runtime 不由這些操作重啟。Legacy menu 若企圖走
+force stop 會被拒絕，legacy cold start 也不走 port-owner cleanup。
 
 ## Owned shutdown transport（2026-10-15）
 
@@ -525,7 +1007,7 @@ Launcher Controller 再驗證 OS Named Pipe 的 Backend PID／creation、typed p
 當前 Owner UUID 與唯一 pending request。只有通過檢查並先持久保存 accepted，
 Controller 才在記憶體登記不可由 public Dispatch／GET 重新建立的 intent 證據。
 Launcher tick 以 TakePending 取出同一 UUID 後，`BeginAuthenticatedOwnedRestart`
-在 30 秒（UTC＋monotonic）內重查 retained process／Owner／source availability、
+沿 accepted 的同一 monotonic deadline 重查 retained process／Owner、
 相同 request、backend preflight identity 及一次性消耗狀態，先持久保存 running，
 再交給原 Owned Stop→Start 流程。**不要求 Windows 本機 Yes/No**，不以 caller 輸入
 `approval`、`all_writers_drained`、`local_approval` 等欄位解鎖。

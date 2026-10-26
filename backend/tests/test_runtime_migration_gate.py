@@ -7,6 +7,35 @@ from r1d_test_support import isolated_job_lifecycle, offline_asyncio  # noqa: F4
 from app.runtime import RuntimeCoordinator
 
 
+@pytest.mark.parametrize("revision", ["old", "future-or-unknown", None])
+def test_owned_schema_mismatch_points_to_maintenance_without_migration(revision):
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+
+    schema, background = Mock(), Mock()
+    schema.acquire.return_value = True
+
+    async def scenario():
+        runtime = RuntimeCoordinator(schema_lock=schema, background_lock=background)
+        with (
+            patch.dict(sys.modules, {"_omi_owned_release": SimpleNamespace(verified=True)}),
+            patch("app.db.migrations.get_database_revision", return_value=revision) as read,
+            patch("app.db.migrations.get_head_revision", return_value="head"),
+            patch("app.runtime.run_database_migrations") as migrate,
+        ):
+            with pytest.raises(RuntimeError, match="omi-schema-maintenance.py Plan"):
+                await runtime.start()
+            read.assert_called_once_with(existing_only=True)
+            migrate.assert_not_called()
+            background.acquire.assert_not_called()
+            schema.release.assert_called_once()
+            with pytest.raises(RuntimeError, match="terminal"):
+                await runtime.start()
+            assert read.call_count == 1
+    asyncio.run(scenario())
+
+
 def test_migration_failure_releases_schema_lock_without_starting_writers():
     import asyncio
     schema = Mock()

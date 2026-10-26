@@ -13,6 +13,18 @@ using System.Web.Script.Serialization;
 using System.Net;
 
 namespace Omi.OwnedShutdown {
+    // One operation clock, created on acceptance and passed through every layer.
+    // The shorter constructor is internal and used only by isolated fixtures.
+    public sealed class LifecycleDeadline {
+        readonly Stopwatch clock = Stopwatch.StartNew();
+        readonly int budget;
+        public readonly string AcceptedAt = DateTime.UtcNow.ToString("o");
+        public LifecycleDeadline() : this(180000) { }
+        internal LifecycleDeadline(int milliseconds) { budget = milliseconds; }
+        public int RemainingMilliseconds { get { return (int)Math.Max(0, budget - clock.ElapsedMilliseconds); } }
+        public long ElapsedMilliseconds { get { return clock.ElapsedMilliseconds; } }
+    }
+
     internal static class Wire {
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8192 };
         public static string Encode(Dictionary<string,string> value) { return Json.Serialize(value); }
@@ -82,14 +94,14 @@ namespace Omi.OwnedShutdown {
             }
             if (!own) throw new IOException("PRIVATE_ACL_REQUIRED");
         }
-        public static Process Start(string file, string args, string cwd) {
+        public static Process Start(string file, string args, string cwd, bool redirectError = false) {
             Process retained;
-            Start(file, args, cwd, out retained);
+            Start(file, args, cwd, out retained, redirectError);
             return retained;
         }
-        public static void Start(string file, string args, string cwd, out Process retained) {
+        public static void Start(string file, string args, string cwd, out Process retained, bool redirectError = false) {
             var info = new ProcessStartInfo(file, args) { WorkingDirectory = cwd, UseShellExecute = false,
-                CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true };
+                CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = redirectError };
             retained = Process.Start(info); var handle = retained.Handle;
         }
     }
@@ -110,7 +122,12 @@ namespace Omi.OwnedShutdown {
         readonly Dictionary<string,StopEvidence> stops = new Dictionary<string,StopEvidence>();
         public StopEvidence LastStop { get; private set; }
         Dictionary<string,string> confirmedStopReceipt;
+        Dictionary<string,string> failedStartupReceipt;
+        bool failedStartRecoveryAttempted;
         bool retirementAttempted;
+        Task<StopEvidence> boundedStop;
+        volatile bool cutoffStarted;
+        StopEvidence forcedStop;
         DateTime readinessVerifiedAt;
         DateTime startReadinessVerifiedAt;
         public Process RunnerProcess { get { return runner; } }
@@ -122,6 +139,7 @@ namespace Omi.OwnedShutdown {
         public string SelectedHost { get { return host; } }
         public int SelectedPort { get { return port; } }
         public bool Terminal { get { return terminal; } }
+        public bool HasRetainedIdentity { get { return RetainedIdentityMatches(); } }
         public string RestartBlocker { get { return identity.ContainsKey("restart_blocker") ? identity["restart_blocker"] : "NONTERMINAL_WRITER_PREFLIGHT_UNAVAILABLE"; } }
         public bool ReadinessVerified { get { return Alive && (DateTime.UtcNow - readinessVerifiedAt).TotalSeconds < 5; } }
         public bool StartReadinessVerified { get { return !terminal && String.IsNullOrEmpty(StartupFailure) &&
@@ -170,9 +188,16 @@ namespace Omi.OwnedShutdown {
             return executable;
         }
         public static ProductionSession Start(string repo, string store, string host, int port) {
-            return new ProductionSession(repo, store, host, port);
+            return Start(repo, store, host, port, null);
         }
-        ProductionSession(string repository, string store, string selectedHost, int selectedPort) {
+        public static ProductionSession Start(string repo, string store, string host, int port, string expectedRelease) {
+            return new ProductionSession(repo, store, host, port, expectedRelease);
+        }
+        internal static void RequireRelease(string repo, string expectedRelease) {
+            if (String.IsNullOrEmpty(expectedRelease) || ApplicationRelease(repo) != expectedRelease)
+                throw new IOException("RESTART_SOURCE_CHANGED");
+        }
+        ProductionSession(string repository, string store, string selectedHost, int selectedPort, string expectedRelease) {
             repo = Path.GetFullPath(repository); host = selectedHost; port = selectedPort;
             if ((host != "127.0.0.1" && host != "::1") || port < 1 || port > 65535) throw new IOException("FIXED_ENDPOINT_REQUIRED");
             RejectReparse(repo); Wire.PrivateDirectory(store, false);
@@ -181,6 +206,7 @@ namespace Omi.OwnedShutdown {
                 Environment.GetEnvironmentVariable("OMI_RUNTIME_LAUNCHER_CREATED") != Wire.Created(owner)) throw new IOException("LAUNCHER_CONTEXT_REQUIRED");
             var python = FixedPython(repo); PythonExecutable = python;
             release = ApplicationRelease(repo);
+            if (expectedRelease != null && release != expectedRelease) throw new IOException("RESTART_SOURCE_CHANGED");
             var root = Path.Combine(store, "sessions", Guid.NewGuid().ToString("N"));
             Wire.PrivateDirectory(root, true);
             var boot = new Dictionary<string,string> { {"scope", "PRODUCTION"}, {"instance", Guid.NewGuid().ToString()},
@@ -233,6 +259,7 @@ namespace Omi.OwnedShutdown {
                 if (child != null && (!child.WaitForExit(1000) || child.ExitCode != exitCode)) return false;
             } else if (!receipt.ContainsKey("child_started") || receipt["child_started"] != "false") return false;
             if (!runner.WaitForExit(2000) || runner.ExitCode != 79) return false;
+            failedStartupReceipt = new Dictionary<string,string>(receipt);
             StartupExitConfirmed = true; StartupFailure = "OWNED_START_EXIT_CONFIRMED"; terminal = true;
             return true; // Startup failure, never a successful StopEvidence.
         }
@@ -275,9 +302,14 @@ namespace Omi.OwnedShutdown {
             }
         }
         bool VerifyReadiness(int timeout) {
-            if (!Alive || ApplicationRelease(repo) != release) return false;
+            if (!Alive) return false;
+            return VerifyLoadedReadiness(ReadEndpoint("/api/system/runtime-control/status", timeout));
+        }
+        // The retained process attests its birth release, not today's disk image.
+        // Disk adoption is checked separately at START and throughout restart.
+        bool VerifyLoadedReadiness(Dictionary<string,object> value) {
+            if (!Alive) return false;
             {
-                var value = ReadEndpoint("/api/system/runtime-control/status", timeout);
                 var serving = value["serving_backend"] as Dictionary<string,object>;
                 if (serving == null || !Object.Equals(serving["runtime_started"], true)) return false;
                 var owned = serving["owned_start"] as Dictionary<string,object>;
@@ -299,12 +331,12 @@ namespace Omi.OwnedShutdown {
                     try {
                         // readyz has no identity field. Bracket its real response
                         // with this instance's authenticated startup projection.
-                        if (VerifyReadiness(Math.Min(2500, remaining()))) {
+                        if (ApplicationRelease(repo) == release && VerifyReadiness(Math.Min(2500, remaining()))) {
                             var ready = ReadEndpoint("/api/system/readyz", Math.Min(2500, remaining()));
                             var checks = ready["checks"] as Dictionary<string,object>;
                             if (Object.Equals(ready["status"], "ready") && checks != null &&
                                 Object.Equals(checks["runtime"], "ok") && Object.Equals(checks["database"], "ok") &&
-                                VerifyReadiness(Math.Min(2500, remaining())) && remaining() > 0) {
+                                VerifyReadiness(Math.Min(2500, remaining())) && ApplicationRelease(repo) == release && remaining() > 0) {
                                 startReadinessVerifiedAt = DateTime.UtcNow;
                                 return true;
                             }
@@ -315,10 +347,66 @@ namespace Omi.OwnedShutdown {
                 return false;
             });
         }
+        // Distinct from StopEvidence. Late exit observation alone cannot grant
+        // recovery: require the original runner receipt and both birth handles.
+        public bool CanRecoverFailedStart {
+            get {
+                lock (stopGate) {
+                    try {
+                        if (failedStartRecoveryAttempted || retirementAttempted || !terminal ||
+                            StartupFailure != "OWNED_START_EXIT_CONFIRMED" || !StartupExitConfirmed ||
+                            LastStop != null || stops.Count != 0 || boundedStop != null || cutoffStarted ||
+                            forcedStop != null || confirmedStopReceipt != null || failedStartupReceipt == null ||
+                            readinessVerifiedAt != DateTime.MinValue || startReadinessVerifiedAt != DateTime.MinValue ||
+                            !RetainedIdentityMatches() || !child.WaitForExit(0) || !runner.WaitForExit(0) ||
+                            runner.ExitCode != 79 || child.ExitCode == 0 ||
+                            !Wire.Same(identity, failedStartupReceipt, Wire.Identity) ||
+                            !Wire.Same(identity, failedStartupReceipt, "host", "port", "release_id", "journal") ||
+                            failedStartupReceipt["state"] != "START_FAILED" ||
+                            failedStartupReceipt["reason"] != "OWNED_START_EXIT_CONFIRMED" ||
+                            failedStartupReceipt["child_exact_exit"] != "true" ||
+                            failedStartupReceipt["child_exit_code"] != child.ExitCode.ToString()) return false;
+                        // No missing/rebuilt/edited receipt, uncertain persistence, or ACL bypass.
+                        Wire.PrivateDirectory(identity["journal"], false);
+                        var path = Path.Combine(identity["journal"], "startup-failure.json");
+                        RejectReparse(path);
+                        if (new FileInfo(path).Length > 8192) return false;
+                        var persisted = Wire.Decode(File.ReadAllText(path));
+                        if (persisted.Count != failedStartupReceipt.Count) return false;
+                        foreach (var item in failedStartupReceipt)
+                            if (!persisted.ContainsKey(item.Key) || persisted[item.Key] != item.Value) return false;
+                        return true;
+                    } catch { return false; }
+                }
+            }
+        }
+        public void RetireFailedStart(string requestId, string expectedRelease) {
+            lock (stopGate) {
+                Guid request;
+                if (!Guid.TryParseExact(requestId, "D", out request) || requestId == identity["instance"] ||
+                    stops.ContainsKey(requestId)) throw new InvalidOperationException("FAILED_START_RECOVERY_REPLAY");
+                if (!CanRecoverFailedStart) throw new InvalidOperationException("FAILED_START_RECOVERY_NOT_ATTESTED");
+                RequireRelease(repo, expectedRelease);
+                // Consume before any IO/disposal. An uncertain write cannot be retried.
+                failedStartRecoveryAttempted = true; retirementAttempted = true;
+                var intent = Wire.Copy(identity, "FAILED_START_RECOVERY_INTENT");
+                intent["request_id"] = requestId; intent["target_release_id"] = expectedRelease;
+                intent["reason"] = "MANUAL_FAILED_START_RECOVERY";
+                intent["accepted_at"] = DateTime.UtcNow.ToString("o");
+                intent["startup_failure"] = StartupFailure;
+                intent["child_exit_code"] = child.ExitCode.ToString();
+                intent["runner_exit_code"] = runner.ExitCode.ToString();
+                Runner.Persist(identity["journal"], "failed-start-recovery.json", intent);
+                Dispose(); // StartupFailure and both original receipts remain unchanged.
+            }
+        }
         public bool CanStartAfterStop {
             get {
                 lock (stopGate) {
                     try {
+                        if (forcedStop != null) return !retirementAttempted && terminal &&
+                            Object.ReferenceEquals(LastStop, forcedStop) && forcedStop.ForcedExitConfirmed &&
+                            RetainedIdentityMatches() && child.WaitForExit(0) && runner.WaitForExit(0);
                         StopEvidence retained;
                         if (retirementAttempted || !terminal || !String.IsNullOrEmpty(StartupFailure) || LastStop == null ||
                             LastStop.State != "stopped" || LastStop.Reason != "LIFESPAN_AND_EXACT_EXIT" ||
@@ -359,43 +447,324 @@ namespace Omi.OwnedShutdown {
             public string Reason { get; internal set; }
             public bool ExactExit { get; internal set; }
             public bool Rearmed { get; internal set; }
+            public bool StopNotSent { get; internal set; }
             public string PreflightStage { get; internal set; }
+            public bool Forced { get; internal set; }
+            public bool ForcedExitConfirmed { get; internal set; }
+            public string CutoffAt { get; internal set; }
+            public string AcceptedAt { get; internal set; }
+            public long ElapsedMilliseconds { get; internal set; }
+            public int RunnerPid { get; internal set; }
+            public string RunnerCreated { get; internal set; }
+            public string ProcessGeneration { get; internal set; }
+            public string GracefulReason { get; internal set; }
+            public string RecoveryState { get; internal set; }
+            public string ReceiptPersistence { get; internal set; }
             internal StopEvidence() { }
         }
         public StopEvidence Stop(string requestId) {
+            return Stop(requestId, null);
+        }
+        StopEvidence Stop(string requestId, string targetRelease) {
             Guid.ParseExact(requestId, "D");
             lock (stopGate) {
                 StopEvidence previous;
                 if (stops.TryGetValue(requestId, out previous)) return previous;
                 // Terminal/unknown delivery never permits a new command or UUID.
                 if (terminal && LastStop != null) return LastStop;
-                var evidence = StopOnce(requestId);
+                var evidence = StopOnce(requestId, targetRelease);
                 stops.Add(requestId, evidence);
                 LastStop = evidence;
                 return evidence;
             }
         }
         public Task<StopEvidence> StopAsync(string requestId) {
-            return Task.Run(() => Stop(requestId));
+            return StopWithinDeadlineAsync(requestId, null, new LifecycleDeadline());
         }
-        StopEvidence StopOnce(string requestId) {
+        string schemaRequest;
+        bool schemaFromFailedStart;
+        bool schemaWorkerAttempted;
+        bool schemaStopPending;
+        HashSet<string> schemaRequests = new HashSet<string>();
+        public bool SchemaWorkerSettled { get; private set; }
+        public bool SchemaWorkerNoChange { get; private set; }
+        public bool CanResumeAfterSchemaStopRefusal {
+            get { lock (stopGate) {
+                StopEvidence retained;
+                return !schemaStopPending && !terminal && Alive && RetainedIdentityMatches() && boundedStop == null && !cutoffStarted &&
+                    !schemaWorkerAttempted && LastStop != null && LastStop.State == "blocked" &&
+                    (LastStop.Rearmed || LastStop.StopNotSent) && !LastStop.ExactExit &&
+                    stops.TryGetValue(LastStop.RequestId, out retained) && Object.ReferenceEquals(retained, LastStop);
+            } }
+        }
+        void AdmitSchemaRequest(string requestId) {
+            if (schemaRequests == null) schemaRequests = new HashSet<string>();
+            if (schemaStopPending || schemaRequests.Contains(requestId) || requestId == identity["instance"] ||
+                (schemaRequest != null && schemaWorkerAttempted && (!SchemaWorkerSettled || !SchemaWorkerNoChange)))
+                throw new IOException("SCHEMA_ADMISSION_NOT_ATTESTED");
+            schemaRequests.Add(requestId); schemaRequest = requestId;
+            schemaWorkerAttempted = false; SchemaWorkerSettled = false; SchemaWorkerNoChange = false;
+        }
+        public void AdmitFailedStartSchemaMaintenance(string requestId, string targetRelease) {
+            lock (stopGate) {
+                Guid.ParseExact(requestId, "D");
+                if (!CanRecoverFailedStart)
+                    throw new IOException("SCHEMA_FAILED_START_NOT_ATTESTED");
+                RequireRelease(repo, targetRelease);
+                AdmitSchemaRequest(requestId); schemaFromFailedStart = true;
+            }
+        }
+        public void AdmitStoppedSchemaMaintenance(string requestId, string targetRelease) {
+            lock (stopGate) {
+                Guid.ParseExact(requestId, "D");
+                if (!CanStartAfterStop || !LastStop.ExactExit || LastStop.Forced || LastStop.ForcedExitConfirmed)
+                    throw new IOException("SCHEMA_GRACEFUL_EXIT_REQUIRED");
+                RequireRelease(repo, targetRelease);
+                AdmitSchemaRequest(requestId); schemaFromFailedStart = false;
+            }
+        }
+        public Task<StopEvidence> StopForSchemaMaintenanceAsync(string requestId, string targetRelease) {
+            lock (stopGate) {
+                Guid.ParseExact(requestId, "D");
+                if (boundedStop != null || (LastStop != null && !CanResumeAfterSchemaStopRefusal) || terminal ||
+                    !HasRetainedIdentity || !String.IsNullOrEmpty(StartupFailure))
+                    throw new IOException("SCHEMA_RUNNING_OWNER_NOT_ATTESTED");
+                RequireRelease(repo, targetRelease);
+                AdmitSchemaRequest(requestId);
+                // Deliberately use the original graceful protocol, never StopBounded.
+                // Timeout/unknown is terminal for maintenance; there is no cutoff.
+                schemaStopPending = true;
+                return Task.Run(() => {
+                    try { return Stop(requestId, targetRelease); }
+                    finally { lock (stopGate) { schemaStopPending = false; } }
+                });
+            }
+        }
+        public static string SchemaSourceRelease(string repo) {
+            var paths = new List<string>(Directory.GetFiles(Path.Combine(repo, "backend", "app"), "*.py", SearchOption.AllDirectories));
+            paths.AddRange(Directory.GetFiles(Path.Combine(repo, "backend", "alembic"), "*.py", SearchOption.AllDirectories));
+            paths.Add(Path.Combine(repo, "scripts", "omi-schema-maintenance.py"));
+            paths.Add(Path.Combine(repo, "scripts", "backup-omi-sqlite.py"));
+            paths.Sort((a,b) => StringComparer.Ordinal.Compare(a.Replace('\\','/'), b.Replace('\\','/')));
+            using (var bytes = new MemoryStream()) using (var sha = SHA256.Create()) {
+                foreach (var path in paths) {
+                    RejectReparse(path);
+                    var label = Encoding.UTF8.GetBytes(path.Substring(repo.TrimEnd('\\').Length + 1).Replace('\\','/') + "\0");
+                    bytes.Write(label, 0, label.Length);
+                    var hash = sha.ComputeHash(File.ReadAllBytes(path)); bytes.Write(hash, 0, hash.Length);
+                }
+                return BitConverter.ToString(sha.ComputeHash(bytes.ToArray())).Replace("-", "").ToLowerInvariant();
+            }
+        }
+        public static string ReadStartCompatibility(string repo, string liveUrl, string database, string schemaLock, bool upgrade) {
+            var entry = Path.Combine(repo, "scripts", "omi-schema-maintenance.py");
+            RejectReparse(entry);
+            var arguments = "-I -S -B " + Wire.Quote(entry) + " CheckStart";
+            if (!String.IsNullOrEmpty(liveUrl)) arguments += " --base-url " + Wire.Quote(liveUrl);
+            if (upgrade) arguments += " --upgrade";
+            if (!String.IsNullOrEmpty(database) || !String.IsNullOrEmpty(schemaLock)) {
+                if (!upgrade || String.IsNullOrEmpty(database) || String.IsNullOrEmpty(schemaLock))
+                    throw new IOException("RESTART_COMPATIBILITY_NOT_ATTESTED");
+                arguments += " --database-path " + Wire.Quote(database) + " --schema-lock-path " + Wire.Quote(schemaLock);
+            }
+            using (var inspector = Wire.Start(FixedPython(repo), arguments, repo, true)) {
+                inspector.StandardInput.Close();
+                var output = inspector.StandardOutput.ReadToEndAsync();
+                var error = inspector.StandardError.ReadToEndAsync();
+                // Read-only inspector: timeout refuses before STOP; never kill a
+                // maintenance worker or reuse an unobserved reply as authority.
+                if (!inspector.WaitForExit(20000) || !output.Wait(500) || !error.Wait(500) ||
+                    inspector.ExitCode != 0 || output.Result.Length > 16384)
+                    throw new IOException("RESTART_COMPATIBILITY_NOT_ATTESTED");
+                return output.Result;
+            }
+        }
+        public Task<bool> ApplyStoppedSchemaAsync(string requestId, string targetRelease, string sourceRelease,
+                string database, string schemaLock, string backup, string receipt) {
+            lock (stopGate) {
+                if (schemaWorkerAttempted || schemaRequest != requestId || !RetainedIdentityMatches())
+                    throw new IOException("SCHEMA_ADMISSION_NOT_ATTESTED");
+                if (schemaFromFailedStart) {
+                    if (!CanRecoverFailedStart) throw new IOException("SCHEMA_FAILED_START_NOT_ATTESTED");
+                } else if (!CanStartAfterStop ||
+                    !LastStop.ExactExit || LastStop.Forced || LastStop.ForcedExitConfirmed ||
+                    LastStop.Reason != "LIFESPAN_AND_EXACT_EXIT") throw new IOException("SCHEMA_GRACEFUL_EXIT_REQUIRED");
+                RequireRelease(repo, targetRelease);
+                if (String.IsNullOrEmpty(sourceRelease) || SchemaSourceRelease(repo) != sourceRelease)
+                    throw new IOException("SCHEMA_SOURCE_CHANGED");
+                schemaWorkerAttempted = true; // Spawn uncertainty consumes the attempt.
+                return Task.Run(() => {
+                    var entry = Path.Combine(repo, "scripts", "omi-schema-maintenance.py");
+                    RejectReparse(entry); RejectReparse(database); RejectReparse(schemaLock);
+                    var boot = new Dictionary<string,string> { {"action", "ApplyStopped"},
+                        {"request_id", requestId}, {"nonce", Wire.Nonce()},
+                        {"launcher_pid", identity["launcher_pid"]}, {"launcher_created", identity["launcher_created"]},
+                        {"database", database}, {"schema_lock", schemaLock}, {"backup", backup}, {"receipt", receipt} };
+                    boot["source_release"] = sourceRelease;
+                    using (var worker = Wire.Start(FixedPython(repo), "-I -S -B " + Wire.Quote(entry) + " ApplyStopped", repo)) {
+                        // No force kill/timeout abandonment: owner admission stays fenced
+                        // until this retained worker exits. Worker SQL/copy is bounded.
+                        string output;
+                        try {
+                            Wire.Send(worker.StandardInput, boot);
+                            var challenge = Wire.Decode(worker.StandardOutput.ReadLine());
+                            if (!Wire.Same(boot, challenge, "request_id", "nonce") ||
+                                !challenge.ContainsKey("state") || challenge["state"] != "CHALLENGE" ||
+                                !challenge.ContainsKey("challenge") || challenge["challenge"].Length != 64)
+                                throw new IOException("SCHEMA_WORKER_HANDSHAKE_FAILED");
+                            lock (stopGate) {
+                                if (schemaRequest != requestId || !RetainedIdentityMatches() ||
+                                    (schemaFromFailedStart ? !CanRecoverFailedStart : !CanStartAfterStop))
+                                    throw new IOException("SCHEMA_ADMISSION_LOST");
+                                Wire.Send(worker.StandardInput, new Dictionary<string,string> {
+                                    {"request_id", requestId}, {"nonce", boot["nonce"]},
+                                    {"challenge", challenge["challenge"]}, {"action", "GO"} });
+                            }
+                            worker.StandardInput.Close();
+                            output = worker.StandardOutput.ReadLine();
+                        }
+                        finally { worker.StandardInput.Close(); worker.WaitForExit(); }
+                        var result = Wire.Decode(output);
+                        RequireRelease(repo, targetRelease);
+                        lock (stopGate) {
+                            bool bound = Wire.Same(boot, result, "request_id", "nonce");
+                            bool success = bound && worker.ExitCode == 0 && result["status"] == "SUCCEEDED";
+                            SchemaWorkerNoChange = bound && worker.ExitCode == 2 && result["status"] == "FAILED" &&
+                                result.ContainsKey("migration") && result["migration"] == "NOT_ATTEMPTED";
+                            SchemaWorkerSettled = success || SchemaWorkerNoChange;
+                            return success;
+                        }
+                    }
+                });
+            }
+        }
+        public Task<StopEvidence> StopForRestartAsync(string requestId, string targetRelease) {
+            if (String.IsNullOrEmpty(targetRelease)) throw new ArgumentException("RESTART_RELEASE_REQUIRED");
+            return StopWithinDeadlineAsync(requestId, targetRelease, new LifecycleDeadline());
+        }
+        bool RetainedIdentityMatches() {
+            try {
+                using (var owner = Process.GetCurrentProcess())
+                    return child != null && runner != null && identity != null &&
+                        owner.Id.ToString() == identity["launcher_pid"] && Wire.Created(owner) == identity["launcher_created"] &&
+                        child.Id.ToString() == identity["child_pid"] && Wire.Created(child) == identity["child_created"] &&
+                        runner.Id.ToString() == identity["runner_pid"] && Wire.Created(runner) == identity["runner_created"] &&
+                        child.Handle != IntPtr.Zero && runner.Handle != IntPtr.Zero;
+            } catch { return false; }
+        }
+        public Task<StopEvidence> StopWithinDeadlineAsync(string requestId, string targetRelease, LifecycleDeadline deadline) {
+            Guid.ParseExact(requestId, "D");
+            if (String.IsNullOrEmpty(targetRelease)) targetRelease = null;
+            if (deadline == null) throw new ArgumentNullException("deadline");
+            lock (stopGate) {
+                if (boundedStop != null) return boundedStop;
+                // The worker must never hold stopGate during IO. A blocked pipe
+                // write/read or Runner wait cannot prevent the deadline callback.
+                boundedStop = StopBounded(requestId, targetRelease, deadline);
+                return boundedStop;
+            }
+        }
+        async Task<StopEvidence> StopBounded(string requestId, string targetRelease, LifecycleDeadline deadline) {
+            var graceful = Task.Run(() => StopOnce(requestId, targetRelease, deadline));
+            var expiry = Task.Delay(deadline.RemainingMilliseconds);
+            StopEvidence evidence = null;
+            if (await Task.WhenAny(graceful, expiry).ConfigureAwait(false) == graceful) {
+                try { evidence = await graceful.ConfigureAwait(false); } catch { }
+                if (evidence != null && evidence.ExactExit && deadline.RemainingMilliseconds > 0) {
+                    lock (stopGate) { LastStop = evidence; stops[requestId] = evidence; }
+                    return evidence;
+                }
+            }
+            // Rearmed/unknown is diagnostic, never a second graceful window.
+            await expiry.ConfigureAwait(false);
+            evidence = ForceRetainedStop(requestId, deadline, evidence);
+            lock (stopGate) { terminal = true; forcedStop = evidence; LastStop = evidence; stops[requestId] = evidence; }
+            // Do not await the abandoned transport task, even after termination.
+            return evidence;
+        }
+        void SaveCutoff(StopEvidence evidence) {
+            var serializer = new JavaScriptSerializer();
+            File.WriteAllText(Path.Combine(identity["journal"], "hard-cutoff-" + evidence.RequestId + ".json"),
+                serializer.Serialize(evidence), new UTF8Encoding(false));
+        }
+        StopEvidence ForceRetainedStop(string requestId, LifecycleDeadline deadline, StopEvidence graceful) {
+            cutoffStarted = true; terminal = true;
+            var evidence = new StopEvidence { RequestId = requestId, State = "unknown", Reason = "FORCE_OWNER_NOT_ATTESTED",
+                Forced = true, AcceptedAt = deadline.AcceptedAt, CutoffAt = DateTime.UtcNow.ToString("o"),
+                ElapsedMilliseconds = deadline.ElapsedMilliseconds, GracefulReason = graceful == null ? "GRACEFUL_DEADLINE" : graceful.Reason,
+                PreflightStage = graceful == null ? null : graceful.PreflightStage, RecoveryState = "RECONCILIATION_REQUIRED" };
+            if (!RetainedIdentityMatches()) return evidence;
+            evidence.BeforePid = child.Id; evidence.BeforeCreated = ChildCreated;
+            evidence.RunnerPid = runner.Id; evidence.RunnerCreated = Wire.Created(runner);
+            evidence.ProcessGeneration = identity["instance"];
+            try {
+                // Stop the retained parent first so it cannot respawn its child.
+                foreach (var process in new[] {runner, child}) {
+                    try { if (!process.HasExited) process.Kill(); }
+                    catch { /* Still visit the other retained target; exact exit below decides the result. */ }
+                }
+                var observed = Stopwatch.StartNew();
+                if (!runner.WaitForExit(3000) || !child.WaitForExit(Math.Max(0, 3000 - (int)observed.ElapsedMilliseconds)))
+                    evidence.Reason = "FORCED_EXIT_UNCONFIRMED";
+                else {
+                    evidence.ForcedExitConfirmed = true;
+                    evidence.State = "forced_stopped"; evidence.Reason = "HARD_CUTOFF_EXACT_OWNED_EXIT";
+                }
+            } catch { evidence.State = "unknown"; evidence.ForcedExitConfirmed = false; evidence.Reason = "FORCED_EXIT_UNCONFIRMED";
+            }
+            // Receipt IO cannot hold termination hostage. The returned memory
+            // receipt is also logged by Launcher/Controller. No DB/Job mutation.
+            evidence.ReceiptPersistence = "UNCONFIRMED";
+            var write = Task.Run(() => { SaveCutoff(evidence); });
+            try { if (write.Wait(500)) evidence.ReceiptPersistence = "WRITTEN"; } catch { }
+            return evidence;
+        }
+        StopEvidence StopOnce(string requestId, string targetRelease, LifecycleDeadline deadline = null) {
             var evidence = new StopEvidence { RequestId = requestId, State = "unknown", Reason = "LIFECYCLE_FAILED" };
             // Stopping the retained running image does not adopt disk source or
             // require a subsequent start/readiness check. PREPARE below is the
             // current writer authority; the READY restart snapshot is not one.
             if (terminal || !Alive) { terminal = true; evidence.Reason = "OWNER_NOT_ATTESTED"; return evidence; }
-            terminal = true;
             evidence.BeforePid = ChildPid; evidence.BeforeCreated = ChildCreated;
+            // A local refusal precedes all dispatch and the terminal latch.
+            // Keep its UUID receipt, but do not strand the live generation.
+            if (targetRelease != null) {
+                try {
+                    RequireRelease(repo, targetRelease);
+                    if (!identity.ContainsKey("restart_abort_protocol") || identity["restart_abort_protocol"] != "1")
+                        throw new IOException("RESTART_ABORT_PROTOCOL_UNAVAILABLE");
+                } catch (IOException error) {
+                    evidence.State = "blocked"; evidence.StopNotSent = true;
+                    evidence.Reason = error.Message == "RESTART_ABORT_PROTOCOL_UNAVAILABLE" ? error.Message : "RESTART_SOURCE_CHANGED";
+                    evidence.PreflightStage = "BEFORE_PREPARE";
+                    return evidence;
+                }
+            }
             var command = Wire.Copy(identity, "REQUEST"); command["action"] = "STOP";
-            command["request_id"] = requestId; command["deadline"] = (Wire.Now + 120000).ToString();
+            var remaining = deadline == null ? 120000 : Math.Min(120000, deadline.RemainingMilliseconds);
+            if (remaining <= 0) { evidence.Reason = "STOP_TIMEOUT"; return evidence; }
+            command["request_id"] = requestId; command["deadline"] = (Wire.Now + remaining).ToString();
+            if (targetRelease != null) command["target_release_id"] = targetRelease;
+            terminal = true; // From the first possible dispatch, delivery is unknown.
             try {
                 Wire.Send(runner.StandardInput, command);
-                var result = Wire.Read(runner.StandardOutput, 125000);
+                var result = Wire.Read(runner.StandardOutput, remaining);
+                if (cutoffStarted) return evidence;
                 if (!Wire.Same(identity, result, Wire.Identity) || !Wire.Same(command, result, "request_id", "deadline")) return evidence;
+                if (result.ContainsKey("state") && result["state"] == "RESTART_NOT_SENT" &&
+                    result.ContainsKey("stop_not_sent") && result["stop_not_sent"] == "true" &&
+                    result.ContainsKey("stage") && result["stage"] == "BEFORE_PREPARE" &&
+                    result.ContainsKey("reason") && result["reason"] == "RESTART_SOURCE_CHANGED" && Alive) {
+                    evidence.State = "blocked"; evidence.Reason = "RESTART_SOURCE_CHANGED";
+                    evidence.StopNotSent = true; evidence.PreflightStage = "BEFORE_PREPARE";
+                    lock (stopGate) { if (!cutoffStarted) terminal = false; }
+                    return evidence;
+                }
                 if (Wire.Rearmed(command, result) && Alive) {
                     evidence.Rearmed = true; evidence.State = "blocked"; evidence.Reason = "PREFLIGHT_REARMED";
                     evidence.PreflightStage = result.ContainsKey("stage") ? result["stage"] : null;
-                    terminal = false;
+                    evidence.StopNotSent = result.ContainsKey("stop_not_sent") && result["stop_not_sent"] == "true";
+                    lock (stopGate) { if (!cutoffStarted) terminal = false; }
                     return evidence;
                 }
                 if (result["state"] != "SUCCEEDED_PRODUCTION" || result["reason"] != "LIFESPAN_AND_EXACT_EXIT" ||
@@ -403,13 +772,15 @@ namespace Omi.OwnedShutdown {
                     string reason;
                     if (result.TryGetValue("reason", out reason) && (reason == "ALL_WRITERS_DRAIN_UNAVAILABLE" ||
                         reason == "STOP_TIMEOUT" || reason == "OWNER_LOST" || reason == "ACK_MISMATCH" ||
-                        reason == "LIFESPAN_NOT_COMPLETE" || reason == "EXACT_EXIT_NOT_PROVEN")) evidence.Reason = reason;
+                        reason == "LIFESPAN_NOT_COMPLETE" || reason == "EXACT_EXIT_NOT_PROVEN" ||
+                        reason == "RESTART_SOURCE_CHANGED" || reason == "RESTART_REARM_NOT_ATTESTED")) evidence.Reason = reason;
                     return evidence;
                 }
                 if (!child.WaitForExit(1000) || child.ExitCode != 0 || !runner.WaitForExit(2000) || runner.ExitCode != 0) return evidence;
                 confirmedStopReceipt = new Dictionary<string,string>(result);
                 evidence.ExactExit = true; evidence.State = "stopped"; evidence.Reason = "LIFESPAN_AND_EXACT_EXIT";
             } catch (TimeoutException) { evidence.Reason = "STOP_TIMEOUT"; }
+              catch (IOException error) { if (error.Message == "RESTART_SOURCE_CHANGED") evidence.Reason = error.Message; }
               catch { /* unknown delivery cannot be replayed */ }
             return evidence;
         }
@@ -498,7 +869,7 @@ namespace Omi.OwnedShutdown {
     }
 
     public static class Runner {
-        static void Persist(string root, string name, Dictionary<string,string> value) {
+        internal static void Persist(string root, string name, Dictionary<string,string> value) {
             Wire.PrivateDirectory(root, false);
             // Fresh directory + CreateNew, write-through, fsync before delivery.
             using (var file = new FileStream(Path.Combine(root, name), FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough)) {
@@ -649,6 +1020,11 @@ namespace Omi.OwnedShutdown {
                         child.WaitForExit(); return 79;
                     }
                     var request = Wire.Decode(input.Result);
+                    // Successor pin belongs only to Launcher -> Runner; do not
+                    // leak it into the child's old-generation identity/schema.
+                    string targetRelease;
+                    request.TryGetValue("target_release_id", out targetRelease);
+                    request.Remove("target_release_id");
                     var result = Wire.Copy(identity, "UNKNOWN"); result["reason"] = "LIFECYCLE_FAILED";
                     result["request_id"] = request["request_id"]; result["deadline"] = request["deadline"];
                     try {
@@ -657,6 +1033,16 @@ namespace Omi.OwnedShutdown {
                             !Int64.TryParse(request["deadline"], out deadline) || deadline <= Wire.Now || deadline - Wire.Now > 120000 ||
                             !Wire.Same(identity, request, Wire.Identity)) throw new IOException("INTENT_MISMATCH");
                         if (!seen.Add(request["request_id"])) throw new IOException("INTENT_REPLAY");
+                        if (targetRelease != null) {
+                            try { ProductionSession.RequireRelease(repo, targetRelease); }
+                            catch (IOException) {
+                                result["state"] = "RESTART_NOT_SENT"; result["reason"] = "RESTART_SOURCE_CHANGED";
+                                result["stop_not_sent"] = "true"; result["stage"] = "BEFORE_PREPARE";
+                                Persist(root, "refusal-" + id.ToString("D") + ".json", result);
+                                Console.WriteLine(Wire.Encode(result)); Console.Out.Flush();
+                                continue;
+                            }
+                        }
                         var clock = Stopwatch.StartNew(); var budget = deadline - Wire.Now;
                         var prepare = Wire.Copy(request, "REQUEST"); prepare["action"] = "PREPARE";
                         Wire.Send(child.StandardInput, prepare);
@@ -675,6 +1061,20 @@ namespace Omi.OwnedShutdown {
                         Persist(root, "terminal-intent-" + id.ToString("D") + ".json", request);
                         if (owner.HasExited || child.HasExited) throw new IOException("OWNER_LOST");
                         Wire.Remaining(deadline, clock, budget);
+                        // PREPARE may take 60s. Recheck the frozen successor image
+                        // after writer drain, immediately before delivering STOP.
+                        if (targetRelease != null) {
+                            try { ProductionSession.RequireRelease(repo, targetRelease); }
+                            catch (IOException) {
+                                AbortPreparedRestart(child.StandardInput, child.StandardOutput, request, owner, child, deadline, clock, budget);
+                                result["state"] = "PREFLIGHT_REARMED"; result["reason"] = "PREFLIGHT_REARMED";
+                                result["rearmed"] = "true"; result["stop_not_sent"] = "true";
+                                result["stage"] = "RESTART_SOURCE_CHANGED";
+                                Persist(root, "refusal-" + id.ToString("D") + ".json", result);
+                                Console.WriteLine(Wire.Encode(result)); Console.Out.Flush();
+                                continue;
+                            }
+                        }
                         Wire.Send(child.StandardInput, request);
                         var ack = Wire.Read(child.StandardOutput, Wire.Remaining(deadline, clock, budget));
                         if (Wire.Rearmed(request, ack) && !owner.HasExited && !child.HasExited) {
@@ -696,7 +1096,8 @@ namespace Omi.OwnedShutdown {
                     } catch (TimeoutException) { result["reason"] = "STOP_TIMEOUT"; }
                       catch (IOException error) {
                         if (error.Message == "OWNER_LOST" || error.Message == "ACK_MISMATCH" ||
-                            error.Message == "LIFESPAN_NOT_COMPLETE" || error.Message == "EXACT_EXIT_NOT_PROVEN") result["reason"] = error.Message;
+                            error.Message == "LIFESPAN_NOT_COMPLETE" || error.Message == "EXACT_EXIT_NOT_PROVEN" ||
+                            error.Message == "RESTART_SOURCE_CHANGED" || error.Message == "RESTART_REARM_NOT_ATTESTED") result["reason"] = error.Message;
                       } catch { /* fixed, non-secret failure reason retained */ }
                     result["no_respawn"] = "true";
                     Persist(root, "result.json", result);
@@ -721,6 +1122,18 @@ namespace Omi.OwnedShutdown {
                 }
                 }
             }
+        }
+
+        internal static void AbortPreparedRestart(StreamWriter input, StreamReader output,
+                Dictionary<string,string> request, Process owner, Process child,
+                long deadline, Stopwatch clock, long budget) {
+            if (owner.HasExited || child.HasExited) throw new IOException("OWNER_LOST");
+            Wire.Remaining(deadline, clock, budget);
+            var abort = Wire.Copy(request, "REQUEST"); abort["action"] = "ABORT_PREPARE";
+            Wire.Send(input, abort);
+            var rearm = Wire.Read(output, Wire.Remaining(deadline, clock, budget));
+            if (!Wire.Rearmed(request, rearm) || !Wire.Same(abort, rearm, "action") ||
+                owner.HasExited || child.HasExited) throw new IOException("RESTART_REARM_NOT_ATTESTED");
         }
     }
 }

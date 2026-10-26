@@ -475,8 +475,16 @@ class RuntimeCoordinator:
                 import sys
                 if getattr(sys.modules.get("_omi_owned_release"), "verified", False):
                     from app.db.migrations import get_database_revision, get_head_revision
-                    if get_database_revision(existing_only=True) != get_head_revision():
-                        raise RuntimeError("Owned startup requires existing schema at head; migration is a separate action")
+                    current_revision = get_database_revision(existing_only=True)
+                    head_revision = get_head_revision()
+                    if current_revision != head_revision:
+                        raise RuntimeError(
+                            "Owned startup requires existing schema at head; migration is a separate action. "
+                            f"current={current_revision!r} head={head_revision!r}. "
+                            "Do not repeat Restart or Apply Update. Run .venv\\Scripts\\python.exe "
+                            "scripts\\omi-schema-maintenance.py Plan for the maintenance gate; "
+                            "preserve the original failed-start receipt."
+                        )
                 else:
                     run_database_migrations()
             finally:

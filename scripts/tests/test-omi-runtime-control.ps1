@@ -83,8 +83,10 @@ try {
     Assert ((Submit $id (NewId)).reason -eq 'OWNER_MISMATCH') 'forged owner'
     foreach ($bad in @($null, '{}', ($report.Replace('true','"true"')))) {
         $id=NewId; $receipt=Submit $id $controller.OwnerId $token $bad
-        Assert ($receipt.state -eq 'blocked' -and $receipt.reason -eq 'BACKEND_PREFLIGHT_NOT_ATTESTED') 'invalid preflight'
-        Assert ($null -eq $controller.TakePending()) 'invalid queued'
+        Assert ($receipt.state -eq 'accepted') 'optional preflight blocked intent'
+        Assert ($controller.TakePending() -eq $id) 'optional preflight not queued'
+        Assert ($controller.BeginAuthenticatedOwnedRestart($id,$before)) 'optional preflight blocked begin'
+        $controller.CompleteOwnedRestart($id,$null,$null,$null)
     }
     $id=NewId
     Assert ((Request $controller $id $controller.OwnerId $token).state -eq 'blocked') 'public Dispatch bypass'
@@ -106,7 +108,10 @@ try {
         $current=Identity $before.pid $before.created_at
         if ($scenario -eq 'wrong-pid') {$current.pid=1}
         if ($scenario -eq 'wrong-created') {$current.created_at='2000-01-01T00:00:00Z'}
-        if ($scenario -eq 'expired') {[Omi.RuntimeControl.Controller].GetField('intentAcceptedAt','NonPublic,Instance').SetValue($controller,[DateTime]::UtcNow.AddSeconds(-31))}
+        if ($scenario -eq 'expired') {
+            $clock=[Omi.OwnedShutdown.LifecycleDeadline].GetConstructor('NonPublic,Instance',$null,[type[]]@([int]),$null).Invoke(@(0))
+            [Omi.RuntimeControl.Controller].GetField('operationDeadline','NonPublic,Instance').SetValue($controller,$clock)
+        }
         if ($scenario -eq 'stale-status') {[Omi.RuntimeControl.Controller].GetField('published','NonPublic,Instance').SetValue($controller,[DateTime]::UtcNow.AddSeconds(-16))}
         if ($scenario -eq 'owner-lost') {$controller.Publish('{"restart":{"available":true}}',$before,$false)}
         if ($scenario -eq 'generation') {$controller.Publish('{"restart":{"available":true}}',(Identity $before.pid '2000-01-01T00:00:00Z'),$true)}
@@ -126,9 +131,9 @@ try {
             $controller.BlockOwnedRestart($id,'STORE_UNAVAILABLE')
         } else {
             $begun=$controller.BeginAuthenticatedOwnedRestart($id,$current)
-            Assert ($begun -eq ($scenario -eq 'success')) $scenario
+            Assert ($begun -eq ($scenario -in @('success','expired','stale-status','unavailable'))) $scenario
         }
-        if ($scenario -eq 'success') {
+        if ($scenario -in @('success','expired','stale-status','unavailable')) {
             $running=Read $controller $id
             Assert ($running.state -eq 'running' -and $null -eq $running.local_approval) 'running durable without fake approval'
             Assert (-not $controller.BeginAuthenticatedOwnedRestart($id,$current)) 'running replay'

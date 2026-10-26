@@ -162,7 +162,7 @@ def test_launcher_separates_run_from_activation_and_preserves_control_priority()
     activation = timer.split("$script:ActivationEvent.WaitOne(0)) {", 1)[1]
     assert activation.strip() == 'Restore-TrayIcon -Reason "secondary-launch"\n    }'
     # Activate without an owner must also remain free of service startup.
-    assert 'if ($LauncherAction -in @("Activate", "Exit", "RestartServices"))' in source
+    assert 'if ($LauncherAction -in @("Activate", "Exit", "RestartServices", "RestartBackend"))' in source
     assert '[string]$LauncherAction = "Run"' in source
     assert "-LauncherAction" not in HIDDEN_LAUNCHER.read_text(encoding="utf-8-sig")
 
@@ -422,6 +422,15 @@ foreach ($name in @({names})) {{
     return json.loads(result.stdout)
 
 
+def _run_legacy_launcher(tmp_path: Path, scenario: str) -> dict:
+    # These routing tests do not load the owned-session setup used by other suites.
+    return _run_isolated_launcher(tmp_path, r"""
+if (-not ('Omi.OwnedShutdown.LifecycleDeadline' -as [type])) {
+    Add-Type -Path (Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs') -ReferencedAssemblies @('System.Web.Extensions','System.Core')
+}
+""" + scenario)
+
+
 @pytest.mark.parametrize(
     ("scenario", "calls", "decision"),
     [
@@ -494,7 +503,7 @@ foreach ($name in @({names})) {{
 def test_launcher_explicit_start_decisions(
     tmp_path: Path, scenario: str, calls: list[str], decision: str
 ) -> None:
-    result = _run_isolated_launcher(tmp_path, scenario + '\nInvoke-ServiceStartRequest -Reason "test-run"')
+    result = _run_legacy_launcher(tmp_path, scenario + '\nInvoke-ServiceStartRequest -Reason "test-run"')
     assert result["calls"] == calls
     assert any(decision in message for message in result["logs"])
     assert result["guarded"] is False
@@ -510,7 +519,7 @@ def test_launcher_explicit_start_decisions(
 
 @pytest.mark.parametrize("guard", ["ServiceStartRequestInProgress", "BackendRecoveryInProgress", "FrontendHealthRecoveryInProgress"])
 def test_launcher_coalesces_run_during_recovery(tmp_path: Path, guard: str) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path, f'$script:{guard} = $true\nInvoke-ServiceStartRequest -Reason "test-run"'
     )
     assert result["calls"] == ["restore"]
@@ -520,7 +529,7 @@ def test_launcher_coalesces_run_during_recovery(tmp_path: Path, guard: str) -> N
 
 
 def test_launcher_repeated_run_after_recovery_does_not_restart_starting_services(tmp_path: Path) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         'Invoke-ServiceStartRequest -Reason "first-run"\nInvoke-ServiceStartRequest -Reason "second-run"',
     )
@@ -531,7 +540,7 @@ def test_launcher_repeated_run_after_recovery_does_not_restart_starting_services
 
 @pytest.mark.parametrize("failure", ["Start-Services", "Stop-Services", "Get-BackendHealth"])
 def test_launcher_recovery_guard_releases_on_failure(tmp_path: Path, failure: str) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         "$script:BackendProcess = New-TestProcess -AgeSeconds 600\n"
         f"function {failure} {{ throw 'isolated failure' }}\n"
@@ -543,7 +552,7 @@ def test_launcher_recovery_guard_releases_on_failure(tmp_path: Path, failure: st
 
 
 def test_launcher_restart_is_forced_even_when_healthy(tmp_path: Path) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path, "$script:BackendReady = $true; $script:FrontendHealthy = $true\nRestart-Services"
     )
     assert result["calls"] == ["stop", "start"]
@@ -551,7 +560,7 @@ def test_launcher_restart_is_forced_even_when_healthy(tmp_path: Path) -> None:
 
 
 def test_launcher_start_services_clears_previous_stopped_status(tmp_path: Path) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         r"""
 # Replace the test double with just the actual Start-Services function.
@@ -572,7 +581,7 @@ Invoke-ServiceStartRequest -Reason 'second-run'
 
 
 def test_launcher_stop_then_run_retains_owner_without_restarting(tmp_path: Path) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         r"""
 $stop = $ast.Find({ param($node)
@@ -599,7 +608,7 @@ Invoke-ServiceStartRequest -Reason 'run-after-stop'
 
 
 def test_launcher_reentrant_start_is_coalesced(tmp_path: Path) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         r"""
 function Start-Services {
@@ -615,7 +624,7 @@ Invoke-ServiceStartRequest -Reason 'first-run'
 
 
 def test_launcher_guard_releases_even_when_event_cleanup_fails(tmp_path: Path) -> None:
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         r"""
 $script:RunEvent | Add-Member -Force ScriptMethod Reset { throw 'test event disposed' }
@@ -639,7 +648,7 @@ def test_launcher_control_timer_routes_only_highest_priority_event(
     tmp_path: Path, pending: tuple[str, ...], expected: str
 ) -> None:
     signals = "\n".join(f"[void]$script:{name}Event.Set()" for name in pending)
-    result = _run_isolated_launcher(
+    result = _run_legacy_launcher(
         tmp_path,
         r"""
 function Exit-Launcher { param($Reason) $script:Calls.Add('exit') }

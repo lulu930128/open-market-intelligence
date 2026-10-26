@@ -13,8 +13,9 @@ from test_runtime_launcher_recovery import _run_isolated_launcher
 
 
 START_SETUP = SETUP + r"""
+Add-Type -Path (Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs') -ReferencedAssemblies @('System.Web.Extensions','System.Core')
 . (Join-Path (Split-Path $ast.Extent.File) 'omi-runtime-control.ps1')
-foreach ($name in @('Start-OmiBackendAfterExactStop', 'Invoke-BackendStartRequest', 'Invoke-OwnedBackendRestart', 'Start-Services', 'Start-Backend', 'Start-Frontend')) {
+foreach ($name in @('Test-FrontendRecoveryAdmission', 'Start-OmiBackendAfterExactStop', 'Start-OmiBackendSuccessor', 'Invoke-BackendStartRequest', 'Invoke-OwnedBackendRestart', 'Start-Services', 'Start-Backend', 'Start-Frontend')) {
     $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$false)
     . ([scriptblock]::Create($definition.Extent.Text))
 }
@@ -44,6 +45,13 @@ $script:LastBackendStartError=$null
 $script:FrontendProcess=New-TestProcess
 $frontend=$script:FrontendProcess
 $script:SpawnCount=0
+$script:OwnedBackendRestartRequests=[Collections.Generic.HashSet[string]]::new()
+function Assert-OmiSchemaCompatibility { param($ExpectedRelease,$DatabasePath,$SchemaLockPath,[switch]$Upgrade)
+    if ($script:DiskSource -cne $script:LoadedLifecycleSourceId -or $script:OldReady -ceq $false) {throw 'RESTART_COMPATIBILITY_NOT_ATTESTED'}
+}
+function Assert-OmiBackendApplicationRelease { param($ExpectedRelease)
+    if ($script:ApplicationRelease -and $ExpectedRelease -cne $script:ApplicationRelease) {throw 'RESTART_SOURCE_CHANGED'}
+}
 $script:Ready=$true
 $script:Bindable=$true
 function Test-TcpPortBindable {
@@ -64,7 +72,7 @@ function Publish-OmiRuntimeControlStatus {
 function New-FakeOwned {
     $result=[pscustomobject]@{RunnerProcess=(New-TestProcess); ChildPid=(100+$script:SpawnCount); ChildCreated='fixture-created';
         Alive=$true;Terminal=$false;StartupFailure=$null;StartupExitConfirmed=$false;LastStop=$null;CanStartAfterStop=$false;RestartBlocker='';
-        SelectedHost=$script:BackendHost;SelectedPort=$script:BackendPort}
+        SelectedHost=$script:BackendHost;SelectedPort=$script:BackendPort;ReleaseId='fixture-release';HasRetainedIdentity=$true}
     $result | Add-Member ScriptMethod DisposeAfterConfirmedStop {
         $script:Calls.Add('retire')
         if (-not [object]::ReferenceEquals($this,$script:RetiredBackendSessions[$script:RetiredBackendSessions.Count-1])) { throw 'NOT_ARCHIVED_FIRST' }
@@ -97,6 +105,11 @@ function New-FakeOwned {
         $this.LastStop=[pscustomobject]@{RequestId=$request;State='stopped';Reason='LIFESPAN_AND_EXACT_EXIT';ExactExit=$true;Rearmed=$false}
         $this.Terminal=$true; $this.Alive=$false; $this.CanStartAfterStop=$true
         $task=[Threading.Tasks.TaskCompletionSource[object]]::new();$task.SetResult($this.LastStop);return $task.Task
+    }
+    $result | Add-Member ScriptMethod StopWithinDeadlineAsync {
+        param($id,$release,$deadline)
+        if ($release -and $this.PSObject.Methods['StopForRestartAsync']) {return $this.StopForRestartAsync($id,$release)}
+        return $this.StopAsync($id)
     }
     return $result
 }
@@ -138,9 +151,7 @@ for ($cycle=0;$cycle -lt 3;$cycle++) {
     $beforeCalls=$script:Calls.Count
     Invoke-OmiRuntimeControlTick
     if ($script:Calls.Count -gt ($beforeCalls+1)) { throw 'QUEUE_EXECUTED' }
-    try { Restart-Services; throw 'RESTART_ACCEPTED' }
-    catch { if ($_.Exception.Message -ne 'OWNED_RESTART_NOT_AVAILABLE_FROM_TRAY') { throw } }
-    foreach ($name in @('Start-Services','Start-Backend','Start-Frontend')) {
+    foreach ($name in @('Start-Services','Start-Backend')) {
         try { & $name; throw 'AUTOMATIC_START_ACCEPTED' }
         catch { if ($_.Exception.Message -ne 'SAFE_STOP_NO_START_OR_RECOVERY') { throw } }
     }
@@ -311,6 +322,7 @@ try {
 def test_manual_start_has_only_one_factory_and_no_frontend_or_legacy_dispatch():
     source = (Path(__file__).resolve().parents[2] / 'scripts/omi-launcher.ps1').read_text(encoding='utf-8-sig')
     body = source.split('function Start-OmiBackendAfterExactStop {', 1)[1].split('\nfunction ', 1)[0]
+    body += source.split('function Start-OmiBackendSuccessor {', 1)[1].split('\nfunction ', 1)[0]
     assert body.count('New-OmiProductionOwnedBackend') == 1
     for forbidden in ('Start-Process', 'Start-Backend\n', 'Start-Services', 'Start-Frontend', 'Stop-Frontend',
                       'Stop-Legacy', 'Stop-Process', 'TakePending', '$script:SafeStopAttempted = $false'):
@@ -345,7 +357,7 @@ $script:RuntimeController | Add-Member ScriptMethod Publish {
     param($json,$identity,$attested)
     $status=$json | ConvertFrom-Json
     if ($status.backend.status -ne $script:ExpectedStatus -or
-        $status.restart.available -ne ($script:ExpectedStatus -eq 'observed')) {throw 'FALSE_PUBLISHED_STATE'}
+        $status.restart.available -ne ($script:ExpectedStatus -eq 'observed' -and -not $script:ServiceStartRequestInProgress -and -not $script:ServiceStopInProgress)) {throw 'FALSE_PUBLISHED_STATE'}
     if ($script:ExpectedStatus -eq 'stopped') {
         if ($attested -or $null -ne $identity) {throw 'STOPPED_IDENTITY_ADOPTED'}
     } elseif ($status.backend.pid -ne $script:OwnedBackendSession.ChildPid) {throw 'OLD_GENERATION_PUBLISHED'}
@@ -507,6 +519,8 @@ $script:RuntimeControlLastPublish=[DateTime]::UtcNow
 $script:OwnedBackendRestartRequests=[Collections.Generic.HashSet[string]]::new()
 $script:SafeStopAttempted=$false
 $script:OldReady=$true
+$script:ApplicationRelease='new-release'
+function Get-OmiBackendApplicationRelease { return $script:ApplicationRelease }
 $script:RemoteIntentAccepted=$true
 $script:StopMode='exact'
 $script:RestartIds=[Collections.Generic.List[string]]::new()
@@ -514,7 +528,18 @@ $script:BaseFakeOwned=(Get-Item Function:New-FakeOwned).ScriptBlock
 function New-FakeOwned {
     $result=& $script:BaseFakeOwned
     $result.ChildCreated='created-'+$script:SpawnCount
+    $result | Add-Member -Force NoteProperty ReleaseId $script:ApplicationRelease
     $result | Add-Member ScriptMethod VerifyReadiness {return $script:OldReady}
+    $result | Add-Member ScriptMethod StopForRestartAsync {
+        param($request,$targetRelease)
+        if ($targetRelease -cne $script:ApplicationRelease) {
+            $refused=[pscustomobject]@{RequestId=$request;BeforePid=$this.ChildPid;BeforeCreated=$this.ChildCreated;
+                State='blocked';Reason='RESTART_SOURCE_CHANGED';StopNotSent=$true;Rearmed=$false;
+                ExactExit=$false;PreflightStage='BEFORE_PREPARE'}
+            $task=[Threading.Tasks.TaskCompletionSource[object]]::new();$task.SetResult($refused);return $task.Task
+        }
+        return $this.StopAsync($request)
+    }
     $result | Add-Member -Force ScriptMethod StopAsync {
         param($request)
         if ($script:Timer.Enabled -or $script:ActivationTimer.Enabled -or (-not $script:ServiceStartRequestInProgress -and -not $script:ServiceStopInProgress)) {throw 'STOP_NOT_SERIALIZED'}
@@ -540,6 +565,8 @@ $script:RuntimeController | Add-Member ScriptMethod BeginAuthenticatedOwnedResta
     if ($identity.pid -ne $script:OwnedBackendSession.ChildPid -or $script:Timer.Enabled) {throw 'UNBOUND_APPROVAL'}
     return $script:RemoteIntentAccepted
 }
+$script:RuntimeController | Add-Member ScriptMethod OwnedRestartDeadline {param($id);return [Omi.OwnedShutdown.LifecycleDeadline]::new()}
+$script:RuntimeController | Add-Member ScriptMethod PendingAction {param($id);return 'RestartBackend'}
 $script:RuntimeController | Add-Member ScriptMethod CompleteOwnedRestart {
     param($id,$stop,$next,$verified)
     $script:Calls.Add('receipt')
@@ -589,7 +616,7 @@ def test_restart_stop_refusal_never_starts_and_preserves_stage_and_remote_fence(
 $id=[Guid]::NewGuid().ToString('D')
 try {Restart-Backend -RequestId $id} catch {}
 if ($script:SpawnCount -or -not [object]::ReferenceEquals($original,$script:OwnedBackendSession) -or
-    $script:RemoteCompleted -or (Test-OmiRemoteRestartGeneration)) {throw 'UNCONFIRMED_RESTART_ESCAPED'}
+    $script:RemoteCompleted -or ((Test-OmiRemoteRestartGeneration) -ne ($script:StopMode -eq 'rearmed'))) {throw 'UNCONFIRMED_RESTART_ESCAPED'}
 if ($script:StopMode -eq 'rearmed' -and ($script:RemoteStage -ne 'SCHEDULER_QUIESCENCE' -or
     $script:LastBackendRestart.PreflightStage -ne 'SCHEDULER_QUIESCENCE')) {throw 'STAGE_LOST'}
 try {Restart-Backend -RequestId $id} catch {}
@@ -686,7 +713,7 @@ try {
     $id=[Guid]::NewGuid().ToString('D')
     if ((Request $id $controller.OwnerId $true).state -ne 'blocked') {throw 'GENERATION_WITHOUT_PIPE_ACCEPTED'}
     $controller.Publish('{"restart":{"available":false}}',$current,$true)
-    if ((Request ([Guid]::NewGuid().ToString('D')) $controller.OwnerId $true).reason -ne 'ALL_WRITERS_DRAIN_UNAVAILABLE') {throw 'STOP_FENCE_BYPASSED'}
+    if ((Request ([Guid]::NewGuid().ToString('D')) $controller.OwnerId $true).reason -ne 'BACKEND_PREFLIGHT_NOT_ATTESTED') {throw 'OS_CALLER_FENCE_BYPASSED'}
     if ((Request ([Guid]::NewGuid().ToString('D')) ([Guid]::NewGuid().ToString('D')) $true).reason -ne 'OWNER_MISMATCH') {throw 'WRONG_OWNER_ADMITTED'}
 } finally {$controller.Dispose()}
 """.replace('STORE', str(tmp_path / 'controller-store').replace("'", "''"))

@@ -89,8 +89,11 @@ function Get-OmiLifecycleSourceId {
     $buffer = [IO.MemoryStream]::new()
     try {
         foreach ($name in @('scripts/omi-launcher.ps1', 'scripts/omi-runtime-control.ps1',
-            'scripts/run-service-logged.ps1', 'scripts/OmiRuntimeControl.cs', 'scripts/OmiOwnedShutdown.cs',
-            'backend/owned_backend_entry.py', '.venv/pyvenv.cfg')) {
+            'scripts/run-service-logged.ps1', 'scripts/OmiRuntimeControl.cs', 'scripts/OmiOwnedShutdown.cs', 'scripts/apply-omi-update.ps1',
+            'backend/owned_backend_entry.py', 'scripts/omi-schema-maintenance.py', 'scripts/backup-omi-sqlite.py',
+            'backend/alembic/env.py', '.venv/pyvenv.cfg') +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'backend/alembic/versions') -Filter '*.py' |
+                Sort-Object Name | ForEach-Object { 'backend/alembic/versions/' + $_.Name })) {
             $bytes = [IO.File]::ReadAllBytes((Join-Path $script:RepoRoot $name))
             $hash = $sha.ComputeHash($bytes)
             $buffer.Write($hash, 0, $hash.Length)
@@ -99,13 +102,143 @@ function Get-OmiLifecycleSourceId {
     } finally { $buffer.Dispose(); $sha.Dispose() }
 }
 
-function New-OmiProductionOwnedBackend {
-    if (-not $script:OwnsMutex -or $null -eq $script:RuntimeController -or
+function Assert-OmiProductionBackendStartPreflight {
+    # Observation only: no session/store creation, Runner, child or UI pump.
+    # Cold admission calls this before its irreversible factory-attempt latch.
+    if ($null -eq $script:RuntimeController) { throw 'Controller unavailable' }
+    if (-not $script:OwnsMutex -or
         $script:BackendReload -or $script:IsPackagedRelease -or
         (Get-OmiLifecycleSourceId) -cne $script:LoadedLifecycleSourceId) { throw 'SOURCE_ADOPTION_NOT_ATTESTED' }
     if (@(Get-ListeningProcessIdsOnPort -Port $script:BackendPort -RequireObservation).Count -ne 0) { throw 'FIXED_PORT_NOT_FREE' }
+    if (-not (Test-TcpPortBindable -Port $script:BackendPort -HostName $script:BackendHost -ServiceName 'Backend' -Quiet)) {
+        throw 'FIXED_PORT_NOT_BINDABLE'
+    }
+}
+
+function New-OmiProductionOwnedBackend {
+    param([string]$ExpectedRelease)
+    # Recheck at the factory boundary. Any failure here remains consumed/unknown
+    # to the caller; a previous successful preflight is not a spawn guarantee.
+    Assert-OmiProductionBackendStartPreflight
+    # Cold startup does not have a successor release pin. Invoke the actual
+    # four-argument overload, whose C# implementation supplies a true null.
+    if (-not $PSBoundParameters.ContainsKey('ExpectedRelease')) {
+        return [Omi.OwnedShutdown.ProductionSession]::Start(
+            $script:RepoRoot, $script:RuntimeControlStore, $script:BackendHost, $script:BackendPort)
+    }
+    # Restart must never fall back to unpinned startup, even if its pin is blank.
+    if ([string]::IsNullOrWhiteSpace($ExpectedRelease)) { throw 'RESTART_SOURCE_CHANGED' }
     return [Omi.OwnedShutdown.ProductionSession]::Start(
-        $script:RepoRoot, $script:RuntimeControlStore, $script:BackendHost, $script:BackendPort)
+        $script:RepoRoot, $script:RuntimeControlStore, $script:BackendHost, $script:BackendPort,
+        $ExpectedRelease)
+}
+
+function Get-OmiBackendApplicationRelease {
+    return [Omi.OwnedShutdown.ProductionSession]::ApplicationRelease($script:RepoRoot)
+}
+
+function Get-OmiSchemaSourceRelease {
+    return [Omi.OwnedShutdown.ProductionSession]::SchemaSourceRelease($script:RepoRoot)
+}
+
+function Assert-OmiBackendApplicationRelease {
+    param([Parameter(Mandatory = $true)][string]$ExpectedRelease)
+    if ((Get-OmiBackendApplicationRelease) -cne $ExpectedRelease) { throw 'RESTART_SOURCE_CHANGED' }
+}
+
+function Get-OmiSchemaReceiptHash {
+    param([string]$Path)
+    try {
+        $info=[IO.FileInfo]::new($Path)
+        if (-not $info.Exists -or $info.Length -gt 1048576 -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) {return $null}
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try {return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','')}
+        finally {$sha.Dispose()}
+    } catch {return $null}
+}
+
+function Assert-OmiSchemaRecoveryAdmission {
+    # A receipt never creates authority. It must match the terminal record this
+    # owner persisted, plus the retained worker result; process gates run anew.
+    $fence=$script:SchemaRecoveryFence
+    if ($null -eq $fence) { return }
+    if (-not $fence.TerminalHash -or -not (Test-Path -LiteralPath $fence.Path) -or
+        (Get-OmiSchemaReceiptHash -Path $fence.Path) -cne $fence.TerminalHash -or
+        (-not $fence.NoEffects -and -not $fence.WorkerSettled)) {
+        throw 'SCHEMA_MAINTENANCE_RECONCILIATION_REQUIRED'
+    }
+}
+
+function Assert-OmiSchemaCompatibility {
+    param([Parameter(Mandatory=$true)][string]$ExpectedRelease,
+        [string]$DatabasePath, [string]$SchemaLockPath, [switch]$Upgrade, [switch]$PassThru)
+    Assert-OmiBackendApplicationRelease -ExpectedRelease $ExpectedRelease
+    # The fixed inspector reads configured SQLite metadata only. No migration,
+    # shell, data rows, repair or credential values are returned.
+    $liveUrl=if ($script:OwnedBackendSession.Alive) {$script:BackendBaseUrl} else {''}
+    try {
+        $output=[Omi.OwnedShutdown.ProductionSession]::ReadStartCompatibility($script:RepoRoot,$liveUrl,$DatabasePath,$SchemaLockPath,[bool]$Upgrade)
+        $proof=$output | ConvertFrom-Json
+    } catch { throw 'RESTART_COMPATIBILITY_NOT_ATTESTED' }
+    if ($proof.contract -cne 'omi.start-compatibility.v1' -or $proof.compatible -cne $true -or
+        ($script:OwnedBackendSession.Alive -and ($proof.backend_pid -ne $script:OwnedBackendSession.ChildPid -or
+            $proof.owner_id -cne $script:RuntimeController.OwnerId))) { throw 'RESTART_COMPATIBILITY_NOT_ATTESTED' }
+    Assert-OmiBackendApplicationRelease -ExpectedRelease $ExpectedRelease
+    if ($PassThru) { return $proof }
+}
+
+function Invoke-OmiLauncherCommand {
+    param([ValidateSet('Status','ReadOperation','RestartBackend','StartBackend','RecoverFailedStart','SchemaUpgrade')][string]$Action,
+        [Parameter(Mandatory=$true)][Diagnostics.Process]$Owner,
+        [Parameter(Mandatory=$true)][string]$ExpectedOwnerId, [string]$RequestId='', [string]$Token='')
+    # CC must supply its independently attested retained Launcher handle. This
+    # adapter neither discovers an owner nor reads/provisions credentials.
+    if (-not ('Omi.RuntimeControl.Controller' -as [type])) {
+        Add-Type -Path @((Join-Path $PSScriptRoot 'OmiRuntimeControl.cs'),(Join-Path $PSScriptRoot 'OmiOwnedShutdown.cs')) -ReferencedAssemblies @('System.Web.Extensions','System.Core','System.Windows.Forms')
+    }
+    $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try {$suffix=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($repo.ToLowerInvariant())))).Replace('-','').ToLowerInvariant().Substring(0,24)}
+    finally {$sha.Dispose()}
+    $message=@{action=$Action;request_id=$RequestId;expected_owner_id=$ExpectedOwnerId;token=$Token}
+    if ($Action -notin @('Status','ReadOperation')) {
+        $message.confirmation=@{RestartBackend='restart_backend';StartBackend='start_backend';RecoverFailedStart='recover_failed_start';SchemaUpgrade='upgrade_schema'}[$Action]
+    }
+    return [Omi.RuntimeControl.Controller]::RequestOwner("omi-runtime-$suffix",$Owner,($message|ConvertTo-Json -Compress))
+}
+
+function Invoke-OmiRemoteControlOperation {
+    param([string]$RequestId,[string]$Action)
+    if (-not $script:RuntimeController.BeginRemoteOperation($RequestId)) { return }
+    $verified=$false; $migration='NOT_ATTEMPTED'; $successor='NOT_ATTEMPTED'; $after=$null; $stop='NOT_ATTEMPTED'; $failure=$null
+    $before=$script:OwnedBackendSession
+    $factoryAttemptsBefore=[long]$script:BackendFactoryAttemptCount
+    try {
+        switch ($Action) {
+            'StartBackend' { Invoke-BackendStartRequest -RequestId $RequestId -RemoteRequest }
+            'RecoverFailedStart' { Invoke-BackendStartRequest -RequestId $RequestId -FailedStartRecovery -RemoteRequest }
+            'SchemaUpgrade' { Invoke-OmiConfiguredSchemaUpgrade -RequestId $RequestId -RemoteRequest }
+            default { throw 'UNSUPPORTED_ACTION' }
+        }
+        $after=Get-OmiOwnedBackendIdentity
+        $verified=$null -ne $after -and [object]::ReferenceEquals($script:RestartReadyBackendSession,$script:OwnedBackendSession)
+        if ($verified) { $successor='VERIFIED' }
+    } catch {
+        $failure=$_.Exception.Message
+        throw
+    } finally {
+        if ($null -ne $before.LastStop -and $before.LastStop.RequestId -ceq $RequestId) {$stop=$before.LastStop.State}
+        elseif ($null -ne $before.LastStop -and $before.LastStop.ExactExit) {$stop='PREVIOUSLY_STOPPED'}
+        if ($Action -eq 'SchemaUpgrade' -and $null -ne $script:LastSchemaOperation -and
+            $script:LastSchemaOperation.request_id -ceq $RequestId) {
+            $migration=$script:LastSchemaOperation.migration_outcome
+            $successor=$script:LastSchemaOperation.successor_outcome
+        } elseif (-not $verified -and [long]$script:BackendFactoryAttemptCount -gt $factoryAttemptsBefore) {
+            $successor=if ([object]::ReferenceEquals($before,$script:OwnedBackendSession)) {'ATTEMPTED_UNCONFIRMED'} else {'FAILED_UNCONFIRMED'}
+        }
+        Publish-OmiRuntimeControlStatus
+        $script:RuntimeController.CompleteRemoteOperation($RequestId,$verified,$stop,$migration,$successor,$after,$failure)
+    }
 }
 
 function Assert-OmiManualBackendStartOwner {
@@ -176,10 +309,9 @@ function Get-OmiOwnedBackendIdentity {
         if ($null -ne $script:OwnedBackendSession) {
             $script:BackendOwnershipReason = 'OWNED_CHANNEL_IDENTITY_UNAVAILABLE'
             $owned = $script:OwnedBackendSession
-            if ($script:BackendReload -or -not $owned.Alive -or
+            if ($script:BackendReload -or -not $owned.HasRetainedIdentity -or
                 $script:BackendProcess.Id -ne $owned.RunnerProcess.Id) { return $null }
-            $listeners = @(Get-ListeningProcessIdsOnPort -Port $script:BackendPort)
-            if ($listeners.Count -ne 1 -or $listeners[0] -ne $owned.ChildPid -or -not $owned.Alive -or
+            if (-not $owned.HasRetainedIdentity -or
                 -not [object]::ReferenceEquals($script:BackendProcess, $owned.RunnerProcess)) { return $null }
             $identity = [Omi.RuntimeControl.Identity]::new()
             $identity.pid = $owned.ChildPid; $identity.created_at = $owned.ChildCreated
@@ -325,7 +457,8 @@ function Publish-OmiRuntimeControlStatus {
     }
     $owned = $script:OwnedBackendSession
     if ($null -ne $owned -and $owned.StartupFailure) { $null = $owned.RefreshStartupExit() }
-    if ($null -ne $owned -and $owned.Terminal) {
+    if ($null -ne $owned -and $owned.Terminal -and (-not $owned.HasRetainedIdentity -or
+        ($null -ne $owned.LastStop -and ($owned.LastStop.ExactExit -or $owned.LastStop.ForcedExitConfirmed)))) {
         # A retained exit receipt describes this owned instance, never whatever
         # might later occupy its port. Terminal ambiguity grants no live owner.
         $identity = $null
@@ -345,22 +478,23 @@ function Publish-OmiRuntimeControlStatus {
         $backend.ownership_reason = 'OWNED_START_READINESS_UNCONFIRMED'
     }
     $blockers = @()
-    if ($script:ServiceStopInProgress -or ($script:SafeStopAttempted -and
-        -not (Test-OmiRemoteRestartGeneration))) { $blockers += 'ALL_WRITERS_DRAIN_UNAVAILABLE' }
+    if ($script:ServiceStopInProgress -or $script:ServiceStartRequestInProgress) { $blockers += 'BUSY' }
     if ($null -eq $identity) { $blockers += 'OWNER_NOT_ATTESTED' }
     elseif ($null -eq $script:OwnedBackendSession) { $blockers += 'OWNED_BOOTSTRAP_REQUIRED' }
-    elseif ($script:OwnedBackendSession.RestartBlocker) { $blockers += $script:OwnedBackendSession.RestartBlocker }
-    elseif ($script:OwnedBackendSession.Terminal) { $blockers += 'ALL_WRITERS_DRAIN_UNAVAILABLE' }
-    elseif ($blockers.Count -eq 0 -and (Get-OmiLifecycleSourceId) -cne $script:LoadedLifecycleSourceId) { $blockers += 'SOURCE_ADOPTION_NOT_ATTESTED' }
+    if ($null -ne $owned -and ($owned.Terminal -or $owned.StartupFailure -or $script:LastBackendStartError)) {
+        $blockers += 'READINESS_NOT_ATTESTED'
+    }
     $status = @{
         observed_at = [DateTime]::UtcNow.ToString('o')
+        loaded_lifecycle_source_id = $script:LoadedLifecycleSourceId
+        application_release_id = $(if ($null -ne $owned) { $owned.ReleaseId } else { $null })
         launcher = @{ status = 'observed'; identity = 'PIPE_SERVER_PID_AND_CREATION'; pid = $PID; created_at = $owner.StartTime.ToUniversalTime().ToString('o') }
         backend = $backend
         frontend = @{ status = 'unknown'; identity = 'UNATTESTED'; pid = $null; created_at = $null
             selected_host = $script:FrontendHost; selected_port = $script:FrontendPort; readiness = 'UNATTESTED' }
         mcp_dependency = @{ status = 'unknown'; identity = 'UNATTESTED'; reason = 'EXTERNAL_ADAPTER_NOT_ATTESTED' }
         restart = @{ available = ($blockers.Count -eq 0); reason = $(if ($blockers.Count) { $blockers[0] } else { 'AUTHENTICATED_REMOTE_INTENT_REQUIRED' })
-            blockers = $blockers; approval = 'authenticated_remote_intent'; writer_drain = 'required_before_stop' }
+            blockers = $blockers; approval = 'authenticated_remote_intent'; writer_drain = 'graceful_then_owned_cutoff_180s' }
     }
     $script:RuntimeController.Publish(($status | ConvertTo-Json -Depth 6 -Compress), $identity, ($null -ne $identity))
     $script:RuntimeControlLastPublish = [DateTime]::UtcNow
@@ -380,10 +514,13 @@ function Invoke-OmiRuntimeControlTick {
         if (([DateTime]::UtcNow - $script:RuntimeControlLastPublish).TotalSeconds -ge 5) { Publish-OmiRuntimeControlStatus }
         # Publication continues after Stop. Never dequeue/replay a destructive
         # request while this retained session is stopped, unknown or terminal.
-        if ($script:ServiceStopInProgress -or $script:ServiceStartRequestInProgress -or
-            -not (Test-OmiRemoteRestartGeneration)) { return }
+        if ($script:ServiceStopInProgress -or $script:ServiceStartRequestInProgress) { return }
         $requestId = $script:RuntimeController.TakePending()
-        if ($null -ne $requestId) { Restart-Backend -RequestId $requestId }
+        if ($null -ne $requestId) {
+            $action=$script:RuntimeController.PendingAction($requestId)
+            if ($action -eq 'RestartBackend') { Restart-Backend -RequestId $requestId }
+            else { Invoke-OmiRemoteControlOperation -RequestId $requestId -Action $action }
+        }
     } catch {
         # Receipt persistence or proof failures never fall through to a legacy action.
         Write-LauncherLog 'Runtime control tick failed closed; receipt may be unknown.' 'WARN'

@@ -2,7 +2,9 @@
 
 BEGIN IMMEDIATE arbitrates with independent SQLite engines/processes, including
 WAL writers. It does not assert that arbitrary programs cannot corrupt a file.
-No DML, schema change, checkpoint, commit or database creation is performed.
+The default lease is lock-only. Maintenance may borrow an already initialized
+SQLAlchemy connection, reserve it here and use it for Alembic without a second
+writer connection. Only the maintenance owner commits; release rolls back leftovers.
 """
 import ctypes
 import os
@@ -11,12 +13,14 @@ import sqlite3
 
 
 class SQLiteWriterLease:
-    def __init__(self, connection, path_handle):
+    def __init__(self, connection, path_handle, borrowed=None):
         self._connection = connection
         self._path_handle = path_handle
+        self._borrowed = borrowed
 
     @classmethod
-    def acquire(cls, url):
+    def acquire(cls, url, *, connection=None):
+        borrowed = connection
         if (url.drivername not in {"sqlite", "sqlite+pysqlite"} or url.query
                 or url.username or url.password or url.host or not url.database):
             raise RuntimeError("SQLITE_TARGET_UNSUPPORTED")
@@ -47,12 +51,20 @@ class SQLiteWriterLease:
                     raise ctypes.WinError(ctypes.get_last_error())
             # Untracked intentionally: this is the lifecycle owner's lock-only
             # connection, opened AFTER the application connection fence is held.
-            connection = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True,
-                                         timeout=0, isolation_level=None)
-            connection.execute("BEGIN IMMEDIATE").close()
-            return cls(connection, handle)
+            if borrowed is None:
+                connection = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True,
+                                             timeout=0, isolation_level=None)
+                connection.execute("BEGIN IMMEDIATE").close()
+            else:
+                connection = borrowed.connection.driver_connection
+                actual = connection.execute("PRAGMA database_list").fetchall()
+                if (borrowed.in_transaction() or connection.in_transaction or
+                        len(actual) != 1 or Path(actual[0][2]) != path):
+                    raise RuntimeError("MAINTENANCE_CONNECTION_TARGET_MISMATCH")
+                borrowed.exec_driver_sql("BEGIN IMMEDIATE")
+            return cls(connection, handle, borrowed)
         except BaseException:
-            if connection is not None:
+            if connection is not None and borrowed is None:
                 connection.close()
             if handle is not None:
                 cls._close_handle(handle)
@@ -74,8 +86,11 @@ class SQLiteWriterLease:
         # On commit this method is deliberately NOT called: the process exit
         # closes the native transaction after lifespan and all writers complete.
         if self._connection is not None:
-            self._connection.rollback()
-            self._connection.close()
+            if self._borrowed is not None:
+                self._borrowed.rollback()
+            else:
+                self._connection.rollback()
+                self._connection.close()
             self._connection = None
         if self._path_handle is not None:
             self._close_handle(self._path_handle)
