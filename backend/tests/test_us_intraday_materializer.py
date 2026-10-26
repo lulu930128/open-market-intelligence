@@ -490,6 +490,45 @@ def test_post_acquisition_exception_preserves_known_external_calls() -> None:
     )
 
 
+def test_index_post_acquisition_value_error_is_partial_and_releases_lane() -> None:
+    """Reproduce the diagnostic branch, not the unobserved production cause."""
+    db = _FakeDb()
+    calls = []
+    run_lock = Lock()
+
+    class _Platform:
+        def refresh_intraday_bars(self, *, symbol, **_kwargs):
+            calls.append(symbol)
+            if symbol == "^DJI":
+                raise PostAcquisitionError(
+                    "fixture post-acquisition failure",
+                    acquisition=AcquisitionSummary(
+                        attempted=True, status=AcquisitionStatus.COMPLETED,
+                        external_calls=1,
+                    ),
+                ) from ValueError("fixture invariant failure")
+            return _refresh_result()
+
+    result = materialize_us_intraday_capability(
+        "intraday.bars", configured_symbols="^DJI,^IXIC", max_symbols=2,
+        lane_id="index_current", instrument_type="index", max_external_calls=4,
+        now=datetime(2026, 8, 28, 15, 0, tzinfo=timezone.utc),
+        session_factory=lambda: db, platform_factory=lambda _db: _Platform(),
+        run_lock=run_lock,
+    )
+    assert calls == ["^DJI", "^IXIC"]
+    assert result["status"] == "partial"
+    assert result["failed_count"] == 1
+    assert result["succeeded_count"] == 1
+    assert db.rollback_count == 1 and db.closed
+    assert not run_lock.locked()
+    diagnostic = us_intraday_materializer_runtime_summary()["runs_by_lane"]["index_current"]["intraday.bars"]["symbol_runs"][0]
+    assert diagnostic["reason"] == "post_acquisition_exception"
+    assert diagnostic["error_type"] == "ValueError"
+    assert diagnostic["failure_stage"] == "post_acquisition"
+    assert diagnostic["external_calls"] == 1
+
+
 def test_bootstrap_cannot_succeed_when_budget_skips_required_plans() -> None:
     db = _FakeDb()
 

@@ -1,8 +1,30 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class USCorporateActionCoverageRead(BaseModel):
+    """Event-only evidence; no existing producer persists interval completeness.
+
+    A future complete state requires a producer-owned, range-bound checkpoint.
+    Event count, a recent fetch or an empty event list cannot provide that proof.
+    """
+
+    applicability: Literal["required", "not_applicable"] = "required"
+    status: Literal["unknown", "not_applicable"] = "unknown"
+    observed_event_count: int = Field(default=0, ge=0)
+    observed_event_scope: Literal["all_cached_symbol_events"] = "all_cached_symbol_events"
+    completeness_checkpoint: None = None
+    reason_codes: list[str] = Field(default_factory=lambda: ["CORPORATE_ACTION_INTERVAL_PROOF_MISSING"])
+
+    @model_validator(mode="after")
+    def _validate_applicability(self) -> "USCorporateActionCoverageRead":
+        if (self.applicability == "not_applicable") != (self.status == "not_applicable"):
+            raise ValueError("Corporate action coverage must match applicability")
+        return self
 
 
 class USCorporateEventRead(BaseModel):

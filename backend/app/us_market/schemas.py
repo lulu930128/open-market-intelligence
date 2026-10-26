@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from app.us_market.session_summary import USSessionSummaryRead
 from app.us_market.market_truth_contracts import USRegularSessionCoverage
+from app.us_market.corporate_event_schemas import USCorporateActionCoverageRead
 
 
 class USStockMasterRead(BaseModel):
@@ -487,7 +488,7 @@ class USMarketResearchRead(BaseModel):
     daily_ohlcv: dict = Field(default_factory=dict)
     technical_indicators: dict = Field(default_factory=dict)
     technical_structure: dict = Field(default_factory=dict)
-    corporate_action_coverage: dict = Field(default_factory=dict)
+    corporate_action_coverage: USCorporateActionCoverageRead = Field(default_factory=USCorporateActionCoverageRead)
     market_coverage: dict = Field(default_factory=dict)
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

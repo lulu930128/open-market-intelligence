@@ -346,9 +346,16 @@ class AcquisitionBudgetExceeded(RuntimeError):
 class PostAcquisitionError(RuntimeError):
     """Preserve known external-work accounting when later processing fails."""
 
-    def __init__(self, message: str, *, acquisition: AcquisitionSummary) -> None:
+    def __init__(
+        self, message: str, *, acquisition: AcquisitionSummary,
+        stage: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.acquisition = acquisition
+        # Optional for existing callers; never retain arbitrary diagnostic text.
+        self.stage = stage if isinstance(stage, str) and stage in {
+            "persistence", "validation", "reread_resolve",
+        } else None
 
 
 def _not_attempted(reason: str) -> AcquisitionSummary:
@@ -776,15 +783,19 @@ class MarketDataGateway:
             if acquired.summary.attempted and (
                 acquired.receipts or acquired.observations
             ):
+                stage = "persistence"
                 try:
                     persisted = persist_route(acquired)
+                    stage = "validation"
                     self._validate_persistence_result(acquired, persisted)
                     persistence_summaries.append(persisted)
+                    stage = "reread_resolve"
                     final_batch, resolved = post_acquisition(acquired)
                 except Exception as exc:
                     raise PostAcquisitionError(
                         f"{label} route post-acquisition processing failed: {exc}",
                         acquisition=aggregate,
+                        stage=stage,
                     ) from exc
 
                 if _resolved_requirement_satisfied(gate_requirement, resolved):
@@ -987,6 +998,7 @@ class MarketDataGateway:
                 )
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
+                stage = "persistence"
                 try:
                     if acquisition.attempted and (
                         acquired.receipts or acquired.observations
@@ -995,7 +1007,9 @@ class MarketDataGateway:
                             acquire_requirement,
                             acquired,
                         )
+                        stage = "validation"
                         self._validate_persistence_result(acquired, persistence)
+                        stage = "reread_resolve"
                         reread_requirement = _post_acquisition_reread_requirement(
                             requirement,
                             acquired.receipts,
@@ -1012,6 +1026,7 @@ class MarketDataGateway:
                     raise PostAcquisitionError(
                         f"bar post-acquisition processing failed: {exc}",
                         acquisition=acquired.summary,
+                        stage=stage,
                     ) from exc
 
         return MarketDataResultV1(
@@ -1144,6 +1159,7 @@ class MarketDataGateway:
                 self._validate_acquisition_budget(requirement, plan, acquired)
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
+                stage = "persistence"
                 try:
                     if acquisition.attempted and (
                         acquired.receipts or acquired.observations
@@ -1152,7 +1168,9 @@ class MarketDataGateway:
                             requirement,
                             acquired,
                         )
+                        stage = "validation"
                         self._validate_persistence_result(acquired, persistence)
+                        stage = "reread_resolve"
                         reread_requirement = _post_acquisition_reread_requirement(
                             requirement, acquired.receipts,
                         )
@@ -1183,6 +1201,7 @@ class MarketDataGateway:
                     raise PostAcquisitionError(
                         f"quote post-acquisition processing failed: {exc}",
                         acquisition=acquired.summary,
+                        stage=stage,
                     ) from exc
 
         return MarketDataResultV1(

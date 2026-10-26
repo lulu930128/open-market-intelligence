@@ -653,6 +653,12 @@ def _symbol_run_diagnostics(results: Any) -> list[dict[str, Any]]:
         }
         if diagnostic.get("reason") in failure_stages:
             diagnostic["failure_stage"] = failure_stages[diagnostic["reason"]]
+            stage = item.get("post_acquisition_stage")
+            if diagnostic["reason"] == "post_acquisition_exception" and (
+                isinstance(stage, str)
+                and stage in {"persistence", "validation", "reread_resolve"}
+            ):
+                diagnostic["post_acquisition_stage"] = stage
             error_type = item.get("error_type")
             if isinstance(error_type, str) and error_type in {
                 "OperationalError", "IntegrityError", "DatabaseError",
@@ -1041,17 +1047,19 @@ def materialize_us_intraday_capability(
                     result["observed_external_call_count"] += external_calls
                     logger.warning(
                         "US intraday materializer post-acquisition failure "
-                        "capability=%s symbol=%s external_calls=%s error_type=%s.",
+                        "capability=%s symbol=%s external_calls=%s error_type=%s stage=%s.",
                         capability,
                         symbol,
                         external_calls,
                         type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
+                        exc.stage,
                     )
                     result["results"].append(
                         {
                             "symbol": symbol,
                             "status": "failed",
                             "reason": "post_acquisition_exception",
+                            "post_acquisition_stage": exc.stage,
                             "acquisition_attempted": bool(exc.acquisition.attempted),
                             "error_type": (
                                 type(exc.__cause__).__name__

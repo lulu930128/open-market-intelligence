@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -11,6 +14,7 @@ from app.db.models import (
     SourceRegistry,
     USDailyPrice,
     USStockMaster,
+    USCorporateAction,
 )
 from app.us_market.research_service import build_us_market_research
 
@@ -25,15 +29,16 @@ def _trading_dates(count: int, *, latest: date) -> list[date]:
     return list(reversed(dates))
 
 
-def test_research_service_reads_resolved_cache_without_writes() -> None:
+@pytest.mark.parametrize("symbol,event_count", [("AAPL", 0), ("NVDA", 1)])
+def test_research_service_reads_resolved_cache_without_writes(symbol, event_count) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     try:
         with Session(engine) as db:
             db.add(
                 USStockMaster(
-                    symbol="AAPL",
-                    security_name="Apple Inc.",
+                    symbol=symbol,
+                    security_name=symbol,
                     exchange="NASDAQ",
                     asset_type="stock",
                     is_active=True,
@@ -57,13 +62,13 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
             db.add(raw)
             db.flush()
             for index, trade_date in enumerate(
-                _trading_dates(220, latest=date(2026, 8, 21))
+                _trading_dates(260, latest=date(2026, 8, 21))
             ):
                 close = 100 + index * 0.25
                 db.add(
                     USDailyPrice(
                         provider="yahoo_chart",
-                        symbol="AAPL",
+                        symbol=symbol,
                         trade_date=trade_date,
                         open_price=close - 0.5,
                         high_price=close + 1,
@@ -91,12 +96,18 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
                         raw_payload_hash=raw.content_hash,
                     )
                 )
+            if event_count:
+                db.add(USCorporateAction(
+                    provider="fixture", symbol=symbol, action_type="split",
+                    event_date=date(2026, 8, 20), split_from=1, split_to=2,
+                    fetched_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+                ))
             db.commit()
             before_count = db.query(USDailyPrice).count()
 
             result = build_us_market_research(
                 db,
-                symbol="AAPL",
+                symbol=symbol,
                 bars=260,
                 now=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
             )
@@ -105,12 +116,25 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
             assert result["schema_version"] == "omi.us_market.research.v1"
             assert result["daily_ohlcv"]["schema_version"] == "omi.market.bars.v1"
             assert result["daily_ohlcv"]["selected_provider"] == "yahoo_chart"
-            assert result["technical_indicators"]["bar_count"] == 220
+            assert result["technical_indicators"]["bar_count"] == 260
             assert result["technical_indicators"]["quality"]["facts_usable"] is True
             assert result["technical_indicators"]["quality"]["decision_usable"] is False
             assert result["technical_structure"]["trend_state"] == "bullish_stack"
             assert result["corporate_action_coverage"]["applicability"] == "required"
             assert result["corporate_action_coverage"]["status"] == "unknown"
+            assert result["status"] == "partial"
+            current = result["technical_indicators"]["current"]
+            assert current["moving_averages"]["ma20"] is not None
+            assert current["rsi"]["rsi14"] is not None
+            assert current["macd"]["line"] is not None
+            assert result["technical_indicators"]["timeframe"] == "1d"
+            assert "RELATIVE_STRENGTH_BENCHMARK_NOT_CONFIGURED" in result["technical_structure"]["limitations"]
+            from app.us_market.schemas import USMarketResearchRead
+            assert USMarketResearchRead.model_validate(result).corporate_action_coverage.status == "unknown"
+            assert result["corporate_action_coverage"]["observed_event_count"] == event_count
+            assert result["corporate_action_coverage"]["completeness_checkpoint"] is None
+            assert result["corporate_action_coverage"]["reason_codes"] == ["CORPORATE_ACTION_INTERVAL_PROOF_MISSING"]
+            assert "CORPORATE_ACTION_COVERAGE_INCOMPLETE" in result["technical_indicators"]["quality"]["reason_codes"]
             assert result["market_coverage"]["full_market_ready"] is False
             classification = result["market_coverage"]["classification_coverage"]
             assert classification["taxonomy_id"] == (
@@ -121,14 +145,14 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
 
             compact = build_us_market_research(
                 db,
-                symbol="AAPL",
+                symbol=symbol,
                 bars=260,
                 now=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
                 include_market_coverage=False,
                 include_daily_ohlcv=False,
             )
             assert compact["daily_ohlcv"] == {}
-            assert compact["technical_indicators"]["bar_count"] == 220
+            assert compact["technical_indicators"]["bar_count"] == 260
             assert compact["market_coverage"] == {
                 "kind": "market_coverage_reference",
                 "schema_version": "omi.us_market.coverage_reference.v1",
@@ -139,7 +163,7 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
             }
             weekly = build_us_market_research(
                 db,
-                symbol="AAPL",
+                symbol=symbol,
                 bars=52,
                 timeframe="weekly",
                 now=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
@@ -148,7 +172,7 @@ def test_research_service_reads_resolved_cache_without_writes() -> None:
             )
             assert weekly["timeframe"] == "weekly"
             assert weekly["technical_indicators"]["timeframe"] == "1w"
-            assert len(weekly["technical_indicators"]["series"]) == 44
+            assert len(weekly["technical_indicators"]["series"]) == 52
             assert weekly["technical_indicators"]["series"][-1]["ma"]["ma20"] is not None
     finally:
         engine.dispose()
@@ -274,3 +298,14 @@ def test_index_research_uses_not_applicable_volume_and_corporate_actions() -> No
             ]["quality"]["reason_codes"]
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("payload", [
+    {"status": "complete", "observed_event_count": 100},
+    {"status": "complete", "completeness_checkpoint": "recent-fetch"},
+    {"status": "not_applicable", "applicability": "required"},
+])
+def test_corporate_action_coverage_rejects_unproven_completion(payload):
+    from app.us_market.corporate_event_schemas import USCorporateActionCoverageRead
+    with pytest.raises(ValidationError):
+        USCorporateActionCoverageRead(**payload)

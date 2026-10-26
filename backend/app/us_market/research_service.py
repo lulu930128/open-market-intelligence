@@ -10,7 +10,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    USCompanyProfile,
     USCorporateAction,
     USStockMaster,
 )
@@ -27,7 +26,9 @@ from app.us_market.daily_market_state import (
     requested_us_completed_daily_state,
 )
 from app.us_market.daily_ohlcv_chart import read_us_daily_ohlcv_chart
+from app.us_market.corporate_event_schemas import USCorporateActionCoverageRead
 from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
+from app.us_market.classification import read_us_classification
 from app.us_market.resolved_reads import (
     US_RESOLVED_DAILY_MAX_BARS,
     read_resolved_us_daily_bars_for_symbol,
@@ -64,40 +65,7 @@ def _coverage_gate(db: Session, *, expected_trade_date, now: datetime) -> dict[s
         fresh_count=fresh_count,
         universe_complete=False,
     )
-    classified_count = int(
-        db.query(func.count(func.distinct(USCompanyProfile.symbol)))
-        .filter(USCompanyProfile.sector.isnot(None))
-        .filter(USCompanyProfile.industry.isnot(None))
-        .scalar()
-        or 0
-    )
-    latest_classification_update = db.query(
-        func.max(USCompanyProfile.fetched_at)
-    ).scalar()
-    gate["classification_coverage"] = {
-        "taxonomy_id": "us_company_profile.provider_reported",
-        "taxonomy_version": (
-            "us_company_profile.provider_reported.v1@"
-            + (
-                latest_classification_update.isoformat()
-                if isinstance(latest_classification_update, datetime)
-                else "empty"
-            )
-        ),
-        "source_scope": "provider_reported_company_profile",
-        "mapped_count": classified_count,
-        "observed_universe_count": observed_count,
-        "coverage_ratio": (
-            classified_count / observed_count if observed_count > 0 else None
-        ),
-        "effective_date": None,
-        "universe_complete": False,
-        "decision_usable": False,
-        "reason_codes": [
-            "STANDARD_TAXONOMY_NOT_CONFIGURED",
-            "EFFECTIVE_MEMBERSHIP_DATE_UNKNOWN",
-        ],
-    }
+    gate["classification_coverage"] = read_us_classification(db, now=now)["coverage"]
     return gate
 
 
@@ -203,7 +171,12 @@ def build_us_market_research(
     )
     # Company corporate actions are not applicable to index observations. For
     # stocks/ETFs, event rows prove observations but not complete coverage.
-    corporate_action_coverage = "not_applicable" if is_index else "unknown"
+    corporate_action_evidence = USCorporateActionCoverageRead(
+        applicability="not_applicable" if is_index else "required",
+        status="not_applicable" if is_index else "unknown",
+        observed_event_count=corporate_action_count,
+        reason_codes=[] if is_index else ["CORPORATE_ACTION_INTERVAL_PROOF_MISSING"],
+    )
     technical_profile = US_INDEX_DAILY_PROFILE if is_index else US_DAILY_PROFILE
     if timeframe != "daily":
         technical_profile = replace(
@@ -246,7 +219,7 @@ def build_us_market_research(
             else "missing"
         ),
         resolved_facts_usable=daily_ohlcv.get("facts_usable") is True,
-        corporate_action_coverage=corporate_action_coverage,
+        corporate_action_coverage=corporate_action_evidence.status,
         lineage=lineage,
     )
     if to_date is not None:
@@ -288,12 +261,7 @@ def build_us_market_research(
         "daily_ohlcv": daily_ohlcv if include_daily_ohlcv else {},
         "technical_indicators": indicators,
         "technical_structure": structure,
-        "corporate_action_coverage": {
-            "applicability": "not_applicable" if is_index else "required",
-            "status": corporate_action_coverage,
-            "observed_event_count": corporate_action_count,
-            "completeness_checkpoint": None,
-        },
+        "corporate_action_coverage": corporate_action_evidence.model_dump(mode="json"),
         "market_coverage": coverage_gate,
         "missing": missing,
         "warnings": warnings,

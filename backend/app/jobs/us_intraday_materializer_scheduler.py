@@ -1025,6 +1025,15 @@ def add_us_intraday_materializer_jobs(scheduler: Any) -> bool:
         _symbols, _batch_size, intraday_run_interval = _rotating_index_batch(
             "intraday.bars"
         )
+        intraday_start_delay = 85.0
+        if settings.enable_us_index_quote_materializer:
+            # Maximize the minimum separation of the two periodic trigger grids.
+            # Keep startup >=85s and all recurring intervals/budgets unchanged.
+            # Work lasting longer than this half-GCD gap can still hit the lock.
+            phase_period = math.gcd(quote_run_interval, intraday_run_interval)
+            intraday_start_delay += (
+                30 + phase_period / 2 - intraday_start_delay
+            ) % phase_period
         with _INDEX_BATCH_STATE_LOCK:
             _INDEX_BATCH_OFFSETS["intraday.bars"] = 0
         scheduler.add_job(
@@ -1035,7 +1044,7 @@ def add_us_intraday_materializer_jobs(scheduler: Any) -> bool:
             replace_existing=True,
             coalesce=True,
             max_instances=1,
-            next_run_time=now + timedelta(seconds=85),
+            next_run_time=now + timedelta(seconds=intraday_start_delay),
         )
         registered = True
     if settings.enable_us_quote_retention_scheduler:
