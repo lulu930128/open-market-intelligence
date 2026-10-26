@@ -345,11 +345,18 @@ def test_progressing_partial_shard_is_not_a_failed_job():
     result = {"status": "partial", "postcondition_met": False,
               "continuation_required": True, "error_count": 0}
     completed = []
+    db = object()
+    distribution = {"status": "partial", "source": "fixture"}
     def execute(_job_id, worker):
-        completed.append(worker(object(), Mock()))
+        completed.append(worker(db, Mock()))
     with patch.object(eod_coverage, "reconcile_eod_coverage", return_value=result), patch.object(
         eod_coverage.job_service, "run_tracked_job", side_effect=execute
-    ):
+    ), patch.object(
+        eod_coverage.US_FULL_MARKET_EOD_LIFECYCLE, "publish_distribution",
+        return_value=distribution,
+    ) as publish:
         eod_coverage.run_eod_coverage_reconcile_job(1, "US", True, None, 1, 30, 0, 5, 1800)
+    publish.assert_called_once_with(db)
     assert completed == [result]
     assert completed[0]["postcondition_met"] is False
+    assert completed[0]["distribution_snapshot"] == distribution

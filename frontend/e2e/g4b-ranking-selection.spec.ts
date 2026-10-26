@@ -3,6 +3,7 @@ import { runInNewContext } from "node:vm";
 import { expect, test, type Page } from "@playwright/test";
 import ts from "typescript";
 import { usTruthResponse } from "./fixtures/usMarketTruth";
+import usDistributionFixture from "./fixtures/usSectorDistribution.json";
 
 // Reuse the current G4 route fixtures without modifying/registering its tests.
 // Remove only top-level test registrations; fixture bodies stay intact.
@@ -35,6 +36,7 @@ const fixtures = runInNewContext(ts.transpileModule(`${fixturesSource}\n({${name
   require: (name: string) => {
     if (name === "@playwright/test") return { test, expect };
     if (name === "./fixtures/usMarketTruth") return { usTruthResponse };
+    if (name === "./fixtures/usSectorDistribution.json") return usDistributionFixture;
     throw new Error(`Unexpected G4 fixture dependency: ${name}`);
   },
 }) as Fixtures;

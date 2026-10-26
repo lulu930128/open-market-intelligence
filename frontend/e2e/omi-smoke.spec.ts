@@ -348,10 +348,10 @@ test.describe("G4 source browser", () => {
     await expect(state).toHaveAttribute("role", "alert");
     await expect(panel.getByRole("img")).toBeVisible();
     mode = "mismatch";
-    await state.getByRole("button", { name: "重試", exact: true }).click();
+    await state.getByRole("button", { name: "重試", exact: true }).press("Enter");
     await expect(state).toHaveAttribute("role", "alert");
     mode = "success";
-    await state.getByRole("button", { name: "重試", exact: true }).click();
+    await state.getByRole("button", { name: "重試", exact: true }).press("Enter");
     await expect(state).toHaveCount(0);
     release();
     await expect(panel.getByRole("img")).toBeVisible();
@@ -2539,12 +2539,12 @@ function usOhlcResponse(symbol: string) {
   };
 }
 
-function usIntradayResponse(symbol: string) {
+function usIntradayResponse(symbol: string, sessionScope = "all") {
   return {
     stock_id: symbol,
     symbol,
     source: "playwright.fixture",
-    session_scope: "regular",
+    session_scope: sessionScope,
     session_phase: "regular",
     has_extended_hours: false,
     previous_close: 940,
@@ -2607,6 +2607,7 @@ test("US Today session metrics preserve shares, estimates, scope and interval", 
     await today.click();
     await expect(today).toHaveClass(/omi-timeframe-tab-active/, { timeout: 750 });
   }).toPass({ timeout: 5_000 });
+  await panel.getByRole("button", { name: "盤中", exact: true }).click();
   await expect(page.getByTestId("session-metric-volume")).toContainText("總量（股）");
   await expect(page.getByTestId("session-metric-volume")).toContainText("7,205,987");
   await expect(page.getByTestId("session-metric-turnover")).toContainText("≈ 3,115,432,187.25");
@@ -3622,6 +3623,11 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (path.endsWith("/us-market/sectors")) {
+      await fulfillJson(route, usDistributionFixture);
+      return;
+    }
+
     if (path.endsWith("/us-market/indices")) {
       if (await tryFulfillMarketTape(route, url, "us", "indices", "all")) return;
       await fulfillJson(route, usMarketIndicesResponse());
@@ -3651,7 +3657,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     if (/\/us-market\/intraday\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
       if (await tryFulfillMarketTape(route, url, "us", "intraday", symbol)) return;
-      await fulfillJson(route, usIntradayResponse(symbol));
+      await fulfillJson(route, usIntradayResponse(symbol, url.searchParams.get("session_scope") ?? "all"));
       return;
     }
 
@@ -7833,6 +7839,8 @@ test.describe("OMI dashboard smoke", () => {
     const priceMap = page.getByTestId("tw-stock-price-map");
     const evidence = page.getByTestId("tw-stock-detail-radar-evidence");
     const external = page.getByTestId("tw-stock-detail-radar-external");
+    const evidenceToggle = evidence.locator('button[aria-controls="tw-stock-detail-radar-evidence-content"]');
+    const externalToggle = external.locator('button[aria-controls="tw-stock-detail-radar-external-content"]');
 
     await expect(radar).toBeVisible();
     await expect(summary).toBeVisible();
@@ -7841,15 +7849,15 @@ test.describe("OMI dashboard smoke", () => {
       "aria-expanded",
       "true"
     );
-    await expect(evidence.getByRole("button")).toHaveAttribute("aria-expanded", "false");
-    await expect(external.getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    await expect(evidenceToggle).toHaveAttribute("aria-expanded", "false");
+    await expect(externalToggle).toHaveAttribute("aria-expanded", "false");
 
-    await evidence.getByRole("button").click();
-    await expect(evidence.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    await evidenceToggle.click();
+    await expect(evidenceToggle).toHaveAttribute("aria-expanded", "true");
     await expect(page.getByTestId("tw-technical-evidence-trend")).toBeVisible();
 
-    await external.getByRole("button").click();
-    await expect(external.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    await externalToggle.click();
+    await expect(externalToggle).toHaveAttribute("aria-expanded", "true");
     await expect(page.getByTestId("tw-overnight-impact-disclosure")).toBeVisible();
   });
   test("Taiwan daily technical panel routes signal chips to evidence or source data", async ({

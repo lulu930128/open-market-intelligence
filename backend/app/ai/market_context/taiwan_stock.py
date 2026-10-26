@@ -963,9 +963,10 @@ def _apply_taiwan_current_price_contract(
         session_phase=calendar_status.get("phase"),
     )
     current_session_date = _json_value(calendar_status.get("date"))
+    research_price = resolved.get("research_price") or {}
     if (
         resolved.get("value") is None
-        and resolved.get("source_kind") == "previous_close_reference"
+        and research_price.get("source_kind") == "previous_close_reference"
         and completed_daily_date
         and current_session_date
         and str(completed_daily_date) < str(current_session_date)
@@ -976,6 +977,7 @@ def _apply_taiwan_current_price_contract(
         if isinstance(latest_completed_close, (int, float, Decimal)):
             if latest_completed_close > 0:
                 resolved["reference_price"] = latest_completed_close
+                research_price["reference_price"] = latest_completed_close
     quote["provider_trade_date"] = provider_trade_date
     resolved["freshness"] = dict(resolved["quality"])
     quote["current_price"] = resolved

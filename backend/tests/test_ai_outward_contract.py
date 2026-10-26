@@ -637,7 +637,12 @@ class QueryPlanContractTests(unittest.TestCase):
             checked_at=datetime(2026, 8, 31, 15, 20, tzinfo=timezone(timedelta(hours=8))),
         )
 
-        self.assertEqual(resolved["source_kind"], "previous_close_reference")
+        self.assertEqual(resolved["source_kind"], "unavailable")
+        self.assertIsNone(resolved["value"])
+        self.assertFalse(resolved["decision_price"]["decision_usable"])
+        self.assertEqual(resolved["research_price"]["source_kind"], "previous_close_reference")
+        self.assertFalse(resolved["research_price"]["decision_usable"])
+        self.assertEqual(resolved["research_price"]["reference_price"], 2420.0)
         self.assertEqual(resolved["reference_price"], 2420.0)
 
     def test_official_headline_is_not_overwritten_by_last_trade(self) -> None:

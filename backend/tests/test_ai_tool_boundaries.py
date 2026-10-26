@@ -132,6 +132,7 @@ class AIToolBoundaryTests(unittest.TestCase):
             question="美國整體市場狀況",
             target={"type": "market", "id": "US", "market": "US"},
             output="evidence_only",
+            selection={"include": ["market.indices"]},
         )
         regional_result = {
             "target": {

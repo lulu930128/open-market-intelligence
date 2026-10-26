@@ -62,13 +62,14 @@ jobs:
         run: python -m pytest -p no:cacheprovider backend\tests\architecture
 
   backend:
-    name: Backend (Python ${{ matrix.python-version }})
+    name: Backend (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }})
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.13"]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
     steps:
       - name: Checkout
@@ -80,18 +81,30 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install backend dependencies
-        run: python -m pip install -r backend\requirements.txt
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 
       - name: Check backend dependency compatibility
-        run: python -m pip check
+        run: .\.venv\Scripts\python.exe -m pip check
 
       - name: Compile backend
-        run: python -m compileall backend\app
+        run: .\.venv\Scripts\python.exe -m compileall backend\app
 
       - name: Run backend unit tests
         env:
           PYTHONPATH: backend
-        run: python -m pytest -p no:cacheprovider --durations=20 backend\tests
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: .\.venv\Scripts\python.exe scripts\ci-backend-shards.py --shard ${{ matrix.shard }} --shards 8
+
+      - name: Upload backend collection and test receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-${{ matrix.python-version }}-shard-${{ matrix.shard }}
+          path: ci-results/
+          if-no-files-found: error
+          retention-days: 7
 
   frontend:
     name: Frontend
