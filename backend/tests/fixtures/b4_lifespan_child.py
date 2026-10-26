@@ -238,6 +238,17 @@ async def rehearse(root, instance, runner_pid, runner_start, scenario):
         if serving.done(): await serving; raise RuntimeError('Uvicorn not started')
         await asyncio.sleep(.005)
     mark('uvicorn_started_without_listener')
+    # The independent test observer must retain its query-only handle before
+    # the runner can complete a fast handshake and release the child process.
+    observation = dict(child_pid=os.getpid(), child_start=own_start)
+    publish(root, 'observer-target.json', observation)
+    observe_until = time.monotonic() + 4
+    while not (root / 'observer-retained.json').exists():
+        if time.monotonic() >= observe_until:
+            raise RuntimeError('INDEPENDENT_OBSERVER_NOT_RETAINED')
+        await asyncio.sleep(.005)
+    if json.loads((root / 'observer-retained.json').read_text()) != observation:
+        raise RuntimeError('INDEPENDENT_OBSERVER_IDENTITY_MISMATCH')
     publish(root, 'ready.json', dict(instance=instance, child_pid=os.getpid(),
         child_start=str(int(own_start)+1) if scenario == 'ready-wrong-start' else own_start))
     lease = time.monotonic() + 5

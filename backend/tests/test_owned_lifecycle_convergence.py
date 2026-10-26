@@ -18,10 +18,10 @@ $flags = [Reflection.BindingFlags]'Instance,NonPublic'
 $session = [Runtime.Serialization.FormatterServices]::GetUninitializedObject($type)
 function Set-Field($name, $value) { $type.GetField($name, $flags).SetValue($session, $value) }
 function Start-Disposable($arguments) {
-    $info = [Diagnostics.ProcessStartInfo]::new('PYTHON', $arguments)
-    $info.UseShellExecute = $false; $info.CreateNoWindow = $true
-    $info.RedirectStandardInput = $true; $info.RedirectStandardOutput = $true
-    $p = [Diagnostics.Process]::Start($info); $null = $p.Handle
+    # Exercise the canonical inherited-channel transport, including its encoding.
+    $wire = $type.Assembly.GetType('Omi.OwnedShutdown.Wire')
+    $start = $wire.GetMethod('Start', [type[]]@([string], [string], [string], [bool]))
+    $p = $start.Invoke($null, @('PYTHON', $arguments, [Environment]::CurrentDirectory, $false))
     return $p
 }
 function Created($process) { return $process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() }
@@ -30,6 +30,38 @@ $owner = [Diagnostics.Process]::GetCurrentProcess()
 foreach ($entry in @{ instance=[Guid]::NewGuid().ToString('D'); nonce=('a'*64); launcher_pid=$owner.Id.ToString(); launcher_created=(Created $owner);
     host='127.0.0.1'; port='65431'; release_id='offline' }.GetEnumerator()) { $identity[$entry.Key] = $entry.Value }
 """.replace('PYTHON', getattr(sys, '_base_executable', sys.executable).replace("'", "''"))
+
+
+def test_wire_stdin_is_bom_free_under_utf8_console_host(tmp_path):
+    child = tmp_path / 'wire_encoding.py'
+    child.write_text(
+        'import json, sys\n'
+        'raw = sys.stdin.buffer.readline()\n'
+        'value = json.loads(raw.decode("utf-8"))\n'
+        'assert raw.startswith(b"{")\n'
+        'print(json.dumps(value), flush=True)\n'
+        'assert sys.stdin.buffer.read() == b""\n', encoding='utf-8',
+    )
+    scenario = CS_SETUP + r"""
+# Reproduce Windows Actions' UTF-8 console before the first canonical start.
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+$child = Start-Disposable '-B "CHILD"'
+try {
+    $wire = $type.Assembly.GetType('Omi.OwnedShutdown.Wire')
+    $value = [Collections.Generic.Dictionary[string,string]]::new()
+    $value['state']='ENCODING_PROOF'
+    $wire.GetMethod('Send').Invoke($null,@($child.StandardInput,$value))
+    $reply = $wire.GetMethod('Read').Invoke($null,@($child.StandardOutput,5000))
+    if ($reply['state'] -cne 'ENCODING_PROOF') {throw 'WIRE_ENCODING_CHANGED_FRAME'}
+    $child.StandardInput.Close()
+    if (-not $child.WaitForExit(5000) -or $child.ExitCode -ne 0) {throw 'WIRE_ENCODING_OR_EOF_FAILED'}
+} finally {
+    $child.StandardInput.Close()
+    if (-not $child.WaitForExit(5000)) {throw 'DISPOSABLE_DID_NOT_EXIT'}
+    $child.Dispose()
+}
+""".replace('CHILD', str(child))
+    assert not _run_isolated_launcher(tmp_path, scenario)['calls']
 
 
 @pytest.mark.parametrize('fault', ['', 'child-survives', 'runner-code', 'child-code', 'wrong-uuid', 'no-proof', 'no-child'])

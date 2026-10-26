@@ -28,7 +28,7 @@ def test_real_child_engine_connection_os_handle_lifecycle(case, expected, reason
     result = subprocess.run([sys.executable, '-B', str(FIXTURE), case],
                             capture_output=True, text=True, timeout=20)
     payload = json.loads(result.stdout)
-    assert payload['verdict'] == expected, payload
+    assert payload['verdict'] == expected, json.dumps(payload, indent=2)
     assert result.returncode == (0 if expected == 'DISPOSABLE_BINDING_PASS' else 2)
     assert payload['production_gate'] == 'BLOCKED'
     assert payload['database_handle_binding'] == 'UNKNOWN'
@@ -42,6 +42,22 @@ def test_real_child_engine_connection_os_handle_lifecycle(case, expected, reason
         identities = list(evidence['new_disk_handle_identities'].values())
         assert identities.count(evidence['expected_identity']) == 1
         assert evidence['expected_identity'] == evidence['connection_identity']
+
+
+def test_native_identity_does_not_depend_on_python_stat_width(monkeypatch):
+    original = Path.lstat
+
+    def legacy_stat(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        return SimpleNamespace(st_file_attributes=info.st_file_attributes,
+                               st_mode=info.st_mode, st_nlink=info.st_nlink,
+                               st_dev=0, st_ino=0)
+
+    monkeypatch.setattr(Path, 'lstat', legacy_stat)
+    payload = fixture.run()
+    assert payload['verdict'] == 'DISPOSABLE_BINDING_PASS', payload
+    assert payload['evidence']['expected_identity'] != [0, 0]
+    assert payload['production_gate'] == 'BLOCKED'
 
 
 @pytest.mark.parametrize('fault', ['denied', 'partial', 'missing', 'wrong_identity'])

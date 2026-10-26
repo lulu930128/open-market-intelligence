@@ -235,7 +235,12 @@ try {
     Assert ($runner.ExitCode -eq 0) 'disposable runner exited naturally'
     $observations = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
     $realArgv = [Omi.RuntimeControl.ProcessEvidence]::Arguments($observations[0].CommandLine)
-    Assert ($realArgv[0] -ieq (Join-Path $repo '.venv\Scripts\python.exe')) 'actual redirector preserves venv argv0'
+    # Python 3.11 rewrites argv0 to the base image; newer redirectors preserve
+    # the venv path. The actual ancestry below must still prove both images.
+    Assert ($realArgv[0] -ieq (Join-Path $repo '.venv\Scripts\python.exe') -or
+        $realArgv[0] -ieq $observations[0].ExecutablePath) 'actual argv0 binds venv or observed base image'
+    Assert ($realArgv[1] -ceq '-I' -and $realArgv[2] -ceq '-S' -and
+        $realArgv[3] -ieq (Join-Path $PSScriptRoot 'owned-identity-child.py')) 'actual isolated child argv'
     Reset-Fixture
     $script:RepoRoot = $repo
     $script:Records = @{}; $script:Processes = @{}

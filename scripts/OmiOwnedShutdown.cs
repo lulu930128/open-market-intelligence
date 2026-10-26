@@ -26,6 +26,9 @@ namespace Omi.OwnedShutdown {
     }
 
     internal static class Wire {
+        // .NET Framework creates redirected stdin writers from Console.InputEncoding.
+        // UTF-8 console hosts otherwise prepend a BOM to the first JSON frame.
+        static Wire() { Console.InputEncoding = new UTF8Encoding(false); }
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8192 };
         public static string Encode(Dictionary<string,string> value) { return Json.Serialize(value); }
         public static Dictionary<string,string> Decode(string line) {

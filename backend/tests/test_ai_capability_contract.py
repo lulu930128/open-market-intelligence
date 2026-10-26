@@ -2758,7 +2758,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertIn("broker_branch", plan.required_readers)
         self.assertNotIn("revenue", plan.required_readers)
         self.assertNotIn("technical_evidence", plan.required_readers)
-        self.assertTrue(plan.external_refresh_allowed)  # Actual acquisition remains policy/fill-owned.
+        self.assertFalse(plan.external_refresh_allowed)  # data_only cannot authorize acquisition.
 
     def test_explicit_intents_add_capabilities_without_keyword_hints(self) -> None:
         payload = AiAskRequest(
@@ -3494,7 +3494,7 @@ class AiCapabilityContractTests(unittest.TestCase):
 
         self.assertEqual(plan.reader_profile, "capability_graph")
         self.assertEqual(set(plan.required_readers), {"identity", "daily", "selected_freshness"})
-        self.assertTrue(plan.external_refresh_allowed)  # Actual acquisition remains policy/fill-owned.
+        self.assertFalse(plan.external_refresh_allowed)  # data_only cannot authorize acquisition.
         self.assertNotIn("financials", plan.required_readers)
         self.assertNotIn("source_health", plan.required_readers)
         self.assertEqual(plan.selection["limits"]["daily.ohlcv"], 20)
@@ -3531,7 +3531,7 @@ class AiCapabilityContractTests(unittest.TestCase):
         self.assertNotIn("financials", plan.required_readers)
         self.assertNotIn("overnight", plan.required_readers)
         self.assertNotIn("broker_branch", plan.required_readers)
-        self.assertTrue(plan.external_refresh_allowed)  # Actual acquisition remains policy/fill-owned.
+        self.assertFalse(plan.external_refresh_allowed)  # data_only cannot authorize acquisition.
 
     def test_crypto_capability_plan_is_target_provider_and_interval_bounded(self) -> None:
         plan, warnings = agentic_planning.plan_crypto_asset_tools(

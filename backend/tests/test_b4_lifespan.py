@@ -59,9 +59,13 @@ def execute(directory, scenario, **kwargs):
     handle = None
     until = time.monotonic() + 15
     while process.poll() is None and time.monotonic() < until:
-        if handle is None and (directory/'ready.json').exists():
-            ready = json.loads((directory/'ready.json').read_text())
+        if handle is None and (directory/'observer-target.json').exists():
+            ready = json.loads((directory/'observer-target.json').read_text())
             handle = ChildHandle(ready['child_pid'])
+            assert handle.start == ready['child_start']
+            marker = directory/'observer-retained.tmp'
+            marker.write_text(json.dumps(dict(child_pid=handle.pid, child_start=handle.start)), encoding='utf-8')
+            marker.rename(directory/'observer-retained.json')
         time.sleep(.002)
     stdout, stderr = process.communicate(timeout=15)
     exit_proof = handle.wait() if handle else None

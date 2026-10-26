@@ -24,10 +24,10 @@ try {
             'owned-running' {
                 # Birth only disposable runner/child; never discover a production PID.
                 $python=@(Get-Content (Join-Path $repo '.venv/pyvenv.cfg') | Where-Object {$_ -like 'executable = *'})[0].Substring(13)
-                $info=[Diagnostics.ProcessStartInfo]::new($python,('"{0}" graceful' -f (Join-Path $PSScriptRoot 'cutoff-fixture.py')))
-                $info.UseShellExecute=$false;$info.CreateNoWindow=$true
-                $info.RedirectStandardInput=$true;$info.RedirectStandardOutput=$true
-                $runner=[Diagnostics.Process]::Start($info);$null=$runner.Handle
+                $wire=[Omi.OwnedShutdown.ProductionSession].Assembly.GetType('Omi.OwnedShutdown.Wire')
+                $start=$wire.GetMethod('Start',[type[]]@([string],[string],[string],[bool]))
+                $arguments='"{0}" graceful' -f (Join-Path $PSScriptRoot 'cutoff-fixture.py')
+                $runner=$start.Invoke($null,@([string]$python,[string]$arguments,[string]$repo,$false))
                 $read=$runner.StandardOutput.ReadLineAsync()
                 if (-not $read.Wait(3000)) {throw 'FIXTURE_BOOT_TIMEOUT'}
                 $child=[Diagnostics.Process]::GetProcessById([int]$read.Result);$null=$child.Handle

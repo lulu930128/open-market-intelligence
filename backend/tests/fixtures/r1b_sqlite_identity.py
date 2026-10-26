@@ -66,6 +66,8 @@ class OwnHandles:
         self.k = ctypes.WinDLL('kernel32', use_last_error=True)
         signatures = {
             'GetCurrentProcess': ([], w.HANDLE),
+            'CreateFileW': ([w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE], w.HANDLE),
+            'CloseHandle': ([w.HANDLE], w.BOOL),
             'PssCaptureSnapshot': ([w.HANDLE, w.DWORD, w.DWORD, ctypes.POINTER(w.HANDLE)], w.DWORD),
             'PssWalkMarkerCreate': ([ctypes.c_void_p, ctypes.POINTER(w.HANDLE)], w.DWORD),
             'PssWalkSnapshot': ([w.HANDLE, w.DWORD, w.HANDLE, ctypes.c_void_p, w.DWORD], w.DWORD),
@@ -108,17 +110,21 @@ class OwnHandles:
             checked(self.k.PssFreeSnapshot(self.process, snapshot))
 
     def disk_identity(self, handle):
-        if self.k.GetFileType(handle) != 1:  # FILE_TYPE_DISK
-            return None
-        info = FileInfo()
-        if not self.k.GetFileInformationByHandle(handle, ctypes.byref(info)):
-            raise EvidenceUnavailable('Disk handle identity unavailable')
-        if info.links != 1 or info.attributes & 0x400:
-            raise EvidenceUnavailable('Alias/reparse handle rejected')
-        identity = FileIdInfo()
-        if not self.k.GetFileInformationByHandleEx(handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)):
-            raise EvidenceUnavailable('128-bit file identity unavailable')
-        return [identity.volume, int.from_bytes(identity.identifier, 'little')]
+        return file_identity(self.k, handle)
+
+
+def file_identity(kernel, handle):
+    if kernel.GetFileType(handle) != 1:  # FILE_TYPE_DISK
+        return None
+    info = FileInfo()
+    if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        raise EvidenceUnavailable('Disk handle identity unavailable')
+    if info.links != 1 or info.attributes & 0x400:
+        raise EvidenceUnavailable('Alias/reparse handle rejected')
+    identity = FileIdInfo()
+    if not kernel.GetFileInformationByHandleEx(handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)):
+        raise EvidenceUnavailable('128-bit file identity unavailable')
+    return [identity.volume, int.from_bytes(identity.identifier, 'little')]
 
 
 def guarded_identity(path, root):
@@ -131,7 +137,20 @@ def guarded_identity(path, root):
             raise EvidenceUnavailable('Reparse path rejected')
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise EvidenceUnavailable('Not a single-link fixture file')
-    return [info.st_dev, info.st_ino]
+    # Python 3.11 stat uses narrower Windows volume/file identifiers than
+    # FILE_ID_INFO. Compare the same full native identity on both Python versions.
+    observer = OwnHandles()
+    handle = observer.k.CreateFileW(str(path), 0, 7, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise EvidenceUnavailable('Fixture identity handle unavailable')
+    try:
+        identity = file_identity(observer.k, handle)
+        if identity is None:
+            raise EvidenceUnavailable('Fixture is not a disk file')
+        return identity
+    finally:
+        if not observer.k.CloseHandle(handle):
+            raise EvidenceUnavailable('Fixture identity handle close failed')
 
 
 def verdict(evidence):
