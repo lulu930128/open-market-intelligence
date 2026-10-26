@@ -4,6 +4,31 @@
 
 ## [Unreleased]
 
+## [4.10.0] - 2026-10-26
+
+### Changed
+
+- Job lifecycle：加入 cooperative pause、durable owner checkpoint、精確續跑與未確認結果的保留；整合 EOD、歷史回補、盤中需求與 Radar 的原 owner，不以重新排程掩蓋未完成工作。
+- 台股：對齊 TWSE MIS 實際成交、試撮與缺值證據，補齊廣度母體、官方盤後資料、成交金額 qualification 與 screening／lease 語意；AI 與 outward contract 保留 partial、best-effort 及來源限制。
+- 美股：加入 grouped daily 有界取得、SEC SIC 分類同步、EOD distribution snapshot 與 sector coverage API；整合 migration `20261025_0093`、canonical eligibility、scope／coverage 與 AI capability contract。
+- AI 與資源市場：統一問題文字與明確市場參數的標的解析；商品 refresh 經既有 capability／job boundary 執行，使用事件時間判斷 freshness，保留供應商失敗與 quota 限制。
+- Discord：依台股 pre-market／intraday／post-market phase 投影派報文字、圖表及 evidence，維持既有資料取得與報告責任邊界。
+- Runtime source：整合 owner-bound restart、磁碟 application snapshot 固定、離線控制、失敗啟動恢復與 schema maintenance 流程；明確區分 graceful exit、forced cutoff、未知結果與 reconciliation requirement。
+- 前端：新增美股 sector distribution 的 coverage、排序、展開及空值狀態，對齊 Market Tape canonical projection、錯誤狀態、型別與三語文案。
+
+### Fixed
+
+- 保留美股盤中 materializer 失敗與 corporate action 未知狀態，避免把未確認資料呈現為正常或已完成。
+- 對齊隔離測試的 lifecycle deadline、停止順序、離線控制與 EOD 發布替身，以及台股剩餘時間預算與成交金額資格檢查。
+- 對齊 VERSION、Frontend package／lockfile root 與三語 README badges 為 4.10.0。
+
+### Notes
+
+- 本版為 Source／Tests／Docs 發布；commit、push 與隔離測試不代表目前載入的 Runtime、Live provider 或 Product acceptance 已通過。
+- 本次未對正式資料庫執行 migration／backup、未重啟正式服務、未執行市場 refresh、Discord 發送、券商認證或交易。Schema 0093 與各 runtime 操作仍須依既有 owner、備份及獨立驗收流程採用。
+- 保留歷史市場缺口與 runtime incident 記錄；既有 BLOCKED、partial、UNKNOWN 與未完成的正式驗收不因版本升號而解除。
+- Runtime 的完整回歸 gate 仍為 partial：歷史 source-phase fixture 與新的 180 秒外層 cutoff／release 選定時點不一致；Frontend retained-process／tree-stop 的隔離測試亦仍有未通過案例。保留具體失敗紀錄，不宣稱這些 runtime 路徑已完成驗收。
+
 ## [4.9.0] - 2026-10-11
 
 ### Changed
