@@ -36,10 +36,22 @@ def _checkpoint(db, target):
     return checkpoint(db, target)
 
 
-def _submit_batch(db, symbols, *, now, origin, enqueuer):
+def _submit_batch(db, symbols, *, now, origin, enqueuer, target_plan=None):
     results = []
     slots = _background_slots(db)
     row, state = _checkpoint(db, f"tw-cadence:{origin}:{now.date()}")
+    if target_plan is not None:
+        # Retain the exact selection considered by this cadence, without
+        # resetting due times, work identity, retry or external-call budgets.
+        state["target_selection"] = {
+            "observed_at": now.isoformat(),
+            "contract_version": target_plan.get("contract_version"),
+            "operation_profile": target_plan.get("operation_profile"),
+            "max_symbols": target_plan.get("max_symbols"),
+            "candidate_count": target_plan.get("candidate_count"),
+            "selected_count": len(symbols),
+            "diagnostics": target_plan.get("selection_diagnostics", []),
+        }
     cursor = int(state.get("cursor", 0)) % max(len(symbols), 1)
     ordered = symbols[cursor:] + symbols[:cursor]
     if origin == "scheduler":
@@ -99,7 +111,8 @@ def collect_taiwan_intraday_bars(*, now: datetime | None = None,
         dispatch_due_materializations(db, requested_at=local)
         universe = universe_resolver(db)
         symbols = list(dict.fromkeys(universe.get("symbols") or []))[:settings.scheduler_taiwan_intraday_bar_max_symbols]
-        results = _submit_batch(db, symbols, now=local, origin="scheduler", enqueuer=enqueuer)
+        results = _submit_batch(db, symbols, now=local, origin="scheduler", enqueuer=enqueuer,
+                                target_plan=universe)
         return {"status": "pending" if results else "skipped", "phase": phase,
                 "requested_count": len(symbols), "submitted_count": len(results),
                 "refreshed_count": 0, "universe": universe, "results": results}
@@ -117,7 +130,8 @@ def reconcile_taiwan_intraday_close_tails(*, now: datetime | None = None,
         universe = resolver(db, max_symbols=settings.scheduler_taiwan_intraday_close_tail_max_symbols,
             **({"operation_profile": "production_session_close"} if universe_resolver is None else {}))
         symbols = list(dict.fromkeys(universe.get("symbols") or []))[:settings.scheduler_taiwan_intraday_close_tail_max_symbols]
-        results = _submit_batch(db, symbols, now=local, origin="close_tail", enqueuer=enqueuer)
+        results = _submit_batch(db, symbols, now=local, origin="close_tail", enqueuer=enqueuer,
+                                target_plan=universe)
         return {"status": "pending" if results else "skipped", "trade_date": local.date().isoformat(),
                 "requested_count": len(symbols), "submitted_count": len(results), "results": results}
 

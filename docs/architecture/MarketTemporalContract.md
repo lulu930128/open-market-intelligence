@@ -50,6 +50,17 @@ Finalization 必須由 evidence object 的 contract 定義，不建立跨所有 
 - `final` 本身不代表 exchange authority、official daily 已發布或 reconciliation 已完成。
 - Session-close quote 是獨立 projection contract；它可以有 `resolving`／`session_final` 等 status，但不得因此擴張 generic `BarFinalization`。
 
+台股 index 的 completed daily proxy 可以 `final` 且可供研究，但未獲正式收盤確認時，
+`decision_usable=false`。`index_resolution` 擁有 research／decision 資格與 authority 的
+一致性；AI v4 保留 source、authority、finalization、provisional 與明確 decision denial。
+
+台股 Market Minute State 的 finalized 只表示該次保存的成熟度，不改寫成交值來源的
+事件時鐘。保存分鐘取 `owns_trade_value` component 的原始 event minute；例如 13:32
+估算值保存及比較於 13:32，不標成 13:30 官方收盤額。兩市場與歷史樣本仍須同交易日、
+同分鐘、相容 scope／semantic／authority 並具完整 lineage。舊 13:30 bucket 搭配
+13:32 event 的 row 維持不合格，讀取不重新詮釋或回寫；歷史修復須另有 migration／
+backfill 評估與授權。沒有足夠合格樣本時 ratio 保持 null。
+
 ### 4. Authority and lineage
 
 `SourceLineage.authority` 回答來源權威類型，例如 exchange、broker、vendor、derived、cache。Authority 不代表資料已發布或已 final；exchange realtime 與 exchange official daily 仍是不同 dataset／evidence。

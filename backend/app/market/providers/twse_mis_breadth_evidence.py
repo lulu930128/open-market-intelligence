@@ -8,10 +8,12 @@ from __future__ import annotations
 from concurrent.futures import Future, wait
 from hashlib import sha256
 import json
-from threading import Lock, Thread
+import math
+from threading import Lock
 from time import monotonic
 from typing import Callable
 
+from app.runtime_admission import AdmissionCommitted, OwnedWorkThread as Thread
 
 EXAMPLE_FIELDS = ("c", "d", "t", "z", "v", "tv", "ts", "pz", "ps", "o", "h", "l", "y")
 _IO_LOCK = Lock()
@@ -45,7 +47,7 @@ blocks subsequent IO until completion instead of accumulating background workers
     if venue not in {"tse", "otc"}:
         raise ValueError("MIS breadth transport requires an explicit venue")
     deadline = monotonic() + seconds
-    if seconds <= 0:
+    if not math.isfinite(seconds) or seconds <= 0:
         raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE")
     with _IO_LOCK:
         previous = _IN_FLIGHT.get(venue)
@@ -60,7 +62,15 @@ blocks subsequent IO until completion instead of accumulating background workers
             except BaseException as exc:
                 future.set_exception(exc)
 
-        Thread(target=run, name=f"twse-mis-breadth-{venue}-io", daemon=True).start()
+        try:
+            # The runtime must retain timed-out IO through actual completion.
+            # A caller deadline is not evidence that the worker has stopped.
+            Thread(target=run, name=f"twse-mis-breadth-{venue}-io", daemon=True).start()
+        except AdmissionCommitted as exc:
+            # This rejection is before native Thread.start. Other start errors
+            # have unknown delivery: retain the slot until run() resolves it.
+            _IN_FLIGHT.pop(venue, None)
+            raise AcquisitionInFlight("TWSE_MIS_RUNTIME_ADMISSION_PAUSED") from exc
     completed, _ = wait((future,), timeout=max(0.0, deadline - monotonic()))
     if not completed:
         raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE")

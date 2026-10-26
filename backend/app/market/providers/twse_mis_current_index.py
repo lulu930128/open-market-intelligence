@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from app.market.index_parsers import as_float, as_int, parse_trade_date
 from app.market.providers import http_get, twse_mis
 from app.market.providers.tw_current_market import CurrentMarketProviderPayload
+from app.market.providers.twse_mis_breadth_evidence import AcquisitionInFlight, bounded_fetch
 from app.market.providers.twse_mis_guard import (
     TWSE_MIS_PROVIDER_GUARD,
     response_failure_metadata,
@@ -83,11 +84,17 @@ def read_twse_mis_current_index(
     if attempt is None:
         raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
     try:
-        message = twse_mis.fetch_index_message(
-            config["channel"],
-            target=normalized,
-            timeout_seconds=timeout_seconds,
-            request=http_get,
+        # exchange is slot routing only; preserve the index transport contract.
+        def fetch(*, exchange: str):
+            return twse_mis.fetch_index_message(
+                config["channel"],
+                target=normalized,
+                timeout_seconds=timeout_seconds,
+                request=http_get,
+            )
+
+        message = bounded_fetch(
+            fetch, timeout_seconds, exchange=config["channel"].split("_", 1)[0],
         )
         event_time = _snapshot_time(
             message.get("d") if message else None,
@@ -130,6 +137,19 @@ def read_twse_mis_current_index(
             url=twse_mis.STOCK_INFO_URL,
             operational_status=OperationalStatus.HEALTHY,
             detail_code="TWSE_MIS_INDEX_AVAILABLE",
+        )
+    except AcquisitionInFlight as exc:
+        # Slot/admission denial proves zero IO, including a half-open probe.
+        TWSE_MIS_PROVIDER_GUARD.cancel_attempt(attempt)
+        return CurrentMarketProviderPayload(
+            payload=None,
+            status="unavailable",
+            url=twse_mis.STOCK_INFO_URL,
+            status_code=None,
+            error=str(exc),
+            operational_status=OperationalStatus.UNAVAILABLE,
+            detail_code=str(exc),
+            external_calls=0,
         )
     except Exception as exc:
         status_code, headers = response_failure_metadata(exc)

@@ -1822,6 +1822,12 @@ def _brief_capability_summary(
                     "volume_reconciliation",
                     "volume_decision_usable",
                     "price_decision_usable",
+                    "decision_usable",
+                    "selected_authority",
+                    "selected_finalization",
+                    "official_source",
+                    "official_close_confirmed",
+                    "provisional_estimate",
                     "trade_value",
                     "trade_value_unit",
                     "trade_value_status",
@@ -4161,13 +4167,69 @@ def build(
         canonical,
         quality=quality,
     )
+    # Factual answers consume the same quality-reconciled acquisition outcomes
+    # that are returned to callers; answer composition must not infer provider IO.
+    reconciled_manifest = _dict(_dict(canonical.get("evidence")).get("manifest"))
+    execution = _dict(canonical.get("execution"))
+    tool_runs = [
+        run
+        for run in _list(execution.get("tool_runs"))
+        if isinstance(run, dict)
+    ]
+    reader_data = _dict(_dict(projection_response.get("result")).get("data"))
+    reader_provider_contract = _dict(reader_data.get("provider_contract"))
+    keyed_reader_attempts = _dict(reader_provider_contract.get("provider_attempts_by_capability"))
+    reader_attempts = {
+        capability: _list(_dict(summary).get("resource_attempts")) or [
+            {"provider": provider, "status": _dict(summary).get("status")}
+            for provider in _list(_dict(summary).get("providers_attempted"))
+            if _dict(summary).get("attempted") is True
+        ]
+        for capability, summary in keyed_reader_attempts.items()
+    } if keyed_reader_attempts else {
+        "quote.snapshot": _list(reader_provider_contract.get("provider_attempts"))
+    }
+    fill_plan = capability_contract.build_fill_plan(
+        canonical=canonical,
+        selection=selection,
+        manifest=reconciled_manifest,
+        scope_type=scope_type,
+        tool_runs=tool_runs,
+        primary_reader_acquisitions=keyed_reader_attempts,
+    )
+    execution["refresh_reconciliation"] = (
+        capability_contract.build_refresh_reconciliation(
+            selection=selection,
+            manifest=reconciled_manifest,
+            fill_plan=fill_plan,
+            tool_runs=tool_runs,
+            scope_type=scope_type,
+            request_policy=_dict(execution.get("policy")),
+            primary_reader_provider_attempts=reader_attempts,
+            primary_reader_acquisitions=keyed_reader_attempts,
+        )
+    )
+    canonical["execution"] = execution
     preferences = _dict(_dict(canonical.get("execution")).get("policy")).get(
         "response_preferences"
     )
-    if scope_type == "stock" and "quote.auction" in projected_data and selection.get("output") != "evidence_only":
+    if (
+        scope_type == "stock"
+        and "quote.auction" in (*selection.get("required", []), *selection.get("optional", []))
+        and (
+            "quote.auction" in selection.get("required", [])
+            or query_plan.has_auction_intent(
+                str(source_response.get("question") or ""),
+                market=_dict(canonical.get("target")).get("market"),
+            )
+        )
+        and selection.get("output") != "evidence_only"
+    ):
         canonical["answer"] = answer_composer.build_quote_consumer_answer(
             target=_dict(canonical.get("target")),
-            analysis_digest={"compact_evidence": {"auction": projected_data["quote.auction"]}},
+            analysis_digest={"compact_evidence": {"auction": _dict(projected_data.get("quote.auction"))}},
+            auction_quality=_dict(_dict(quality.get("capabilities")).get("quote.auction")),
+            auction_reconciliation=_dict(execution["refresh_reconciliation"]["capabilities"].get("quote.auction")),
             missing=_list(limitations.get("missing")), warnings=_list(limitations.get("warnings")),
             summary_limit=3, response_preferences=preferences,
         )
@@ -4234,47 +4296,6 @@ def build(
     canonical["quality_status"] = str(
         quality.get("status") or "blocked"
     )
-    reconciled_manifest = _dict(_dict(canonical.get("evidence")).get("manifest"))
-    execution = _dict(canonical.get("execution"))
-    tool_runs = [
-        run
-        for run in _list(execution.get("tool_runs"))
-        if isinstance(run, dict)
-    ]
-    reader_data = _dict(_dict(projection_response.get("result")).get("data"))
-    reader_provider_contract = _dict(reader_data.get("provider_contract"))
-    keyed_reader_attempts = _dict(reader_provider_contract.get("provider_attempts_by_capability"))
-    reader_attempts = {
-        capability: _list(_dict(summary).get("resource_attempts")) or [
-            {"provider": provider, "status": _dict(summary).get("status")}
-            for provider in _list(_dict(summary).get("providers_attempted"))
-            if _dict(summary).get("attempted") is True
-        ]
-        for capability, summary in keyed_reader_attempts.items()
-    } if keyed_reader_attempts else {
-        "quote.snapshot": _list(reader_provider_contract.get("provider_attempts"))
-    }
-    fill_plan = capability_contract.build_fill_plan(
-        canonical=canonical,
-        selection=selection,
-        manifest=reconciled_manifest,
-        scope_type=scope_type,
-        tool_runs=tool_runs,
-        primary_reader_acquisitions=keyed_reader_attempts,
-    )
-    execution["refresh_reconciliation"] = (
-        capability_contract.build_refresh_reconciliation(
-            selection=selection,
-            manifest=reconciled_manifest,
-            fill_plan=fill_plan,
-            tool_runs=tool_runs,
-            scope_type=scope_type,
-            request_policy=_dict(execution.get("policy")),
-            primary_reader_provider_attempts=reader_attempts,
-            primary_reader_acquisitions=keyed_reader_attempts,
-        )
-    )
-    canonical["execution"] = execution
     continuation = _dict(canonical.get("continuation"))
     continuation["fill_plan"] = fill_plan
     canonical["continuation"] = continuation

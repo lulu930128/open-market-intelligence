@@ -209,7 +209,7 @@ class TaiwanMarketBreadthSessionContractTests(unittest.TestCase):
         codes = ["2330", "2303", "2317", "2454"]
         messages = [
             self._message(c="2330", t="13:31:00", z="101", v="5", ts="0"),
-            self._message(c="2303", t="13:31:00", z="-", v="0"),
+            self._message(c="2303", t="13:31:00", z="-", v="0", ts="0"),
             self._message(c="2317", t="13:31:00", y="-", z="-", v="0"),
         ]
 

@@ -712,6 +712,8 @@ class MarketIndexSummaryRead(BaseModel):
 class TaiwanMarketVolumeBaselineRead(BaseModel):
     requested_days: int
     sample_days: int
+    qualified_sample_days: int = Field(default=0, ge=0)
+    qualification_reason_codes: list[str] = Field(default_factory=list)
     median_cumulative_trade_value: int | None = None
     pace_ratio: float | None = None
     status: str = "warming_up"
@@ -724,6 +726,14 @@ class TaiwanMarketVolumeBaselineRead(BaseModel):
     component_scope: dict[str, list[Any]] = Field(default_factory=dict)
     comparison_identity: dict[str, dict[str, Any]] = Field(default_factory=dict)
     samples: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TaiwanMarketTradeValueQualificationRead(BaseModel):
+    status: Literal["qualified", "best_effort", "unverified"] = "unverified"
+    decision_usable: bool = False
+    acquisition_complete: bool | None = None
+    price_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
+    reason_codes: list[str] = Field(default_factory=list)
 
 
 class TaiwanMarketVolumeMarketRead(BaseModel):
@@ -750,6 +760,11 @@ class TaiwanMarketVolumeMarketRead(BaseModel):
     trade_value_semantics: str | None = None
     trade_value_is_estimate: bool | None = None
     comparison_identity: dict[str, Any] = Field(default_factory=dict)
+    acquisition_diagnostics: dict[str, Any] | None = None
+    coverage_reason_counts: dict[str, int] | None = None
+    trade_value_qualification: TaiwanMarketTradeValueQualificationRead = Field(
+        default_factory=TaiwanMarketTradeValueQualificationRead
+    )
 
 
 class TaiwanMarketVolumeStateRead(BaseModel):
@@ -767,6 +782,11 @@ class TaiwanMarketVolumeStateRead(BaseModel):
     official_cumulative_trade_value: int | None = None
     trade_value_available: bool = False
     trade_value_complete: bool = False
+    # Completeness above describes aligned values; qualification proves scope
+    # representativeness independently and fails closed for legacy payloads.
+    trade_value_qualification: TaiwanMarketTradeValueQualificationRead = Field(
+        default_factory=TaiwanMarketTradeValueQualificationRead
+    )
     baseline_readiness_status: str = "warming_up"
     field_status: dict[str, Any] = Field(default_factory=dict)
     currency: str = "TWD"

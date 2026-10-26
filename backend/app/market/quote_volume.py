@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from app.market_data.contracts import Quantity, QuantityUnit
+
 
 TAIWAN_STANDARD_LOT_SIZE_SHARES = 1_000
 TAIWAN_MIS_VOLUME_SCOPE = "regular_session_board_lot_cumulative"
@@ -28,6 +30,31 @@ def _non_negative_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def taiwan_standard_board_lots(quantity: Quantity | None) -> int | None:
+    """Accept only exact canonical quantities with a proven 1,000-share lot.
+
+    Shares alone do not establish board-lot scope. In particular, never round
+    odd shares or truncate fractional lots into this legacy volume contract.
+    """
+    if quantity is None or quantity.scale != TAIWAN_STANDARD_LOT_SIZE_SHARES:
+        return None
+    if quantity.unit is QuantityUnit.SHARE:
+        lots = quantity.original_value
+        if (
+            quantity.original_unit is not QuantityUnit.BOARD_LOT
+            or lots is None
+            or quantity.value != lots * quantity.scale
+        ):
+            return None
+    elif quantity.unit is QuantityUnit.BOARD_LOT:
+        lots = quantity.value
+    else:
+        return None
+    if not lots.is_finite() or lots != lots.to_integral_value():
+        return None
+    return int(lots)
 
 
 def build_taiwan_quote_volume_contract(

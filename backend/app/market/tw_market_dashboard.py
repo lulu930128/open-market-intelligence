@@ -3,7 +3,9 @@ from __future__ import annotations
 from app.market.tw_breadth_projection import project_breadth_coverage
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime, time
+from decimal import Decimal
 from hashlib import sha256
 from math import isfinite
 from typing import Any, Iterable
@@ -21,6 +23,7 @@ from app.db.models import (
     WatchlistItem,
 )
 from app.market.official_index_platform import read_taiwan_official_index_series
+from app.market.tw_bar_service import TaiwanBarService
 from app.market.intraday import get_market_intraday_history
 from app.market.index_resolution import project_taiwan_index_headline
 from app.market.indices import get_market_index_summary
@@ -40,7 +43,7 @@ from app.market.tw_intraday_state import (
     build_tw_hot_groups_snapshot,
 )
 from app.market.tw_watchlist_state import read_taiwan_watchlist_instrument_states
-from app.market_data.contracts import MarketIndexObservation
+from app.market_data.contracts import AuthorityClass, BarFinalization, SourceLineage
 from app.watchlists.service import list_groups
 
 
@@ -625,27 +628,65 @@ def estimate_cap_weighted_index(
     }
 
 
+@dataclass(frozen=True)
+class _IndexBaseline:
+    close_value: Decimal
+    trade_date: date
+    lineage: SourceLineage
+
+
 def _latest_index_baseline(
     db: Session,
     *,
     index_id: str,
     trade_date: date,
-) -> MarketIndexObservation | None:
+    requested_at: datetime | None = None,
+) -> _IndexBaseline | None:
     previous_session = previous_taiwan_trading_day(
         trade_date,
         include_value=False,
     )
+    effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    # Use the same release/receipt-qualified daily Gateway as the index
+    # headline. Legacy FMTQIK stats without receipt FKs remain ineligible.
+    series = TaiwanBarService(db).read_bars(
+        instrument_id=index_id,
+        interval="1d",
+        from_time=datetime.combine(previous_session, time.min, tzinfo=TAIWAN_TZ),
+        to_time=datetime.combine(previous_session, time(23, 59, 59), tzinfo=TAIWAN_TZ),
+        limit=1,
+        include_partial=False,
+        requested_at=effective_requested_at,
+    )
+    for bar, state in zip(series.bars, series.bar_states, strict=True):
+        if (
+            bar.start_at.astimezone(TAIWAN_TZ).date() == previous_session
+            and bar.lineage.authority is AuthorityClass.EXCHANGE
+            and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+            and state.official
+            and state.release_status.value == "released"
+            and state.technical_eligible
+            and bar.lineage.raw_receipt_id
+            and bar.lineage.content_hash
+        ):
+            return _IndexBaseline(bar.close_price, previous_session, bar.lineage)
     results = read_taiwan_official_index_series(
         db,
         index_id=index_id,
         to_date=previous_session,
         limit=1,
+        requested_at=effective_requested_at,
     )
     return next(
         (
-            result.resolved.market_index
+            _IndexBaseline(
+                result.resolved.market_index.close_value,
+                result.resolved.market_index.trade_date,
+                result.resolved.market_index.lineage,
+            )
             for result in reversed(results)
             if result.resolved.market_index is not None
+            and result.resolved.market_index.trade_date == previous_session
         ),
         None,
     )
@@ -658,6 +699,7 @@ def _build_index_estimates(
     *,
     session_phase: str,
     trade_date: date,
+    requested_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     stock_rows = list(stocks)
     stock_ids = [stock.stock_id for stock in stock_rows]
@@ -687,6 +729,7 @@ def _build_index_estimates(
             db,
             index_id=index_id,
             trade_date=trade_date,
+            requested_at=requested_at,
         )
         components: list[dict[str, Any]] = []
         shares_dates: list[date] = []
@@ -950,6 +993,7 @@ def build_tw_market_dashboard(
         state_by_stock,
         session_phase=session_phase,
         trade_date=trade_date,
+        requested_at=checked_at,
     ) if session_phase == "preopen" else []
     (
         resolved_indices,

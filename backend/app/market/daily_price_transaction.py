@@ -23,6 +23,7 @@ from app.db.models import (
 )
 from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market.tw_issued_shares import parse_tpex_issued_shares_payload
+from app.market.taiwan_rules import taiwan_daily_price_release_at
 from app.market_data.contracts import BarFinalization, BarObservation, Market
 from app.market_data.gateway import BarAcquisitionResult
 from app.market_data.integration_contracts import (
@@ -33,6 +34,7 @@ from app.market_data.integration_contracts import (
 )
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
+    TPEX_MARKET_HIGHLIGHT_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
     TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
@@ -42,8 +44,8 @@ TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 logger = logging.getLogger(__name__)
 
 
-def _persist_published_breadth(db: Session, raw: RawFetchResult, trade_date) -> str | None:
-    from app.parsers.twse_published_breadth import parse_twse_published_breadth
+def _persist_published_breadth(db: Session, raw: RawFetchResult, trade_date, *, venue: str = "TWSE") -> str | None:
+    from app.parsers.twse_published_breadth import parse_twse_published_breadth, parse_tpex_published_breadth
 
     if not inspect(db.connection()).has_table(TaiwanPublishedBreadthSnapshot.__tablename__):
         return "PUBLISHED_BREADTH_SCHEMA_PENDING"
@@ -53,13 +55,17 @@ def _persist_published_breadth(db: Session, raw: RawFetchResult, trade_date) -> 
     payload = None
     error = None
     try:
+        fetched_at = raw.fetched_at.replace(tzinfo=timezone.utc) if raw.fetched_at.tzinfo is None else raw.fetched_at
+        if fetched_at < taiwan_daily_price_release_at(trade_date):
+            raise ValueError("OFFICIAL_AGGREGATE_NOT_RELEASED")
         if not raw.raw_text or hashlib.sha256(raw.raw_text.encode("utf-8")).hexdigest() != raw.content_hash:
             raise ValueError("TWSE_AGGREGATE_RECEIPT_HASH_MISMATCH")
-        payload = parse_twse_published_breadth(raw.raw_text, trade_date=trade_date).model_dump_json()
+        parser = parse_twse_published_breadth if venue == "TWSE" else parse_tpex_published_breadth
+        payload = parser(raw.raw_text, trade_date=trade_date).model_dump_json()
     except (ValueError, TypeError) as exc:
         logger.warning("Published breadth receipt %s rejected: %s", raw.id, exc)
         error = "OFFICIAL_AGGREGATE_RECEIPT_REJECTED"
-    db.add(TaiwanPublishedBreadthSnapshot(venue="TWSE", trade_date=trade_date,
+    db.add(TaiwanPublishedBreadthSnapshot(venue=venue, trade_date=trade_date,
         raw_result_id=raw.id, payload_json=payload, error_code=error))
     return error
 
@@ -69,6 +75,7 @@ def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
         TWSE_DAILY_TRADING_SOURCE_NAME,
         TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
         TPEX_DAILY_QUOTES_SOURCE_NAME,
+        TPEX_MARKET_HIGHLIGHT_SOURCE_NAME,
         TAIEX_OFFICIAL_DAILY_SOURCE,
     }:
         raise ValueError(f"unsupported Taiwan official daily source: {receipt.source}")
@@ -423,16 +430,36 @@ class TaiwanOfficialDailyTransaction:
                     dates = {bar.end_at.astimezone(TAIWAN_TZ).date() for bar in acquisition.observations
                         if bar.lineage.source == receipt.source
                         and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}}
+                    if (not dates and isinstance(_requirement, RefreshRequirementV1)
+                        and _requirement.dataset_id == "tw.market_breadth.daily"
+                        and _requirement.from_date == _requirement.to_date
+                        and getattr(_requirement.target, "scope_key", None) == "TWSE"):
+                        dates = {_requirement.to_date}
                     if len(dates) == 1:
                         issue = _persist_published_breadth(self._db, raw, next(iter(dates)))
                         if issue:
                             limitations.append(issue)
+                        else:
+                            observations_by_source[key] = max(1, observations_by_source.get(key, 0))
+                if (receipt.source == TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
+                    and receipt.provider == "tpex_openapi" and receipt.resource_id == "tpex_after_trading_highlight"
+                    and receipt.parser_version == "tpex_published_breadth.v1"
+                    and receipt.status_code == 200 and not receipt.error_message):
+                    if (not isinstance(_requirement, RefreshRequirementV1)
+                        or _requirement.from_date != _requirement.to_date
+                        or getattr(_requirement.target, "scope_key", None) != "TPEX"):
+                        raise ValueError("published TPEx breadth requires an exact venue/date refresh requirement")
+                    issue = _persist_published_breadth(self._db, raw, _requirement.to_date, venue="TPEX")
+                    if issue:
+                        limitations.append(issue)
+                    else:
+                        observations_by_source[key] = 1
                 self._quality_check(
                     source=source,
                     raw=raw,
                     receipt=receipt,
                     observation_count=observations_by_source.get(key, 0),
-                    limitations=acquisition.summary.limitations,
+                    limitations=tuple(limitations),
                 )
             self._db.commit()
         except Exception:

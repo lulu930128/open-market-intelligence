@@ -299,7 +299,7 @@ class TaiwanMarketStateTests(unittest.TestCase):
             "unavailable_no_trusted_historical_minute_provider",
         )
 
-    def test_final_reconciliation_uses_official_close_minute(self) -> None:
+    def test_final_reconciliation_preserves_trade_value_owner_minute(self) -> None:
         trade_date = date(2026, 7, 22)
         result = persist_taiwan_market_minute_state(
             self.db,
@@ -316,7 +316,7 @@ class TaiwanMarketStateTests(unittest.TestCase):
         rows = self.db.query(TaiwanMarketMinuteState).all()
         self.assertEqual(result["inserted_count"], 2)
         self.assertEqual({row.session_status for row in rows}, {"final"})
-        self.assertEqual({row.minute_at.strftime("%H:%M") for row in rows}, {"13:30"})
+        self.assertEqual({row.minute_at.strftime("%H:%M") for row in rows}, {"15:05"})
         self.assertTrue(all(row.official_flag for row in rows))
 
     def test_cumulative_trade_value_regression_is_visible_as_invalid(self) -> None:

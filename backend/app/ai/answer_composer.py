@@ -912,6 +912,39 @@ def _us_quote_time_text(value: Any, *, english: bool, japanese: bool) -> str | N
     return f"{market_label}／台北時間 {taipei_label}"
 
 
+def _auction_acquisition_text(
+    outcome: dict[str, Any], *, english: bool, japanese: bool,
+) -> str:
+    """Render canonical per-capability reconciliation without inferring IO."""
+    def localized(zh: str, en: str, ja: str) -> str:
+        return en if english else ja if japanese else zh
+
+    receipt = outcome.get("primary_reader_acquisition") or {}
+    if outcome.get("provider_fetch_attempted") is True:
+        providers = receipt.get("providers_attempted") or [
+            item.get("provider") for item in outcome.get("primary_reader_provider_attempts") or []
+            if isinstance(item, dict) and item.get("provider")
+        ]
+        source = ", ".join(dict.fromkeys(providers)) or "unknown"
+        status = receipt.get("status")
+        if status == "completed" or outcome.get("provider_succeeded") is True:
+            return localized(f"本次已查詢來源 {source}，取得程序完成。", f"Source {source} was queried; acquisition completed.", f"今回の取得元 {source} への照会は完了しました。")
+        if status == "partial":
+            return localized(f"本次已查詢來源 {source}，取得結果不完整（partial）。", f"Source {source} was queried; acquisition was partial.", f"今回の取得元 {source} への照会結果は一部のみです（partial）。")
+        if status in {"failed", "unavailable"}:
+            return localized(f"本次已嘗試查詢來源 {source}，取得失敗（{status}）。", f"Source {source} was queried; acquisition failed ({status}).", f"今回の取得元 {source} への照会は失敗しました（{status}）。")
+        return localized(f"本次已嘗試查詢來源 {source}，取得結果尚未確認。", f"Source {source} was queried; the acquisition outcome is unverified.", f"今回の取得元 {source} への照会結果は未確認です。")
+    if receipt.get("status") == "unverified" or outcome.get("reconciliation") == "acquisition_outcome_unverified":
+        return localized("已提出更新要求，但缺少取得回執；無法確認是否查詢來源或取得結果。", "Refresh was requested, but the acquisition receipt is missing; provider access and outcome are unverified.", "更新要求はありますが取得記録がなく、取得元への照会と結果は未確認です。")
+    if outcome.get("refresh_requested") is True or outcome.get("provider_fetch_requested") is True:
+        if outcome.get("refresh_allowed") is False:
+            return localized("已要求更新，但政策不允許執行；本次未查詢來源。", "Refresh was requested but policy denied execution; the provider was not queried.", "更新要求はポリシーにより実行されず、今回は取得元に照会していません。")
+        return localized("已要求更新，但本次未執行來源查詢。", "Refresh was requested, but no provider query was executed.", "更新要求はありますが、今回は取得元への照会を実行していません。")
+    if outcome.get("not_attempted_reason") == "refresh_not_requested":
+        return localized("本次未要求更新，未查詢來源；不能據此判定來源沒有資料。", "No refresh was requested and the provider was not queried; this does not establish that the provider has no data.", "今回は更新を要求せず、取得元に照会していません。取得元にデータがないとは判断できません。")
+    return localized("本次來源查詢狀態未確認。", "Provider query status is unverified.", "今回の取得元への照会状況は未確認です。")
+
+
 def build_quote_consumer_answer(
     *,
     target: dict[str, Any],
@@ -920,6 +953,8 @@ def build_quote_consumer_answer(
     warnings: list[Any],
     summary_limit: int,
     response_preferences: dict[str, Any] | None,
+    auction_quality: dict[str, Any] | None = None,
+    auction_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     compact = (
         analysis_digest.get("compact_evidence")
@@ -939,11 +974,16 @@ def build_quote_consumer_answer(
     price_text = _quote_price_text(price, market=market, english=english, japanese=japanese)
     auction = compact.get("auction")
     if isinstance(auction, dict):
+        quality = auction_quality or {}
+        freshness_status = quality.get("freshness_status") or (auction.get("freshness") or {}).get("status")
+        stale = freshness_status == "stale"
         price = auction.get("indicative_match_price") if auction.get("indicative_match_available") else None
         price_text = _quote_price_text(price, market=market, english=english, japanese=japanese)
         reference = auction.get("change_reference") or {}
         reference_label = ("prior close" if english else "前日終値" if japanese else "昨收") if reference.get("type") == "prior_regular_close" else ("exchange/provider reference" if english else "取引所・配信元の基準値" if japanese else "交易所／來源參考價（未確認為昨收）")
         title = "Indicative auction" if english else "板寄せ参考値" if japanese else "試搓參考"
+        if stale:
+            title = "Expired indicative observation" if english else "期限切れの板寄せ観測" if japanese else "已過期試搓觀測"
         disclaimer = ("Provisional indication, not an actual trade; not usable for trading decisions or execution." if english
                       else "暫定参考値であり実約定ではありません。売買判断・執行には利用できません。" if japanese
                       else "試搓是暫定參考，並非正式成交；不可用於交易決策或執行。")
@@ -954,8 +994,21 @@ def build_quote_consumer_answer(
             f"{change:+.2f} ({pct:+.2f}%)" if isinstance(change, (int, float)) and isinstance(pct, (int, float))
             else "unavailable" if english else "比較不可" if japanese else "漲跌比較無可用證據"
         )
-        lines = [disclaimer, comparison,
-                 f"as_of: {auction.get('auction_time') or 'unknown'}; status: {auction.get('status') or 'missing'}; source: {auction.get('provider') or 'unknown'}/{auction.get('source') or 'unknown'}"]
+        acquisition = _auction_acquisition_text(auction_reconciliation or {}, english=english, japanese=japanese)
+        if stale:
+            observation = ("Cached observation is expired, not current indicative evidence." if english else "キャッシュの観測は期限切れで、現在の参考値ではありません。" if japanese else "快取觀測已過期，不代表目前試搓。")
+        elif price is None:
+            if (auction_reconciliation or {}).get("provider_succeeded") is True and auction.get("indicative_match_available") is False:
+                observation = ("This acquisition produced no eligible indicative match price; an order book does not establish a match." if english else "今回の取得では適格な参考約定価格がなく、板情報から約定価格は推定できません。" if japanese else "本次取得未提供符合條件的試搓撮合價；有委託簿也不代表有試搓撮合。")
+            elif (auction_reconciliation or {}).get("provider_succeeded") is True:
+                observation = ("The indicative match price is unverified in this evidence; completed acquisition alone does not establish a match or its absence." if english else "今回の証拠では参考約定価格は未確認です。取得完了だけでは約定の有無を判断できません。" if japanese else "目前證據中的試搓撮合價未確認；取得完成不代表已確認撮合價或確認沒有撮合。")
+            else:
+                observation = ("The cache has no eligible current indicative observation." if english else "キャッシュに適格な現在の参考値がありません。" if japanese else "快取沒有符合條件的目前試搓觀測。")
+        else:
+            observation = disclaimer
+        lines = [f"{observation} {acquisition}",
+                 f"as_of: {auction.get('auction_time') or quality.get('event_time') or 'unknown'}; status: {freshness_status or auction.get('status') or 'unknown'}; source: {auction.get('provider') or 'unknown'}/{auction.get('source') or 'unknown'}",
+                 comparison]
         answer = {"kind": "consumer_market_answer", "style": "quote_auction_summary", "source": "quote.auction",
                   "headline": f"{label} {title}: {price_text}", "summary": lines, "detail": "\n".join(lines),
                   "data_limits": [disclaimer, *generic_data_limits(missing=missing, warnings=warnings, response_preferences=response_preferences)],

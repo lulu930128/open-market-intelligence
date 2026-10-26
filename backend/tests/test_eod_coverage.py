@@ -708,6 +708,8 @@ def test_tw_healthy_lifecycle_performs_zero_provider_calls(db: Session) -> None:
         ]
     )
     db.commit()
+    _seed_published(db, EXPECTED, "TWSE")
+    _seed_published(db, EXPECTED, "TPEX")
 
     with patch("app.market_data.eod_coverage.refresh_source") as refresh:
         result = reconcile_eod_coverage(
@@ -760,6 +762,8 @@ def test_tw_lifecycle_repairs_only_unresolved_venue_then_rereads_coverage(
         ]
     )
     db.commit()
+    _seed_published(db, EXPECTED, "TWSE")
+    _seed_published(db, EXPECTED, "TPEX")
     calls: list[int] = []
 
     def fake_refresh(*, db: Session, source_id: int, trade_date: date):
@@ -913,3 +917,191 @@ def test_scheduler_decision_recomputes_persisted_coverage_instead_of_trusting_ch
         return_value=EXPECTED,
     ):
         assert should_enqueue_eod_reconcile(db, market="TW", taiwan_daily_qualifier=qualify_taiwan_eod_universe) is True
+
+
+def test_daily_healthy_missing_published_repairs_only_highlight(db, monkeypatch):
+    from app.db.models import TaiwanPublishedBreadthSnapshot
+    from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
+    from app.market.daily_ohlcv_acquisition import TaiwanOfficialDailyAcquisitionExecutor
+    from app.market.providers.tw_official_daily import TPEX_DAILY_RESOURCE_ID, TPEX_HIGHLIGHT_RESOURCE_ID
+    from test_tpex_published_breadth import acquire, DAY, NOW, RAW, FakeResponse
+
+    db.add(StockMaster(stock_id="6488", market="TPEX", instrument_type="stock", is_active=True))
+    db.commit()
+    acquire(db)
+    db.query(TaiwanPublishedBreadthSnapshot).delete()
+    db.commit()
+    before = db.query(MarketDailyPrice).one().raw_result_id
+    daily = Mock(side_effect=AssertionError("qualified daily must not be refreshed"))
+    highlight = Mock(return_value=FakeResponse(text=RAW.decode("utf-8")))
+    executor = TaiwanOfficialDailyAcquisitionExecutor(fetchers={
+        TPEX_DAILY_RESOURCE_ID: daily, TPEX_HIGHLIGHT_RESOURCE_ID: highlight}, clock=lambda: NOW)
+    def refresh(**kwargs):
+        return refresh_taiwan_official_daily_venue(**kwargs, acquisition=executor, requested_at=NOW)
+    monkeypatch.setattr("app.market_data.eod_coverage.utc_now", lambda: NOW)
+    monkeypatch.setattr("app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window", lambda **_: (True, None, "test"))
+    result = reconcile_eod_coverage(db, market="TW", expected_trade_date=DAY,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh)
+    assert result["postcondition_met"] is True
+    assert highlight.call_count == 1
+    daily.assert_not_called()
+    assert db.query(MarketDailyPrice).one().raw_result_id == before
+    assert db.query(TaiwanPublishedBreadthSnapshot).count() == 1
+    assert reconcile_eod_coverage(db, market="TW", expected_trade_date=DAY,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh)["attempted_count"] == 0
+    assert highlight.call_count == 1
+
+
+def _seed_published(db, day, venue):
+    from app.market.daily_ohlcv_acquisition import TaiwanOfficialDailyAcquisitionExecutor
+    from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
+    from app.market.providers.tw_official_daily import TWSE_RWD_DAILY_RESOURCE_ID, TPEX_HIGHLIGHT_RESOURCE_ID
+    from test_tpex_published_breadth import RAW, FakeResponse
+    from test_tw_published_breadth import payload
+    raw = payload() if venue == "TWSE" else json.loads(RAW)
+    raw["date"] = day.strftime("%Y%m%d")
+    if venue == "TPEX":
+        raw["tables"][0]["date"] = f"{day.year - 1911:03d}/{day:%m/%d}"
+    now = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=10)
+    resource = TWSE_RWD_DAILY_RESOURCE_ID if venue == "TWSE" else TPEX_HIGHLIGHT_RESOURCE_ID
+    executor = TaiwanOfficialDailyAcquisitionExecutor(fetchers={resource: lambda _: FakeResponse(text=json.dumps(raw))},
+        clock=lambda: now, monotonic=lambda: 0.0)
+    return refresh_taiwan_official_daily_venue(db, venue=venue, trade_date=day,
+        requested_at=now, acquisition=executor, refresh_daily=False)
+
+
+@pytest.mark.parametrize("failure", ["http", "parser", "source", "receipt_date"])
+def test_published_failure_preserves_daily_and_backs_off_same_job(db, monkeypatch, failure):
+    from app.db.models import TaiwanPublishedBreadthSnapshot
+    from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
+    from app.market.daily_ohlcv_acquisition import TaiwanOfficialDailyAcquisitionExecutor
+    from app.market.providers.tw_official_daily import TPEX_DAILY_RESOURCE_ID, TPEX_HIGHLIGHT_RESOURCE_ID
+    from test_tpex_published_breadth import acquire, DAY, NOW, RAW, FakeResponse
+
+    db.add(StockMaster(stock_id="6488", market="TPEX", instrument_type="stock", is_active=True))
+    db.commit()
+    acquire(db, highlight=FakeResponse(text="failed", status_code=503))
+    before = db.query(MarketDailyPrice).one().raw_result_id
+    bad_response = FakeResponse(text="invalid" if failure == "parser" else RAW.decode("utf-8"),
+                                status_code=503 if failure == "http" else 200)
+    fetch = Mock(return_value=bad_response)
+    denied = Mock(side_effect=AssertionError("no daily refresh"))
+    executor = TaiwanOfficialDailyAcquisitionExecutor(fetchers={
+        TPEX_DAILY_RESOURCE_ID: denied, TPEX_HIGHLIGHT_RESOURCE_ID: fetch}, clock=lambda: NOW)
+    def refresh(**kwargs):
+        result = refresh_taiwan_official_daily_venue(**kwargs, requested_at=NOW, acquisition=executor)
+        if failure in {"source", "receipt_date"}:
+            snapshot = db.query(TaiwanPublishedBreadthSnapshot).one()
+            raw = db.get(RawFetchResult, snapshot.raw_result_id)
+            if failure == "source":
+                raw.source_id = db.query(MarketDailyPrice).one().source_id
+            else:
+                raw.fetched_at = datetime(2026, 10, 22, 5, 0)
+            db.commit()
+        return result
+    monkeypatch.setattr("app.market_data.eod_coverage.utc_now", lambda: NOW)
+    monkeypatch.setattr("app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window", lambda **_: (True, None, "test"))
+    monkeypatch.setattr(eod_coverage_jobs, "refresh_taiwan_official_daily_venue", refresh)
+    checkpoint = persist_eod_coverage(db, compute_eod_coverage(db, market="TW", expected_trade_date=DAY,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe))
+    assert checkpoint.status == "healthy"
+    assert should_enqueue_eod_reconcile(db, market="TW", expected_trade_date=DAY, now=NOW,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
+    def tracked(_job_id, worker):
+        return worker(db, lambda *_: None)
+    monkeypatch.setattr(job_service, "run_tracked_job", tracked)
+    with pytest.raises(job_service.JobExecutionError) as error:
+        eod_coverage_jobs.run_eod_coverage_reconcile_job(123, "TW", True, DAY, 2, 120, 0, 5, 60)
+    result = error.value.result
+    assert result["postcondition_met"] is False
+    assert result["checkpoint"]["status"] == "healthy"
+    assert result["published_breadth"] == {"TPEX": False}
+    assert db.query(MarketDailyPrice).one().raw_result_id == before
+    assert fetch.call_count == 1
+    denied.assert_not_called()
+    assert not should_enqueue_eod_reconcile(db, market="TW", expected_trade_date=DAY, now=NOW,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
+    again = reconcile_eod_coverage(db, market="TW", expected_trade_date=DAY,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh)
+    assert again["attempted_count"] == 0 and not again["postcondition_met"]
+    assert fetch.call_count == 1
+    assert should_enqueue_eod_reconcile(db, market="TW", expected_trade_date=DAY, now=NOW + timedelta(seconds=61),
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
+
+
+def test_existing_job_two_call_budget_defers_only_missing_companion(db, monkeypatch):
+    from app.market.daily_ohlcv_platform import refresh_taiwan_official_daily_venue
+    from app.market.daily_ohlcv_acquisition import TaiwanOfficialDailyAcquisitionExecutor
+    from app.market.providers.tw_official_daily import TPEX_DAILY_RESOURCE_ID, TPEX_HIGHLIGHT_RESOURCE_ID, TWSE_RWD_DAILY_RESOURCE_ID
+    from test_tpex_published_breadth import DAY, NOW, RAW, FakeResponse, _fixture
+    from test_tw_published_breadth import payload
+    db.add_all([StockMaster(stock_id="3711", market="TWSE", instrument_type="stock", is_active=True),
+                StockMaster(stock_id="6488", market="TPEX", instrument_type="stock", is_active=True)])
+    db.commit()
+    twse = payload(); twse["date"] = DAY.strftime("%Y%m%d")
+    tpex = _fixture("tpex_mainboard_quotes_excerpt_20260825.json")["payload"]
+    tpex["date"] = DAY.strftime("%Y%m%d")
+    fetchers = {resource: Mock(return_value=FakeResponse(text=json.dumps(raw))) for resource, raw in [
+        (TWSE_RWD_DAILY_RESOURCE_ID, twse), (TPEX_DAILY_RESOURCE_ID, tpex), (TPEX_HIGHLIGHT_RESOURCE_ID, json.loads(RAW))]}
+    executor = TaiwanOfficialDailyAcquisitionExecutor(fetchers=fetchers, clock=lambda: NOW, monotonic=lambda: 0.0)
+    def refresh(**kwargs):
+        return refresh_taiwan_official_daily_venue(**kwargs, requested_at=NOW, acquisition=executor)
+    monkeypatch.setattr("app.market_data.eod_coverage.utc_now", lambda: NOW)
+    monkeypatch.setattr("app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window", lambda **_: (True, None, "test"))
+    result = reconcile_eod_coverage(db, market="TW", expected_trade_date=DAY,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh, error_backoff_seconds=60)
+    assert result["external_call_budget_used"] == 2
+    assert result["checkpoint"]["current_count"] == 2
+    assert result["missing_published_venues"] == ["TPEX"]
+    assert not result["postcondition_met"]
+    assert fetchers[TPEX_HIGHLIGHT_RESOURCE_ID].call_count == 0
+    monkeypatch.setattr("app.market_data.eod_coverage.utc_now", lambda: NOW + timedelta(seconds=61))
+    result = reconcile_eod_coverage(db, market="TW", expected_trade_date=DAY,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh)
+    assert result["postcondition_met"]
+    assert result["external_call_budget_used"] == 1
+    assert all(fetch.call_count == 1 for fetch in fetchers.values())
+    assert not should_enqueue_eod_reconcile(db, market="TW", expected_trade_date=DAY, now=NOW + timedelta(seconds=61),
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe)
+
+
+@pytest.mark.parametrize("duration,expected_timeouts", [(7, [10, 3]), (10, [10]), (15, [10])])
+def test_tw_job_remaining_runtime_controls_next_venue(db, monkeypatch, duration, expected_timeouts):
+    db.add_all([StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"),
+                StockMaster(stock_id="6488", market="TPEX", instrument_type="stock")])
+    db.commit()
+    tick = [0.0]
+    received = []
+    def refresh(**kwargs):
+        received.append(kwargs)
+        tick[0] += duration
+        return {"external_call_count": 1, "fetch_status": "error", "parse_status": "error"}
+    monkeypatch.setattr("app.market_data.eod_coverage.monotonic", lambda: tick[0])
+    monkeypatch.setattr("app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window", lambda **_: (True, None, "test"))
+    result = reconcile_eod_coverage(db, market="TW", expected_trade_date=EXPECTED, max_runtime_seconds=10,
+        taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh)
+    assert [item["timeout_seconds"] for item in received] == expected_timeouts
+    assert [item["max_external_calls"] for item in received] == [2, 1][:len(expected_timeouts)]
+    assert result["external_call_budget_used"] == len(expected_timeouts) and not result["postcondition_met"]
+
+
+def test_tw_call_budget_cursor_prevents_starving_other_venue(db, monkeypatch):
+    db.add_all([StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"),
+                StockMaster(stock_id="6488", market="TPEX", instrument_type="stock")])
+    db.commit()
+    now = [datetime(2026, 8, 21, 10, tzinfo=timezone.utc)]
+    venues = []
+    def refresh(**kwargs):
+        venues.append(kwargs["venue"])
+        return {"external_call_count": 2, "fetch_status": "error", "parse_status": "error"}
+    monkeypatch.setattr("app.market_data.eod_coverage.utc_now", lambda: now[0])
+    monkeypatch.setattr("app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window", lambda **_: (True, None, "test"))
+    for _ in range(2):
+        result = reconcile_eod_coverage(db, market="TW", expected_trade_date=EXPECTED,
+            taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh, error_backoff_seconds=60,
+            priority_symbols=lambda: ("2330",))
+        assert result["external_call_budget_used"] == 2
+        assert result["attempted_count"] == 1
+        assert not result["postcondition_met"]
+        now[0] += timedelta(seconds=61)
+    assert venues == ["TWSE", "TPEX"]

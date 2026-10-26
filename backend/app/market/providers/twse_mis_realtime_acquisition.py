@@ -9,6 +9,10 @@ from hashlib import sha256
 from typing import Any
 
 from app.market.providers import twse_mis
+from app.market.providers.twse_mis_breadth_evidence import (
+    AcquisitionInFlight,
+    bounded_fetch,
+)
 from app.market.providers.twse_mis_guard import (
     TWSE_MIS_PROVIDER_GUARD,
     TwseMisProviderGuard,
@@ -74,6 +78,7 @@ class TwseMisProviderSnapshot:
 
 TwseMisSnapshotReader = Callable[[str, str | None, int], TwseMisProviderSnapshot]
 Clock = Callable[[], datetime]
+MIS_SINGLE_SYMBOL_MAX_WAIT_SECONDS = 8
 
 
 def _default_reader(
@@ -81,23 +86,24 @@ def _default_reader(
     venue: str | None,
     timeout_seconds: int,
 ) -> TwseMisProviderSnapshot:
-    response = twse_mis.get_stock_response(
-        [symbol],
-        exchange=exchange_code_for_venue(venue),
-        timeout_seconds=timeout_seconds,
-    )
-    return TwseMisProviderSnapshot(
-        raw_text=str(response.text or ""),
-        status="available" if 200 <= int(response.status_code) < 300 else "failed",
-        url=str(response.url or ""),
-        status_code=int(response.status_code),
-        content_type=str(response.headers.get("content-type") or "") or None,
-        error=(
-            None
-            if 200 <= int(response.status_code) < 300
-            else f"HTTP {int(response.status_code)}"
-        ),
-    )
+    seconds = min(timeout_seconds, MIS_SINGLE_SYMBOL_MAX_WAIT_SECONDS)
+
+    def fetch(*, exchange):
+        response = twse_mis.get_stock_response(
+            [symbol], exchange=exchange, timeout_seconds=seconds,
+        )
+        return TwseMisProviderSnapshot(
+            raw_text=str(response.text or ""),
+            status="available" if 200 <= int(response.status_code) < 300 else "failed",
+            url=str(response.url or ""),
+            status_code=int(response.status_code),
+            content_type=str(response.headers.get("content-type") or "") or None,
+            error=None if 200 <= int(response.status_code) < 300 else f"HTTP {int(response.status_code)}",
+        )
+
+    # Same process-local venue slot as breadth. A timed-out worker retains it
+    # until transport completion; late responses cannot publish cache/guard state.
+    return bounded_fetch(fetch, seconds, exchange=exchange_code_for_venue(venue))
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +239,19 @@ class TwseMisRealtimeAcquisitionAdapter:
                         instrument.venue,
                         route.timeout_seconds,
                     )
+                except AcquisitionInFlight as exc:
+                    # No provider IO was admitted. Do not penalize provider
+                    # health or consume a half-open recovery probe.
+                    self._provider_guard.cancel_attempt(guard_attempt)
+                    guard_attempt = None
+                    provider_snapshot = TwseMisProviderSnapshot(
+                        raw_text=None, status="unavailable",
+                        url=endpoint_for_instrument(instrument),
+                        error=str(exc),
+                        operational_status=OperationalStatus.UNAVAILABLE,
+                        detail_code=str(exc),
+                        external_calls=0,
+                    )
                 except Exception as exc:
                     status_code, headers = response_failure_metadata(exc)
                     guard = (
@@ -311,6 +330,12 @@ class TwseMisRealtimeAcquisitionAdapter:
             resource_id=resource_id,
         )
         if provider_snapshot.status != "available" or not provider_snapshot.raw_text:
+            limitations = ("PROVIDER_REQUEST_FAILED",)
+            # Preserve the known no-IO denial through the Gateway route summary.
+            # A busy venue slot or guard rejection is not an HTTP failure; keep
+            # the generic code for compatibility without discarding its cause.
+            if provider_snapshot.external_calls == 0 and provider_snapshot.detail_code:
+                limitations = (*limitations, provider_snapshot.detail_code)
             if guard_attempt is not None:
                 self._provider_guard.record_failure(
                     guard_attempt,
@@ -336,7 +361,7 @@ class TwseMisRealtimeAcquisitionAdapter:
                     providers_attempted=(MIS_PROVIDER,),
                     resource_attempts=(attempt,),
                     external_calls=external_calls,
-                    limitations=("PROVIDER_REQUEST_FAILED",),
+                    limitations=limitations,
                 ),
                 receipts=(receipt,),
                 provider_health=(health,),

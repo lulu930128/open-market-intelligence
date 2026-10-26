@@ -361,6 +361,15 @@ class FugleRealtimeBuffer:
             if current is not None and record.ordering_value < current.ordering_value:
                 self.out_of_order_count += 1
                 return False
+            if current is not None and record.channel == "aggregates":
+                prior_trade = current.payload.get("lastTrade")
+                next_trade = record.payload.get("lastTrade")
+                prior_time = _microsecond_time(prior_trade.get("time")) if isinstance(prior_trade, dict) else None
+                next_time = _microsecond_time(next_trade.get("time")) if isinstance(next_trade, dict) else None
+                # Snapshot updates must not roll the actual trade clock back.
+                if prior_time is not None and next_time is not None and next_time < prior_time:
+                    self.out_of_order_count += 1
+                    return False
             self._latest[key] = record
             self.accepted_count += 1
             return True
@@ -588,7 +597,20 @@ def fugle_quote_acquisition(
     _validate_stock_payload_identity(data, instrument)
     last_trade = data.get("lastTrade") if isinstance(data.get("lastTrade"), dict) else None
     total = data.get("total") if isinstance(data.get("total"), dict) else {}
-    last_price = _decimal(last_trade.get("price"), positive=True) if last_trade else None
+    trade_time = _microsecond_time(last_trade.get("time")) if last_trade else None
+    trade_date = (
+        date.fromisoformat(str(data.get("date")))
+        if isinstance(data.get("date"), str)
+        else record.event_at.astimezone(TAIPEI_TZ).date()
+    )
+    # _event_time also serves non-trade snapshots. Its trial/total/update
+    # fallback is never evidence of when lastTrade.price actually traded.
+    qualified_trade = bool(
+        trade_time is not None
+        and trade_time.astimezone(TAIPEI_TZ).date() == trade_date
+        and trade_time == record.event_at
+    )
+    last_price = _decimal(last_trade.get("price"), positive=True) if qualified_trade else None
     is_trial = data.get("isTrial") is True
     trade_state = (
         TradeObservationState.TRADE_OBSERVED
@@ -604,11 +626,7 @@ def fugle_quote_acquisition(
             source=FUGLE_QUOTE_SOURCE,
             parser=FUGLE_QUOTE_PARSER_VERSION,
         ),
-        trade_date=(
-            date.fromisoformat(str(data.get("date")))
-            if isinstance(data.get("date"), str)
-            else record.event_at.astimezone(TAIPEI_TZ).date()
-        ),
+        trade_date=trade_date,
         currency="TWD",
         state=(
             ObservationState.INDICATIVE
@@ -619,7 +637,7 @@ def fugle_quote_acquisition(
         ),
         trade_state=trade_state,
         last_trade_price=last_price,
-        last_trade_quantity=_lots(last_trade.get("size")) if last_trade else None,
+        last_trade_quantity=_lots(last_trade.get("size")) if last_price is not None else None,
         cumulative_quantity=_lots(total.get("tradeVolume")),
         open_price=_decimal(data.get("openPrice"), positive=True),
         high_price=_decimal(data.get("highPrice"), positive=True),

@@ -40,6 +40,7 @@ from app.market.tw_issued_shares import (
 )
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
+    TPEX_MARKET_HIGHLIGHT_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
     TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
 )
@@ -54,6 +55,8 @@ TW_BREADTH_DATASET_ID = "tw.market_breadth.daily"
 TWSE_DAILY_RESOURCE_ID = "STOCK_DAY_ALL"
 TWSE_RWD_DAILY_RESOURCE_ID = "MI_INDEX_ALLBUT0999"
 TPEX_DAILY_RESOURCE_ID = "tpex_mainboard_quotes"
+TPEX_HIGHLIGHT_RESOURCE_ID = "tpex_after_trading_highlight"
+TPEX_HIGHLIGHT_PARSER_VERSION = "tpex_published_breadth.v1"
 TWSE_DAILY_PARSER_VERSION = "twse_stock_day_all.v2"
 TWSE_RWD_DAILY_PARSER_VERSION = "twse_mi_index_allbut0999.v1"
 TPEX_DAILY_PARSER_VERSION = "tpex_mainboard_quotes.v2"
@@ -211,7 +214,7 @@ TPEX_OFFICIAL_BREADTH_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     provider_key=tpex.PROVIDER,
     market=Market.TW,
     capability_id="market.breadth",
-    resource_id=TPEX_DAILY_RESOURCE_ID,
+    resource_id=TPEX_HIGHLIGHT_RESOURCE_ID,
     authority=AuthorityClass.EXCHANGE,
     target_kinds=(DescriptorTargetKind.DATASET,),
     dataset_ids=(TW_BREADTH_DATASET_ID,),
@@ -677,6 +680,8 @@ def official_daily_record_to_bar(
 
 
 def source_name_for_resource(resource_id: str) -> str:
+    if resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
+        return TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
     if resource_id == TWSE_DAILY_RESOURCE_ID:
         return TWSE_DAILY_TRADING_SOURCE_NAME
     if resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
@@ -687,6 +692,8 @@ def source_name_for_resource(resource_id: str) -> str:
 
 
 def parser_version_for_resource(resource_id: str) -> str:
+    if resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
+        return TPEX_HIGHLIGHT_PARSER_VERSION
     if resource_id == TWSE_DAILY_RESOURCE_ID:
         return TWSE_DAILY_PARSER_VERSION
     if resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
@@ -697,6 +704,8 @@ def parser_version_for_resource(resource_id: str) -> str:
 
 
 def endpoint_for_resource(resource_id: str) -> str:
+    if resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
+        return tpex.MARKET_HIGHLIGHT_URL
     if resource_id == TWSE_DAILY_RESOURCE_ID:
         return twse.DAILY_QUOTES_URL
     if resource_id == TWSE_RWD_DAILY_RESOURCE_ID:

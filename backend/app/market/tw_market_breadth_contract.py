@@ -188,11 +188,19 @@ def breadth_classification_reason(row: Mapping[str, Any]) -> tuple[str, str | No
     previous_close = _positive_number(row.get("previous_close"))
     has_actual_trade = row.get("has_actual_trade") is True
     if (row.get("market_session") in ACTUAL_TRADE_SESSIONS
-        and not has_actual_trade and volume == 0 and previous_close is not None):
+        and not has_actual_trade and volume == 0 and previous_close is not None
+        # The canonical reason proves matching date, non-trial status and
+        # a valid event inside the actual-trade window; zero alone cannot.
+        and row.get("actual_trade_reason_code") == "ACTUAL_TRADE_EVIDENCE_MISSING"):
         return "valid_no_trade", None
     if previous_close is None:
         return "reference_price_unavailable", "reference_price_missing"
-    if not has_actual_trade and (volume or 0) > 0:
+    if not has_actual_trade and (
+        (volume or 0) > 0 or (
+            row.get("market_session") in ACTUAL_TRADE_SESSIONS
+            and row.get("actual_trade_reason_code") == "AUCTION_INDICATIVE_ONLY"
+        )
+    ):
         return "actual_trade_unavailable", str(row.get("actual_trade_reason_code") or "actual_trade_unavailable")
     return "unknown", None
 

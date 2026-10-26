@@ -148,13 +148,15 @@ def read_taiwan_official_breadth(
         trade_date=effective_trade_date,
         requested_at=effective_requested_at,
     )
-    return MarketDataGateway().resolve_market_breadth(
-        requirement,
-        reader=TaiwanOfficialBreadthCandidateReader(
-            TaiwanOfficialBreadthRepository(db, available_at=effective_requested_at,
-                                           allow_universe_fallback=allow_universe_fallback)
-        ),
-    )
+    # A cache read must not flush unrelated work pending in the caller's session.
+    with db.no_autoflush:
+        return MarketDataGateway().resolve_market_breadth(
+            requirement,
+            reader=TaiwanOfficialBreadthCandidateReader(
+                TaiwanOfficialBreadthRepository(db, available_at=effective_requested_at,
+                                               allow_universe_fallback=allow_universe_fallback)
+            ),
+        )
 
 
 def project_taiwan_official_breadth(result: MarketDataResultV1) -> dict:
@@ -178,6 +180,7 @@ def project_taiwan_official_breadth(result: MarketDataResultV1) -> dict:
         "received_unclassified_count": observation.unknown_count, "missing_count": observation.missing_count,
         "not_received_count": observation.missing_count,
         "unknown_count": observation.unknown_count + observation.missing_count,
+        "coverage_reason_counts": dict(observation.coverage_reason_counts),
         "limit_up_count": observation.published_limits.up_count if observation.published_limits else None,
         "limit_down_count": observation.published_limits.down_count if observation.published_limits else None,
         "published_limits": observation.published_limits.model_dump(mode="json") if observation.published_limits else None,

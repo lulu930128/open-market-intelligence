@@ -22,10 +22,13 @@ from app.jp_market.trading_calendar import (
     previous_jp_trading_day,
 )
 from app.market.trading_calendar import (
+    TAIWAN_EMERGENCY_MARKET_CLOSURES,
     is_taiwan_trading_day,
     latest_released_trading_day,
     next_taiwan_trading_day,
     taiwan_market_holiday_name,
+    taiwan_market_session_phase,
+    taiwan_presentation_session,
 )
 from app.us_market.trading_calendar import (
     expected_us_daily_price_date,
@@ -86,6 +89,48 @@ class TaiwanTradingCalendarTests(unittest.TestCase):
                 taiwan_market_holiday_name(date(2026, 7, 10)),
                 "Typhoon emergency market closure",
             )
+            self.assertEqual(
+                taiwan_market_holiday_name(date(2026, 10, 23)),
+                "Typhoon Champi (薔琵) emergency market closure",
+            )
+            self.assertFalse(is_taiwan_trading_day(date(2026, 10, 23)))
+
+    def test_october_typhoon_closure_and_presentation_rollover(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+        self.assertTrue(is_taiwan_trading_day(date(2026, 10, 22)))
+        self.assertFalse(is_taiwan_trading_day(date(2026, 10, 23)))
+        self.assertEqual(
+            taiwan_market_holiday_name(date(2026, 10, 26)),
+            "Taiwan Retrocession Day compensatory holiday",
+        )
+        self.assertEqual(next_taiwan_trading_day(date(2026, 10, 22)), date(2026, 10, 27))
+        closure = TAIWAN_EMERGENCY_MARKET_CLOSURES[date(2026, 10, 23)]
+        self.assertEqual(closure.reason_code, "TW_TYPHOON_EMERGENCY_CLOSURE")
+        self.assertEqual(closure.source, "https://www.cna.com.tw/news/afe/202610220388.aspx")
+
+        for day, hour, minute in ((23, 9, 15), (23, 14, 0), (26, 9, 15)):
+            with self.subTest(day=day, hour=hour, minute=minute):
+                now = datetime(2026, 10, day, hour, minute, tzinfo=timezone)
+                self.assertEqual(taiwan_market_session_phase(now), "market_closed")
+                presentation = taiwan_presentation_session(now)
+                self.assertEqual(presentation["state"], "previous_session")
+                self.assertEqual(presentation["trade_date"], date(2026, 10, 22))
+                self.assertFalse(presentation["is_current_trading_day"])
+                self.assertEqual(
+                    presentation["next_transition_at"],
+                    datetime(2026, 10, 27, 8, 0, tzinfo=timezone),
+                )
+
+        before = taiwan_presentation_session(datetime(2026, 10, 27, 7, 59, tzinfo=timezone))
+        self.assertEqual(before["trade_date"], date(2026, 10, 22))
+        rollover = taiwan_presentation_session(datetime(2026, 10, 27, 8, 0, tzinfo=timezone))
+        self.assertEqual(rollover["trade_date"], date(2026, 10, 27))
+        self.assertEqual(rollover["state"], "today_pending")
+        self.assertTrue(rollover["is_current_trading_day"])
+        self.assertEqual(
+            taiwan_market_session_phase(datetime(2026, 10, 27, 9, 15, tzinfo=timezone)),
+            "regular",
+        )
 
     def test_release_day_skips_holiday_and_waits_for_release_time(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")
@@ -114,6 +159,21 @@ class TaiwanTradingCalendarTests(unittest.TestCase):
 
 
 class MarketCalendarStatusTests(unittest.TestCase):
+    def test_october_typhoon_status_uses_prior_daily_release(self) -> None:
+        status = build_taiwan_calendar_status(
+            now=datetime(2026, 10, 23, 16, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+        )
+        self.assertEqual(
+            status["release_windows"]["market_daily_price"]["expected_trade_date"],
+            "2026-10-22",
+        )
+        self.assertFalse(status["is_trading_day"])
+        self.assertEqual(status["phase"], "market_closed")
+        self.assertEqual(status["previous_trading_day"], "2026-10-22")
+        self.assertEqual(status["previous_completed_trading_day"], "2026-10-22")
+        self.assertEqual(status["next_trading_day"], "2026-10-27")
+        self.assertEqual(status["presentation_session"]["trade_date"], "2026-10-22")
+
     def test_taiwan_status_reports_weekend_and_next_trading_day(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")
         status = build_taiwan_calendar_status(

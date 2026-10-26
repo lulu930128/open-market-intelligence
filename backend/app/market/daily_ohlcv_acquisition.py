@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from app.market.providers import tpex, twse
 from app.market.providers.tw_official_daily import (
     TPEX_DAILY_RESOURCE_ID,
+    TPEX_HIGHLIGHT_RESOURCE_ID,
     TWSE_DAILY_RESOURCE_ID,
     TWSE_RWD_DAILY_RESOURCE_ID,
     endpoint_for_resource,
@@ -45,6 +46,8 @@ from app.market_data.provider_catalog import (
     DataAcquisitionPlanV2,
     ProviderResourceRouteV2,
 )
+from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.parsers.twse_published_breadth import parse_tpex_published_breadth, parse_twse_published_breadth
 
 
 class HttpResponseLike(Protocol):
@@ -64,6 +67,7 @@ class _RouteOutcome:
     health: ProviderResourceHealth
     limitations: tuple[str, ...]
     success: bool
+    external_calls: int = 1
 
 
 def _unique(values: Sequence[str]) -> tuple[str, ...]:
@@ -79,6 +83,7 @@ def _default_fetch(
         return twse.get_response(
             twse.DAILY_QUOTES_URL,
             timeout_seconds=route.timeout_seconds,
+            allow_redirects=False,
         )
     if route.resource_id == TWSE_RWD_DAILY_RESOURCE_ID:
         if trade_date is None:
@@ -86,6 +91,7 @@ def _default_fetch(
         return twse.get_response(
             twse.RWD_MI_INDEX_URL,
             timeout_seconds=route.timeout_seconds,
+            allow_redirects=False,
             params={
                 "date": trade_date.strftime("%Y%m%d"),
                 "type": "ALLBUT0999",
@@ -96,6 +102,16 @@ def _default_fetch(
         return tpex.get_response(
             tpex.DAILY_QUOTES_URL,
             timeout_seconds=route.timeout_seconds,
+            allow_redirects=False,
+        )
+    if route.resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
+        if trade_date is None:
+            raise ValueError("TPEx highlight requires trade_date")
+        return tpex.get_response(
+            tpex.MARKET_HIGHLIGHT_URL,
+            timeout_seconds=route.timeout_seconds,
+            allow_redirects=False,
+            params={"date": trade_date.strftime("%Y/%m/%d"), "response": "json"},
         )
     raise ValueError(f"unsupported Taiwan official daily resource: {route.resource_id}")
 
@@ -161,8 +177,17 @@ class TaiwanOfficialDailyAcquisitionExecutor:
         *,
         instruments: Mapping[str, InstrumentKey],
         trade_date: date | None,
+        published_only: bool = False,
     ) -> _RouteOutcome:
         checked_at = self._clock()
+        if (route.resource_id == TPEX_HIGHLIGHT_RESOURCE_ID or published_only) and (
+            trade_date is None or checked_at < taiwan_daily_price_release_at(trade_date)
+        ):
+            return _RouteOutcome(receipt=None, bars=(),
+                health=_health(route, checked_at=checked_at, connection=ConnectionStatus.UNKNOWN,
+                    operational=OperationalStatus.DEGRADED, freshness=EvidenceFreshness.MISSING,
+                    detail_code="OFFICIAL_AGGREGATE_NOT_RELEASED"),
+                limitations=("OFFICIAL_AGGREGATE_NOT_RELEASED",), success=False, external_calls=0)
         try:
             response = self._fetch(route, trade_date=trade_date)
         except Exception as exc:
@@ -225,6 +250,14 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             )
 
         try:
+            if route.resource_id == TPEX_HIGHLIGHT_RESOURCE_ID or published_only:
+                parser = (parse_tpex_published_breadth if route.resource_id == TPEX_HIGHLIGHT_RESOURCE_ID
+                          else parse_twse_published_breadth)
+                parser(raw_text, trade_date=trade_date)
+                return _RouteOutcome(receipt=receipt, bars=(),
+                    health=_health(route, checked_at=fetched_at, connection=ConnectionStatus.CONNECTED,
+                        operational=OperationalStatus.HEALTHY, freshness=EvidenceFreshness.FRESH,
+                        detail_code="OFFICIAL_AGGREGATE_OBSERVED"), limitations=(), success=True)
             target_symbols = frozenset(instruments)
             if route.resource_id == TWSE_DAILY_RESOURCE_ID:
                 parsed = parse_twse_official_daily_payload(
@@ -336,18 +369,55 @@ class TaiwanOfficialDailyAcquisitionExecutor:
         routes: Sequence[ProviderResourceRouteV2],
         *,
         trade_date: date | None,
+        companion_routes: Sequence[ProviderResourceRouteV2] = (),
+        timeout_seconds: float = 30,
+        max_external_calls: int = 2,
+        published_only: bool = False,
     ) -> BarAcquisitionResult:
-        if not instruments:
+        if not instruments and not published_only:
             raise ValueError("official daily dataset acquisition requires instruments")
         started_at = self._monotonic()
+        # Admission deadline, not cancellation of an in-flight OS/socket request.
+        # Parsing time also consumes the same budget; no detached worker/retry.
+        deadline = started_at + min(max(timeout_seconds, 0), 30)
         attempts: list[AcquisitionResourceAttempt] = []
         receipts: list[RawFetchReceiptV1] = []
         bars: list[BarObservation] = []
         health: list[ProviderResourceHealth] = []
         limitations: list[str] = []
         had_failure = False
+        external_calls = 0
+        published_success = False
+        # Planner-selected daily and companion routes share this acquisition's
+        # time/call budget and the same persistence batch.
+        if len(companion_routes) > 1 or any(
+            route.resource_id != TPEX_HIGHLIGHT_RESOURCE_ID
+            or route.provider_key != tpex.PROVIDER or route.capability_id != "market.breadth"
+            or route.max_external_calls != 1
+            or any(instrument.venue != "TPEX" for instrument in instruments.values())
+            for route in companion_routes
+        ):
+            raise ValueError("unsupported official daily companion route")
+        if published_only and any(route.resource_id != TWSE_RWD_DAILY_RESOURCE_ID for route in routes):
+            raise ValueError("unsupported published-only daily route")
+
+        def admitted_route(route):
+            remaining = int(deadline - self._monotonic())
+            reason = ("ACQUISITION_DEADLINE_EXHAUSTED" if remaining < 1 else
+                      "ACQUISITION_CALL_BUDGET_EXHAUSTED" if external_calls >= max_external_calls else None)
+            if reason:
+                limitations.append(reason)
+                health.append(_health(route, checked_at=self._clock(),
+                    connection=ConnectionStatus.UNKNOWN, operational=OperationalStatus.DEGRADED,
+                    freshness=EvidenceFreshness.MISSING, detail_code=reason))
+                return None
+            return route.model_copy(update={"timeout_seconds": min(route.timeout_seconds, remaining)})
 
         for route in routes:
+            route = admitted_route(route)
+            if route is None:
+                had_failure = True
+                break
             attempts.append(
                 AcquisitionResourceAttempt(
                     provider=route.provider_key,
@@ -358,7 +428,9 @@ class TaiwanOfficialDailyAcquisitionExecutor:
                 route,
                 instruments=instruments,
                 trade_date=trade_date,
+                published_only=published_only,
             )
+            external_calls += outcome.external_calls
             if outcome.receipt is not None:
                 receipts.append(outcome.receipt)
             bars.extend(outcome.bars)
@@ -368,10 +440,27 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             if outcome.limitations:
                 had_failure = True
             if outcome.success:
+                published_success = published_only
                 break
             had_failure = True
 
-        if bars:
+        for route in companion_routes:
+            route = admitted_route(route)
+            if route is None:
+                had_failure = True
+                break
+            attempts.append(AcquisitionResourceAttempt(provider=route.provider_key, resource_id=route.resource_id))
+            outcome = self._run_route(route, instruments=instruments, trade_date=trade_date)
+            external_calls += outcome.external_calls
+            if outcome.receipt is not None:
+                receipts.append(outcome.receipt)
+            health.append(outcome.health)
+            limitations.extend(route.limitations)
+            limitations.extend(outcome.limitations)
+            had_failure = had_failure or not outcome.success
+            published_success = published_success or outcome.success
+
+        if bars or published_success:
             status = AcquisitionStatus.PARTIAL if had_failure else AcquisitionStatus.COMPLETED
         elif attempts:
             status = AcquisitionStatus.FAILED if had_failure else AcquisitionStatus.UNAVAILABLE
@@ -384,7 +473,7 @@ class TaiwanOfficialDailyAcquisitionExecutor:
                 status=(status if attempts else AcquisitionStatus.NOT_ATTEMPTED),
                 providers_attempted=providers,
                 resource_attempts=tuple(attempts),
-                external_calls=len(attempts),
+                external_calls=external_calls,
                 subscriptions_created=0,
                 elapsed_ms=max(
                     0,

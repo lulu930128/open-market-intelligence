@@ -135,7 +135,9 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         call = fetch_messages.call_args
-        self.assertEqual(call.args, (codes, "TPEX", 10))
+        self.assertEqual(call.args[:2], (codes, "TPEX"))
+        self.assertGreater(call.args[2], 0)
+        self.assertLessEqual(call.args[2], 10)
         self.assertTrue(call.kwargs["initial_decision"].allowed)
         self.assertEqual(result.external_calls, 3)
         self.assertEqual(payload["market"], "TPEX")
@@ -517,7 +519,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertEqual(row["five_minute_return_status"], "insufficient_data")
         self.assertIsNone(row["five_minute_reference_time"])
 
-    def test_volume_state_keeps_trade_value_usable_when_breadth_is_missing(
+    def test_volume_state_keeps_same_authority_trade_value_when_breadth_is_missing(
         self,
     ) -> None:
         minute_at = datetime(2026, 7, 30, 10, 0, tzinfo=TAIWAN_TZ)
@@ -528,8 +530,8 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
                     index_id="TAIEX",
                     minute_at=minute_at,
                     trade_value=1_000,
-                    trade_value_quality="ready",
-                    estimated=False,
+                    trade_value_quality="estimated",
+                    estimated=True,
                 ),
                 self._market_minute_row(
                     market="TPEX",
@@ -550,8 +552,9 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         self.assertIsNone(payload["official_cumulative_trade_value"])
         self.assertTrue(payload["trade_value_complete"])
         self.assertEqual(payload["trade_value_coverage_status"], "complete")
-        self.assertEqual(payload["trade_value_authority_status"], "mixed")
-        self.assertEqual(payload["trade_value_status"], "mixed_complete")
+        self.assertEqual(payload["trade_value_authority_status"], "estimated")
+        self.assertEqual(payload["trade_value_status"], "best_effort")
+        self.assertFalse(payload["trade_value_qualification"]["decision_usable"])
         self.assertEqual(payload["missing_markets"], [])
         self.assertEqual(payload["status"], "partial")
         self.assertTrue(
@@ -1069,7 +1072,8 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
             row["component_sources"][0]["received_at"] = now.isoformat()
             if code == "2303":
                 row.update(current_price=None, price_as_of=None, has_actual_trade=False,
-                    cumulative_volume_lots=0, estimated_trade_value=None)
+                    cumulative_volume_lots=0, estimated_trade_value=None,
+                    actual_trade_reason_code="ACTUAL_TRADE_EVIDENCE_MISSING")
             rows.append(row)
         persist_taiwan_intraday_stock_states(self.db, rows=rows, now=now)
         for state in self.db.query(TaiwanIntradayStockState).all():
@@ -1118,7 +1122,8 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         for code in codes:
             row = self._stock_state_row(code, "TWSE", 110, 100, event_at)
             row.update(current_price=None, price_as_of=None, has_actual_trade=False,
-                cumulative_volume_lots=0, estimated_trade_value=None, observation_received_at=now)
+                cumulative_volume_lots=0, estimated_trade_value=None, observation_received_at=now,
+                actual_trade_reason_code="ACTUAL_TRADE_EVIDENCE_MISSING")
             row["component_sources"][0]["received_at"] = now.isoformat()
             rows.append(row)
         persist_taiwan_intraday_stock_states(self.db, rows=rows, now=now)

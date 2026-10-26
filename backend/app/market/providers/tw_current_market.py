@@ -383,7 +383,7 @@ class CurrentIndexAdapter:
                 provisional=True,
             )
         except (TypeError, ValueError) as exc:
-            error = str(exc)
+            error = payload.error or str(exc)
         receipt = _receipt(
             binding=self.binding,
             route=route,
@@ -393,14 +393,19 @@ class CurrentIndexAdapter:
             parse_error=error,
         )
         observations = (observation,) if observation is not None else ()
+        summary = _summary(
+            binding=self.binding,
+            route=route,
+            observation_count=len(observations),
+            error=error,
+            payload=payload,
+        )
+        if observation is None and payload.detail_code:
+            summary = summary.model_copy(update={
+                "limitations": (*summary.limitations, payload.detail_code),
+            })
         return MarketIndexAcquisitionResult(
-            summary=_summary(
-                binding=self.binding,
-                route=route,
-                observation_count=len(observations),
-                error=error,
-                payload=payload,
-            ),
+            summary=summary,
             observations=observations,
             receipts=(receipt,),
             provider_health=(

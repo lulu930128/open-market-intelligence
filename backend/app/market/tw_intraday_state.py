@@ -24,6 +24,7 @@ from app.market.trading_calendar import (
 )
 from app.market.taiwan_industries import canonical_tw_sector_identity
 from app.market.tw_universe import list_taiwan_stock_universe
+from app.market.tw_market_breadth_contract import breadth_classification_reason
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
     read_taiwan_session_closes,
@@ -32,7 +33,7 @@ from app.market_data.contracts import InstrumentKey, InstrumentType, Market
 
 
 INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v3"
-INTRADAY_STATE_CALCULATION_VERSION = "tw.stock.intraday.state.derived.v3"
+INTRADAY_STATE_CALCULATION_VERSION = "tw.stock.intraday.state.derived.v4"
 INTRADAY_SCREENING_VERSION = "tw.screening.intraday.v2"
 HOT_GROUPS_VERSION = "tw.market.hot_groups.v1"
 GROUP_SNAPSHOT_VERSION = "tw.market.group_snapshot.v2"
@@ -363,18 +364,26 @@ def _ranking_eligibility(
         and recency == "current" and received_freshness == "current"
         and age is not None and age <= allowed_age
     )
-    no_trade = bool(
-        lane == "actual" and not state.has_actual_trade
-        and _number(state.cumulative_volume_lots) == 0 and reference is not None and reference > 0
-        and state.session_phase in {"regular", "closing_auction", "close_resolution", "post_close"}
-    )
-    coverage_reason = (
-        ("advance" if change > 0 else "decline" if change < 0 else "unchanged") if facts and change is not None
-        else "valid_no_trade" if no_trade
-        else "reference_price_unavailable" if reference is None or reference <= 0
-        else "actual_trade_unavailable" if not state.has_actual_trade and (_number(state.cumulative_volume_lots) or 0) > 0
-        else "unknown"
-    )
+    coverage_reason, _ = breadth_classification_reason({
+        "direction": (
+            ("advance" if change > 0 else "decline" if change < 0 else "unchanged")
+            if facts and change is not None else None
+        ),
+        "market_session": state.session_phase,
+        "has_actual_trade": state.has_actual_trade,
+        "cumulative_volume_lots": state.cumulative_volume_lots,
+        "previous_close": reference,
+        # Only the new producer classification carries the no-trade proof.
+        # Legacy zero-volume rows must await a new canonical observation.
+        "actual_trade_reason_code": (
+            "ACTUAL_TRADE_EVIDENCE_MISSING"
+            if state.quality_status == "valid_no_trade"
+            and state.calculation_version == INTRADAY_STATE_CALCULATION_VERSION
+            else "AUCTION_INDICATIVE_ONLY" if state.quality_status == "auction_indicative"
+            else None
+        ),
+    })
+    no_trade = lane == "actual" and coverage_reason == "valid_no_trade"
     breadth_usable = bool(
         lane == "actual" and received_freshness == "current"
         and state.trade_date == expected and state.lineage_complete
@@ -690,6 +699,21 @@ def persist_taiwan_intraday_stock_states(
             session_lows[session_key] = low_price
         cumulative_volume_lots = _int(raw.get("cumulative_volume_lots"))
         estimated_trade_value = _int(raw.get("estimated_trade_value"))
+        classification, detail = breadth_classification_reason({
+            **raw, "market_session": session_phase, "has_actual_trade": has_actual_trade,
+            "cumulative_volume_lots": cumulative_volume_lots, "previous_close": previous_close,
+        })
+        quality_status = (
+            "ready"
+            if decision_usable and previous_close is not None
+            else "partial"
+            if has_actual_trade
+            else "pending"
+            if session_phase == "preopen"
+            else "valid_no_trade" if classification == "valid_no_trade"
+            else "auction_indicative" if detail == "AUCTION_INDICATIVE_ONLY"
+            else "missing"
+        )
         if (
             existing is not None
             and _aware_taipei(existing.event_time) == event_time
@@ -702,6 +726,7 @@ def persist_taiwan_intraday_stock_states(
             and existing.calculation_version == INTRADAY_STATE_CALCULATION_VERSION
             and existing.decision_usable == decision_usable
             and existing.freshness_status == freshness_status
+            and existing.quality_status == quality_status
             and existing.cumulative_volume_lots == cumulative_volume_lots
             and _state_received_at(existing) == received_at
             and existing.high_price == high_price
@@ -715,16 +740,6 @@ def persist_taiwan_intraday_stock_states(
         ):
             unchanged_count += 1
             continue
-        quality_status = (
-            "ready"
-            if decision_usable and previous_close is not None
-            else "partial"
-            if has_actual_trade
-            else "pending"
-            if session_phase == "preopen"
-            else "valid_no_trade" if cumulative_volume_lots == 0 and previous_close is not None
-            else "missing"
-        )
         values = {
             "provider": provider,
             "market": market,

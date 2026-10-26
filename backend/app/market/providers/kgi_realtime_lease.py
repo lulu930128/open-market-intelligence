@@ -127,6 +127,10 @@ class KgiRealtimeQuoteLeasePort:
 
         return KgiRealtimeAcquisitionAdapter(read_snapshot, clock=clock)
 
+    def quote_snapshot(self, stock_id: str):
+        """Read the existing bounded buffer; never starts provider IO."""
+        return get_kgi_superpy_quote_snapshot(stock_id)
+
     def market_stream_snapshot(
         self,
         stock_id: str,

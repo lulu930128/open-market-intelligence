@@ -6,7 +6,7 @@ import json
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from app.market.trading_calendar import previous_taiwan_trading_day
 from app.market.live_snapshot import LIVE_MAX_AGE_SECONDS, classify_market_snapshot
@@ -140,8 +140,23 @@ class ResolvedTaiwanIndexTruth(CanonicalModel):
     freshness_status: str
     decision_usable: bool
     coverage_status: str
+    research_usable: bool = False
     candidates: tuple[TaiwanIndexTruthCandidate, ...]
     warnings: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _validate_decision_authority(self) -> ResolvedTaiwanIndexTruth:
+        if self.decision_usable and (
+            self.selected_authority == "derived_proxy"
+            or (
+                self.selected_candidate in {"official_close", "completed_daily_bar"}
+                and not (self.official_source and self.official_close_confirmed)
+            )
+        ):
+            raise ValueError("index decision usability requires qualified selected authority")
+        if self.official_close_confirmed and not self.official_source:
+            raise ValueError("a derived index cannot confirm an official close")
+        return self
 
 
 def normalize_index_acquisition_policy(value: Any) -> str:
@@ -1108,6 +1123,14 @@ def resolve_taiwan_index_quote_state(
         selected_finalization == "provisional"
         or selected_authority == "derived_proxy"
     )
+    # A finalized proxy remains research evidence. Completion alone does not
+    # establish exchange authority or an officially confirmed close.
+    research_usable = decision_usable
+    decision_usable = bool(
+        decision_usable
+        and selected_authority != "derived_proxy"
+        and (not completed_session_phase or selected_official_close_confirmed)
+    )
     if active_session_phase:
         snapshot_freshness = classify_market_snapshot(
             calendar_status=calendar_status,
@@ -1301,6 +1324,7 @@ def resolve_taiwan_index_quote_state(
         "delivery_status": delivery_status,
         "freshness_status": freshness_status,
         "decision_usable": decision_usable,
+        "research_usable": research_usable,
         "coverage_status": (
             "complete"
             if decision_usable and not warnings
@@ -1401,6 +1425,7 @@ def project_taiwan_index_headline(
             "official": truth.official_close_confirmed,
             "provisional": truth.provisional_estimate,
             "decision_usable": truth.decision_usable,
+            "research_usable": truth.research_usable,
             "coverage_status": truth.coverage_status,
             "quote_semantics": truth.quote_semantics,
             "delivery_status": truth.delivery_status,

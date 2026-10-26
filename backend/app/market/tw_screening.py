@@ -319,13 +319,25 @@ def build_tw_screening_snapshot(
 
     values: list[tuple[str, float | int]] = []
     observed_periods: dict[str, int] = {}
+    missing_value_days: dict[str, list[str]] = {}
     for stock_id in universe_ids:
         rows = rows_by_stock.get(stock_id, [])
+        # Margin is a window endpoint ratio, not an additive daily flow.
+        # Keep its original endpoint/value eligibility and row coverage.
+        valid_rows = (
+            [row for row in rows if getattr(row, str(metric.value_field), None) is not None]
+            if metric.model is InstitutionalTradeDaily else rows
+        )
+        missing_value_days[stock_id] = [
+            row.trade_date.isoformat() for row in rows
+            if metric.model is InstitutionalTradeDaily
+            and getattr(row, str(metric.value_field), None) is None
+        ]
         value = _metric_value(metric, rows)
         if value is None:
             continue
         values.append((stock_id, value))
-        observed_periods[stock_id] = len(rows)
+        observed_periods[stock_id] = len(valid_rows)
     if normalized["sort_order"] == "desc":
         values.sort(key=lambda item: (-item[1], item[0]))
     else:
@@ -381,6 +393,7 @@ def build_tw_screening_snapshot(
                 "value": value,
                 "unit": metric.unit,
                 "observed_periods": observed_periods.get(stock_id, 0),
+                "missing_value_days": missing_value_days.get(stock_id, []),
                 "requested_periods": normalized["window"],
                 "window_complete": (
                     observed_periods.get(stock_id, 0) >= normalized["window"]
@@ -558,6 +571,9 @@ def build_tw_screening_snapshot(
         ),
         "missing_count": max(universe_count - covered_count, 0),
         "reconciliation": reconciliation,
+        "missing_value_days": {
+            stock_id: days for stock_id, days in missing_value_days.items() if days
+        },
         "coverage_ratio": (
             round(covered_count / universe_count, 6)
             if universe_count
@@ -624,6 +640,7 @@ def build_tw_screening_snapshot(
                     "value": value,
                     "unit": metric.unit,
                     "observed_periods": observed_periods.get(stock_id, 0),
+                    "missing_value_days": missing_value_days.get(stock_id, []),
                     "requested_periods": normalized["window"],
                     "window_complete": False,
                 }

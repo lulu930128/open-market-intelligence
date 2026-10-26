@@ -8,9 +8,10 @@ from datetime import datetime
 from threading import Lock
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
-from app.market.providers.kgi_canonical import KGI_PROVIDER
+from app.market.providers.kgi_canonical import KGI_PROVIDER, kgi_quote_has_actual_trade_evidence
 from app.market.providers.kgi_intraday_bars import (
     kgi_minute_kbar_acquisition,
     kgi_minute_kbar_bucket_bounds,
@@ -44,6 +45,8 @@ from app.market_data.contracts import (
     InstrumentType,
     MarketSession,
     ResolvedDepth,
+    ResolvedQuote,
+    ResolvedEvidenceStatus,
 )
 from app.market_data.integration_contracts import MarketDataResultV1
 from app.market_data.integration_contracts import RequestBounds
@@ -121,26 +124,82 @@ def _sync_canonical_snapshot(
     *,
     stock_id: str,
     requested_at: datetime,
-) -> None:
-    adapter = _KGI_REALTIME_PORT.acquisition_adapter(clock=lambda: requested_at)
-    quote = acquire_taiwan_public_last_trade_quote(
-        db,
-        stock_id=stock_id,
-        policy=RealtimePolicy.REQUIRE_LIVE,
-        requested_at=requested_at,
-        acquisition=adapter,
-        descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
+) -> tuple[bool, tuple[str, ...]]:
+    errors: list[str] = []
+
+    def failed(step: str, exc: Exception) -> None:
+        # Do not expose arbitrary SDK messages, account data or raw snapshots.
+        code = f"{step}:{type(exc).__name__}"
+        if exc.__cause__ is not None:
+            code += f":{type(exc.__cause__).__name__}"
+        if str(exc) == "MIS_DEPTH_FALLBACK_UNAVAILABLE":
+            code += ":MIS_DEPTH_FALLBACK_UNAVAILABLE"
+        errors.append(code)
+        logger.warning("KGI_CANONICAL_SYNC_STEP_FAILED stock_id=%s error=%s", stock_id, code)
+
+    def can_continue(exc: Exception) -> bool:
+        # Transaction owners rollback their own writes. Still stop this sync on
+        # DB failures (including Gateway wrappers); is_active alone is not proof
+        # that another capability can safely use the same transaction context.
+        if not db.is_active:
+            errors.append("SESSION_INACTIVE")
+            return False
+        if isinstance(exc, SQLAlchemyError) or isinstance(exc.__cause__, SQLAlchemyError):
+            errors.append("DB_SYNC_FAILED_STOPPED")
+            return False
+        return True
+
+    try:
+        adapter = _KGI_REALTIME_PORT.acquisition_adapter(clock=lambda: requested_at)
+        quote = acquire_taiwan_public_last_trade_quote(
+            db,
+            stock_id=stock_id,
+            policy=RealtimePolicy.REQUIRE_LIVE,
+            requested_at=requested_at,
+            acquisition=adapter,
+            descriptors=(KGI_QUOTE_SNAPSHOT_DESCRIPTOR,),
+        )
+    except Exception as exc:
+        failed("QUOTE", exc)
+        return False, tuple(errors)
+    # Transport readiness and a completed acquisition are not actual-trade proof.
+    # The canonical Resolver owns event freshness, lineage and provider health.
+    resolved = quote.resolved
+    qualified = (
+        isinstance(resolved, ResolvedQuote)
+        and resolved.quote is not None
+        and resolved.quote.last_trade_price is not None
+        and resolved.quote.lineage.provider == KGI_PROVIDER
+        and resolved.health.research_usable
     )
-    _sync_kgi_minute_bars(
-        db,
-        stock_id=stock_id,
-        requested_at=requested_at,
-    )
+    if qualified and quote.requirement.session is not MarketSession.CLOSE_RESOLUTION:
+        # Gateway may satisfy the request from cache without reading the adapter.
+        # Keep that fact, but do not call a missing/current trial snapshot live.
+        try:
+            current = _KGI_REALTIME_PORT.quote_snapshot(stock_id)
+            qualified = (
+                current.status == "live"
+                and current.quote is not None
+                and kgi_quote_has_actual_trade_evidence(
+                    current.quote, session=quote.requirement.session,
+                )
+            )
+        except Exception as exc:
+            failed("QUOTE", exc)
+            qualified = False
+    if not qualified:
+        errors.append("QUOTE_UNQUALIFIED")
+    try:
+        _sync_kgi_minute_bars(db, stock_id=stock_id, requested_at=requested_at)
+    except Exception as exc:
+        failed("KBAR", exc)
+        if not can_continue(exc):
+            return qualified, tuple(errors)
     if quote.requirement.session is MarketSession.CLOSE_RESOLUTION:
         # During the bounded close-resolution window, the formal-match quote is
         # the only capability that remains applicable. Depth and auction routes
         # intentionally stay fail-closed after the closing auction ends.
-        return
+        return qualified, tuple(errors)
     depth = None
     try:
         depth = acquire_taiwan_depth(
@@ -151,31 +210,46 @@ def _sync_canonical_snapshot(
             descriptors=(KGI_ORDER_BOOK_DESCRIPTOR,),
             acquisition=adapter,
         )
-    except Exception:
+    except Exception as exc:
         # The public fallback below owns the recovery attempt. The outer lease
         # state reports degradation only if both bounded paths fail.
-        pass
+        logger.warning("KGI_DEPTH_PRIMARY_FAILED stock_id=%s error=%s", stock_id, type(exc).__name__)
+        if not can_continue(exc):
+            failed("DEPTH", exc)
+            return qualified, tuple(errors)
     if depth is None or not _has_research_usable_depth(depth):
-        _sync_mis_depth_snapshot(
-            db,
-            stock_id=stock_id,
-            requested_at=requested_at,
-        )
+        try:
+            _sync_mis_depth_snapshot(db, stock_id=stock_id, requested_at=requested_at)
+        except Exception as exc:
+            failed("DEPTH", exc)
+            if not can_continue(exc):
+                return qualified, tuple(errors)
     session = quote.requirement.session
     auction_session = (
         MarketSession.OPENING_AUCTION
         if session is MarketSession.PRE_OPEN
         else session
     )
-    acquire_taiwan_auction(
-        db,
-        stock_id=stock_id,
-        policy=RealtimePolicy.REQUIRE_LIVE,
-        requested_at=requested_at,
-        descriptors=(KGI_AUCTION_DESCRIPTOR,),
-        acquisition=adapter,
-        session=auction_session,
-    )
+    try:
+        auction = acquire_taiwan_auction(
+            db,
+            stock_id=stock_id,
+            policy=RealtimePolicy.REQUIRE_LIVE,
+            requested_at=requested_at,
+            descriptors=(KGI_AUCTION_DESCRIPTOR,),
+            acquisition=adapter,
+            session=auction_session,
+        )
+        # A valid indicative auction is not an actual-trade research quote.
+        if auction.acquisition.attempted and (
+            auction.resolved.auction is None
+            or auction.resolved.auction.indicative_price is None
+            or auction.resolved.health.status is not ResolvedEvidenceStatus.SELECTED
+        ):
+            errors.append("AUCTION_UNQUALIFIED")
+    except Exception as exc:
+        failed("AUCTION", exc)
+    return qualified, tuple(errors)
 
 
 def _sync_kgi_minute_bars(
@@ -269,11 +343,21 @@ def _sync_if_live(
                 requested_at=requested_at,
             )
         else:
-            _sync_canonical_snapshot(
+            qualified, errors = _sync_canonical_snapshot(
                 db,
                 stock_id=state.stock_id,
                 requested_at=requested_at,
             )
+            if errors:
+                return state.model_copy(update={
+                    "status": "degraded",
+                    "error": "CANONICAL_SYNC_FAILED:" + ";".join(errors),
+                    "message": (
+                        "QUOTE_QUALIFIED：合格成交已在canonical cache；附屬能力同步受限。"
+                        if qualified else
+                        "QUOTE_UNQUALIFIED：連線存在但無合格KGI實際成交；不可宣稱live quote。"
+                    ),
+                })
     except Exception as exc:
         return state.model_copy(
             update={

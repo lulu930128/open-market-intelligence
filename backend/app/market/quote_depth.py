@@ -14,7 +14,10 @@ from app.db.models import (
 )
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.live_snapshot import market_status_from_session
-from app.market.quote_volume import build_taiwan_quote_volume_contract
+from app.market.quote_volume import (
+    build_taiwan_quote_volume_contract,
+    taiwan_standard_board_lots,
+)
 from app.market.schemas import TaiwanChangeReferenceRead, TaiwanDecisionPriceRead
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
@@ -2292,9 +2295,41 @@ def project_taiwan_quote_evidence_bundle(
             "last_trade_available", "last_trade_time", "last_trade_is_current_session",
             "actual_trade_occurred", "actual_trade_price_cached", "actual_trade_price_source",
             "actual_trade_price_as_of", "previous_close", "change", "change_pct",
-            "cumulative_volume_lots", "total_volume_lots", "last_trade_volume_lots",
         ):
             response[field] = projected_quote[field]
+        quote = quote_result.resolved.quote
+        daily_volume = getattr(official_daily_bar, "volume", None)
+        response.update(build_taiwan_quote_volume_contract(
+            snapshot_trade_date=quote.trade_date,
+            cumulative_volume_lots=(
+                taiwan_standard_board_lots(quote.cumulative_quantity)
+                if phase != "preopen_auction" else None
+            ),
+            last_trade_volume_lots=(
+                taiwan_standard_board_lots(quote.last_trade_quantity)
+                if phase != "preopen_auction" else None
+            ),
+            official_daily_trade_date=(
+                official_daily_bar.end_at.astimezone(TAIWAN_TZ).date()
+                if official_daily_bar is not None else None
+            ),
+            official_daily_volume_shares=(
+                int(daily_volume.value)
+                if daily_volume is not None and daily_volume.unit is QuantityUnit.SHARE
+                else None
+            ),
+            official_daily_volume_source=(
+                official_daily_bar.lineage.source if official_daily_bar is not None else None
+            ),
+            provider=quote.lineage.provider,
+            cumulative_volume_source_field="canonical.cumulative_quantity",
+            last_trade_volume_source_field="canonical.last_trade_quantity",
+        ))
+        if quote.cumulative_quantity is not None and response["cumulative_volume_lots"] is None:
+            response["volume_reconciliation"]["reason"] = (
+                "preopen_actual_volume_not_applicable" if phase == "preopen_auction"
+                else "canonical_standard_board_lot_quantity_unverified"
+            )
         response["freshness"] = {**response.get("freshness", {}), **projected_quote["freshness"],
             "message": "Canonical current-session last actual trade; original event time retained."}
         response.update(_headline_contract(
@@ -2324,10 +2359,11 @@ def project_taiwan_quote_evidence_bundle(
         requested_at=requested_at,
     )
     _apply_change_reference(response, bundle)
-    if response.get("headline_basis") == "actual_trade":
+    if response.get("headline_basis") in {"actual_trade", "last_trade", "current_session_last_trade"}:
         response["headline_decision_usable"] = bool(
             response.get("headline_decision_usable")
             and quote_evidence["freshness"]["is_current"]
+            and quote_result.resolved.health.research_usable
         )
     _apply_headline_compatibility_aliases(response)
     selected_sources = [

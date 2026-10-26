@@ -47,6 +47,7 @@ class TaiwanTierATargetPlan(CanonicalModel):
     max_symbols: int = Field(gt=0)
     configured_symbol_count: int = Field(ge=0)
     skipped_targets: tuple[dict[str, Any], ...] = ()
+    selection_diagnostics: tuple[dict[str, Any], ...] = ()
     scope_semantics: str = "bounded_tier_a_universe_not_all_market"
     profile_semantics: str
     source_priority: tuple[str, ...] = (
@@ -293,6 +294,10 @@ def resolve_taiwan_tier_a_target_plan(
             }
         )
 
+    candidate_ranks = {symbol: rank for rank, symbol in enumerate(ordered_candidates, 1)}
+    eligible_ranks = {symbol: rank for rank, symbol in enumerate(profile_eligible, 1)}
+    skipped_reasons = {item["stock_id"]: item["reason"] for item in skipped_targets}
+    selected_set = set(selected)
     plan = TaiwanTierATargetPlan(
         operation_profile=operation_profile,
         symbols=tuple(selected),
@@ -312,6 +317,16 @@ def resolve_taiwan_tier_a_target_plan(
         max_symbols=hard_cap,
         configured_symbol_count=len(configured),
         skipped_targets=tuple(skipped_targets),
+        selection_diagnostics=tuple(
+            {
+                "stock_id": symbol,
+                "selected": symbol in selected_set,
+                "candidate_rank": candidate_ranks[symbol],
+                "eligible_rank": eligible_ranks.get(symbol),
+                "reason": "selected" if symbol in selected_set else skipped_reasons[symbol],
+            }
+            for symbol in ordered_candidates
+        ),
         profile_semantics=profile_semantics,
     )
     return {

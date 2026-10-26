@@ -929,6 +929,27 @@ def _observation_time_value(payload: Any, *, keys: set[str]) -> Any:
     return _first_semantic_value(payload, keys=keys)
 
 
+def _breadth_metadata_payload(payload: Any, *, depth: int = 0) -> Any:
+    """Exclude supplemental auction lanes from the main breadth provenance.
+
+    Keep the selected payload itself, including a primary auction observation.
+    This copy is only for metadata lookup; the outward auction history remains
+    intact and the market owner's price/coverage decisions are unchanged.
+    """
+    if depth > 6:
+        return None
+    if isinstance(payload, dict):
+        return {
+            key: _breadth_metadata_payload(value, depth=depth + 1)
+            for key, value in payload.items()
+            if key not in {"auction_breadth", "latest_completed_auctions"}
+        }
+    if isinstance(payload, list):
+        return [_breadth_metadata_payload(value, depth=depth + 1)
+                for value in payload[:500]]
+    return payload
+
+
 def _canonical_freshness_status(
     *,
     status: str,
@@ -1345,6 +1366,14 @@ def _quality_for_capability(
     slot = _dict(slots.get(slot_name))
     realtime = _dict(realtime_assessments.get(capability_id))
     payload = projected_data.get(capability_id)
+    metadata_payload = (
+        _breadth_metadata_payload(payload)
+        if capability_id == "market.breadth" else payload
+    )
+    metadata_value = (
+        _observation_time_value
+        if capability_id == "market.breadth" else _first_semantic_value
+    )
     payload_freshness = (
         _dict(payload.get("freshness"))
         if isinstance(payload, dict)
@@ -1772,15 +1801,15 @@ def _quality_for_capability(
         "issues": list(dict.fromkeys(issues)),
         "reason_codes": reason_codes,
         "as_of": _observation_time_value(
-            payload,
+            metadata_payload,
             keys={"as_of", "latest_data_date", "trade_date", "date"},
         ),
         "trade_date": _observation_time_value(
-            payload,
+            metadata_payload,
             keys={"trade_date", "latest_data_date", "date"},
         ),
         "event_time": _observation_time_value(
-            payload,
+            metadata_payload,
             keys={
                 "event_at",
                 "event_time",
@@ -1790,17 +1819,17 @@ def _quality_for_capability(
                 "selected_event_at",
             },
         ),
-        "release_at": _first_semantic_value(
-            payload,
+        "release_at": metadata_value(
+            metadata_payload,
             keys={"release_at", "released_at", "next_release_at"},
         ),
-        "fetched_at": _observation_time_value(payload, keys={"fetched_at"}),
-        "computed_at": _first_semantic_value(
-            payload,
+        "fetched_at": _observation_time_value(metadata_payload, keys={"fetched_at"}),
+        "computed_at": metadata_value(
+            metadata_payload,
             keys={"computed_at", "calculated_at", "generated_at"},
         ),
         "served_at": (
-            _first_semantic_value(payload, keys={"served_at"})
+            metadata_value(metadata_payload, keys={"served_at"})
             or canonical.get("served_at")
             or canonical.get("generated_at")
         ),
@@ -1849,24 +1878,24 @@ def _quality_for_capability(
                 in {"missing", "stale", "delayed", "future", "unavailable"}
             )
         ),
-        "source_grade": _first_semantic_value(
-            payload,
+        "source_grade": metadata_value(
+            metadata_payload,
             keys={"source_grade"},
         ),
-        "selected_provider": _first_semantic_value(
-            payload,
+        "selected_provider": metadata_value(
+            metadata_payload,
             keys={"selected_provider", "provider"},
         ),
-        "selected_source": _first_semantic_value(
-            payload,
+        "selected_source": metadata_value(
+            metadata_payload,
             keys={"selected_source", "source"},
         ),
-        "selection_reason": _first_semantic_value(
-            payload,
+        "selection_reason": metadata_value(
+            metadata_payload,
             keys={"selection_reason"},
         ),
         "fallback_used": bool(
-            _first_semantic_value(payload, keys={"fallback_used"})
+            metadata_value(metadata_payload, keys={"fallback_used"})
         ),
     }
 

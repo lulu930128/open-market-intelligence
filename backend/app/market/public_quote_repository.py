@@ -173,7 +173,7 @@ class TaiwanPublicQuoteRepository:
             if row is None:
                 continue
             latest_rows[(row.provider, row.source)] = row
-            if row.last_price is None and row.trade_state != TradeObservationState.INDICATIVE_OBSERVED.value:
+            if row.last_price is None:
                 row = next((actual for actual in pool if actual.provider == row.provider
                     and actual.source == row.source and actual.trade_date == row.trade_date
                     and actual.trade_state == TradeObservationState.TRADE_OBSERVED.value
@@ -577,7 +577,7 @@ class TaiwanPublicQuoteRepository:
                     latest_rows[(row.provider, row.source)] = row
                     # A no-trade message is an observation, not a deletion of the
                     # last actual trade. Query by role before applying the bound.
-                    if row.last_price is None and row.trade_state != TradeObservationState.INDICATIVE_OBSERVED.value:
+                    if row.last_price is None:
                         actual = base_query.filter(
                             TaiwanStockQuoteSnapshot.provider == row.provider,
                             TaiwanStockQuoteSnapshot.source == row.source,
@@ -628,9 +628,26 @@ class TaiwanPublicQuoteRepository:
             if read.observation is not None and latest_row is not None and latest_row.id != row.id:
                 latest_read = self._decode_row(instrument, latest_row)
                 if latest_read.observation is not None:
+                    original_volume = read.observation.cumulative_quantity
+                    latest_volume = latest_read.observation.cumulative_quantity
+                    volume_changed = (
+                        original_volume is not None and latest_volume is not None
+                        and original_volume.value != latest_volume.value
+                    )
+                    state = read.observation.state
+                    if latest_read.observation.state is ObservationState.INDICATIVE:
+                        state = ObservationState.INDICATIVE
+                    elif volume_changed:
+                        state = ObservationState.STALE
+                    # Keep the original price/time/receipt as a historical fact.
+                    # A changed cumulative volume without a new actual price
+                    # cannot requalify that fact as the current trade.
                     read = replace(read, observation=read.observation.model_copy(update={
                         "latest_observation_lineage": latest_read.observation.lineage,
-                    }))
+                        "state": state,
+                    }), limitations=tuple(dict.fromkeys((*read.limitations, *(
+                        ("CURRENT_PRICE_UNVERIFIED",) if volume_changed else ()
+                    )))))
             reads.append(read)
         if requested_at is not None:
             state = self._price_states_batch.get(instrument.symbol) if self._quote_rows_batch is not None else read_current_stock_price_states(

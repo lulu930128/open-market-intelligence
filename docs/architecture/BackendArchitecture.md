@@ -901,3 +901,15 @@ Viewer retry 只由有效 heartbeat 觸發，caller deadline／external-call bud
 Current breadth 與 completed breadth projection 都保留 typed `trade_value_is_estimate`／semantics／canonical lineage。Current volume composer 僅合成同日期、同分鐘、同 scope／semantics／authority 的 TWSE＋TPEX components；authority 缺少、非 bool、混合或 receipt event minute 不一致皆 fail closed。兩個 estimated components 的 current／estimated value 可以完整，但 official value 保持 null；historical baseline readiness 獨立，沿用原 lineage／semantic／authority guards。Minute bucket 標為 13:30 不會抹除原始 component event 為 13:32 的不一致。
 
 量能 diagnostics 分別提供 raw/canonical scope、semantic、authority、value/lineage、日期、分鐘及市場缺口，附逐 session 排除原因。Legacy `scope_mismatch` 保留為 canonical scope/semantic/authority 任一不符的 session 聯集計數，並非 raw scope mismatch；細項可重疊，不能直接相加。唯有真正足夠的 5/20 個可比較樣本才產生 pace ratio；consumer 不補算、不改標 history。
+
+量能代表性由同一 Market Service 的 `trade_value_qualification` 獨立判定；`trade_value_complete` 仍只表示兩個 venue 的數值與既有時間／scope／lineage 合約可對齊，不保證全市場代表性。MIS 估值須有明示完整 acquisition、零 failed／skipped、無 fallback，且收到的 universe 數量與 Canonical reason partition 一致；有效成交價分類加上 verified no-trade 必須覆蓋整個宣告 universe，不能以 directional ratio、receipt 成功或缺值補零代替。未達資格保留金額、estimated authority 與原因，`trade_value_status=best_effort`，5d／20d 比值為 null、decision_usable=false。官方值仍遵守原 authority、scope、lineage 與同期可比性合約。
+
+原 minute-state persistence owner 將該次估值證據附在既有 `component_sources_json` 的 trade-value owner 下；讀取時重新判定 current 與每個歷史樣本，不改正式歷史資料、不拿今日 acquisition 替舊樣本補證據。缺證據的 legacy estimates 排除於 baseline，保留逐 session 原因；`qualified_sample_days` 與 typed qualification 穿過 response round-trip。Fallback composer、persisted direct branch 及 AI 委派共用此資格 gate，consumer 不另建政策。
+
+### US 分類與 EOD 樣本分布
+
+`us_market.classification` 與既有 full-market EOD coverage 共用 catalog 的 active 普通股 Universe filter，排除明示 ETF、test 與 inactive。分類在同一 Universe 中按 fetched_at、provider、id 決定每個 symbol 的單一 profile；保留 provider 原始文字與時間，空值／unknown 不偽裝一般分類，生效日期未知，也不宣稱 GICS／SIC 授權。
+
+`us_market.sector_distribution` 是讀取聚合，不是新的 provider、cache 或 producer。每次依既有 lifecycle 的 expected completed session 重算 canonical inventory；歷史 durable checkpoint 不代表當日覆蓋。價格只經既有 `USDailyOhlcvPlatform`／Gateway，對已分類且有當日候選的 symbols 作有上限的 cache-only read，超額回報 not_covered。全 Universe、已評估樣本與可比較價格交集分開計數；缺值、跨日缺口、provisional 或 lineage 不相容不能當 0。公開 lineage 僅保留有限的來源、時間與狀態。
+
+既有 `market.sectors`、`market.hot_groups`、`market.breadth` 由 target market dispatcher 選用 US projection 與 tagged schema，TW 原有語意及 schema 保留。US derived aggregation 不虛構 provider contract ID，不產生 refresh action；API、`omi.decision.v4` 與 MCP 共用同一讀取結果。Frontend 只呈現後端統計，mount／明確重整才讀取 EOD，不掛 quote poller。此階段為 `eod_sample`，零交集為 unavailable，非零仍 partial／sample-only，不能宣稱完整市場或 decision usable；intraday 另待既有 canonical 資料足以驗證後才開放。

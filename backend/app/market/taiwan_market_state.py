@@ -21,7 +21,7 @@ from app.market.trading_calendar import (
 SUPPORTED_MARKETS = {"TWSE", "TPEX"}
 INDEX_ID_BY_MARKET = {"TWSE": "TAIEX", "TPEX": "TPEX"}
 TAIWAN_SESSION_CLOSE = time(13, 30)
-MARKET_MINUTE_CALCULATION_VERSION = "tw.market.minute_state.derived.v3"
+MARKET_MINUTE_CALCULATION_VERSION = "tw.market.minute_state.derived.v4"
 VOLUME_COMPARISON_VERSION = "tw.market.volume_comparison.v1"
 
 
@@ -80,6 +80,98 @@ def _as_float(value: Any) -> float | None:
 def _as_int(value: Any) -> int | None:
     parsed = _as_float(value)
     return int(parsed) if parsed is not None else None
+
+
+def _trade_value_qualification(component: dict[str, Any]) -> dict[str, Any]:
+    """Representativeness of a value, independent of numeric/lineage completeness.
+
+    MIS's canonical reason partition counts actual-price directions separately
+    from verified no-trade. Require the whole declared universe; a directional
+    coverage ratio or a successful transport alone is not valuation evidence.
+    """
+    reasons: list[str] = []
+    acquisition_complete = None
+    price_coverage_ratio = None
+    estimate = component.get("trade_value_is_estimate")
+    if estimate is False:
+        if component.get("official_flag") is not True:
+            reasons.append("OFFICIAL_AUTHORITY_UNVERIFIED")
+    elif estimate is True:
+        if component.get("trade_value_semantics") != "estimated_latest_price_x_cumulative_volume_lots":
+            reasons.append("ESTIMATE_SEMANTICS_UNVERIFIED")
+        acquisition = component.get("acquisition_diagnostics")
+        if not isinstance(acquisition, dict):
+            reasons.append("ACQUISITION_EVIDENCE_MISSING")
+        else:
+            acquisition_complete = (
+                acquisition.get("acquisition_complete") is True
+                and type(acquisition.get("failed_batch_count")) is int
+                and acquisition["failed_batch_count"] == 0
+                and type(acquisition.get("skipped_batch_count")) is int
+                and acquisition["skipped_batch_count"] == 0
+                and acquisition.get("fallback_used") is False
+                and not acquisition.get("batch_failures")
+                and acquisition.get("latest_attempt_status") in (None, "complete")
+            )
+            if not acquisition_complete:
+                reasons.append("ACQUISITION_INCOMPLETE")
+        total = component.get("total_count")
+        partition = component.get("coverage_reason_counts")
+        required = ("advance", "decline", "unchanged", "valid_no_trade")
+        if (
+            type(total) is not int or total <= 0 or not isinstance(partition, dict)
+            or not all(key in partition for key in required)
+            or any(type(value) is not int or value < 0 for value in partition.values())
+            or sum(partition.values()) != total
+        ):
+            reasons.append("PRICE_COVERAGE_EVIDENCE_MISSING")
+        else:
+            price_coverage_ratio = sum(partition[key] for key in required) / total
+            if price_coverage_ratio != 1:
+                reasons.append("PRICE_COVERAGE_INCOMPLETE")
+            if isinstance(acquisition, dict) and (
+                type(acquisition.get("received_count")) is not int
+                or acquisition["received_count"] != total
+            ):
+                acquisition_complete = False
+                reasons.append("ACQUISITION_COVERAGE_INCOMPLETE")
+    else:
+        reasons.append("TRADE_VALUE_AUTHORITY_UNVERIFIED")
+    return {
+        "status": "qualified" if not reasons else "best_effort",
+        "decision_usable": not reasons,
+        "acquisition_complete": acquisition_complete,
+        "price_coverage_ratio": price_coverage_ratio,
+        "reason_codes": reasons,
+    }
+
+
+def _combined_trade_value_qualification(components: list[dict[str, Any]]) -> dict[str, Any]:
+    by_market = {item.get("market"): _trade_value_qualification(item) for item in components}
+    reasons = [f"{market}:{reason}" for market, quality in by_market.items()
+               for reason in quality["reason_codes"]]
+    if set(by_market) != SUPPORTED_MARKETS or len(components) != len(SUPPORTED_MARKETS):
+        reasons.append("MARKET_QUALIFICATION_EVIDENCE_MISSING")
+    return {"status": "qualified" if not reasons else "best_effort",
+            "decision_usable": not reasons, "reason_codes": reasons}
+
+
+def _row_trade_value_evidence(row: TaiwanMarketMinuteState) -> dict[str, Any]:
+    try:
+        components = json.loads(row.component_sources_json or "[]")
+        owner = next((item for item in components if item.get("owns_trade_value") is True), {})
+        evidence = owner.get("trade_value_evidence")
+    except (ValueError, TypeError, AttributeError):
+        evidence = None
+    # Legacy estimates have no proof of acquisition/price coverage. Do not
+    # recover it from today's breadth or rewrite the historical minute.
+    return {
+        **(evidence if isinstance(evidence, dict) else {}),
+        "market": row.market,
+        "trade_value_is_estimate": row.trade_value_is_estimate,
+        "trade_value_semantics": row.trade_value_semantics,
+        "official_flag": evidence.get("official_flag") if isinstance(evidence, dict) else row.official_flag,
+    }
 
 
 def _as_taiwan_datetime(value: Any, *, naive_is_local: bool = False) -> datetime | None:
@@ -204,15 +296,13 @@ def _minute_at_for_payload(
     finalized: bool,
     now: datetime | None,
 ) -> datetime:
-    if finalized:
-        return datetime.combine(trade_date, TAIWAN_SESSION_CLOSE, tzinfo=TAIWAN_TZ)
     observed_at = (
         _as_taiwan_datetime(payload.get("as_of"))
         or _as_taiwan_datetime(now)
         or datetime.now(TAIWAN_TZ)
     )
-    if observed_at.time() > TAIWAN_SESSION_CLOSE:
-        return datetime.combine(trade_date, TAIWAN_SESSION_CLOSE, tzinfo=TAIWAN_TZ)
+    # Finalization does not change the observation clock. A 13:32 estimate is
+    # comparable only to another 13:32 observation, never a synthetic 13:30.
     return observed_at.replace(second=0, microsecond=0)
 
 
@@ -444,6 +534,17 @@ def persist_taiwan_market_minute_state(
             item=item,
             breadth=breadth,
         )
+        value_domain = (
+            "market_breadth" if trade_value_contract["source"] == "breadth"
+            else "index_snapshot"
+        )
+        value_component = next(
+            (component for component in component_lineage["components"]
+             if component["domain"] == value_domain), {}
+        )
+        value_event_at = _as_taiwan_datetime(value_component.get("event_at"))
+        if value_event_at is not None:
+            minute_at = value_event_at.replace(second=0, microsecond=0)
         existing = (
             db.query(TaiwanMarketMinuteState)
             .filter(TaiwanMarketMinuteState.market == market)
@@ -497,19 +598,24 @@ def persist_taiwan_market_minute_state(
             finalized=finalized,
             is_estimate=trade_value_is_estimate,
         )
-        value_domain = (
-            "market_breadth" if trade_value_contract["source"] == "breadth"
-            else "index_snapshot"
-        )
-        value_component = next(
-            (component for component in component_lineage["components"]
-             if component["domain"] == value_domain), {}
-        )
         for component in component_lineage["components"]:
             component["owns_trade_value"] = component["domain"] == value_domain
-        value_event_at = _as_taiwan_datetime(value_component.get("event_at"))
-        if cumulative_trade_value is not None and not finalized and (
+            if component["owns_trade_value"]:
+                value_evidence = breadth if value_domain == "market_breadth" else item
+                component["trade_value_evidence"] = {
+                    key: deepcopy(value_evidence.get(key))
+                    for key in ("official_flag", "total_count", "acquisition_diagnostics", "coverage_reason_counts")
+                }
+                component["trade_value_evidence"]["official_flag"] = (
+                    value_evidence.get("official_flag") is True
+                    or value_domain == "index_snapshot" and value_evidence.get("official") is True
+                )
+        if cumulative_trade_value is not None and (
             value_event_at is None
+            or value_event_at.date() != trade_date
+            or taiwan_market_session_phase(value_event_at) not in {
+                "regular", "closing_auction", "close_resolution", "post_close",
+            }
             or value_event_at.replace(second=0, microsecond=0) != minute_at
         ):
             trade_value_quality_status = "component_time_mismatch"
@@ -690,12 +796,37 @@ def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
         return False
     return bool(
         event_at is not None
+        and all(component.get(key) for key in ("provider", "source", "raw_result_id"))
         and row.trade_date == _row_minute_at(row).date()
         and event_at.replace(second=0, microsecond=0) == _row_minute_at(row)
+        and taiwan_market_session_phase(event_at) in {
+            "regular", "closing_auction", "close_resolution", "post_close",
+        }
     )
 
 
+def _row_trade_value_source_identity(row: TaiwanMarketMinuteState) -> tuple[str, str] | None:
+    """Compare origins across minutes; each endpoint keeps its own receipt ID."""
+    try:
+        components = json.loads(row.component_sources_json or "[]")
+        domain = "market_breadth" if row.breadth_snapshot_as_of is not None else "index_snapshot"
+        owner = next((item for item in components if item.get("owns_trade_value") is True), None)
+        if owner is None:
+            owner = next((item for item in components if item.get("domain") == domain), {})
+        provider, source = owner.get("provider"), owner.get("source")
+        return (provider, source) if provider and source else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _combined_trade_value(rows_by_market: dict[str, TaiwanMarketMinuteState]) -> int | None:
+    identities = [_row_comparison_identity(row) for row in rows_by_market.values()]
+    if any(
+        len({identity[axis] for identity in identities}) != 1
+        or any(not identity[axis] for identity in identities)
+        for axis in ("universe_class", "trade_value_semantic_class", "authority_class")
+    ):
+        return None
     if any(
         not _has_usable_trade_value(row)
         for market, row in rows_by_market.items()
@@ -776,6 +907,8 @@ def _baseline_payload(
         "requested_days": days,
         "required_sample_days": days,
         "sample_days": len(selected),
+        # values are admitted only after per-session qualification in the reader.
+        "qualified_sample_days": len(selected),
         "available_sample_days": len(selected),
         "remaining_sample_days": remaining_sessions,
         "expected_ready_after_sessions": remaining_sessions,
@@ -934,6 +1067,12 @@ def compose_taiwan_market_volume_state(
             "source": "canonical_market_breadth" if qualified else None,
             "reason": None if qualified else "TWSE and TPEX values require matching date, minute, scope, semantics, explicit authority and canonical lineage.",
         }
+    return _qualify_volume_comparisons(output)
+
+
+def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
+    """Gate current/history decisions without changing the selected numeric facts."""
+    current = _as_int(output.get("current_cumulative_trade_value"))
     component_scope = {
         item["market"]: [item.get("scope"), item.get("trade_value_semantics"), item.get("trade_value_is_estimate")]
         for item in output.get("markets") or [] if isinstance(item, dict) and item.get("market")
@@ -943,13 +1082,53 @@ def compose_taiwan_market_volume_state(
         for item in output.get("markets") or [] if isinstance(item, dict) and item.get("market")
     }
     output["comparison_identity"] = comparison_identity
+    qualification = _combined_trade_value_qualification(output.get("markets") or [])
+    if current is None:
+        qualification.update(status="best_effort", decision_usable=False)
+        qualification["reason_codes"].append("CURRENT_VALUE_UNAVAILABLE")
+    output["trade_value_qualification"] = qualification
+    for item in output.get("markets") or []:
+        item["trade_value_qualification"] = _trade_value_qualification(item)
+    if current is not None and not qualification["decision_usable"]:
+        output["trade_value_status"] = "best_effort"
     for days in (5, 20):
         key = f"same_time_baseline_{days}d"
         baseline = output.setdefault(key, {})
+        if (
+            output.get("current_value_source") == "canonical_market_breadth"
+            and (
+                baseline.get("comparison_minute") != output.get("comparison_minute")
+                or baseline.get("comparison_trade_date") != output.get("trade_date")
+            )
+        ):
+            # The newly selected current clock cannot inherit samples from the
+            # old minute-state endpoint. Preserve the rejected context as
+            # diagnostics; do not relabel those samples or read/write history.
+            output.setdefault("baseline_diagnostics", {}).setdefault(
+                "rejected_comparison_context", {}
+            )[key] = {
+                "comparison_minute": baseline.get("comparison_minute"),
+                "comparison_trade_date": baseline.get("comparison_trade_date"),
+                "sample_days": baseline.get("sample_days"),
+                "reason": "current_comparison_context_changed",
+            }
+            baseline = _baseline_payload(
+                current, [], days,
+                comparison_minute=output.get("comparison_minute"),
+                comparison_trade_date=output.get("trade_date"),
+                component_scope=component_scope,
+                comparison_identity=comparison_identity,
+            )
+            output[key] = baseline
+            output["history_trade_dates"] = []
+            output["baseline_readiness_status"] = "warming_up"
         median_value = _as_float(baseline.get("median_cumulative_trade_value"))
         sample_days = _as_int(baseline.get("sample_days")) or 0
         comparable = bool(
             current is not None and median_value is not None and median_value > 0
+            and qualification["decision_usable"]
+            and type(baseline.get("qualified_sample_days")) is int
+            and baseline["qualified_sample_days"] == sample_days
             and sample_days >= days and baseline.get("sample_status") == "complete"
             and output.get("comparison_minute") is not None
             and baseline.get("comparison_minute") == output["comparison_minute"]
@@ -963,6 +1142,12 @@ def compose_taiwan_market_volume_state(
             pace_ratio=current / median_value if comparable else None,
             decision_usable=comparable,
             pace_ratio_status="calculated" if comparable else "insufficient_history" if sample_days < days else "incomparable_current_or_baseline",
+            qualification_reason_codes=(
+                qualification["reason_codes"]
+                + (["HISTORICAL_QUALIFICATION_EVIDENCE_MISSING"]
+                   if baseline.get("qualified_sample_days") != sample_days
+                   or type(baseline.get("qualified_sample_days")) is not int else [])
+            ),
         )
     output["status"] = "ready" if output["same_time_baseline_5d"]["decision_usable"] else "partial"
     return output
@@ -1091,6 +1276,9 @@ def read_taiwan_market_volume_state(
              selected_rows[market].trade_value_semantics, selected_rows[market].trade_value_is_estimate)
             == (previous_rows[market].source, previous_rows[market].breadth_scope,
                 previous_rows[market].trade_value_semantics, previous_rows[market].trade_value_is_estimate)
+            and _row_comparison_identity(selected_rows[market]) == _row_comparison_identity(previous_rows[market])
+            and _row_trade_value_source_identity(selected_rows[market]) is not None
+            and _row_trade_value_source_identity(selected_rows[market]) == _row_trade_value_source_identity(previous_rows[market])
             and selected_rows[market].cumulative_trade_value is not None
             and previous_rows[market].cumulative_trade_value is not None
             and selected_rows[market].cumulative_trade_value >= previous_rows[market].cumulative_trade_value
@@ -1101,9 +1289,22 @@ def read_taiwan_market_volume_state(
         if comparable
         else None
     )
+    # Numeric completeness does not establish representativeness. Qualify
+    # each endpoint from its own persisted evidence, never today's coverage.
+    current_qualification = _combined_trade_value_qualification([
+        _row_trade_value_evidence(row) for row in selected_rows.values()
+    ])
+    previous_qualification = _combined_trade_value_qualification([
+        _row_trade_value_evidence(row) for row in previous_rows.values()
+    ])
+    delta_qualified = (
+        current_qualification["decision_usable"]
+        and previous_qualification["decision_usable"]
+    )
     one_minute_change = (
         current_value - previous_value
         if current_value is not None and previous_value is not None
+        and delta_qualified
         else None
     )
 
@@ -1134,6 +1335,7 @@ def read_taiwan_market_volume_state(
         "prior_session_count": len(rows_by_date), "usable_sample_count": 0,
         "missing_comparison_minute": 0, "missing_market_component": 0,
         "scope_mismatch": 0, "unusable_value_or_lineage": 0,
+        "unqualified_trade_value": 0,
         "trade_date_mismatch": 0,
         "raw_scope_mismatch": 0, "canonical_scope_mismatch": 0,
         "trade_value_semantic_mismatch": 0, "authority_mismatch": 0,
@@ -1188,6 +1390,13 @@ def read_taiwan_market_volume_state(
         if value is None:
             baseline_diagnostics["unusable_value_or_lineage"] += 1
             diagnostic["exclusion_reasons"].append("unusable_value_or_lineage")
+        history_qualification = _combined_trade_value_qualification([
+            _row_trade_value_evidence(row) for row in selected_history_rows.values()
+        ])
+        if not history_qualification["decision_usable"]:
+            baseline_diagnostics["unqualified_trade_value"] += 1
+            diagnostic["exclusion_reasons"].append("unqualified_trade_value")
+            diagnostic["qualification_reason_codes"] = history_qualification["reason_codes"]
         if diagnostic["exclusion_reasons"]:
             continue
         diagnostic["usable"] = True
@@ -1211,8 +1420,10 @@ def read_taiwan_market_volume_state(
         row = selected_rows.get(market)
         if row is None:
             continue
+        value_evidence = _row_trade_value_evidence(row)
         market_payloads.append(
             {
+                **value_evidence,
                 "market": market,
                 "index_id": row.index_id,
                 "scope": row.breadth_scope,
@@ -1238,7 +1449,7 @@ def read_taiwan_market_volume_state(
                 "trade_value_is_estimate": row.trade_value_is_estimate,
                 "source": row.source,
                 "source_category": row.source_category,
-                "official_flag": row.official_flag,
+                "official_flag": value_evidence["official_flag"],
                 "derived_flag": row.derived_flag,
                 "component_raw_result_ids": (
                     json.loads(row.component_raw_result_ids_json)
@@ -1317,11 +1528,16 @@ def read_taiwan_market_volume_state(
             "reason": (
                 None
                 if one_minute_change is not None
-                else "Current and previous complete TWSE+TPEX minutes are required."
+                else "Current and previous adjacent, comparable TWSE+TPEX minutes must both be qualified. "
+                + "; ".join(
+                    f"{endpoint}:{reason}"
+                    for endpoint, quality in (("current", current_qualification), ("previous", previous_qualification))
+                    for reason in quality["reason_codes"]
+                )
             ),
         },
     }
-    return {
+    return _qualify_volume_comparisons({
         "kind": "taiwan_market_volume_state",
         "generated_at": generated_at.isoformat(),
         "as_of": selected_minute.isoformat(),
@@ -1400,7 +1616,7 @@ def read_taiwan_market_volume_state(
         "limitations": [
             "Up/down-side trade-value split requires full-market per-stock realtime state and is not inferred here."
         ],
-    }
+    })
 
 
 __all__ = [

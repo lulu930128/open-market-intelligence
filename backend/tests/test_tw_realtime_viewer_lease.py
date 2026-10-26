@@ -646,7 +646,8 @@ def test_close_resolution_sync_persists_quote_without_depth_or_auction(
     def sync_quote(*_args, **_kwargs):
         calls.append("quote")
         return SimpleNamespace(
-            requirement=SimpleNamespace(session=MarketSession.CLOSE_RESOLUTION)
+            requirement=SimpleNamespace(session=MarketSession.CLOSE_RESOLUTION),
+            resolved=None,
         )
 
     def forbidden(*_args, **_kwargs):
@@ -666,7 +667,7 @@ def test_close_resolution_sync_persists_quote_without_depth_or_auction(
     )
 
     _sync_canonical_snapshot(
-        SimpleNamespace(),
+        SimpleNamespace(is_active=True),
         stock_id="2330",
         requested_at=datetime(2026, 8, 26, 13, 31, tzinfo=TAIPEI),
     )
@@ -682,7 +683,8 @@ def test_kgi_depth_failure_uses_one_market_owned_mis_fallback(
     def sync_quote(*_args, **_kwargs):
         calls.append("quote")
         return SimpleNamespace(
-            requirement=SimpleNamespace(session=MarketSession.CONTINUOUS)
+            requirement=SimpleNamespace(session=MarketSession.CONTINUOUS),
+            resolved=None,
         )
 
     def sync_depth(*_args, **_kwargs):
@@ -694,6 +696,7 @@ def test_kgi_depth_failure_uses_one_market_owned_mis_fallback(
 
     def sync_auction(*_args, **_kwargs):
         calls.append("auction")
+        return SimpleNamespace(acquisition=SimpleNamespace(attempted=False))
 
     monkeypatch.setattr(
         "app.market.tw_realtime_lease_platform.acquire_taiwan_public_last_trade_quote",
@@ -713,7 +716,7 @@ def test_kgi_depth_failure_uses_one_market_owned_mis_fallback(
     )
 
     _sync_canonical_snapshot(
-        SimpleNamespace(),
+        SimpleNamespace(is_active=True),
         stock_id="2330",
         requested_at=NOW,
     )

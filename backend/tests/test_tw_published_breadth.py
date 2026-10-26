@@ -116,3 +116,106 @@ def test_published_companion_rolls_back_with_daily_transaction(db, monkeypatch):
     assert db.query(TaiwanPublishedBreadthSnapshot).count() == 0
     assert db.query(RawFetchResult).count() == 0
     assert db.query(MarketDailyPrice).count() == 0
+
+
+def test_published_no_trade_survives_canonical_and_outward_projection(db):
+    db.add(StockMaster(stock_id="3711", stock_name="test", market="TWSE", instrument_type="stock", is_active=True))
+    db.commit()
+    acquire(db, payload())
+    result = read_taiwan_official_breadth(db, venue="TWSE", trade_date=DAY, requested_at=NOW)
+    observation = result.resolved.breadth
+    assert observation.unchanged_count == 2
+    assert observation.unknown_count == 4
+    assert observation.valid_no_trade_count == 3
+    assert observation.directional_unavailable_count == 1
+    outward = project_taiwan_official_breadth(result)
+    assert outward["valid_no_trade_count"] == 3
+    assert outward["directional_unavailable_count"] == 1
+    assert outward["classification_reason_counts"]["reference_price_unavailable"] == 1
+    assert outward["decision_usable"] is False
+
+
+@pytest.mark.parametrize("venue", ["TWSE", "TPEX"])
+@pytest.mark.parametrize("allow_universe_fallback", [False, True])
+def test_official_breadth_read_does_not_flush_pending_work(db, venue, allow_universe_fallback):
+    pending = StockMaster(stock_id="9999", stock_name="pending", market=venue, instrument_type="stock", is_active=True)
+    db.add(pending)
+    statements = []
+
+    def capture(_conn, _cursor, statement, *_):
+        statements.append(statement.lower())
+
+    event.listen(db.get_bind(), "before_cursor_execute", capture)
+    try:
+        result = read_taiwan_official_breadth(db, venue=venue, trade_date=DAY,
+            requested_at=NOW, allow_universe_fallback=allow_universe_fallback)
+    finally:
+        event.remove(db.get_bind(), "before_cursor_execute", capture)
+    assert result.resolved.breadth is None
+    assert not result.resolved.health.research_usable
+    assert not any(statement.lstrip().startswith(("insert", "update", "delete")) for statement in statements)
+    assert pending in db.new
+
+
+@pytest.mark.parametrize("invalid_part", ["source", "venue", "scope", "date"])
+def test_published_reader_rejects_cross_source_venue_scope_or_date(db, invalid_part):
+    from app.db.models import SourceRegistry
+    from app.sources.defaults import TPEX_DAILY_QUOTES_SOURCE_NAME
+
+    db.add(StockMaster(stock_id="3711", stock_name="test", market="TWSE", instrument_type="stock", is_active=True))
+    db.commit()
+    acquire(db, payload())
+    snapshot = db.query(TaiwanPublishedBreadthSnapshot).one()
+    if invalid_part == "source":
+        db.query(SourceRegistry).one().source_name = TPEX_DAILY_QUOTES_SOURCE_NAME
+    elif invalid_part == "venue":
+        snapshot.venue = "TPEX"
+    else:
+        stored = json.loads(snapshot.payload_json)
+        if invalid_part == "scope":
+            stored["limits"]["scope"] = "all_securities"
+        else:
+            stored["trade_date"] = "2026-08-26"
+        snapshot.payload_json = json.dumps(stored)
+    db.commit()
+    for venue in ("TWSE", "TPEX"):
+        result = read_taiwan_official_breadth(db, venue=venue, trade_date=DAY,
+            requested_at=NOW, allow_universe_fallback=False)
+        assert result.resolved.breadth is None
+        assert not result.resolved.health.research_usable
+
+
+def test_forced_date_cannot_relabel_a_different_official_response(db):
+    from app.market.providers.tw_official_daily import TWSE_DAILY_RESOURCE_ID
+
+    db.add(StockMaster(stock_id="3711", stock_name="test", market="TWSE", instrument_type="stock", is_active=True))
+    db.commit()
+    raw = payload()
+    raw["date"] = "20260826"
+    executor = TaiwanOfficialDailyAcquisitionExecutor(
+        fetchers={
+            TWSE_RWD_DAILY_RESOURCE_ID: lambda _: FakeResponse(text=json.dumps(raw)),
+            TWSE_DAILY_RESOURCE_ID: lambda _: FakeResponse(text="unavailable", status_code=503),
+        },
+        clock=lambda: NOW, monotonic=lambda: 10.0,
+    )
+    result = refresh_taiwan_official_daily_venue(db, venue="TWSE", trade_date=DAY,
+        requested_at=NOW, acquisition=executor)
+    assert "EXPECTED_TRADE_DATE_NOT_OBSERVED" in result["limitations"]
+    assert db.query(RawFetchResult).count() == 2
+    assert db.query(MarketDailyPrice).count() == 0
+    assert db.query(TaiwanPublishedBreadthSnapshot).count() == 0
+
+
+def test_preclose_receipt_cannot_be_promoted_after_release(db):
+    db.add(StockMaster(stock_id="3711", stock_name="test", market="TWSE", instrument_type="stock", is_active=True))
+    db.commit()
+    acquire(db, payload())
+    raw = db.query(RawFetchResult).one()
+    raw.fetched_at = datetime(2026, 8, 27, 5, 0)  # 13:00 Asia/Taipei
+    db.commit()
+    for requested_at in (datetime(2026, 8, 27, 5, 29, tzinfo=timezone.utc), NOW):
+        result = read_taiwan_official_breadth(db, venue="TWSE", trade_date=DAY,
+            requested_at=requested_at, allow_universe_fallback=False)
+        assert result.resolved.breadth is None
+        assert not result.resolved.health.research_usable

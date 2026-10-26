@@ -92,6 +92,12 @@ TAIWAN_EMERGENCY_MARKET_CLOSURES: dict[date, TaiwanEmergencyMarketClosure] = {
         reason_code="TW_TYPHOON_EMERGENCY_CLOSURE",
         source="Taiwan exchange emergency closure notice",
     ),
+    # CNA, 2026-10-22 20:39: TWSE and TPEx announced a full-day closure.
+    date(2026, 10, 23): TaiwanEmergencyMarketClosure(
+        name="Typhoon Champi (薔琵) emergency market closure",
+        reason_code="TW_TYPHOON_EMERGENCY_CLOSURE",
+        source="https://www.cna.com.tw/news/afe/202610220388.aspx",
+    ),
 }
 
 

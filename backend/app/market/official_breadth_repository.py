@@ -14,8 +14,8 @@ from sqlalchemy import inspect, func
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository, _TRUSTED_OFFICIAL_RELIABILITY
 from app.db.models import RawFetchResult, SourceRegistry, TaiwanPublishedBreadthSnapshot
 from app.market.taiwan_rules import taiwan_daily_price_release_at
-from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME
-from app.parsers.twse_published_breadth import PublishedStockBreadth, TWSE_AGGREGATE_SCOPE
+from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME, TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
+from app.parsers.twse_published_breadth import PublishedStockBreadth
 from app.market_data.contracts import (
     Market,
     MarketBreadthObservation,
@@ -46,7 +46,7 @@ class TaiwanOfficialBreadthRepository:
         self._available_at = available_at or datetime.now(timezone.utc)
         self._allow_universe_fallback = allow_universe_fallback
 
-    def _load_published_breadth(self, trade_date: date) -> OfficialBreadthRead | None:
+    def _load_published_breadth(self, trade_date: date, *, venue: str = "TWSE") -> OfficialBreadthRead | None:
         """Reuse a release-qualified receipt committed by official daily acquisition.
 
         The stock aggregate is a different scope from the active-stock bar universe.
@@ -54,15 +54,16 @@ class TaiwanOfficialBreadthRepository:
         """
         if not inspect(self._db.connection()).has_table(TaiwanPublishedBreadthSnapshot.__tablename__):
             return None
+        source_name = TWSE_RWD_DAILY_TRADING_SOURCE_NAME if venue == "TWSE" else TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
         row = self._db.query(TaiwanPublishedBreadthSnapshot, RawFetchResult).join(
             RawFetchResult, RawFetchResult.id == TaiwanPublishedBreadthSnapshot.raw_result_id
         ).join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id).options(
             load_only(RawFetchResult.id, RawFetchResult.fetched_at, RawFetchResult.content_hash),
         ).filter(
-            TaiwanPublishedBreadthSnapshot.venue == "TWSE",
+            TaiwanPublishedBreadthSnapshot.venue == venue,
             TaiwanPublishedBreadthSnapshot.trade_date == trade_date,
             RawFetchResult.fetched_at >= taiwan_daily_price_release_at(trade_date).astimezone(timezone.utc).replace(tzinfo=None),
-            SourceRegistry.source_name == TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+            SourceRegistry.source_name == source_name,
             func.lower(SourceRegistry.reliability_level).in_(tuple(_TRUSTED_OFFICIAL_RELIABILITY)),
             RawFetchResult.status_code == 200,
             RawFetchResult.error_message.is_(None),
@@ -75,29 +76,40 @@ class TaiwanOfficialBreadthRepository:
             if stored.error_code or not stored.payload_json:
                 raise ValueError(stored.error_code or "TWSE_AGGREGATE_PAYLOAD_MISSING")
             parsed = PublishedStockBreadth.model_validate_json(stored.payload_json)
-            if parsed.trade_date != trade_date:
-                raise ValueError("TWSE_AGGREGATE_DATE_MISMATCH")
+            if parsed.trade_date != trade_date or parsed.venue != venue:
+                raise ValueError("OFFICIAL_AGGREGATE_DATE_OR_VENUE_MISMATCH")
         except (ValueError, TypeError) as exc:
             logger.warning("Official breadth aggregate receipt %s rejected: %s", raw.id, exc)
             return OfficialBreadthRead(None, limitations=("OFFICIAL_AGGREGATE_RECEIPT_REJECTED",))
         observation = MarketBreadthObservation(
-            market=Market.TW, venue="TWSE", trade_date=trade_date,
-            lineage=SourceLineage(provider="twse_rwd", source=TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
-                authority=AuthorityClass.EXCHANGE, raw_contract_version="twse_mi_index_breadth.v1",
+            market=Market.TW, venue=venue, trade_date=trade_date,
+            lineage=SourceLineage(provider="twse_rwd" if venue == "TWSE" else "tpex_openapi", source=source_name,
+                authority=AuthorityClass.EXCHANGE, raw_contract_version="twse_mi_index_breadth.v1" if venue == "TWSE" else "tpex_published_breadth.v1",
                 event_at=datetime.combine(trade_date, time(13, 30), tzinfo=TAIWAN_TZ),
                 fetched_at=raw.fetched_at.replace(tzinfo=timezone.utc) if raw.fetched_at.tzinfo is None else raw.fetched_at,
                 cache_hit=True, raw_receipt_id=f"raw_fetch_result:{raw.id}", content_hash=raw.content_hash),
-            session=MarketSession.CLOSED, scope=TWSE_AGGREGATE_SCOPE,
-            universe_source="twse.mi_index.stock_column.all_reported_categories",
+            session=MarketSession.CLOSED, scope=parsed.limits.scope,
+            universe_source=("twse.mi_index.stock_column.all_reported_categories" if venue == "TWSE"
+                else "tpex.highlight.stocks_and_share_conversion_right_certificates"),
             universe_count=parsed.limits.universe_count,
             advance_count=parsed.advance, decline_count=parsed.decline,
             unchanged_count=parsed.unchanged,
             unknown_count=parsed.no_trade + parsed.no_comparison, missing_count=0,
+            coverage_reason_counts={
+                "advance": parsed.advance,
+                "decline": parsed.decline,
+                "unchanged": parsed.unchanged,
+                # TPEx publishes a combined no-trade/suspended category. Its
+                # members cannot be assigned an individual trading status.
+                "valid_no_trade" if venue == "TWSE" else "unknown": parsed.no_trade,
+                "reference_price_unavailable": parsed.no_comparison,
+            },
             published_limits=parsed.limits, state=ObservationState.PARTIAL,
             price_semantics="exchange_published_stock_breadth", official=True, provisional=False,
         )
         return OfficialBreadthRead(observation, provider_priority=5, rows_examined=1,
-            limitations=("OFFICIAL_AGGREGATE_DISTINCT_SCOPE", "BREADTH_TRADE_VALUE_UNAVAILABLE"))
+            limitations=("OFFICIAL_AGGREGATE_DISTINCT_SCOPE", "BREADTH_TRADE_VALUE_UNAVAILABLE",
+                *(("PUBLISHED_NO_TRADE_INCLUDES_SUSPENDED",) if venue == "TPEX" else ())))
 
     def load_market_breadth(
         self,
@@ -110,12 +122,11 @@ class TaiwanOfficialBreadthRepository:
         if normalized_venue not in {"TWSE", "TPEX"}:
             raise ValueError("official Taiwan breadth requires venue=TWSE or TPEX")
         published_limitations = ()
-        if normalized_venue == "TWSE":
-            published = self._load_published_breadth(trade_date)
-            if published is not None and published.observation is not None:
-                return published
-            if published is not None:
-                published_limitations = published.limitations
+        published = self._load_published_breadth(trade_date, venue=normalized_venue)
+        if published is not None and published.observation is not None:
+            return published
+        if published is not None:
+            published_limitations = published.limitations
         if not self._allow_universe_fallback:
             return OfficialBreadthRead(observation=None, limitations=(
                 *published_limitations, "OFFICIAL_BREADTH_PERSISTED_SUMMARY_UNAVAILABLE",

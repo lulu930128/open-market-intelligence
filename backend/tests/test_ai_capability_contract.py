@@ -18,6 +18,62 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiCapabilityContractTests(unittest.TestCase):
+    def test_market_volume_qualification_survives_capability_field_selection(self):
+        from copy import deepcopy
+        from app.market.taiwan_market_state import compose_taiwan_market_volume_state, _volume_comparison_identity
+        from test_tw_volume_composition import evidence, qualified_estimate
+
+        capability = "market.volume_state"
+        for qualified in (False, True):
+            for explicit in (False, True):
+                for path in ("compact", "data"):
+                    with self.subTest(qualified=qualified, explicit=explicit, path=path), patch(
+                        "socket.socket.connect", side_effect=AssertionError("offline projection only")
+                    ):
+                        volume, breadth = evidence()
+                        for item in breadth["markets"].values():
+                            qualified_estimate(item)
+                        if not qualified:
+                            breadth["markets"]["TWSE"]["acquisition_diagnostics"]["failed_batch_count"] = 1
+                        volume["same_time_baseline_5d"]["comparison_identity"] = {
+                            market: _volume_comparison_identity(item)
+                            for market, item in breadth["markets"].items()
+                        }
+                        volume["same_time_baseline_20d"] = dict(
+                            volume["same_time_baseline_5d"], sample_days=20, qualified_sample_days=20
+                        )
+                        owner_result = compose_taiwan_market_volume_state(volume, breadth=breadth)
+                        original = deepcopy(owner_result)
+                        request_selection = {"required": [capability]}
+                        if explicit:
+                            request_selection["fields"] = {capability: [
+                                "trade_value_qualification", "same_time_baseline_5d", "same_time_baseline_20d"
+                            ]}
+                        selection = capability_contract.normalize_selection(
+                            selection=request_selection, output="evidence_only",
+                            realtime_policy="cache_only", payload_level="full",
+                            scope_type="market", question_intent="general",
+                        )
+                        data = {"volume_state": owner_result}
+                        response = {"result": {"data": {"compact": data} if path == "compact" else data}}
+                        projected, unavailable = capability_contract.project_selected_data(
+                            response=response, selection=selection,
+                        )
+                        self.assertNotIn(capability, unavailable)
+                        result = projected[capability]
+                        self.assertEqual(result["trade_value_qualification"], original["trade_value_qualification"])
+                        reasons = result["trade_value_qualification"]["reason_codes"]
+                        self.assertEqual(reasons, [] if qualified else ["TWSE:ACQUISITION_INCOMPLETE"])
+                        for days in (5, 20):
+                            baseline = result[f"same_time_baseline_{days}d"]
+                            self.assertEqual(baseline, original[f"same_time_baseline_{days}d"])
+                            self.assertIs(baseline["decision_usable"], qualified)
+                            if qualified:
+                                self.assertGreater(baseline["pace_ratio"], 0)
+                            else:
+                                self.assertIsNone(baseline["pace_ratio"])
+                        self.assertEqual(owner_result, original)
+
     def test_intraday_metric_availability_survives_outward_quality_projection(self):
         capability = "screening.intraday"
         for metric, status, reason in (

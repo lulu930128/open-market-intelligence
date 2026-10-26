@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
@@ -26,12 +27,14 @@ from app.market.providers.tw_official_daily import (
     TWSE_DAILY_RESOURCE_ID,
     TWSE_RWD_DAILY_RESOURCE_ID,
     TPEX_DAILY_RESOURCE_ID,
+    TW_BREADTH_DATASET_ID,
+    TPEX_OFFICIAL_BREADTH_DESCRIPTOR,
 )
 from app.market.tw_universe import list_taiwan_stock_universe
 from app.market.tw_intraday_universe import (
     list_taiwan_active_watchlist_instruments,
 )
-from app.market.taiwan_rules import expected_daily_price_date
+from app.market.taiwan_rules import expected_daily_price_date, taiwan_daily_price_release_at
 from app.market_data.contracts import (
     AuthorityClass,
     BarObservation,
@@ -674,6 +677,10 @@ def refresh_taiwan_official_daily_venue(
     trade_date: date,
     requested_at: datetime | None = None,
     acquisition: TaiwanOfficialDailyAcquisitionExecutor | None = None,
+    refresh_daily: bool = True,
+    refresh_published: bool = True,
+    timeout_seconds: int = 30,
+    max_external_calls: int = 2,
 ) -> dict[str, object]:
     """Refresh one official venue receipt through the existing daily owner.
 
@@ -682,12 +689,15 @@ def refresh_taiwan_official_daily_venue(
     lineage as per-instrument refresh; it does not create another EOD store.
     """
 
+    started_at = monotonic()
     normalized_venue = str(venue or "").strip().upper()
     if normalized_venue not in {"TWSE", "TPEX"}:
         raise ValueError("official Taiwan daily venue must be TWSE or TPEX")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
     if effective_requested_at.tzinfo is None or effective_requested_at.utcoffset() is None:
         raise ValueError("requested_at must be timezone-aware")
+    if timeout_seconds < 1 or max_external_calls < 1:
+        raise ValueError("official venue refresh requires a positive remaining time/call budget")
     instruments: dict[str, InstrumentKey] = {}
     for stock in list_taiwan_stock_universe(db):
         stock_venue = str(stock.market or "").strip().upper()
@@ -720,7 +730,9 @@ def refresh_taiwan_official_daily_venue(
             f"active Taiwan ordinary-stock universe is empty for venue={normalized_venue}"
         )
 
-    attempt_bound = 2 if normalized_venue == "TWSE" else 1
+    # TWSE permits its existing fallback; TPEx reserves one additional resource
+    # call for the planner-selected published breadth companion.
+    attempt_bound = min(max(int(max_external_calls), 1), 2)
     requirement = RefreshRequirementV1(
         dataset_id=TW_FULL_MARKET_DAILY_DATASET_ID,
         target=DatasetTarget(
@@ -734,7 +746,7 @@ def refresh_taiwan_official_daily_venue(
         purpose=DataPurpose.REPAIR,
         max_provider_attempts=attempt_bound,
         max_external_calls=attempt_bound,
-        timeout_seconds=30,
+        timeout_seconds=min(max(int(timeout_seconds), 1), 30),
         max_symbols=len(instruments),
         max_range_days=1,
         postcondition=(
@@ -748,6 +760,7 @@ def refresh_taiwan_official_daily_venue(
     )
     if plan.unfillable:
         return {
+            "external_call_count": 0,
             "fetch_status": "skipped",
             "parse_status": "skipped",
             "parsed_count": 0,
@@ -761,14 +774,36 @@ def refresh_taiwan_official_daily_venue(
         }
 
     executor = acquisition or TaiwanOfficialDailyAcquisitionExecutor()
+    companion_routes = ()
+    if refresh_published and normalized_venue == "TPEX" and effective_requested_at >= taiwan_daily_price_release_at(trade_date):
+        breadth_requirement = requirement.model_copy(update={
+            "dataset_id": TW_BREADTH_DATASET_ID,
+            "target": DatasetTarget(market=Market.TW, dataset_id=TW_BREADTH_DATASET_ID, scope_key="TPEX"),
+            "max_provider_attempts": 1, "max_external_calls": 1, "max_symbols": 1,
+            "postcondition": "Persist the dated official published breadth receipt in the EOD transaction.",
+        })
+        companion_routes = plan_refresh_acquisition_v1(
+            breadth_requirement, (TPEX_OFFICIAL_BREADTH_DESCRIPTOR,),
+        ).routes
+    daily_routes = plan.routes if refresh_daily else tuple(
+        route for route in plan.routes if refresh_published and route.resource_id == TWSE_RWD_DAILY_RESOURCE_ID
+    )
     acquired = executor.acquire_dataset_routes(
-        instruments,
-        plan.routes,
+        instruments if refresh_daily else {},
+        daily_routes,
         trade_date=trade_date,
+        companion_routes=companion_routes,
+        timeout_seconds=max(0, requirement.timeout_seconds - (monotonic() - started_at)),
+        max_external_calls=attempt_bound,
+        published_only=not refresh_daily,
     )
     persistence = (
         TaiwanOfficialDailyTransaction(db).persist_bar_acquisition(
-            requirement,
+            requirement if refresh_daily else requirement.model_copy(update={
+                "dataset_id": TW_BREADTH_DATASET_ID,
+                "target": DatasetTarget(market=Market.TW, dataset_id=TW_BREADTH_DATASET_ID,
+                                        scope_key=normalized_venue),
+            }),
             acquired,
         )
         if acquired.receipts or acquired.observations
@@ -786,6 +821,12 @@ def refresh_taiwan_official_daily_venue(
     observed_sources = list(
         dict.fromkeys(bar.lineage.source for bar in acquired.observations)
     )
+    # Keep the daily command's primary receipt bound to its bars. The aggregate
+    # has its own receipt in raw_result_ids, committed in this same transaction.
+    primary_receipt_index = next((
+        index for index in reversed(range(len(acquired.receipts)))
+        if acquired.receipts[index].source in observed_sources
+    ), len(acquired.receipts) - 1)
     parse_success = bool(acquired.observations)
     fetch_success = parse_success and any(
         receipt.error_message is None
@@ -793,7 +834,15 @@ def refresh_taiwan_official_daily_venue(
         and 200 <= receipt.status_code < 300
         for receipt in acquired.receipts
     )
+    if not refresh_daily:
+        # Transport success is not completion: the job rereads the canonical
+        # published receipt after this transaction commits.
+        parse_success = acquired.summary.status in {AcquisitionStatus.COMPLETED, AcquisitionStatus.PARTIAL} and any(
+            receipt.status_code == 200 and not receipt.error_message for receipt in acquired.receipts
+        )
+        fetch_success = parse_success
     return {
+        "external_call_count": acquired.summary.external_calls,
         "fetch_status": "success" if fetch_success else "error",
         "parse_status": "success" if parse_success else "error",
         "source_name": observed_sources[0] if len(observed_sources) == 1 else None,
@@ -808,11 +857,11 @@ def refresh_taiwan_official_daily_venue(
             else "error"
         ),
         "raw_result_id": (
-            persistence.raw_result_ids[-1] if persistence.raw_result_ids else None
+            persistence.raw_result_ids[primary_receipt_index] if persistence.raw_result_ids else None
         ),
         "raw_result_ids": list(persistence.raw_result_ids),
         "fetched_at": (
-            acquired.receipts[-1].fetched_at
+            acquired.receipts[primary_receipt_index].fetched_at
             if acquired.receipts
             else effective_requested_at
         ),
@@ -830,7 +879,9 @@ def refresh_taiwan_official_daily_venue(
     }
 
 
-def qualify_taiwan_eod_universe(db: Session, *, trade_date: date) -> dict[str, object]:
+def qualify_taiwan_eod_universe(
+    db: Session, *, trade_date: date, include_published: bool = False,
+) -> dict[str, object]:
     """Batch eligibility port for shared coverage; no refresh or per-stock resolver."""
     batch = TaiwanOfficialDailyBarRepository(db).load_market_universe(trade_date=trade_date)
     reasons: dict[str, list[str]] = {}
@@ -880,7 +931,17 @@ def qualify_taiwan_eod_universe(db: Session, *, trade_date: date) -> dict[str, o
                           else "SYMBOL_ABSENT_FROM_DATED_PROVIDER_PAYLOAD")
                 reasons.setdefault(member.stock_id, []).append(reason)
                 diagnostic["symbol_reasons"][member.stock_id] = reason
+    from app.market.official_breadth_platform import read_taiwan_official_breadth
+
+    published_breadth = {}
+    for venue in (sorted({str(item.market).upper() for item in universe} & {"TWSE", "TPEX"})
+                  if include_published else ()):
+        resolved = read_taiwan_official_breadth(db, venue=venue, trade_date=trade_date,
+                                             allow_universe_fallback=False)
+        observation = resolved.resolved.breadth
+        published_breadth[venue] = bool(observation is not None and observation.published_limits is not None)
     return {
+        "published_breadth": published_breadth,
         "qualified_symbols": tuple(bar.instrument.symbol for bar in batch.bars),
         "rejection_reasons": {symbol: tuple(dict.fromkeys(values)) for symbol, values in reasons.items()},
         "rows_examined": batch.rows_examined, "rows_rejected": batch.rows_rejected,
