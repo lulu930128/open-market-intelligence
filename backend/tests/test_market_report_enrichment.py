@@ -78,7 +78,7 @@ def test_evidence_time_mode_threads_bounded_owner_arguments(monkeypatch, mode):
     model, _, _ = report.build_readonly_presentation(
         db, phase="postclose", local_now=now, evidence_time_mode=mode)
     replay = mode == "replay"
-    assert calls["overview"] == {"market": "tw", **({"trade_date": DAY} if replay else {})}
+    assert calls["overview"] == {"market": "tw", "trade_date": DAY, "report_phase": "postclose"}
     assert len(calls["price_map"]) == len(model.stock_radar) == 8
     assert all(kw == {"to_date": DAY, "requested_at": None if replay else now}
                for kw in calls["daily"])
@@ -86,7 +86,7 @@ def test_evidence_time_mode_threads_bounded_owner_arguments(monkeypatch, mode):
         assert all(kw["to_date"] == DAY for kw in calls[kind])
     for kw in calls["price_map"]:
         assert kw["now"] == now
-        assert (kw["as_of_date"] == DAY) if replay else ("as_of_date" not in kw)
+        assert kw["as_of_date"] == DAY
     assert model.evidence_axes["evidence_time_mode"] == mode
     assert model.evidence_axes["semantics"] == (
         "current_cache_bounded_report_date" if replay else "strict_availability")
@@ -121,7 +121,7 @@ def test_replay_daily_release_cap_is_shared_by_all_daily_owners(monkeypatch, hou
 
     def overview(db, **kw):
         calls["preview"] = kw
-        return {"metadata": {"value_leaders": [{"stock_id": "2324"}]}}
+        return {"metadata": {"latest_trade_date": cap.isoformat(), "value_leaders": [{"stock_id": "2324"}]}}
 
     def daily(db, stock_id, **kw):
         calls["daily"] = kw
@@ -146,21 +146,28 @@ def test_replay_daily_release_cap_is_shared_by_all_daily_owners(monkeypatch, hou
     assert model.report_date == DAY.isoformat()
     assert model.evidence_axes["daily_sample_cap"] == cap.isoformat()
     assert calls["preview"]["trade_date"] == cap
-    assert calls["daily"] == {"to_date": cap, "requested_at": None}
-    assert calls["chart"]["to_date"] == calls["technical"]["to_date"] == cap
-    assert calls["price_map"]["as_of_date"] == cap
-    assert calls["price_map"]["now"] == now
+    if phase == "intraday":
+        assert not model.stock_radar
+        assert set(calls) == {"preview"}
+    else:
+        assert calls["daily"] == {"to_date": cap, "requested_at": None}
+        assert calls["chart"]["to_date"] == calls["technical"]["to_date"] == cap
+        assert calls["price_map"]["as_of_date"] == cap
+        assert calls["price_map"]["now"] == now
 
-    # Live keeps its original date and strict availability arguments at every phase.
+    # Live uses the same daily release cap and keeps strict availability.
     report.build_readonly_presentation(db, phase=phase, local_now=now)
-    assert calls["preview"] == {"market": "tw"}
-    assert calls["daily"] == {"to_date": DAY, "requested_at": now}
-    assert calls["chart"]["to_date"] == calls["technical"]["to_date"] == DAY
-    assert "as_of_date" not in calls["price_map"]
+    assert calls["preview"] == {"market": "tw", "trade_date": cap, "report_phase": phase}
+    if phase != "intraday":
+        assert calls["daily"] == {"to_date": cap, "requested_at": now}
+        assert calls["chart"]["to_date"] == calls["technical"]["to_date"] == cap
+        assert calls["price_map"]["as_of_date"] == cap
+    else:
+        assert set(calls) == {"preview"}
 
 
 def preview():
-    return {"metadata": {"value_leaders": [{"stock_id": sid} for sid in IDS],
+    return {"metadata": {"latest_trade_date": DAY.isoformat(), "value_leaders": [{"stock_id": sid} for sid in IDS],
         "market_chips": {"institutional_per_stock": {"trade_date": DAY,
             "top_net_buy": [{"stock_id": "2409", "total_institutional_net": 91289209}],
             "top_net_sell": [{"stock_id": "2324", "total_institutional_net": -23520107,
@@ -174,6 +181,8 @@ def preview():
 
 
 def test_bounded_orchestration_enriches_all_ids_through_existing_owners(monkeypatch):
+    # A postclose recap belongs to its trading date, not Saturday's report.
+    NOW = datetime(2026, 10, 2, 16, tzinfo=ZoneInfo("Asia/Taipei"))
     calls = []
     canonical = preview()
     monkeypatch.setattr(report.templates, "build_market_overview_preview", lambda db, **kw: canonical)
@@ -213,7 +222,7 @@ def test_bounded_orchestration_enriches_all_ids_through_existing_owners(monkeypa
                          execute=lambda statement: statements.append(str(statement)))
     model, _, elapsed = report.build_readonly_presentation(db, phase="postclose", local_now=NOW)
     assert statements == ["PRAGMA query_only=ON"] and elapsed >= 0
-    assert model.stock_radar == build_presentation(canonical, phase="postclose", report_date=NOW.date()).stock_radar
+    assert {item["stock_id"] for item in model.stock_radar} == set(IDS)
     assert {item["stock_id"] for item in model.stock_analysis} == set(IDS)
     assert len(calls) == 16
     for item in model.stock_analysis:

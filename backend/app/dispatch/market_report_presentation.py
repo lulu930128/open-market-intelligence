@@ -146,6 +146,8 @@ class MarketReportPresentation:
     stock_sector_context: dict = field(default_factory=dict)
     technology_pulse: dict = field(default_factory=dict)
     presentation_warnings: tuple[str, ...] = field(default_factory=tuple)
+    phase_selection: dict = field(default_factory=dict)
+    index_intraday: dict = field(default_factory=dict)
 
     def evidence(self) -> dict:
         return _evidence(asdict(self))
@@ -160,7 +162,7 @@ def build_presentation(preview: dict, *, phase: str, report_date: date) -> Marke
             "latest_trade_date", "sample_coverage", "top_industries", "weak_industries",
             "value_leaders", "top_gainers", "top_losers", "market_chips", "cross_market",
             "stance", "freshness", "freshness_by_capability", "source_refs", "radar",
-            "stock_sector_context", "technology_pulse")
+            "stock_sector_context", "technology_pulse", "phase_selection", "index_intraday")
     data = _evidence({key: metadata.get(key) for key in keys})
     warnings, missing = report_limitations(_evidence(preview))
     canonical_quality = _map(data.get("freshness")).get("status")
@@ -206,6 +208,8 @@ def build_presentation(preview: dict, *, phase: str, report_date: date) -> Marke
         sector_radar=sectors, stock_radar=stocks, cross_market_strip=build_cross_market_strip(groups),
         stock_sector_context=_map(data.get("stock_sector_context")),
         technology_pulse=_map(data.get("technology_pulse")),
+        phase_selection=_map(data.get("phase_selection")),
+        index_intraday=_map(data.get("index_intraday")),
     )
     return with_price_maps(model, {})
 
@@ -421,6 +425,81 @@ def display_status(value: Any) -> str:
 
 def index_summary(row: dict) -> str:
     return f"{_number(row.get('value'))}  {_number(row.get('change_pct'), percent=True)}"
+
+
+def phase_report_lines(model: MarketReportPresentation) -> list[str]:
+    """Shared slot labels for compact, audit and charts; values remain owner facts."""
+    selection = model.phase_selection
+    sections = _map(selection.get("sections"))
+    status = lambda key: _text(_map(sections.get(key)).get("status"))
+    label = {"preopen": "歷史官方收盤基準", "intraday": "本交易日盤中成交",
+             "postclose": "本交易日官方結算"}[model.phase]
+    lines = [model.stance]
+    for identity in ("TAIEX", "TPEX"):
+        row = next((row for row in _rows(model.indices.get("items")) if row.get("index_id") == identity), {})
+        lines.append(f"{label} {identity}｜{index_summary(row)}｜{status('index.' + identity)}")
+        if row:
+            lines.append(f"  {_stamp(row)}｜source={_text(row.get('source'))}｜"
+                         f"{_text(row.get('quote_semantics'))}／{_text(row.get('finalization'))}")
+    breadth_label = "試撮廣度（provisional／非正式成交）" if model.phase == "preopen" else "市場廣度"
+    breadth = model.breadth
+    lines.append(f"{breadth_label}｜{status('breadth')}／{_text(breadth.get('status'))}｜"
+                 f"漲 {_number(breadth.get('advance_count'))}／跌 {_number(breadth.get('decline_count'))}／平 {_number(breadth.get('unchanged_count'))}")
+    lines.append(f"  {_stamp(breadth)}｜coverage={_text(breadth.get('coverage_count'))}/{_text(breadth.get('universe_count'))}｜source={_text(breadth.get('source'))}")
+    if model.phase == "postclose":
+        for venue, row in model.breadth_by_market.items():
+            lines.append(f"  {venue} 已完成時段廣度｜漲 {_number(row.get('advance_count'))}／跌 {_number(row.get('decline_count'))}｜"
+                         f"{_stamp(row)}｜{_text(row.get('finalization'))}／{_text(row.get('status'))}｜"
+                         f"reconciliation={_text(_map(row.get('close_reconciliation')).get('status'))}｜"
+                         f"coverage={_text(row.get('coverage_count'))}/{_text(row.get('universe_count'))}")
+        lines.append("session_final 廣度不等於官方 final；保留 partial／個別發布狀態。")
+    volume = model.volume
+    lines.append(f"成交值｜{status('volume')}／{_text(volume.get('status'))}｜"
+                 f"{_number(volume.get('current_cumulative_trade_value'), money=True)}｜"
+                 f"可用部分 {_number(volume.get('available_cumulative_trade_value'), money=True)}")
+    if status("volume") == "selected":
+        lines.append(f"  {_stamp(volume)}｜coverage={_text(volume.get('trade_value_coverage_status'))}｜"
+                     f"authority={_text(volume.get('trade_value_authority_status'))}｜source={_text(volume.get('source'))}")
+    if model.phase != "postclose":
+        candidates = _map(selection.get("candidates"))
+        candidate_label = "試撮個股（provisional；非正式成交）" if model.phase == "preopen" else "盤中候選"
+        lines.append(f"{candidate_label}｜{status('candidates')}／{_text(candidates.get('status'))}｜"
+                     f"as_of={_text(candidates.get('event_time'))}｜coverage={_text(_map(candidates.get('coverage')).get('coverage_ratio'))}｜"
+                     f"freshness={_text(candidates.get('freshness_status'))}")
+        for row in _rows(candidates.get("rows"))[:3]:
+            lines.append(f"  {_stock(row)}｜{_number(row.get('current_price'))}｜{_number(row.get('change_pct'), percent=True)}｜"
+                         f"{_text(row.get('price_semantics'))}｜source={_text(_map(row.get('lineage')).get('source'))}｜"
+                         f"as_of={_text(row.get('event_time'))}")
+        groups = _map(selection.get("groups"))
+        lines.append(f"{'試撮族群' if model.phase == 'preopen' else '盤中族群'}｜"
+                     f"{status('groups')}／{_text(groups.get('status'))}｜as_of={_text(groups.get('as_of'))}｜"
+                     f"coverage={_text(_map(groups.get('coverage')).get('coverage_ratio'))}｜"
+                     f"recency={_text(groups.get('last_trade_recency'))}")
+        for row in _rows(groups.get("groups"))[:3]:
+            lines.append(f"  {_text(row.get('group_name'))}｜{_number(row.get('mean_return_pct'), percent=True)}｜"
+                         f"{_text(row.get('price_semantics') or groups.get('price_semantics'))}")
+    if model.phase == "preopen":
+        lines.append(f"日 K／日線排行僅為歷史基準｜{model.daily_sample_scope}｜{status('daily_rankings')}")
+        for row in model.value_leaders[:3]:
+            lines.append(f"  歷史成交焦點 {_stock(row)}｜{_number(row.get('change_pct'), percent=True)}")
+        lines.append("隔夜市場基準（各市場獨立 as_of；缺資料 unavailable）")
+        overnight = _rows(_map(model.cross_market_groups.get('us')).get('promoted'))[:2]
+        if not overnight:
+            lines.append("  隔夜美股基準 unavailable")
+        for row in overnight:
+            lines.append(f"  {_text(row.get('label') or row.get('id'))}｜{_number(row.get('change_pct'), percent=True)}｜as_of={_text(row.get('as_of'))}｜source={_text(row.get('source'))}")
+    elif model.phase == "postclose":
+        lines.append(f"本交易日日線樣本｜{status('daily_rankings')}｜{model.daily_sample_scope}；官方發布狀態個別確認，非全市場定稿。")
+        lines.append(f"  樣本 coverage={_text(model.sample_coverage.get('sample_count'))}/{_text(model.sample_coverage.get('universe_count'))}｜{_text(model.sample_coverage.get('status'))}")
+        for row in model.value_leaders[:3]:
+            lines.append(f"  成交焦點 {_stock(row)}｜{_number(row.get('change_pct'), percent=True)}｜成交值 {_number(row.get('trade_value'), money=True)}")
+        for label, rows in (("樣本強勢族群", model.strong_sectors), ("樣本弱勢族群", model.weak_sectors)):
+            for row in rows[:2]:
+                lines.append(f"  {label} {_text(row.get('industry'))}｜{_number(row.get('average_change_pct'), percent=True)}")
+        lines.append("盤前預期回顧 unavailable：缺不可變盤前快照，不從現有快取回填。")
+    else:
+        lines.append("日 K 僅供歷史研究，不替代盤中價格、候選或族群。")
+    return lines
 
 
 def coverage_summary(block: dict) -> str:

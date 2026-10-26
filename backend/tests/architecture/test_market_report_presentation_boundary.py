@@ -8,7 +8,7 @@ def test_presentation_modules_only_use_pure_projection_and_local_font_io():
     root = Path(__file__).resolve().parents[2] / "app" / "dispatch"
     allowed = {"__future__", "dataclasses", "datetime", "math", "typing", "re", "io", "pathlib",
                "PIL", "app.dispatch.market_report_presentation"}
-    for name in ("market_report_presentation", "market_report_discord", "market_report_chart", "market_report_text"):
+    for name in ("market_report_presentation", "market_report_discord", "market_report_chart", "market_report_text", "market_report_phase"):
         tree = ast.parse((root / f"{name}.py").read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):

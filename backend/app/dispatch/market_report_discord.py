@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.dispatch.market_report_presentation import (
     MarketReportPresentation, _map, _rows, _number, _text, _stock,
-    coverage_summary, display_status, index_summary,
+    coverage_summary, display_status, index_summary, phase_report_lines,
 )
 
 
@@ -29,6 +29,9 @@ def _sectors(rows: list[dict]) -> str:
 
 def render_compact_content(model: MarketReportPresentation) -> str:
     """Reader summary only; detailed diagnostics remain available in audit mode."""
+    if model.phase_selection:
+        return _clip("\n".join([f"**{model.header}**", *phase_report_lines(model),
+            "資料限制保留於各區塊；partial 不代表完整市場。"]), 1900)
     rows = _rows(model.indices.get("items"))
     lines = [f"**{model.header}**"]
     for identity in ("TAIEX", "TPEX"):
@@ -60,6 +63,12 @@ def render_compact_content(model: MarketReportPresentation) -> str:
 
 
 def render_embeds(model: MarketReportPresentation, *, png_filename: str | None = None) -> list[dict]:
+    if model.phase_selection:
+        embed = {"title": _clip(model.header, 200),
+                 "description": _clip("\n".join(phase_report_lines(model)), 3800), "color": 0x226B80}
+        if png_filename:
+            embed["image"] = {"url": f"attachment://{png_filename}"}
+        return [embed]
     indices = _rows(model.indices.get("items"))
     index_lines = []
     for identity in ("TAIEX", "TPEX"):

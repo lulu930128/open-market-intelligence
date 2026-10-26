@@ -671,7 +671,29 @@ def _build_tw_market_overview_preview(
     content_depth: str = "standard",
     radar_limit: int | None = None,
     trade_date: date | None = None,
+    report_phase: str | None = None,
 ) -> dict[str, Any]:
+    if report_phase is not None:
+        if report_phase not in {"preopen", "intraday", "postclose"}:
+            raise ValueError("Unsupported Discord market report phase.")
+        capabilities = ["market.indices", "market.breadth", "market.volume_state"]
+        parameters = {}
+        if report_phase in {"preopen", "intraday"}:
+            lane = "indicative" if report_phase == "preopen" else "actual"
+            capabilities.extend(["screening.intraday", "market.hot_groups"])
+            parameters = {key: {"lane": lane, "limit": 8} for key in
+                          ("screening.intraday", "market.hot_groups")}
+        envelope = tools.read_market_overview(
+            db=db, limit=8, include_intraday=report_phase == "intraday",
+            market_data_params={"requested_capabilities": capabilities,
+                                "capability_parameters": parameters,
+                                **({"trade_date": trade_date.isoformat()} if trade_date else {})},
+        )
+        data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+        return {"as_of": envelope.get("as_of"), "warnings": envelope.get("warnings") or [],
+                "missing": envelope.get("missing") or [],
+                "metadata": {**data, "freshness": envelope.get("freshness"),
+                             "source_refs": envelope.get("source_refs") or []}}
     envelope = tools.read_market_overview(
         db=db, limit=8,
         market_data_params={"requested_capabilities": ["market.indices"],
@@ -1225,6 +1247,7 @@ def build_market_overview_preview(
     content_depth: str = "standard",
     radar_limit: int | None = None,
     trade_date: date | None = None,
+    report_phase: str | None = None,
 ) -> dict[str, Any]:
     normalized_market = str(market or "tw").strip().lower()
     if normalized_market == "us":
@@ -1240,6 +1263,7 @@ def build_market_overview_preview(
         content_depth=content_depth,
         radar_limit=radar_limit,
         trade_date=trade_date,
+        report_phase=report_phase,
     )
 
 

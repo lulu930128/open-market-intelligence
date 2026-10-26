@@ -7,7 +7,7 @@ from math import isfinite
 
 from app.dispatch.market_report_presentation import (
     MarketReportPresentation, _map, _rows, _number, _text, _stock,
-    coverage_summary, display_status, index_summary,
+    coverage_summary, display_status, index_summary, phase_report_lines,
 )
 
 
@@ -120,6 +120,13 @@ def _render_png(model: MarketReportPresentation, *, stock: bool, technology: boo
     text(48, 18, "個股分析板" if stock else "科技股雷達" if technology else "市場＋族群總覽", 38, 450, "#ffffff")
     text(530, 29, model.header, 24, 1022, "#d4e4e7")
     text(48, 77, f"資料時間 {model.as_of}｜{model.daily_sample_scope}", 20, 1504, "#d4e4e7")
+
+    if model.phase_selection and not stock and not technology:
+        for index, value in enumerate(phase_report_lines(model)[:31]):
+            text(48, 140 + index * 32, value, 20, 1504)
+        output = BytesIO()
+        canvas.save(output, format="PNG")
+        return output.getvalue()
 
     if technology:
         pulse = model.technology_pulse

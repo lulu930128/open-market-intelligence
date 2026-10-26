@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from app.dispatch.market_report_presentation import (
     MarketReportPresentation, PHASE_LABELS, build_presentation, daily_sample_scope,
-    report_limitations, _map, _rows, _text, _number, _stamp, _stock,
+    report_limitations, _map, _rows, _text, _number, _stamp, _stock, phase_report_lines,
 )
 
 
@@ -218,6 +218,9 @@ def render_presentation(model: MarketReportPresentation) -> str:
              f"as_of：{model.as_of}",
              f"證據 session：{_text(model.session.get('market_session'))} / {_text(model.session.get('session_semantics'))}",
              f"資料品質：{model.quality}｜{len(warnings)} warnings｜{len(missing)} missing",
-             "", render_model_sections(model)]
+             "", ("\n".join([*phase_report_lines(model), "", "## 資料品質與限制",
+                       *[f"- warning: {item}" for item in warnings],
+                       *[f"- missing: {item}" for item in missing]])
+                   if model.phase_selection else render_model_sections(model))]
     lines.extend(f"- 呈現提醒：{warning}" for warning in model.presentation_warnings)
     return "\n".join(lines)

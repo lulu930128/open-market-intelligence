@@ -336,7 +336,7 @@ def test_orchestration_closes_db_before_render_and_network(prepared, monkeypatch
 
     def send(*args, **kwargs):
         prepared.sessions.return_value.__exit__.assert_called_once()
-        assert len(kwargs["embeds"]) == 4 and len(kwargs["attachments"]) == 2
+        assert len(kwargs["embeds"]) == 1 and len(kwargs["attachments"]) == 2
         return {"status": "sent", "sent_chunks": 1, "total_chunks": 1}
 
     monkeypatch.setattr(report, "render_market_dashboard_chart", render)
@@ -444,7 +444,7 @@ def test_default_orchestration_compact_and_invalid_mode(prepared):
     prepared.send.assert_called_once()
     kwargs = prepared.send.call_args.kwargs
     assert result["mode"] == "compact" and kwargs["embeds"] == []
-    assert [a.filename for a in kwargs["attachments"]] == ["market_dashboard.png", "stock_analysis.png", "technology_pulse.png"]
+    assert [a.filename for a in kwargs["attachments"]] == ["market_dashboard.png"]
 
 
 def test_radar_deduplicates_and_preserves_canonical_coverage(evidence_preview, monkeypatch):

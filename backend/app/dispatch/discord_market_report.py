@@ -16,6 +16,7 @@ from app.dispatch import templates
 from app.dispatch.market_report_text import render_presentation
 from app.dispatch.market_report_presentation import MarketReportPresentation, PHASE_LABELS, _evidence, build_presentation, with_price_maps
 from app.dispatch.market_report_discord import render_compact_content, render_embeds
+from app.dispatch.market_report_phase import select_phase_preview
 from app.dispatch.market_report_chart import (
     ChartUnavailable, render_market_dashboard_chart, render_stock_analysis_chart, render_technology_pulse_chart,
 )
@@ -66,9 +67,10 @@ def build_rich_report(model: MarketReportPresentation, *, mode: ReportMode = "co
     try:
         # Build the complete set before attaching; missing Pillow/font yields
         # summary-only compact, never a partial image set or audit fallback.
-        images = [("market_dashboard.png", render_market_dashboard_chart(model)),
-                  ("stock_analysis.png", render_stock_analysis_chart(model)),
-                  ("technology_pulse.png", render_technology_pulse_chart(model))]
+        images = [("market_dashboard.png", render_market_dashboard_chart(model))]
+        if not model.phase_selection:
+            images.extend([("stock_analysis.png", render_stock_analysis_chart(model)),
+                           ("technology_pulse.png", render_technology_pulse_chart(model))])
     except ChartUnavailable as error:
         model = replace(model, presentation_warnings=(*model.presentation_warnings, str(error)))
     else:
@@ -91,8 +93,7 @@ def read_stock_analysis_facts(
 ) -> tuple[dict, dict]:
     """Bounded cache-only reads through the dashboard's daily/technical owners."""
     _evidence_time_semantics(evidence_time_mode)
-    daily_cap = (expected_daily_price_date(now=local_now)
-                 if evidence_time_mode == "replay" else local_now.date())
+    daily_cap = expected_daily_price_date(now=local_now)
     chart = list_stock_ohlc_chart_data(
         db=db, stock_id=stock_id, timeframe="daily", bars=90,
         ensure_history=False, include_intraday=False, to_date=daily_cap)
@@ -163,14 +164,17 @@ def build_report_selection(
     if local_now.tzinfo is None:
         raise ValueError("Discord report time must be timezone-aware.")
     local_now = local_now.astimezone(TAIPEI)
+    if phase not in PHASE_LABELS:
+        raise ValueError("Unsupported Discord market report phase.")
     replay = evidence_time_mode == "replay"
-    daily_cap = expected_daily_price_date(now=local_now) if replay else None
+    daily_cap = expected_daily_price_date(now=local_now)
     preview = templates.build_market_overview_preview(
-        db, market="tw", **({"trade_date": daily_cap} if replay else {}))
+        db, market="tw", trade_date=daily_cap, report_phase=phase)
+    preview = select_phase_preview(preview, phase=phase, now=local_now, daily_cap=daily_cap)
     model = build_presentation(preview, phase=phase, report_date=local_now.date())
     model = replace(model, evidence_axes={**model.evidence_axes,
         "evidence_time_mode": evidence_time_mode, "semantics": semantics,
-        **({"daily_sample_cap": daily_cap.isoformat()} if replay else {})})
+        "daily_sample_cap": daily_cap.isoformat()})
     if replay:
         warning = (
             "Replay uses current_cache_bounded_report_date; it is not an immutable historical snapshot. "
@@ -206,7 +210,7 @@ def build_readonly_presentation(
             raise ValueError("Report selection context mismatch.")
     model, preview = selection.model, selection.preview
     replay = evidence_time_mode == "replay"
-    daily_cap = expected_daily_price_date(now=local_now) if replay else None
+    daily_cap = expected_daily_price_date(now=local_now)
     started = perf_counter()
     maps = {}
     market_facts = {}
@@ -218,7 +222,7 @@ def build_readonly_presentation(
         try:
             maps[stock_id] = build_tw_stock_price_map(
                 db=db, stock_id=stock_id, timeframe="daily", candidate_close=None, now=local_now,
-                **({"as_of_date": daily_cap} if replay else {}))
+                as_of_date=daily_cap)
         except ValueError:
             maps[stock_id] = {"status": "missing", "decision_usable": False}
     elapsed = perf_counter() - started

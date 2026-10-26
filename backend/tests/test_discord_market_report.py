@@ -242,12 +242,12 @@ def test_calendar_skip_precedes_template_and_transport(prepared, calendar, reaso
 
 
 @pytest.mark.parametrize("phase,label", list(report.PHASE_LABELS.items()))
-def test_template_reuse_preserves_asof_warnings_missing(prepared, phase, label, webhook):
+def test_phase_selection_preserves_asof_warnings_missing(prepared, phase, label, webhook):
     result = report.run_discord_market_report(phase, now=NOW, mode="audit")
     assert result["evidence_time_mode"] == "live"
     assert result["semantics"] == "strict_availability"
     db = prepared.sessions.return_value.__enter__.return_value
-    prepared.preview.assert_called_once_with(db, market="tw")
+    prepared.preview.assert_called_once_with(db, market="tw", trade_date=NOW.date(), report_phase=phase)
     assert str(db.execute.call_args.args[0]) == "PRAGMA query_only=ON"
     db.commit.assert_not_called()
     prepared.sessions.return_value.__exit__.assert_called_once()
@@ -303,7 +303,10 @@ def test_real_template_uses_formal_reader_only(monkeypatch, webhook, transport):
         engine.dispose()
     reader.assert_called_once()
     assert reader.call_args.kwargs["limit"] == 8
-    assert reader.call_args.kwargs["market_data_params"] == {"requested_capabilities": ["market.indices"]}
+    assert reader.call_args.kwargs["market_data_params"] == {
+        "requested_capabilities": ["market.indices", "market.breadth", "market.volume_state"],
+        "capability_parameters": {}, "trade_date": NOW.date().isoformat()}
+    assert reader.call_args.kwargs["include_intraday"] is False
     content = transport.return_value.request.call_args.kwargs["body"].decode("utf-8", errors="replace")
     assert "canonical stale" in content and "canonical breadth" in content
     assert result["status"] == "sent"
@@ -318,7 +321,7 @@ def test_discord_modules_cannot_import_market_data_providers_or_ai():
         "app.dispatch.market_report_presentation", "app.dispatch.market_report_discord",
         "app.dispatch.market_report_chart", "time", "app.market.stock_price_map",
         "app.market.service", "app.market.daily_ohlcv_platform", "app.market.technical_report",
-        "app.market.taiwan_rules",
+        "app.market.taiwan_rules", "app.dispatch.market_report_phase",
     }
     module_boundaries = (
         (report, orchestration_allowed),
