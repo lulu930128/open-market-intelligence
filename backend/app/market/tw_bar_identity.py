@@ -43,6 +43,10 @@ def _timestamp(value: datetime | None) -> str | None:
 
 
 def _canonical(value: Any) -> Any:
+    # Exact JSON scalar types avoid repeated ABC checks across large histories.
+    # Enum and custom scalar subclasses retain their original normalization.
+    if type(value) in (str, int, float, bool, type(None)):
+        return value
     if isinstance(value, Decimal):
         return _decimal(value)
     if isinstance(value, datetime):
@@ -57,8 +61,13 @@ def _canonical(value: Any) -> Any:
 
 
 def _digest(payload: Any) -> str:
+    return _normalized_digest(_canonical(payload))
+
+
+def _normalized_digest(payload: Any) -> str:
+    """Hash private payloads whose leaves are already canonical JSON values."""
     encoded = json.dumps(
-        _canonical(payload),
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -165,10 +174,12 @@ def build_taiwan_bar_series_identity(
         "coverage": [_coverage_state(item) for item in coverage],
         "state": dict(state or {}),
     }
-    series_fingerprint = _digest(semantic_payload)
-    lineage_digest = _digest(lineage_payload)
+    # The private bar/instrument builders normalize these leaves once. Only
+    # state/coverage accept generic Decimal, datetime, Enum or nested mappings.
+    series_fingerprint = _normalized_digest(semantic_payload)
+    lineage_digest = _normalized_digest(lineage_payload)
     state_digest = _digest(state_payload)
-    series_revision = _digest(
+    series_revision = _normalized_digest(
         {
             "contract_version": TAIWAN_BAR_SERIES_REVISION_VERSION,
             "series_fingerprint": series_fingerprint,

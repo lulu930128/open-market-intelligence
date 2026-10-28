@@ -250,6 +250,8 @@ def _research_price_candidate(
         and raw_quote.get("headline_decision_usable") is True
         and headline_current_session
     ):
+        from app.market.quote_depth import project_taiwan_selected_price_provider
+
         headline_basis = str(raw_quote.get("headline_basis") or "resolved_headline")
         event_time = (
             raw_quote.get("headline_event_time")
@@ -263,7 +265,7 @@ def _research_price_candidate(
             "value": headline_price,
             "source_kind": headline_basis,
             "source": raw_quote.get("headline_source") or raw_quote.get("source"),
-            "provider": raw_quote.get("provider"),
+            "provider": project_taiwan_selected_price_provider(raw_quote),
             "semantics": (
                 raw_quote.get("quote_semantics")
                 or raw_quote.get("headline_finalization")

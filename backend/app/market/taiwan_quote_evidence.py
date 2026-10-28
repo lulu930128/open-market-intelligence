@@ -243,9 +243,13 @@ def acquire_taiwan_quote_evidence_bundle(
     requested_at: datetime | None = None,
     requested_capabilities: Iterable[str] | None = None,
     acquisition: TwseMisRealtimeAcquisitionAdapter | None = None,
+    timeout_seconds: int | None = None,
+    max_external_calls: int | None = None,
 ) -> TaiwanQuoteEvidenceBundle:
     """Run the explicit bounded market refresh, then expose canonical results."""
 
+    from time import monotonic
+    deadline = monotonic() + timeout_seconds if timeout_seconds is not None else None
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("Taiwan quote evidence acquisition requires a live policy")
     now = requested_at or datetime.now(TAIWAN_TZ)
@@ -272,6 +276,8 @@ def acquire_taiwan_quote_evidence_bundle(
             not in {"quote.official_close", "quote.session_close"}
         ),
         acquisition=acquisition,
+        timeout_seconds=timeout_seconds,
+        max_external_calls=max_external_calls,
     )
     for result in (refreshed.quote, refreshed.depth, refreshed.auction):
         if result is not None and result.acquisition.attempted:
@@ -285,6 +291,10 @@ def acquire_taiwan_quote_evidence_bundle(
             stock_id=stock_id,
             requested_at=now,
             acquisition=acquisition,
+            timeout_seconds=max(0, int(deadline - monotonic())) if deadline is not None else None,
+            max_external_calls=max(0, max_external_calls - sum(
+                item.acquisition.external_calls for item in (refreshed.quote, refreshed.depth, refreshed.auction) if item is not None
+            )) if max_external_calls is not None else None,
         )
         if "quote.session_close" in requested
         else read_taiwan_session_close(

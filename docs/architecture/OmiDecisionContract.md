@@ -4,6 +4,11 @@
 `omi.decision.v3` 與 `omi.ai.ask.v2` 只保留在 backend 私有 builder 與測試
 seam，不再由 HTTP、SSE、MCP 或 OpenAPI 接受/宣告。
 
+US canonical quote 的 previous close 與 change reference 由 Market Truth 選取。AI compact
+projection 保留 exact reference 的 null、reason、trade date 與 price basis；不得用 latest cached
+Daily 回填被拒絕的 reference。無日期證明的 provider metadata 只作 hint，不能因 HTTP／MCP／AI
+投影而獲得日期或 decision usability。Quote API 的新增診斷欄位為 additive；v4 envelope 不變。
+
 US 指定歷史日期的 `quote.snapshot` 與 `intraday.bars` 可同時選取：quote 使用 canonical Daily 的目標交易日與前一交易日，不以當前 quote 或最後一根 partial intraday bar 替代收盤；盤中讀取保留指定日期、逐分鐘 coverage、partial 與來源限制。Data Quality 完成最終 confidence cap 後，localized confidence label 與回答文字必須由同一最終值重新呈現。
 
 US historical intraday 的 `fill_state` 由 capability contract 依 canonical coverage、completed-session eligibility 與 resolution registry 建立。Fill partition 與 refresh reconciliation 共用此滿足條件；`latest_completed_session` 不代表分鐘資料完整。Quality projection 保留 historical fill requirement，且不得抬高來源的 `decision_usable=false`。Historical continuation 保留並綁定 trade_date、session_scope 與 interval；cache-only 可展示補洞動作，但不執行 provider I/O。完整歷史資料可 satisfied，同時仍維持非即時與非交易決策證據。
@@ -19,6 +24,8 @@ TW stock 的 public v4 selection 由 `capability_resolution_registry` 編譯為 
 既有 quote `reader_fetch` command 由 ask orchestration 在 graph 前呼叫 canonical acquisition owner，僅限明確選取、server 允許 external fetch、非 cache-only、啟用 before-answer refresh 且 command/fetch budget 非零的 request；graph 本身仍不 acquisition。取得失敗保留警告與 canonical cache 的原始品質限制。
 
 Graph 在 request 內循序執行且去重；相同輸入的 TaiwanBarService 讀取可在該 request 內共用，不建立持久 cache。每個 read node 在同一 thread 擁有獨立 read-only Session／transaction，SQLite VM execution 與 lock wait 受 deadline 約束。Pure Python 計算依 canonical row／iteration limits 有界，deadline 在返回時檢查，不宣稱可強制中斷任意 Python code。Node timeout／error 保留其他 evidence，透過 missing、limitations 與既有 quality gate 降級；必要能力缺失仍可 blocked。Debug `execution.query_plan.read_execution` 記錄 planned／actual nodes、狀態與耗時，tool_runs 不代表所有普通 reader 工作。既有 freshness guard、brief／report owner 使用同一份 pre-read evidence；另行授權的成功 fill 後才重讀同一 graph。`continuation.fill_plan` 繼續代表 acquisition，不是 payload pagination。
+
+ReadExecution 的逐 node 診斷保留既有 `duration_ms`，並附加同值 `wall_ms`、當前 thread 的 `thread_cpu_ms`、connection acquisition／PRAGMA 的 `connection_setup_ms` 與 reader callback 的 `reader_ms`。未進入的階段為 null；耗時含該階段失敗前的時間，node wall／CPU 亦涵蓋 cleanup。SQLite 失敗只公開 driver 的整數 `sqlite_errorcode` 與相符的已知 `sqlite_errorname`，不公開 SQL、參數、rows 或原始 exception 字串。這些欄位沿同一 `execution.query_plan.read_execution` 投影；不改 deadline、freshness、quality 或讀取／acquisition 邊界，wall 與 CPU 差值本身不能判定等待原因。
 
 市場 Human Answer 由既有 answer composer 渲染同一份 selected canonical evidence，再進單一 v4 projection。Breadth、指數與盤中 ranking 不另讀 snapshot；排名保留時間、metric 與 eligible／universe 的有限樣本限制。非 `evidence_only` 的 `answer_ready` 需在最終 response budget projection 後仍有實質文字；`response_ready` 只代表回應已完成。必要盤中 bars 不可用時，intraday 主結論與 action synthesis 必須由 canonical quality 降級，完成日線只作有日期的背景。
 
@@ -525,7 +532,20 @@ Temporal evidence 必須遵守 [`MarketTemporalContract.md`](MarketTemporalContr
 
 ## 驗證要求
 
+合法且 target 已解析的 `background_in_progress` 保留 request validity、target、safe tool progress 與 job／poll reference；背景工作未終止時 `execution_completed=false`。既有 cached evidence 的 usability 仍受原 policy／quality gate 限制，pending 不代表資料 ready。Fill plan 的 active jobs 優先保留等待資訊；terminal success／failed 不再列為等待中。Budget projection 同樣保留追蹤欄位，真正 invalid／clarification／unresolved 沿原拒絕路徑。
+
+Quote summary 保留已存在的 `cumulative_trade_value` 與整組 `cumulative_trade_value_evidence`，包含獨立 event／freshness clock；不重算或提升 stale amount。TW 分 K fill invoke 與 cache-only resume 明示公開 `analysis_horizon=intraday`，仍經既有 trusted external-fetch policy 與 continuation binding 驗證。
+
+`technical.indicators` 的時點 metadata 僅使用分析本身的 as_of／完成日及明確 analysis lineage clock；歷史 corporate-action 事件不充當當前時點，缺 clock 保留 null。Watchlist ranking／radar results 的 selection limit 保留既有排序前端與實際 returned_count，total ranked／matched 不變；時間序列仍保留最新端。TW canonical Quantity 單位沿 technical／signal／ranking row 投影傳遞，不由 AI 補猜或轉換成交量。
+
 Intraday payload 的 `is_partial=true` 與 canonical partial coverage 是硬性降級訊號；回傳片段 continuity 與 transport trimming 不得將它升格 complete。Required intraday 不可決策時，analysis readiness 不得重新升格。Market chips capability 的 aggregate 與 per-stock 欄位沿現有 owner 名稱輸出，不可因 registry 欄位過時而只留下 status。
+
+`market.volume_state` 的 capability coverage 沿用 owner 的 trade_value_coverage_status；consumer projection coverage 仍獨立。Resource daily／intraday 各自發布最新 relevant bar event time 與 interval health，receipt 不改寫 event clock，合讀舊分 K 不使 daily freshness 降級；watch_only、delayed、interval mismatch 與未確認單位仍保留。
+
+Taiwan intraday demand 的 terminal partial 可以同時保有 cached evidence 與 acquisition error。
+Refresh status 公開 allowlisted last_failure reason／stage／subphase／exception type／attempt，
+不輸出原始訊息、stack 或 private payload；不明 physical HTTP／寫入數保持 null。
+Gateway 已知的 post-acquisition external-call 數可保留，仍須 canonical reread 才能宣告 ready。
 
 單股 intraday Source Health 的 resolved coverage 使用與 1d chart 相同的 TaiwanBarService read 與 series identity；latest provider storage 僅作診斷。Acquisition selection 另列 selected/not_selected 與 bounded plan reason，不與資料新鮮度合成單一狀態。
 

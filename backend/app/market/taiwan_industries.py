@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -138,6 +138,7 @@ def build_tw_sector_benchmark(
     *,
     stock_id: str,
     trade_dates: list[date],
+    requested_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a bounded equal-weight sector index from canonical daily bars."""
 
@@ -182,16 +183,16 @@ def build_tw_sector_benchmark(
         }
 
     selected_dates = sorted(dict.fromkeys(trade_dates))[-61:]
-    repository = TaiwanOfficialDailyBarRepository(db)
+    repository = TaiwanOfficialDailyBarRepository(db, available_at=requested_at)
+    snapshots = repository.load_market_universe_history(
+        trade_dates=tuple(selected_dates), symbols=tuple(members),
+        max_rows=min(20_000, max(5_000, len(members) * 4)),
+    ) if selected_dates else {}
     bases: dict[str, float] = {}
     points: list[dict[str, Any]] = []
     coverage: list[dict[str, Any]] = []
     for trade_date in selected_dates:
-        snapshot = repository.load_market_universe(
-            trade_date=trade_date,
-            symbols=tuple(members),
-            max_rows=min(20_000, max(5_000, len(members) * 4)),
-        )
+        snapshot = snapshots[trade_date]
         normalized_values: list[float] = []
         for bar in snapshot.bars:
             symbol = bar.instrument.symbol

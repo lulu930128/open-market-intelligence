@@ -8,6 +8,7 @@ from typing import Any
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead, TaiwanChartPresentationEvent
 from app.market.tw_chart_service import TaiwanChartBundleRead
 from app.market.tw_intraday_universe import intraday_materialization_policy
+from app.market.tw_intraday_value import project_taiwan_intraday_values
 
 
 def _single_session_trade_date(series: TaiwanBarSeriesRead) -> date | None:
@@ -27,9 +28,11 @@ def project_taiwan_bar_series(
     expected_trade_date: date | None = None,
     presentation_events: tuple[TaiwanChartPresentationEvent, ...] = (),
 ) -> dict[str, Any]:
+    amount_projection = (project_taiwan_intraday_values(series)
+        if series.requested_interval not in {"1d", "1w", "1mo"} else None)
     states = {item.start_at: item for item in series.bar_states}
     points: list[dict[str, Any]] = []
-    for bar in series.bars:
+    for bar, amount in zip(series.bars, amount_projection.points if amount_projection else (None,) * len(series.bars)):
         state = states.get(bar.start_at)
         volume = float(bar.volume.value) if bar.volume is not None else None
         close = float(bar.close_price)
@@ -68,11 +71,13 @@ def project_taiwan_bar_series(
                     if bar.finalization.value == "provisional"
                     else "ok"
                 ),
+                **(amount.model_dump(mode="python") if amount else {}),
             }
         )
     latest = series.bars[-1] if series.bars else None
     observed_trade_dates = sorted({bar.start_at.date().isoformat() for bar in series.bars})
     payload = {
+        **(amount_projection.metadata if amount_projection else {}),
         "kind": "taiwan_bar_series",
         "market_phase": series.market_phase,
         "stock_id": series.instrument.symbol,

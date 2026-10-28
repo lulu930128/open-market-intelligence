@@ -584,6 +584,25 @@ def fugle_index_acquisition(
     )
 
 
+def fugle_cumulative_fields(data: dict[str, Any], *, trade_date: date, received_at: datetime) -> dict:
+    """Same-date regular board-lot totals, independently timed from lastTrade."""
+    total = data.get("total") if isinstance(data.get("total"), dict) else {}
+    at = _microsecond_time(total.get("time"))
+    if (at is None or at.date() != trade_date or at > received_at
+            or data.get("isTrial") is True or data.get("type") not in {"EQUITY", "ETF"}):
+        return {}
+    value = _decimal(total.get("tradeValue"))
+    if value is not None and value < 0:
+        value = None
+    return {
+        "cumulative_quantity": _lots(total.get("tradeVolume")),
+        "cumulative_turnover_value": value,
+        "cumulative_turnover_currency": "TWD" if value is not None else None,
+        "cumulative_event_at": at,
+        "cumulative_scope": "regular_board_lot",
+    }
+
+
 def fugle_quote_acquisition(
     record: FugleStreamRecord,
     requirement: DataRequirementV2,
@@ -638,7 +657,7 @@ def fugle_quote_acquisition(
         trade_state=trade_state,
         last_trade_price=last_price,
         last_trade_quantity=_lots(last_trade.get("size")) if last_price is not None else None,
-        cumulative_quantity=_lots(total.get("tradeVolume")),
+        **fugle_cumulative_fields(data, trade_date=trade_date, received_at=record.received_at),
         open_price=_decimal(data.get("openPrice"), positive=True),
         high_price=_decimal(data.get("highPrice"), positive=True),
         low_price=_decimal(data.get("lowPrice"), positive=True),

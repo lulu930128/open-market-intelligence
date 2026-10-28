@@ -929,6 +929,23 @@ def _observation_time_value(payload: Any, *, keys: set[str]) -> Any:
     return _first_semantic_value(payload, keys=keys)
 
 
+def _technical_indicator_clock_payload(payload: Any) -> dict[str, Any]:
+    """Read analysis clocks, never historical corporate-action/period events."""
+    payload = _dict(payload)
+    lineage = _dict(payload.get("lineage"))
+    freshness = _dict(payload.get("freshness"))
+    analysis_date = next((value for value in (
+        payload.get("as_of"), payload.get("trade_date"),
+        freshness.get("finalized_daily_date"), freshness.get("latest_data_date"),
+    ) if _has_semantic_value(value)), None)
+    clocks = {key: next((value for value in (payload.get(key), lineage.get(key))
+                        if _has_semantic_value(value)), None)
+              for key in ("event_at", "event_time", "provider_event_time", "bar_time", "end_at",
+                          "selected_event_at", "fetched_at", "release_at", "released_at", "next_release_at",
+                          "computed_at", "calculated_at", "generated_at", "served_at")}
+    return {"as_of": analysis_date, "trade_date": analysis_date, **clocks}
+
+
 def _breadth_metadata_payload(payload: Any, *, depth: int = 0) -> Any:
     """Exclude supplemental auction lanes from the main breadth provenance.
 
@@ -1022,6 +1039,12 @@ def _canonical_coverage_status(
     payload_included: bool,
     continuity: dict[str, Any],
 ) -> str:
+    if capability_id == "market.volume_state" and isinstance(payload, dict):
+        # Market owner qualifies the total independently of payload presence or
+        # consumer projection limits. A partial component is not a full market.
+        coverage = payload.get("trade_value_coverage_status")
+        if coverage in {"complete", "partial", "missing"}:
+            return coverage
     if (
         capability_id == "market.sample_ranking"
         and isinstance(payload, dict)
@@ -1373,6 +1396,10 @@ def _quality_for_capability(
     metadata_value = (
         _observation_time_value
         if capability_id == "market.breadth" else _first_semantic_value
+    )
+    clock_payload = (
+        _technical_indicator_clock_payload(payload)
+        if capability_id == "technical.indicators" else metadata_payload
     )
     payload_freshness = (
         _dict(payload.get("freshness"))
@@ -1801,15 +1828,15 @@ def _quality_for_capability(
         "issues": list(dict.fromkeys(issues)),
         "reason_codes": reason_codes,
         "as_of": _observation_time_value(
-            metadata_payload,
+            clock_payload,
             keys={"as_of", "latest_data_date", "trade_date", "date"},
         ),
         "trade_date": _observation_time_value(
-            metadata_payload,
+            clock_payload,
             keys={"trade_date", "latest_data_date", "date"},
         ),
         "event_time": _observation_time_value(
-            metadata_payload,
+            clock_payload,
             keys={
                 "event_at",
                 "event_time",
@@ -1820,16 +1847,16 @@ def _quality_for_capability(
             },
         ),
         "release_at": metadata_value(
-            metadata_payload,
+            clock_payload,
             keys={"release_at", "released_at", "next_release_at"},
         ),
-        "fetched_at": _observation_time_value(metadata_payload, keys={"fetched_at"}),
+        "fetched_at": _observation_time_value(clock_payload, keys={"fetched_at"}),
         "computed_at": metadata_value(
-            metadata_payload,
+            clock_payload,
             keys={"computed_at", "calculated_at", "generated_at"},
         ),
         "served_at": (
-            metadata_value(metadata_payload, keys={"served_at"})
+            metadata_value(clock_payload, keys={"served_at"})
             or canonical.get("served_at")
             or canonical.get("generated_at")
         ),

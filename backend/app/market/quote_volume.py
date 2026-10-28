@@ -3,12 +3,49 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from app.market_data.contracts import Quantity, QuantityUnit
+from app.market_data.contracts import Quantity, QuantityUnit, QuoteObservation
 
 
 TAIWAN_STANDARD_LOT_SIZE_SHARES = 1_000
 TAIWAN_MIS_VOLUME_SCOPE = "regular_session_board_lot_cumulative"
 TAIWAN_OFFICIAL_DAILY_VOLUME_SCOPE = "official_daily_aggregate"
+
+
+def project_taiwan_cumulative_totals(quote: QuoteObservation | None) -> dict[str, Any]:
+    """Project independent amount clock and scope without changing price health."""
+    if quote is None or quote.cumulative_event_at is None or quote.cumulative_scope != "regular_board_lot":
+        return {"cumulative_trade_value": None, "cumulative_trade_value_evidence": None}
+    quantity = quote.cumulative_quantity
+    lineage = quote.cumulative_lineage or quote.lineage
+    shares = float(quantity.value) if quantity is not None and quantity.unit is QuantityUnit.SHARE else None
+    value = float(quote.cumulative_turnover_value) if quote.cumulative_turnover_value is not None else None
+    return {
+        "cumulative_trade_value": value,
+        "cumulative_trade_value_evidence": {
+            "value": value, "currency": quote.cumulative_turnover_currency,
+            "volume_shares": shares, "volume_unit": "shares",
+            "provider_volume_unit": quantity.original_unit.value if quantity and quantity.original_unit else None,
+            "trade_date": quote.trade_date.isoformat() if quote.trade_date else None,
+            "event_time": quote.cumulative_event_at.isoformat(),
+            "received_at": lineage.received_at.isoformat() if lineage.received_at else None,
+            "provider": lineage.provider, "source": lineage.source,
+            "source_field": "total.tradeValue", "volume_source_field": "total.tradeVolume",
+            "scope": TAIWAN_MIS_VOLUME_SCOPE, "authority": lineage.authority.value,
+            "official": False, "method": "provider_reported_cumulative",
+            "raw_result_id": lineage.raw_receipt_id,
+            "freshness": quote.cumulative_freshness.value if quote.cumulative_freshness else "unknown",
+            "freshness_basis": "cumulative_event_time",
+            "checked_at": quote.cumulative_checked_at.isoformat() if quote.cumulative_checked_at else None,
+            "fresh_amount_usable": value is not None and quote.cumulative_freshness is not None and quote.cumulative_freshness.value in {"live", "fresh"},
+        },
+        "cumulative_volume_shares": shares,
+        "cumulative_volume_lots": shares / 1000 if shares is not None else None,
+        "cumulative_volume_trade_date": quote.trade_date.isoformat() if quote.trade_date else None,
+        "cumulative_volume_event_time": quote.cumulative_event_at.isoformat(),
+        "cumulative_volume_source": lineage.provider,
+        "cumulative_volume_source_field": "total.tradeVolume",
+        "volume_scope": TAIWAN_MIS_VOLUME_SCOPE,
+    }
 
 
 def _date_text(value: Any) -> str | None:

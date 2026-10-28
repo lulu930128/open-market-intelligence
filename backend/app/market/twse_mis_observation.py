@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from math import isfinite
-from typing import Any
+from typing import Any, Mapping
 
 from app.market.trading_calendar import (
     TAIWAN_CLOSE_RESOLUTION_TIME,
@@ -25,7 +26,7 @@ def _positive(value: Any) -> bool:
     try:
         parsed = float(value)
         return isfinite(parsed) and parsed > 0
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -55,9 +56,11 @@ def resolve_twse_mis_actual_trade(
     observation_trade_date: date | str | None,
     provider_event_time: datetime | None,
     trial_status: Any,
-    last_trade_price: float | None,
+    last_trade_price: Decimal | float | None,
     last_trade_volume_lots: int | None,
-    cumulative_volume_lots: int | None,
+    cumulative_volume_lots: Any,
+    nested_trade: Any = None,
+    observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Resolve whether one MIS message carries a canonical actual-trade price.
 
@@ -65,7 +68,9 @@ def resolve_twse_mis_actual_trade(
     the requested trade date, be outside trial-auction state, fall inside the
     exchange's trade/close-resolution window, and carry positive trade-volume
     evidence. This helper is pure so quote, intraday and contract tests can
-    share the same boundary without consumer-side inference.
+    share the same boundary without consumer-side inference. A nested execution
+    additionally requires explicit ts=0, integral compatible volume and its own
+    time at or before the snapshot (and the receipt when supplied).
     """
 
     expected_date = _trade_date(expected_trade_date)
@@ -78,7 +83,8 @@ def resolve_twse_mis_actual_trade(
             ("tv", last_trade_volume_lots),
             ("v", cumulative_volume_lots),
         )
-        if _positive(value)
+        # Existing adapters use whole board lots for execution evidence.
+        if _positive(value) and float(value) >= 1
     ]
     trade_date_matches = bool(
         expected_date is not None
@@ -101,6 +107,52 @@ def resolve_twse_mis_actual_trade(
     actual_trade_price_available = bool(
         actual_trade_occurred and _positive(last_trade_price)
     )
+    price_source = "twse_mis_snapshot_z"
+    price_event_time = event_time
+    normalized_volume = last_trade_volume_lots
+    # Nested trade is a separate last-execution observation, never a snapshot
+    # timestamp refresh or an auction-price fallback. Keep legacy top-z rules.
+    if not _positive(last_trade_price) and isinstance(nested_trade, Mapping):
+        try:
+            nested_price = Decimal(str(nested_trade.get("z")))
+            nested_volume = Decimal(str(nested_trade.get("v")))
+            total_volume = Decimal(str(cumulative_volume_lots))
+            time_text = nested_trade.get("t")
+            nested_time = (
+                datetime.strptime(time_text, "%H:%M:%S").time()
+                if isinstance(time_text, str) and len(time_text) == 8 else None
+            )
+            nested_event = (
+                datetime.combine(observed_date, nested_time, tzinfo=event_time.tzinfo)
+                if observed_date and nested_time and event_time else None
+            )
+            receipt_time = taiwan_now(observed_at) if observed_at else None
+            valid_nested = bool(
+                trade_date_matches
+                and str(trial_status).strip() == "0"
+                and event_in_trade_window
+                and nested_event is not None
+                and TAIWAN_SESSION_OPEN_TIME <= nested_event.time() <= TAIWAN_CLOSE_RESOLUTION_TIME
+                and nested_event <= event_time
+                and (receipt_time is None or (
+                    receipt_time.date() == observed_date and event_time <= receipt_time
+                ))
+                and ("d" not in nested_trade or _trade_date(nested_trade["d"]) == observed_date)
+                and nested_price.is_finite() and _positive(nested_price)
+                and nested_volume.is_finite() and nested_volume > 0
+                and nested_volume == nested_volume.to_integral_value()
+                and total_volume.is_finite() and total_volume >= nested_volume
+                and total_volume == total_volume.to_integral_value()
+            )
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            valid_nested = False
+        if valid_nested:
+            actual_trade_occurred = actual_trade_price_available = True
+            last_trade_price = nested_price
+            normalized_volume = int(nested_volume)
+            price_event_time = nested_event
+            price_source = "twse_mis_nested_trade_z"
+            volume_evidence_fields = ["trade.v", "v"]
 
     if expected_date is None:
         reason_code = "EXPECTED_TRADE_DATE_MISSING"
@@ -136,11 +188,15 @@ def resolve_twse_mis_actual_trade(
             else None
         ),
         "actual_trade_price_as_of": (
-            event_time if actual_trade_price_available else None
+            price_event_time if actual_trade_price_available else None
         ),
         "actual_trade_price_source": (
-            "twse_mis_snapshot_z" if actual_trade_price_available else None
+            price_source if actual_trade_price_available else None
         ),
+        "actual_trade_price_decimal": (
+            Decimal(str(last_trade_price)) if actual_trade_price_available else None
+        ),
+        "actual_trade_volume_lots": normalized_volume if actual_trade_price_available else None,
         "volume_evidence_fields": volume_evidence_fields,
         "reason_code": reason_code,
     }

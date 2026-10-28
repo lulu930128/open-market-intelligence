@@ -7,6 +7,7 @@ selection, commit, or rollback.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
@@ -229,6 +230,24 @@ class TaiwanOfficialDailyBarRepository:
         )
         self._latest_batch: dict[str, list] | None = None
         self._latest_batch_dates: dict[str, date] = {}
+        self._capture_daily_candidate_read = False
+        self._daily_candidate_handoff: tuple[int, datetime | None, DailyBarCandidateRead] | None = None
+
+    @contextmanager
+    def completed_daily_candidate_read_scope(self):
+        """One-shot full-candidate handoff from Gateway to day-state resolution.
+
+        The graph consists of frozen canonical models, tuples and immutable
+        values. Keep all candidates/rejections, never a selected-bar substitute.
+        This repository-local slot exists only inside the caller's read scope;
+        it is consumed once and restored on both success and failure.
+        """
+        previous = self._capture_daily_candidate_read, self._daily_candidate_handoff
+        self._capture_daily_candidate_read, self._daily_candidate_handoff = True, None
+        try:
+            yield
+        finally:
+            self._capture_daily_candidate_read, self._daily_candidate_handoff = previous
 
     def preload_latest_stock_daily(
         self, instruments: tuple[InstrumentKey, ...], *, end_date: date,
@@ -737,13 +756,17 @@ class TaiwanOfficialDailyBarRepository:
             for source_name, bars in bars_by_source.items()
             if bars
         )
-        return DailyBarCandidateRead(
+        result = DailyBarCandidateRead(
             query=query,
             series=series,
             rejections=tuple(rejections),
             rows_examined=len(rows),
             rows_accepted=sum(len(values) for values in bars_by_source.values()),
         )
+        if self._capture_daily_candidate_read:
+            self._capture_daily_candidate_read = False
+            self._daily_candidate_handoff = (id(self._db), self._available_at, result)
+        return result
 
     def resolve_daily_days(self, *, instrument, start_date, end_date, resolved_bars):
         """Read official activity and event evidence; resolve one state per date."""
@@ -756,11 +779,18 @@ class TaiwanOfficialDailyBarRepository:
         from app.market.tw_daily_day_state import TaiwanDailyEvidence, resolve_taiwan_daily_day_state
         available = (_as_aware_utc(self._available_at) if self._available_at else datetime.now(timezone.utc))
         events = read_taiwan_instrument_event_evidence(instrument=instrument, available_at=available)
-        stored = self.load_daily_bars(DailyBarCandidateQuery(
-            instrument=instrument, start_date=start_date, end_date=end_date, max_rows=5000))
+        query = DailyBarCandidateQuery(
+            instrument=instrument, start_date=start_date, end_date=end_date, max_rows=5000)
+        captured = self._daily_candidate_handoff
+        self._daily_candidate_handoff = None
+        stored = (captured[2] if captured is not None
+            and self._available_at is not None
+            and captured[:2] == (id(self._db), self._available_at)
+            and captured[2].query == query else self.load_daily_bars(query))
         ids = {item.storage_row_id for item in stored.rejections if item.reason_code == "MISSING_REQUIRED_OHLC"}
         ids.update(row_id for series in stored.series for row_id in series.storage_row_ids)
         rows = (self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
+                .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS, RawFetchResult.status_code, RawFetchResult.error_message))
                 .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
                 .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
                 .filter(MarketDailyPrice.id.in_(ids)).all()) if ids else []
@@ -894,14 +924,24 @@ class TaiwanOfficialDailyBarRepository:
         }
 
     def load_market_universe(
+        self, *, trade_date: date, include_etf: bool = False,
+        venue: str | None = None, symbols: tuple[str, ...] | None = None,
+        max_rows: int = 5000,
+    ) -> TaiwanOfficialDailyUniverseRead:
+        return self.load_market_universe_history(
+            trade_dates=(trade_date,), include_etf=include_etf,
+            venue=venue, symbols=symbols, max_rows=max_rows,
+        )[trade_date]
+
+    def load_market_universe_history(
         self,
         *,
-        trade_date: date,
+        trade_dates: tuple[date, ...],
         include_etf: bool = False,
         venue: str | None = None,
         symbols: tuple[str, ...] | None = None,
         max_rows: int = 5000,
-    ) -> TaiwanOfficialDailyUniverseRead:
+    ) -> dict[date, TaiwanOfficialDailyUniverseRead]:
         """Load an exact completed-session universe through official lineage.
 
         The repository applies the same source identity, receipt release and
@@ -910,6 +950,9 @@ class TaiwanOfficialDailyBarRepository:
         never interpret raw duplicate rows as separate market observations.
         """
 
+        trade_dates = tuple(sorted(set(trade_dates)))
+        if not 1 <= len(trade_dates) <= 61:
+            raise ValueError("Taiwan universe history requires 1 to 61 exact dates")
         if max_rows < 1 or max_rows > 20_000:
             raise ValueError("Taiwan universe read max_rows must be between 1 and 20000")
         normalized_venue = str(venue or "").strip().upper() or None
@@ -924,11 +967,6 @@ class TaiwanOfficialDailyBarRepository:
         )
         if len(normalized_symbols) > 500:
             raise ValueError("Taiwan bounded universe symbols cannot exceed 500")
-        source_to_binding = {
-            binding.source_name: binding
-            for bindings in _SOURCES_BY_VENUE.values()
-            for binding in bindings
-        }
         instrument_types = ["stock"]
         if include_etf:
             instrument_types.extend(("etf", "exchange_traded_fund"))
@@ -944,10 +982,9 @@ class TaiwanOfficialDailyBarRepository:
             )
         if symbols is not None:
             if not normalized_symbols:
-                return TaiwanOfficialDailyUniverseRead(
-                    trade_date=trade_date,
-                    limitations=("REQUESTED_STOCK_UNIVERSE_EMPTY",),
-                )
+                return {day: TaiwanOfficialDailyUniverseRead(
+                    trade_date=day, limitations=("REQUESTED_STOCK_UNIVERSE_EMPTY",),
+                ) for day in trade_dates}
             universe_query = universe_query.filter(
                 StockMaster.stock_id.in_(normalized_symbols)
             )
@@ -967,11 +1004,10 @@ class TaiwanOfficialDailyBarRepository:
             if market in universe_counts:
                 universe_counts[market] += 1
         if not universe_symbols:
-            return TaiwanOfficialDailyUniverseRead(
-                trade_date=trade_date,
-                limitations=("ACTIVE_STOCK_UNIVERSE_EMPTY",),
-            )
-        rows = (
+            return {day: TaiwanOfficialDailyUniverseRead(
+                trade_date=day, limitations=("ACTIVE_STOCK_UNIVERSE_EMPTY",),
+            ) for day in trade_dates}
+        query = (
             self._db.query(
                 MarketDailyPrice,
                 RawFetchResult,
@@ -982,21 +1018,58 @@ class TaiwanOfficialDailyBarRepository:
             .outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
             .outerjoin(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
             .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)
-            .filter(MarketDailyPrice.trade_date == trade_date)
+            .filter(MarketDailyPrice.trade_date.in_(trade_dates))
             .filter(MarketDailyPrice.stock_id.in_(universe_symbols))
-            .order_by(
+        )
+        if self._available_at is not None:
+            query = query.filter(RawFetchResult.fetched_at <= self._available_at)
+        rows = (
+            query.order_by(
+                MarketDailyPrice.trade_date.asc(),
                 MarketDailyPrice.stock_id.asc(),
                 SourceRegistry.priority.asc(),
                 MarketDailyPrice.id.desc(),
             )
-            .limit(max_rows + 1)
-            .all()
+            .limit(max_rows * len(trade_dates) + 1)
+            .yield_per(256)
         )
-        if len(rows) > max_rows:
-            raise CandidateReadLimitExceeded(
-                "Taiwan universe daily read exceeded max_rows"
+        # Materialize at most one date plus the driver's bounded batch. Keeping
+        # the whole joined ORM history would multiply the old read's peak by 61.
+        resolved = {}
+        day_rows = []
+        current_date = None
+        for row in rows:
+            row_date = row[0].trade_date
+            if current_date is not None and row_date != current_date:
+                resolved[current_date] = self._resolve_market_universe_rows(
+                    trade_date=current_date, rows=day_rows, universe_symbols=universe_symbols,
+                    universe_counts=universe_counts, max_rows=max_rows,
+                )
+                day_rows = []
+            current_date = row_date
+            day_rows.append(row)
+            if len(day_rows) > max_rows:
+                raise CandidateReadLimitExceeded("Taiwan universe daily read exceeded max_rows")
+        if current_date is not None:
+            resolved[current_date] = self._resolve_market_universe_rows(
+                trade_date=current_date, rows=day_rows, universe_symbols=universe_symbols,
+                universe_counts=universe_counts, max_rows=max_rows,
             )
+        for day in trade_dates:
+            if day not in resolved:
+                resolved[day] = self._resolve_market_universe_rows(
+                    trade_date=day, rows=(), universe_symbols=universe_symbols,
+                    universe_counts=universe_counts, max_rows=max_rows,
+                )
+        return resolved
 
+    def _resolve_market_universe_rows(self, *, trade_date, rows, universe_symbols, universe_counts, max_rows):
+        if len(rows) > max_rows:
+            raise CandidateReadLimitExceeded("Taiwan universe daily read exceeded max_rows")
+        source_to_binding = {
+            binding.source_name: binding
+            for bindings in _SOURCES_BY_VENUE.values() for binding in bindings
+        }
         candidates: dict[str, list[tuple[int, BarObservation]]] = {}
         rejected = 0
         rejection_reasons: list[tuple[str, str]] = []

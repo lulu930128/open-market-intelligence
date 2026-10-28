@@ -29,6 +29,7 @@ from app.market.tw_instrument import resolve_taiwan_instrument
 from app.market_data.contracts import InstrumentType
 from app.market_data.policies import RealtimePolicy
 from app.market_data.integration_contracts import RequestBounds
+from app.market_data.gateway import PostAcquisitionError
 
 
 INDEX_NAME = "uq_job_run_tw_intraday_active_demand"
@@ -38,6 +39,37 @@ RETRY_DELAYS = (15, 30)
 ORIGINS = {"viewer", "ai", "scheduler", "close_tail", "completed_session_repair", "completed_session", "operator", "front"}
 COMPLETED_BACKOFF_KEY = "tw-completed-materialization:backoff"
 RESTART_HANDOFF_KEY = "restart_unstarted_v1"
+FAILURE_STAGES = frozenset({"admission", "pre_reread", "acquisition", "persistence", "validation", "reread_resolve", "post_reread", "finalization"})
+FAILURE_TYPES = frozenset({"Exception", "TimeoutError", "ConnectionError", "JSONDecodeError", "ValueError", "TypeError", "KeyError", "RuntimeError", "OperationalError", "IntegrityError", "ValidationError"})
+FAILURE_REASONS = frozenset({"TW_INTRADAY_DEMAND_TIMEOUT", "TW_INTRADAY_DEMAND_ACQUISITION_FAILED", "CANONICAL_PERSISTENCE_REJECTED", "TW_INTRADAY_DEMAND_FAILED"})
+
+
+def safe_demand_failure(value: object) -> dict | None:
+    """Allowlisted diagnostic projection; never expose exception text or paths."""
+    def allowed(item: object, values) -> str | None:
+        return item if isinstance(item, str) and item in values else None
+    if not isinstance(value, dict) or allowed(value.get("reason_code"), FAILURE_REASONS) is None:
+        return None
+    attempt = value.get("attempt_count")
+    return {
+        "reason_code": value["reason_code"],
+        "stage": allowed(value.get("stage"), FAILURE_STAGES),
+        "subphase": allowed(value.get("subphase"), {"parse", "provider_or_parse"}),
+        "error_type": allowed(value.get("error_type"), FAILURE_TYPES),
+        "attempt_count": attempt if type(attempt) is int and 0 <= attempt <= 3 else None,
+    }
+
+
+def _record_failure(result: dict, *, reason: str, stage: str, exc: Exception | None = None,
+                    subphase: str | None = None) -> None:
+    cause = exc.__cause__ if isinstance(exc, PostAcquisitionError) and exc.__cause__ else exc
+    name = type(cause).__name__ if cause is not None else None
+    result["last_failure"] = safe_demand_failure({
+        "reason_code": reason, "stage": stage,
+        "subphase": "parse" if isinstance(cause, json.JSONDecodeError) else subphase,
+        "error_type": name if name in FAILURE_TYPES else "Exception" if cause else None,
+        "attempt_count": result.get("attempt_count", 0),
+    })
 
 
 def is_restart_handoff(job: JobRun) -> bool:
@@ -497,6 +529,7 @@ def enqueue_consumer_demand(db: Session, *, stock_id: str, requested_at: datetim
 def run_consumer_demand(job_id: int) -> None:
     db = jobs.SessionLocal()
     result = {}
+    stage = "admission"
     try:
         job = jobs.get_job(db, job_id)
         request = consumer_request(job)
@@ -514,6 +547,7 @@ def run_consumer_demand(job_id: int) -> None:
         if remaining < 1 or calls < 1:
             _finish(db, job, result, "TW_INTRADAY_DEMAND_EXPIRED")
             return
+        stage = "pre_reread"
         result.update(_reread(db, request, now))
         result["reread_count"] += 1
         if result["reread_ready"]:
@@ -539,6 +573,7 @@ def run_consumer_demand(job_id: int) -> None:
             return
         deadline = monotonic() + duration
         reason = "CURRENT_SESSION_BASELINE_NOT_READY"
+        stage = "acquisition"
         try:
             acquired = refresh_taiwan_intraday_bars(
                 db, stock_id=request["stock_id"], interval="1m", range_value="1d",
@@ -570,8 +605,11 @@ def run_consumer_demand(job_id: int) -> None:
                 and str(code).split(":", 1)[1].isdigit()
             ]
             acquisition = getattr(acquired, "acquisition", None)
-            if "PROVIDER_REQUEST_OR_PARSE_FAILED" in getattr(acquisition, "limitations", ()):
+            if (getattr(acquisition, "status", None) == "failed"
+                    or "PROVIDER_REQUEST_OR_PARSE_FAILED" in getattr(acquisition, "limitations", ())):
                 result["provider_failure_count"] = result.get("provider_failure_count", 0) + 1
+                reason = "TW_INTRADAY_DEMAND_ACQUISITION_FAILED"
+                _record_failure(result, reason=reason, stage="acquisition", subphase="provider_or_parse")
             if delays:
                 result["provider_backoff_count"] = result.get("provider_backoff_count", 0) + 1
                 result["retry_not_before_at"] = (_now() + timedelta(seconds=max(delays))).isoformat()
@@ -580,17 +618,26 @@ def run_consumer_demand(job_id: int) -> None:
                 reason = "TW_INTRADAY_DEMAND_PROVIDER_BACKOFF"
             if acquired.persistence.attempted and not acquired.persistence.committed:
                 reason = "CANONICAL_PERSISTENCE_REJECTED"
+                _record_failure(result, reason=reason, stage="persistence")
         except Exception as exc:
             db.rollback()
-            result["external_call_count"] = None
+            actual_calls = exc.acquisition.external_calls if isinstance(exc, PostAcquisitionError) else None
+            result["external_call_count"] = (
+                result["external_call_count"] + actual_calls
+                if result["external_call_count"] is not None and actual_calls is not None else None
+            )
             result["bars_written_count"] = None
             reason = "TW_INTRADAY_DEMAND_TIMEOUT" if isinstance(exc, TimeoutError) else "TW_INTRADAY_DEMAND_ACQUISITION_FAILED"
-            jobs.logger.warning("Taiwan demand %s acquisition failed: %s", job_id, type(exc).__name__)
+            failure_stage = exc.stage if isinstance(exc, PostAcquisitionError) and exc.stage else "acquisition"
+            _record_failure(result, reason=reason, stage=failure_stage, exc=exc)
+            jobs.logger.warning("Taiwan demand %s failed: %s", job_id, result["last_failure"])
         now = _now()
         db.refresh(job)
         request = materialization_request(job) or request
+        stage = "post_reread"
         result.update(_reread(db, request, now))
         result["reread_count"] += 1
+        stage = "finalization"
         if result["reread_ready"]:
             _finish(db, job, result, "CANONICAL_CURRENT_SESSION_READY")
             return
@@ -609,8 +656,10 @@ def run_consumer_demand(job_id: int) -> None:
             db.commit()
         else:
             _finish(db, job, result, reason)
-    except Exception:
-        jobs.logger.exception("Taiwan consumer demand %s failed", job_id)
+    except Exception as exc:
+        db.rollback()
+        _record_failure(result, reason="TW_INTRADAY_DEMAND_FAILED", stage=stage, exc=exc)
+        jobs.logger.warning("Taiwan consumer demand %s failed: %s", job_id, result["last_failure"])
         # Keep consumed quota/provider evidence even if the canonical reread
         # itself fails. A generic failure must not erase the episode ledger.
         result.update(reread_ready=False, reason_code="TW_INTRADAY_DEMAND_FAILED")

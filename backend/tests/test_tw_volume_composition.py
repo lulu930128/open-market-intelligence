@@ -79,7 +79,7 @@ def test_valid_current_value_does_not_invent_comparable_baseline(key, value):
     assert result["same_time_baseline_5d"]["decision_usable"] is False
 
 
-def test_postclose_typed_estimated_1330_components_keep_baseline_warming():
+def test_postclose_unqualified_estimates_keep_amount_but_cannot_predict_readiness():
     from datetime import date
     from app.market.taiwan_market_state import persist_taiwan_market_minute_state, read_taiwan_market_volume_state
     from test_taiwan_market_state import make_session, market_summary_payload
@@ -108,7 +108,8 @@ def test_postclose_typed_estimated_1330_components_keep_baseline_warming():
         assert serialized["estimated_cumulative_trade_value"] == 1_178_859_493_542
         assert serialized["official_cumulative_trade_value"] is None
         assert serialized["trade_value_complete"] is True
-        assert serialized["baseline_readiness_status"] == "warming_up"
+        assert serialized["baseline_readiness_status"] == "current_unqualified"
+        assert serialized["expected_5d_ready_after_sessions"] is None
         for item in payload["indices"]:
             projected = MarketBreadthRead.model_validate(item["breadth"]).model_dump(mode="json")
             assert projected["trade_value_is_estimate"] is True
@@ -122,7 +123,8 @@ def test_postclose_typed_estimated_1330_components_keep_baseline_warming():
         assert result["official_cumulative_trade_value"] is None
         assert result["trade_value_authority_status"] == "estimated"
         assert result["trade_value_coverage_status"] == "complete"
-        assert result["baseline_readiness_status"] == "warming_up"
+        assert result["baseline_readiness_status"] == "current_unqualified"
+        assert result["expected_20d_ready_after_sessions"] is None
         assert result["status"] == "partial"
         assert result["same_time_baseline_5d"]["pace_ratio"] is None
         assert result == _volume_state_with_breadth_current_value(persisted, breadth=breadth)

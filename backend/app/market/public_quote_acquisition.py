@@ -136,8 +136,10 @@ class TaiwanPublicQuoteAcquisitionExecutor:
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         provider_guard: TwseMisProviderGuard | None = None,
+        fugle=None,
     ) -> None:
         self._fetchers = dict(fetchers or {})
+        self._fugle = fugle
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
         self._provider_guard = provider_guard or (
@@ -402,6 +404,10 @@ class TaiwanPublicQuoteAcquisitionExecutor:
             raise ValueError("public quote acquisition requires instrument target")
         if len(plan.routes) > 1:
             raise ValueError("public quote acquisition is bounded to one route")
+        from app.market.tw_realtime_capabilities import FUGLE_HTTP_QUOTE_RESOURCE_ID
+        if plan.routes and plan.routes[0].resource_id == FUGLE_HTTP_QUOTE_RESOURCE_ID:
+            from app.market.providers.fugle_http import FugleHttpAdapter
+            return (self._fugle or FugleHttpAdapter(clock=self._clock)).acquire_route(requirement, plan.routes[0])
         started_at = self._monotonic()
         outcomes = tuple(
             self._run_route(

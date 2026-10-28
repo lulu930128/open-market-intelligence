@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 
 from sqlalchemy import and_, func, inspect, or_
 from sqlalchemy.orm import Session, load_only, defer
@@ -323,6 +324,20 @@ class TaiwanPublicQuoteRepository:
                 rows_examined=1,
                 limitations=("PUBLIC_QUOTE_TRADE_STATE_CONFLICT",),
             )
+        cumulative = {"cumulative_quantity": _quantity_from_lots(row.total_volume_lots)}
+        if row.provider == "fugle_marketdata":
+            from app.market.providers.fugle_realtime import fugle_cumulative_fields, _validate_stock_payload_identity
+            cumulative = {}
+            try:
+                payload = json.loads(raw.raw_text or "")
+                data = payload.get("data", payload) if isinstance(payload, dict) else {}
+                _validate_stock_payload_identity(data, instrument)
+                payload_date = (date.fromisoformat(data["date"]) if isinstance(data.get("date"), str)
+                    else _as_taiwan(row.quote_time).date())
+                if data.get("symbol") == instrument.symbol and payload_date == row.trade_date:
+                    cumulative = fugle_cumulative_fields(data, trade_date=row.trade_date, received_at=_as_utc(row.received_at))
+            except (ValueError, TypeError, AttributeError):
+                pass  # Missing totals do not invalidate the independent price observation.
         quote = QuoteObservation(
             instrument=instrument,
             lineage=SourceLineage(
@@ -350,7 +365,7 @@ class TaiwanPublicQuoteRepository:
             last_trade_quantity=_quantity_from_lots(
                 row.last_trade_volume_lots
             ),
-            cumulative_quantity=_quantity_from_lots(row.total_volume_lots),
+            **cumulative,
             open_price=_price(row.open_price),
             high_price=_price(row.high_price),
             low_price=_price(row.low_price),

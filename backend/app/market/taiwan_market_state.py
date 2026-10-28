@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.db.models import TaiwanMarketMinuteState, utc_now
 from app.market.trading_calendar import (
     TAIWAN_TZ,
-    normalize_taiwan_session_phase,
     taiwan_market_session_phase,
 )
 
@@ -59,9 +58,10 @@ def _volume_comparison_identity(component: dict[str, Any]) -> dict[str, Any]:
 
 
 def _row_comparison_identity(row: TaiwanMarketMinuteState) -> dict[str, Any]:
+    evidence = _row_trade_value_evidence(row)
     return _volume_comparison_identity({
-        "market": row.market, "scope": row.breadth_scope,
-        "source": row.source, "breadth_contract_version": row.breadth_contract_version,
+        "market": row.market, "scope": evidence["scope"],
+        "source": evidence["source"], "breadth_contract_version": evidence["breadth_contract_version"],
         "trade_value_semantics": row.trade_value_semantics,
         "trade_value_is_estimate": row.trade_value_is_estimate,
     })
@@ -166,6 +166,9 @@ def _row_trade_value_evidence(row: TaiwanMarketMinuteState) -> dict[str, Any]:
     # Legacy estimates have no proof of acquisition/price coverage. Do not
     # recover it from today's breadth or rewrite the historical minute.
     return {
+        "scope": row.breadth_scope,
+        "source": row.source,
+        "breadth_contract_version": row.breadth_contract_version,
         **(evidence if isinstance(evidence, dict) else {}),
         "market": row.market,
         "trade_value_is_estimate": row.trade_value_is_estimate,
@@ -384,10 +387,8 @@ def _eligible_session_trade_value(
     finalized: bool,
     minute_at: datetime,
 ) -> dict[str, Any]:
-    raw_phase = breadth.get("market_session") or "unknown"
-    session_phase = normalize_taiwan_session_phase(raw_phase)
-    if session_phase == "unknown":
-        session_phase = taiwan_market_session_phase(minute_at)
+    # Stale/preopen breadth must not veto an independently eligible index value.
+    session_phase = taiwan_market_session_phase(minute_at)
     if session_phase in {"preopen", "preopen_pending"}:
         return {
             "value": None,
@@ -398,59 +399,52 @@ def _eligible_session_trade_value(
             "reason": "preopen_has_no_actual_session_trade_value",
         }
 
-    breadth_value = _as_int(breadth.get("trade_value"))
-    breadth_authority_known = (
-        breadth.get("trade_value_is_estimate") is True
-        or breadth.get("official_flag") is True and breadth.get("trade_value_is_estimate") is False
-    )
-    if breadth_value is not None and not breadth_authority_known:
-        breadth_value = None
-    if breadth_value is not None:
-        is_estimate = bool(breadth.get("trade_value_is_estimate"))
+    # Select authority before considering sample estimates. Every candidate
+    # must identify the same venue/date/minute through its own receipt lineage;
+    # a newer breadth receipt cannot lend its clock to an older official value.
+    components = {
+        component["domain"]: component
+        for component in _market_minute_component_lineage(item=item, breadth=breadth)["components"]
+    }
+    candidates = ((item, "index_snapshot", "market_index_summary"),
+                  (breadth, "market_breadth", "breadth"))
+    candidates = sorted(candidates, key=lambda candidate: candidate[0].get("trade_value_is_estimate") is True)
+    for candidate, domain, source in candidates:
+        value = _as_int(candidate.get("trade_value"))
+        estimate = candidate.get("trade_value_is_estimate")
+        official = candidate.get("official_flag") is True or candidate.get("official") is True
+        component = components.get(domain, {})
+        event_at = _as_taiwan_datetime(component.get("event_at"))
+        candidate_date = _as_trade_date(candidate.get("trade_date") or candidate.get("time"))
+        candidate_event = candidate.get("as_of") or candidate.get("snapshot_as_of")
+        candidate_at = _as_taiwan_datetime(candidate_event, naive_is_local=True)
+        if (
+            value is None
+            or not (estimate is True or official and (estimate is None or estimate is False))
+            or candidate.get("market") != item.get("market")
+            or candidate_date != trade_date
+            or event_at is None or event_at.date() != trade_date
+            or event_at.replace(second=0, microsecond=0) != minute_at.replace(second=0, microsecond=0)
+            or candidate_event is not None and (
+                candidate_at is None
+                or candidate_at.replace(second=0, microsecond=0) != event_at.replace(second=0, microsecond=0)
+            )
+            or not all(component.get(key) for key in ("provider", "source", "raw_result_id"))
+        ):
+            continue
+        is_estimate = estimate is True
         return {
-            "value": breadth_value,
+            "value": value,
             "is_estimate": is_estimate,
-            "semantics": breadth.get("trade_value_semantics")
+            "semantics": candidate.get("trade_value_semantics")
             or (
                 "estimated_cumulative_trade_value"
                 if is_estimate
                 else "official_cumulative_trade_value"
             ),
-            "confidence": breadth.get("trade_value_confidence")
+            "confidence": candidate.get("trade_value_confidence")
             or ("medium" if is_estimate else "high"),
-            "source": "breadth",
-            "reason": None,
-        }
-
-    item_trade_date = _as_trade_date(item.get("time") or item.get("trade_date"))
-    item_value = _as_int(item.get("trade_value"))
-    item_authority_known = (
-        item.get("trade_value_is_estimate") is True
-        or (item.get("official_flag") is True or item.get("official") is True)
-        and item.get("trade_value_is_estimate") is not True
-    )
-    if (
-        item_value is not None
-        and item_authority_known
-        and item_trade_date == trade_date
-        and (
-            finalized
-            or session_phase in {"regular", "closing_auction", "post_close"}
-        )
-    ):
-        is_estimate = bool(item.get("trade_value_is_estimate"))
-        return {
-            "value": item_value,
-            "is_estimate": is_estimate,
-            "semantics": item.get("trade_value_semantics")
-            or (
-                "estimated_cumulative_trade_value"
-                if is_estimate
-                else "official_cumulative_trade_value"
-            ),
-            "confidence": item.get("trade_value_confidence")
-            or ("medium" if is_estimate else "high"),
-            "source": "market_index_summary",
+            "source": source,
             "reason": None,
         }
 
@@ -490,13 +484,20 @@ def persist_taiwan_market_minute_state(
             else {}
         )
         trade_date = _as_trade_date(
-            breadth.get("trade_date")
+            payload.get("as_of")
             or item.get("time")
-            or payload.get("as_of")
+            or breadth.get("trade_date")
         )
         if trade_date is None:
             skipped.append(f"{index_id}:missing_trade_date")
             continue
+        breadth_date_mismatch = bool(
+            breadth and _as_trade_date(breadth.get("trade_date")) != trade_date
+        )
+        if breadth_date_mismatch:
+            # Retain original component lineage, but never relabel yesterday's
+            # directional counts as today's independent official turnover.
+            breadth = {}
         minute_at = _minute_at_for_payload(
             payload=payload,
             trade_date=trade_date,
@@ -508,7 +509,9 @@ def persist_taiwan_market_minute_state(
             if isinstance(item.get("breadth_status"), dict)
             else {}
         )
-        raw_quality_status = str(breadth_status.get("status") or "unknown")
+        raw_quality_status = (
+            "missing" if breadth_date_mismatch else str(breadth_status.get("status") or "unknown")
+        )
         breadth_scope = str(breadth.get("scope") or "") or None
         breadth_session_phase = str(
             breadth.get("market_session") or "unknown"
@@ -543,7 +546,7 @@ def persist_taiwan_market_minute_state(
              if component["domain"] == value_domain), {}
         )
         value_event_at = _as_taiwan_datetime(value_component.get("event_at"))
-        if value_event_at is not None:
+        if value_event_at is not None and cumulative_trade_value is not None:
             minute_at = value_event_at.replace(second=0, microsecond=0)
         existing = (
             db.query(TaiwanMarketMinuteState)
@@ -572,6 +575,11 @@ def persist_taiwan_market_minute_state(
         previous_values = [
             row.cumulative_trade_value for row in (existing, latest_prior)
             if row is not None and row.cumulative_trade_value is not None
+            and row.trade_value_is_estimate == trade_value_contract["is_estimate"]
+            and row.trade_value_semantics == trade_value_contract["semantics"]
+            and _row_trade_value_source_identity(row) == (
+                value_component.get("provider"), value_component.get("source")
+            )
         ]
         previous_trade_value = max(previous_values) if previous_values else None
         out_of_order = (
@@ -610,6 +618,12 @@ def persist_taiwan_market_minute_state(
                     value_evidence.get("official_flag") is True
                     or value_domain == "index_snapshot" and value_evidence.get("official") is True
                 )
+                if value_domain == "index_snapshot":
+                    component["trade_value_evidence"].update(
+                        scope=value_evidence.get("scope") or "full_market",
+                        source=component.get("source"),
+                        breadth_contract_version=None,
+                    )
         if cumulative_trade_value is not None and (
             value_event_at is None
             or value_event_at.date() != trade_date
@@ -781,7 +795,7 @@ def _complete_minute_groups(
 def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
     status = str(row.trade_value_quality_status or "unknown").strip().lower()
     value = _as_int(row.cumulative_trade_value)
-    if not row.lineage_complete or value is None or value < 0 or status not in {"ready", "estimated"}:
+    if value is None or value < 0 or status not in {"ready", "estimated"}:
         return False
     # Historical v2 rows may already contain a stale component marked ready.
     # Validate persisted lineage on reads without rewriting historical data.
@@ -791,6 +805,10 @@ def _has_usable_trade_value(row: TaiwanMarketMinuteState) -> bool:
         component = next((item for item in components if item.get("owns_trade_value") is True), None)
         if component is None:
             component = next((item for item in components if item.get("domain") == domain), {})
+        if not row.lineage_complete and not (
+            component.get("owns_trade_value") is True and component.get("domain") == "index_snapshot"
+        ):
+            return False
         event_at = _as_taiwan_datetime(component.get("event_at"))
     except (ValueError, TypeError, AttributeError):
         return False
@@ -1138,6 +1156,13 @@ def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
             and baseline.get("comparison_identity") == comparison_identity
             and all(all(identity.values()) for identity in comparison_identity.values())
         )
+        readiness = ("current_unqualified" if not qualification["decision_usable"] else
+                     "ready" if comparable else "warming_up" if sample_days < days else "incomparable")
+        remaining = max(days - sample_days, 0)
+        baseline.update(status=readiness, readiness_status=readiness,
+                        remaining_sample_days=remaining,
+                        expected_ready_after_sessions=(remaining if readiness in {"ready", "warming_up"} else None),
+                        next_fill="scheduler_accumulation" if readiness == "warming_up" else None)
         baseline.update(
             pace_ratio=current / median_value if comparable else None,
             decision_usable=comparable,
@@ -1149,7 +1174,15 @@ def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
                    or type(baseline.get("qualified_sample_days")) is not int else [])
             ),
         )
-    output["status"] = "ready" if output["same_time_baseline_5d"]["decision_usable"] else "partial"
+    readiness_states = {output[f"same_time_baseline_{days}d"]["readiness_status"] for days in (5, 20)}
+    output["baseline_readiness_status"] = next(
+        (state for state in ("current_unqualified", "incomparable", "warming_up") if state in readiness_states), "ready")
+    for days in (5, 20):
+        output[f"expected_{days}d_ready_after_sessions"] = output[f"same_time_baseline_{days}d"]["expected_ready_after_sessions"]
+    output["next_fill"] = "scheduler_accumulation" if output["baseline_readiness_status"] == "warming_up" else None
+    has_current_evidence = current is not None or _as_int(output.get("available_cumulative_trade_value")) is not None
+    if output.get("status") not in {"empty", "missing"} or has_current_evidence:
+        output["status"] = "ready" if output["same_time_baseline_5d"]["decision_usable"] else "partial"
     return output
 
 
@@ -1163,7 +1196,7 @@ def read_taiwan_market_volume_state(
         TaiwanMarketMinuteState.trade_date.desc()
     ).limit(1).scalar()
     if latest_trade_date is None:
-        return {
+        return _qualify_volume_comparisons({
             "kind": "taiwan_market_volume_state",
             "generated_at": generated_at.isoformat(),
             "as_of": None,
@@ -1215,10 +1248,10 @@ def read_taiwan_market_volume_state(
             },
             "markets": [],
             "warnings": [
-                "Minute-level market state history is empty; same-time volume baselines will accumulate from the scheduler."
+                "No qualified current market value is available; a same-time readiness estimate cannot be established."
             ],
             "source_refs": [{"type": "table", "name": "taiwan_market_minute_state"}],
-        }
+        })
 
     current_rows = (
         db.query(TaiwanMarketMinuteState)
@@ -1426,8 +1459,8 @@ def read_taiwan_market_volume_state(
                 **value_evidence,
                 "market": market,
                 "index_id": row.index_id,
-                "scope": row.breadth_scope,
-                "breadth_contract_version": row.breadth_contract_version,
+                "scope": value_evidence["scope"],
+                "breadth_contract_version": value_evidence["breadth_contract_version"],
                 "comparison_identity": comparison_identity[market],
                 "trade_date": row.trade_date.isoformat(),
                 "as_of": _row_minute_at(row).isoformat(),
@@ -1447,7 +1480,7 @@ def read_taiwan_market_volume_state(
                 "trade_value_semantics": row.trade_value_semantics,
                 "trade_value_confidence": row.trade_value_confidence,
                 "trade_value_is_estimate": row.trade_value_is_estimate,
-                "source": row.source,
+                "source": value_evidence["source"],
                 "source_category": row.source_category,
                 "official_flag": value_evidence["official_flag"],
                 "derived_flag": row.derived_flag,

@@ -460,6 +460,9 @@ def refresh_taiwan_intraday_bars(
     executor = acquisition or TaiwanIntradayAcquisitionExecutor(
         clock=lambda: datetime.now(TAIPEI_TZ)
     )
+    if not getattr(executor, "fugle_http_available", True):
+        from app.market.tw_intraday_capabilities import FUGLE_HTTP_INTRADAY_RESOURCE_ID
+        catalog = tuple(item for item in catalog if item.resource_id != FUGLE_HTTP_INTRADAY_RESOURCE_ID)
     return MarketDataGateway().resolve_bars(
         requirement,
         reader=TaiwanIntradayBarRepository(db),

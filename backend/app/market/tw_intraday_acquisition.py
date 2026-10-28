@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from time import monotonic
+from app.market.providers.fugle_http import FugleHttpAdapter
 
 from app.market.providers.tw_intraday_bars import (
     NStockIntradayAdapter,
@@ -10,6 +11,7 @@ from app.market.providers.tw_intraday_bars import (
 )
 from app.market.tw_intraday_capabilities import (
     NSTOCK_INTRADAY_PROVIDER,
+    FUGLE_INTRADAY_PROVIDER,
     YAHOO_INTRADAY_PROVIDER,
 )
 from app.market_data.gateway import BarAcquisitionResult
@@ -30,11 +32,15 @@ class TaiwanIntradayAcquisitionExecutor:
         *,
         nstock: NStockIntradayAdapter | None = None,
         yahoo: YahooIntradayAdapter | None = None,
+        fugle: FugleHttpAdapter | None = None,
         clock,
         deadline_monotonic: float | None = None,
     ) -> None:
+        from app.config import settings
+        self.fugle_http_available = fugle is not None or bool(settings.fugle_api_key)
         self._deadline = deadline_monotonic
         self._adapters = {
+            FUGLE_INTRADAY_PROVIDER: fugle or FugleHttpAdapter(clock=clock),
             NSTOCK_INTRADAY_PROVIDER: nstock or NStockIntradayAdapter(clock=clock),
             YAHOO_INTRADAY_PROVIDER: yahoo or YahooIntradayAdapter(clock=clock),
         }

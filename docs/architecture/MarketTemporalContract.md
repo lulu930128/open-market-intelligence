@@ -9,6 +9,28 @@
 - Outward AI／API projection 必須保留正交 axes，不重新壓成單一 readiness 或 finalization 字串。
 - 缺少的 axis 優先 additive typed extension；只有改變既有 serialized value、field meaning 或 consumer contract 時才需要 migration／version gate。
 
+## US daily 修訂與比較基準
+
+美股 16:05／early-close 13:05 是 expected release window，不是 vendor 數值已準確或不可修訂的證明。
+Yahoo 當個 exchange date 取得的 daily candle 保持 provisional；已存為 final 的同日 receipt
+在 canonical candidate eligibility 層拒用，且不回寫舊資料。較晚 exchange date 的新 receipt
+才可作 historical vendor daily candidate。這是保守的歷史資料資格門檻，不宣稱午夜後價格必然正確，
+也不把 vendor authority 升為 official。較晚的 OHLCV 修訂經原 transaction 更新為 `corrected`，
+保留舊 raw receipt；相同 payload 的新取得時間也有獨立 receipt，原始 receipt 時間不被刷新。
+
+最新 expected completed daily 的 Yahoo evidence，在下一個有效交易日 pre-market 開始後，
+若尚未取得該 exchange date 的 receipt，標為 revision check due／stale；週末與休市日不以固定秒數過期。
+這個檢查只影響最新 completed-session 需求，較早指定歷史日期不被每日重驗。GET 只投影狀態，
+取得較新 receipt 仍須既有明示、限量的 Gateway refresh。新 receipt 通過 lineage、raw basis、
+OHLCV quality 與 resolver 選取後才恢復 usability；既有 early-close calendar 保持獨立。
+
+`quote.previous_close` 是 Market Truth `headline_change` 已選定的 exact reference。
+Pre-market／regular 使用 expected completed session；after-hours 使用當日 regular close，
+不足時為 null + reason，不用前日資料代替。Yahoo metadata previousClose 沒有獨立日期證明，
+只保留為 `provider_previous_close_hint`，日期為 null、price basis 為 `provider_default`，
+不可作 close role 或計算變動。Typed `USCloseEvidence.trade_date` 只允許這類 hint 為 null；
+其他 close evidence 仍必須有日期。Daily comparison 使用 `daily_vs_*`，不把 vendor daily 稱為 official。
+
 ## Independent axes
 
 台股 current breadth 的 receipt freshness、trade-state resolution 與 last-trade recency 分開投影。`valid_no_trade` 是獨立且有效的 state，不合併 `unchanged`，也不算 provider missing；`unknown_count` 仍保留非方向 partition 以完成 reconciliation。Observation coverage 使用 received/universe，directional coverage 僅使用 classified/universe；含未成交標的時，後者仍是 partial，即使 trade-state resolution 已 complete。
@@ -289,6 +311,7 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Index official-close 最早評估時間由 `official_index_contract.py` 擁有，與股票 Daily release 分開。最早評估不代表 provider 發布保證；reconciliation 必須驗證官方日期、receipt、authority 與 finalization，breadth ready 不足以停止重試。
 - Bar 的 market phase 由 `TaiwanBarService` 傳遞至 AI compact／capability；current interval bar 可以滿足研究用 freshness，但不因此取得 execution usability。
 - 成交值與 baseline 組合由 `taiwan_market_state.py` 擁有。兩市場 component 需有可比日期、分鐘、scope 與明示 authority；baseline 另需相同 comparison date、minute、component scope 與足夠樣本。Warnings、ratio、field status 隨資格重算。AI 只委派組合與投影。
+- Baseline readiness 每次 composition 依當前 qualification 雙向重算；current unavailable／unqualified 不預測再等 5／20 天即可 ready，缺樣本數仍保留。合格 current 且歷史不足才標 warming_up；empty／missing reader 維持原 availability。原始 owns_trade_value event minute 不因盤後而 clamp，無同分鐘合格樣本可正確拒絕比較。
 - Breadth 的參考價缺失、實際成交價缺失各有 coverage partition，diagnostic reasons 另行核對；舊 `mapping_error` partition 仍可讀，新分類不將缺價解釋為 symbol mapping failure。Trade-value semantics／estimate flag 經既有 canonical companion 保存；舊 row 缺 metadata 保留 unknown，不推定 official。
 - `TaiwanAuctionRepository` 依交易日及可見 receipt 時間查詢；歷史 reader 位於既有 realtime platform，與 current applicability 分開。盤後 history 可讀但保持 indicative／provisional，decision／indicator／execution usability 均為 false。沒有可見 row 僅表示 missing，不能證明從未採集；不引用 acceptance capture table 作 production fallback。
 - Shared EOD coverage 由 job composition 注入 `qualify_taiwan_eod_universe`，以既有 Daily batch source／receipt／OHLC 資格判 current。拒絕原因與 provider receipt diagnostics 分開，不把 transport success 當 coverage success，也不縮小 active ordinary-stock 分母。Diagnostic parser 只處理有界已存 receipts，不 acquire 或寫入。
@@ -305,6 +328,13 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Current-session Bar 的 `read_diagnostics` 分開 snapshot cache、canonical store 與最終 series revision。Recent snapshot reuse 先比對有界 DB row／lineage revision；新增、刪除或修正後必須重新解析。按指定 revision 取 immutable snapshot 的既有語意不變。Canonical Bar projection 明示 persisted hit／miss，不以 missing legacy cache metadata 推斷 miss。
 - Futures volume metadata 由已實作的 futures provider parser／persistence owner 宣告 contracts、interval／session／trading-day 語意與 contract month，經 normalization、technical report 與 outward quality 原樣傳遞。AI 不依 TXF 名稱補單位；未知 provider 或 metadata 仍不能通過 volume unit guard。
 - 同分鐘量能 baseline 額外揭露歷史 session 數、可用樣本數及 date／minute／market component／scope／lineage 篩除原因。零樣本不補零或插值，一個 prior-session sample 仍為 warming-up。離線 latency 與 bytes 量測不表示 runtime／live SLO 已驗收。
+
+## 台股累計量值與分鐘估值
+
+- 累計量值使用獨立的 source event time、交易日、交易範圍、幣別、股／張單位、receipt lineage 與 freshness。價格新鮮不代表累計金額新鮮；相反方向亦然。明示刷新命令可要求 fresh amount，cache-only 組合可保留 stale amount 供參考，但不能滿足該命令需求。Vendor actual 不等於 official。
+- 分鐘估值由 Market owner `tw_intraday_value` 處理；AI 僅投影。實際分鐘金額優先，缺少時以 HLC3 × canonical shares 估算，累計均價不能乘當分鐘量作為精確金額。VWAP 只使用有對應金額的量；零量正金額保留原始 evidence，但不進 VWAP 或可用 session cumulative。Daily turnover 不走分鐘估值。
+- Interval end 與 observed cutoff 分開。Provisional bar 不宣稱已觀測至未來區間終點；部分窗口與 consumer 截短均不冒充完整 session。量差核對要求同日、同單位、同範圍與時間對齊；負差保留為 correction／scope diagnostic，不能補零或分配到某分鐘。
+- `data_only` 的明示行情補值續接可走既有 market-cache Job owner，仍保留 `allow_llm=false`、`allow_write=false`。Action 在任何 IO 前綁定 target／capability／effective date／interval／session；相同 action 重送重讀 postcondition。Quote、session-close、graph read 與 intraday command 共用剩餘時間，cache-only／refresh off 不出網。
 
 ## Negative acceptance
 

@@ -109,6 +109,7 @@ def build_taiwan_public_quote_requirement(
     requested_at: datetime,
     bounds: RequestBounds | None = None,
     require_actual_trade: bool = True,
+    require_cumulative_turnover: bool = False,
 ) -> DataRequirementV2:
     if requested_at.tzinfo is None or requested_at.utcoffset() is None:
         raise ValueError("requested_at must be timezone-aware")
@@ -130,11 +131,13 @@ def build_taiwan_public_quote_requirement(
         max_candidates=2,
         max_rows=1,
     )
+    required_fields = (("last_trade_price",) if require_actual_trade else ()) + (
+        ("cumulative_turnover_value",) if require_cumulative_turnover else ())
     return DataRequirementV2(
         target=InstrumentTarget(instrument=instrument),
         request=SnapshotCapabilityRequest(
             capability_id=TW_PUBLIC_LAST_TRADE_CAPABILITY_ID,
-            required_fields=("last_trade_price",) if require_actual_trade else (),
+            required_fields=required_fields,
         ),
         purpose=DataPurpose.VIEWER,
         realtime_policy=policy,
@@ -145,7 +148,7 @@ def build_taiwan_public_quote_requirement(
             basis=FreshnessBasis.EVENT_TIME if require_actual_trade else FreshnessBasis.RECEIVED_TIME,
         ),
         quality=QualityRequirement(
-            required_fields=("last_trade_price",) if require_actual_trade else (),
+            required_fields=required_fields,
             allow_partial=not require_actual_trade,
             require_canonical_lineage=True,
         ),
@@ -268,6 +271,15 @@ class TaiwanPublicQuoteCandidateReader:
             if observation is None:
                 partial = partial or stored.storage_row_id is not None
                 continue
+            cumulative_at = observation.cumulative_event_at
+            cumulative_age = ((requirement.requested_at - cumulative_at).total_seconds()
+                if cumulative_at is not None else None)
+            cumulative_freshness = (EvidenceFreshness.MISSING if cumulative_at is None
+                else EvidenceFreshness.UNKNOWN if cumulative_age < 0 or observation.trade_date != expected_trade_date
+                else EvidenceFreshness.FRESH if cumulative_age <= PUBLIC_QUOTE_MAX_AGE_SECONDS
+                else EvidenceFreshness.STALE)
+            observation = observation.model_copy(update={"cumulative_freshness": cumulative_freshness,
+                "cumulative_checked_at": requirement.requested_at})
             missing_fields = tuple(
                 field
                 for field in requirement.request.required_fields
@@ -277,11 +289,20 @@ class TaiwanPublicQuoteCandidateReader:
                 missing_fields = (*missing_fields, "expected_trade_date")
                 limitations.append("PUBLIC_QUOTE_TRADE_DATE_MISMATCH")
             event_at = observation.lineage.event_at
+            amount_demand = "cumulative_turnover_value" in requirement.request.required_fields
+            if amount_demand and requirement.realtime_policy is not RealtimePolicy.CACHE_ONLY and cumulative_freshness is not EvidenceFreshness.FRESH:
+                missing_fields = (*missing_fields, "fresh_cumulative_turnover")
+                limitations.append("CUMULATIVE_TURNOVER_EVENT_NOT_FRESH")
             if event_at is None:
                 missing_fields = (*missing_fields, "event_at")
             if missing_fields:
                 partial = True
                 if stored.storage_row_id is None or stored.raw_result_id is None:
+                    if amount_demand:
+                        # Composite breadth evidence can supply price without a
+                        # quote-row receipt. It cannot supply absent totals.
+                        limitations.append("PUBLIC_QUOTE_SUPPLEMENTAL_AMOUNT_UNAVAILABLE")
+                        continue
                     raise ValueError("persisted quote rejection requires lineage IDs")
                 event_date = (
                     observation.trade_date
@@ -303,9 +324,8 @@ class TaiwanPublicQuoteCandidateReader:
             else:
                 assert event_at is not None
                 local_event_at = event_at.astimezone(TAIWAN_TZ)
-                age_seconds = (
-                    requirement.requested_at - event_at
-                ).total_seconds()
+                age_seconds = cumulative_age if amount_demand and cumulative_age is not None else (
+                    requirement.requested_at - event_at).total_seconds()
                 same_trade_date = observation.trade_date == expected_trade_date
                 confirmed_at = (
                     stored.confirmed_at.astimezone(TAIWAN_TZ)
@@ -460,6 +480,29 @@ class TaiwanPublicQuoteCandidateReader:
         )
 
 
+def _with_cumulative_evidence(db: Session, result: MarketDataResultV1) -> MarketDataResultV1:
+    """Cache-only totals composition; never changes selected price or health."""
+    price = result.resolved.quote
+    if price is None or price.cumulative_turnover_value is not None:
+        return result
+    requirement = build_taiwan_public_quote_requirement(
+        instrument=price.instrument, policy=RealtimePolicy.CACHE_ONLY,
+        requested_at=result.requirement.requested_at, require_actual_trade=False,
+        require_cumulative_turnover=True,
+    )
+    amounts = MarketDataGateway().resolve_quote(requirement,
+        reader=TaiwanPublicQuoteCandidateReader(TaiwanPublicQuoteRepository(db)))
+    total = amounts.resolved.quote
+    if (total is None or total.trade_date != price.trade_date
+            or total.cumulative_turnover_value is None):
+        return result
+    fields = {key: getattr(total, key) for key in (
+        "cumulative_quantity", "cumulative_turnover_value", "cumulative_turnover_currency",
+        "cumulative_event_at", "cumulative_scope", "cumulative_freshness", "cumulative_checked_at")}
+    quote = price.model_copy(update={**fields, "cumulative_lineage": total.lineage})
+    return result.model_copy(update={"resolved": result.resolved.model_copy(update={"quote": quote})})
+
+
 def read_taiwan_public_last_trade_quote(
     db: Session,
     *,
@@ -472,12 +515,12 @@ def read_taiwan_public_last_trade_quote(
         policy=RealtimePolicy.CACHE_ONLY,
         requested_at=effective_requested_at,
     )
-    return MarketDataGateway().resolve_quote(
+    return _with_cumulative_evidence(db, MarketDataGateway().resolve_quote(
         requirement,
         reader=TaiwanPublicQuoteCandidateReader(
             TaiwanPublicQuoteRepository(db)
         ),
-    )
+    ))
 
 
 def read_taiwan_quote_snapshot(
@@ -495,10 +538,10 @@ def read_taiwan_quote_snapshot(
         requested_at=effective_requested_at,
         require_actual_trade=False,
     )
-    return MarketDataGateway().resolve_quote(
+    return _with_cumulative_evidence(db, MarketDataGateway().resolve_quote(
         requirement,
         reader=TaiwanPublicQuoteCandidateReader(TaiwanPublicQuoteRepository(db)),
-    )
+    ))
 
 
 def read_taiwan_session_close(
@@ -580,27 +623,38 @@ def acquire_taiwan_public_last_trade_quote(
     requested_at: datetime | None = None,
     acquisition: QuoteAcquisitionPort | None = None,
     descriptors: Iterable[ProviderCapabilityDescriptorV2] | None = None,
+    timeout_seconds: int | None = None,
+    max_external_calls: int | None = None,
 ) -> MarketDataResultV1:
     if policy not in {
         RealtimePolicy.PREFER_LIVE,
         RealtimePolicy.REQUIRE_LIVE,
     }:
         raise ValueError("refresh policy must be prefer_live or require_live")
+    from app.market.tw_realtime_capabilities import FUGLE_HTTP_QUOTE_DESCRIPTOR
+    from app.config import settings
     descriptor_catalog = (
-        (TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,)
+        ((FUGLE_HTTP_QUOTE_DESCRIPTOR, TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR)
+         if acquisition is None and settings.fugle_api_key else (TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,))
         if descriptors is None
         else tuple(descriptors)
     )
     if descriptors is not None and acquisition is None:
         raise ValueError("custom public quote descriptors require an acquisition port")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
+    bounds = _acquisition_bounds(descriptor_catalog)
+    bounds = bounds.model_copy(update={
+        "timeout_seconds": min(bounds.timeout_seconds, timeout_seconds) if timeout_seconds is not None else bounds.timeout_seconds,
+        "max_external_calls": min(bounds.max_external_calls, max_external_calls) if max_external_calls is not None else bounds.max_external_calls,
+    })
     requirement = build_taiwan_public_quote_requirement(
         instrument=_load_instrument(db, stock_id),
         policy=policy,
         requested_at=effective_requested_at,
-        bounds=_acquisition_bounds(descriptor_catalog),
+        bounds=bounds,
+        require_cumulative_turnover=any(item.resource_id == FUGLE_HTTP_QUOTE_DESCRIPTOR.resource_id for item in descriptor_catalog),
     )
-    return MarketDataGateway().resolve_quote(
+    result = MarketDataGateway().resolve_quote(
         requirement,
         reader=TaiwanPublicQuoteCandidateReader(
             TaiwanPublicQuoteRepository(db)
@@ -610,6 +664,18 @@ def acquire_taiwan_public_last_trade_quote(
         transaction_port=TaiwanPublicQuoteTransaction(db),
         route_resolution_gate=True,
     )
+    # Amount is a command demand, never a global price availability gate.
+    # Reread through the normal resolver and retain the command's receipts.
+    price_requirement = build_taiwan_public_quote_requirement(
+        instrument=requirement.target.instrument, policy=policy,
+        requested_at=max([effective_requested_at, *(h.checked_at for h in result.provider_health)]),
+        bounds=bounds.model_copy(update={"max_provider_attempts": 0, "max_external_calls": 0}),
+    ).model_copy(update={"session": requirement.session})
+    price = MarketDataGateway().resolve_quote(price_requirement,
+        reader=TaiwanPublicQuoteCandidateReader(TaiwanPublicQuoteRepository(db)))
+    return _with_cumulative_evidence(db, price).model_copy(update={"acquisition": result.acquisition,
+        "persistence": result.persistence, "provider_health": result.provider_health,
+        "limitations": tuple(dict.fromkeys((*price.limitations, *result.acquisition.limitations)))})
 
 
 def acquire_taiwan_session_close(
@@ -618,16 +684,26 @@ def acquire_taiwan_session_close(
     stock_id: str,
     requested_at: datetime | None = None,
     acquisition: QuoteAcquisitionPort | None = None,
+    timeout_seconds: int | None = None,
+    max_external_calls: int | None = None,
 ) -> MarketDataResultV1:
     """Confirm a session close through the bounded existing quote transaction."""
 
+    if (timeout_seconds is not None and timeout_seconds < 1) or (max_external_calls is not None and max_external_calls < 1):
+        result = read_taiwan_session_close(db, stock_id=stock_id, requested_at=requested_at)
+        return result.model_copy(update={"acquisition": result.acquisition.model_copy(update={
+            "limitations": ("ACQUISITION_BUDGET_ZERO",)})})
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
     descriptor_catalog = (_SESSION_CLOSE_ROUTE_DESCRIPTOR,)
+    bounds = _acquisition_bounds(descriptor_catalog)
+    bounds = bounds.model_copy(update={
+        "timeout_seconds": min(bounds.timeout_seconds, timeout_seconds) if timeout_seconds is not None else bounds.timeout_seconds,
+        "max_external_calls": min(bounds.max_external_calls, max_external_calls) if max_external_calls is not None else bounds.max_external_calls})
     requirement = build_taiwan_session_close_requirement(
         instrument=_load_instrument(db, stock_id),
         policy=RealtimePolicy.PREFER_LIVE,
         requested_at=effective_requested_at,
-        bounds=_acquisition_bounds(descriptor_catalog),
+        bounds=bounds,
     )
     return MarketDataGateway().resolve_quote(
         requirement,
@@ -737,7 +813,9 @@ def project_taiwan_public_last_trade_quote(
         if result.persistence.committed
         else "failed"
     )
+    from app.market.quote_volume import project_taiwan_cumulative_totals
     return {
+        **project_taiwan_cumulative_totals(quote),
         "contract_version": "omi.market.tw_public_quote_projection.v1",
         "provider": quote.lineage.provider if quote is not None else health.selected_provider,
         "source": quote.lineage.source if quote is not None else health.selected_source,

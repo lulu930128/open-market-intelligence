@@ -314,6 +314,13 @@ class QuoteObservation(CanonicalModel):
     last_trade_price: Decimal | None = None
     last_trade_quantity: Quantity | None = None
     cumulative_quantity: Quantity | None = None
+    cumulative_turnover_value: Decimal | None = Field(default=None, ge=0)
+    cumulative_turnover_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    cumulative_event_at: datetime | None = None
+    cumulative_scope: str | None = Field(default=None, max_length=64)
+    cumulative_lineage: SourceLineage | None = None
+    cumulative_freshness: EvidenceFreshness | None = None
+    cumulative_checked_at: datetime | None = None
     open_price: Decimal | None = None
     high_price: Decimal | None = None
     low_price: Decimal | None = None
@@ -326,6 +333,18 @@ class QuoteObservation(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_quote_prices(self) -> QuoteObservation:
+        if (self.cumulative_turnover_value is None) != (self.cumulative_turnover_currency is None):
+            raise ValueError("cumulative turnover requires value and currency together")
+        if self.cumulative_event_at is not None and self.cumulative_event_at.utcoffset() is None:
+            raise ValueError("cumulative event time must be timezone-aware")
+        if self.cumulative_turnover_value is not None and not (
+            self.cumulative_event_at and self.trade_date and self.cumulative_scope
+        ):
+            raise ValueError("cumulative turnover requires event time, date and scope")
+        if self.cumulative_event_at is not None and self.trade_date is not None and self.cumulative_event_at.date() != self.trade_date:
+            raise ValueError("cumulative event time must use the declared trade date and timezone")
+        if self.cumulative_turnover_currency is not None and self.currency is not None and self.cumulative_turnover_currency != self.currency:
+            raise ValueError("cumulative turnover currency must match quote currency")
         _validate_positive_prices(
             {
                 "last_trade_price": self.last_trade_price,

@@ -546,6 +546,7 @@ def acquire_taiwan_depth(
     provider_health: Iterable[ProviderResourceHealth] = (),
     requested_at: datetime | None = None,
     session: MarketSession | None = None,
+    timeout_seconds: int | None = None,
 ) -> MarketDataResultV1:
     catalog = tuple(descriptors)
     now = requested_at or datetime.now(TAIWAN_TZ)
@@ -555,7 +556,7 @@ def acquire_taiwan_depth(
         policy=policy,
         requested_at=now,
         session=session,
-        bounds=_bounds(catalog),
+        bounds=_bounds(catalog).model_copy(update={"timeout_seconds": timeout_seconds}) if timeout_seconds else _bounds(catalog),
     )
     return MarketDataGateway().resolve_depth(
         requirement,
@@ -601,6 +602,7 @@ def acquire_taiwan_auction(
     requested_at: datetime | None = None,
     session: MarketSession | None = None,
     disposition_status: Mapping[str, object] | None = None,
+    timeout_seconds: int | None = None,
 ) -> MarketDataResultV1:
     catalog = tuple(descriptors)
     now = requested_at or datetime.now(TAIWAN_TZ)
@@ -620,7 +622,7 @@ def acquire_taiwan_auction(
         requested_at=now,
         session=effective_session,
         auction_type=applicability.auction_type,
-        bounds=_bounds(catalog),
+        bounds=_bounds(catalog).model_copy(update={"timeout_seconds": timeout_seconds}) if timeout_seconds else _bounds(catalog),
     )
     reader = TaiwanAuctionCandidateReader(
         TaiwanAuctionRepository(db),
@@ -716,12 +718,18 @@ def refresh_taiwan_realtime_snapshot(
     requested_at: datetime | None = None,
     acquisition: TwseMisRealtimeAcquisitionAdapter | None = None,
     requested_capabilities: Iterable[str] | None = None,
+    timeout_seconds: int | None = None,
+    max_external_calls: int | None = None,
 ) -> TaiwanRealtimeRefreshResult:
     """Explicit bounded MIS refresh; callers must expose it through POST/job."""
 
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("Taiwan realtime refresh requires a live acquisition policy")
     now = requested_at or datetime.now(TAIWAN_TZ)
+    from time import monotonic
+    deadline = monotonic() + timeout_seconds if timeout_seconds is not None else None
+    def remaining_seconds():
+        return max(0, int(deadline - monotonic())) if deadline is not None else None
     requested = frozenset(
         requested_capabilities
         if requested_capabilities is not None
@@ -751,10 +759,13 @@ def refresh_taiwan_realtime_snapshot(
             stock_id=stock_id,
             policy=policy,
             requested_at=now,
-            acquisition=adapter,
-            descriptors=(TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,),
+            timeout_seconds=remaining_seconds(),
+            max_external_calls=max_external_calls,
+            acquisition=(None if acquisition is None and requested == {TW_QUOTE_SNAPSHOT_CAPABILITY_ID} else adapter),
+            descriptors=(None if acquisition is None and requested == {TW_QUOTE_SNAPSHOT_CAPABILITY_ID}
+                         else (TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR,)),
         )
-        if TW_QUOTE_SNAPSHOT_CAPABILITY_ID in requested
+        if TW_QUOTE_SNAPSHOT_CAPABILITY_ID in requested and remaining_seconds() != 0
         else read_taiwan_quote_snapshot(db, stock_id=stock_id, requested_at=now)
     )
     depth = (
@@ -766,8 +777,9 @@ def refresh_taiwan_realtime_snapshot(
             acquisition=adapter,
             requested_at=now,
             session=quote.requirement.session,
+            timeout_seconds=remaining_seconds(),
         )
-        if TW_ORDER_BOOK_CAPABILITY_ID in requested
+        if TW_ORDER_BOOK_CAPABILITY_ID in requested and remaining_seconds() != 0
         else read_taiwan_depth(
             db,
             stock_id=stock_id,
@@ -781,7 +793,7 @@ def refresh_taiwan_realtime_snapshot(
         else quote.requirement.session
     )
     auction = None
-    if TW_AUCTION_CAPABILITY_ID in requested:
+    if TW_AUCTION_CAPABILITY_ID in requested and remaining_seconds() != 0:
         acquired_auction = acquire_taiwan_auction(
             db,
             stock_id=stock_id,
@@ -790,6 +802,7 @@ def refresh_taiwan_realtime_snapshot(
             acquisition=adapter,
             requested_at=now,
             session=auction_session,
+            timeout_seconds=remaining_seconds(),
         )
         if (
             acquired_auction.dataset_health is not None

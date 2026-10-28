@@ -1763,6 +1763,8 @@ def _compact_quote_snapshot(
         "kind": "quote_snapshot",
         "source": quote_depth.get("source"),
         "provider": quote_depth.get("provider"),
+        "cumulative_trade_value": quote_depth.get("cumulative_trade_value"),
+        "cumulative_trade_value_evidence": _json_value(quote_depth.get("cumulative_trade_value_evidence")),
         "data_core_result_kinds": list(
             quote_depth.get("data_core_result_kinds") or []
         ),
@@ -2106,6 +2108,12 @@ def _compact_intraday_point(point: dict[str, Any]) -> dict[str, Any]:
         "trade_value": point.get("trade_value"),
         "trade_value_unit": point.get("trade_value_unit") or "TWD",
         "approx_trade_value": point.get("approx_trade_value"),
+        "trade_value_method": point.get("trade_value_method"),
+        "trade_value_currency": point.get("trade_value_currency"),
+        "trade_value_authority": point.get("trade_value_authority"),
+        "trade_value_official": point.get("trade_value_official"),
+        "trade_value_asof": _json_value(point.get("trade_value_asof")),
+        "trade_value_asof_basis": point.get("trade_value_asof_basis"),
         "trade_value_status": point.get("trade_value_status"),
         "transaction_count": point.get("transaction_count"),
         "bar_close_time": _json_value(point.get("bar_close_time")),
@@ -2298,6 +2306,8 @@ def _compact_intraday_history(
         "unallocated_volume_lots": history.get("unallocated_volume_lots"),
         "volume_reconciliation": history.get("volume_reconciliation"),
         "cumulative_trade_value": history.get("cumulative_trade_value"),
+        "window_trade_value": history.get("window_trade_value"),
+        "trade_value_coverage": _json_value(history.get("trade_value_coverage")),
         "available_cumulative_trade_value": history.get(
             "available_cumulative_trade_value"
         ),
@@ -2689,6 +2699,11 @@ def _compact_technical_evidence(
     return {
         "status": analysis.get("status") or "partial",
         "decision_usable": decision_usable,
+        **({"quality": {
+            "status": "partial",
+            "decision_usable": False,
+            "reason_codes": insufficient_reason_codes,
+        }} if not decision_usable and "READ_NODE_UNAVAILABLE" in insufficient_reason_codes else {}),
         "currency": "TWD",
         "price_unit": "TWD",
         "volume_unit": "shares",

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from bisect import bisect_left, bisect_right
+from copy import deepcopy
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from inspect import signature
 from decimal import Decimal
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from threading import Lock
 from time import monotonic
@@ -53,7 +56,13 @@ def _deduplicate_request_read(read):
         ))
         if key not in reads:
             reads[key] = read(self, *args, **kwargs)
-        return reads[key].model_copy(deep=True)
+        # TaiwanBarSeriesRead's bars, lineage, day states and coverage are frozen
+        # tuple/scalar graphs. Only resolution reasons contain mutable dicts.
+        # Isolate that branch on both the first return and every memo hit.
+        series = reads[key]
+        return series.model_copy(update={
+            "session_resolution": deepcopy(series.session_resolution),
+        })
 
     return wrapped
 
@@ -147,6 +156,29 @@ from app.market_data.integration_contracts import (
     RequestBounds,
 )
 from app.market_data.policies import DataPurpose, RealtimePolicy
+
+
+def _period_technical_eligibility(
+    paired: list[tuple[BarObservation, TaiwanBarOutwardState]],
+) -> Callable[[datetime, datetime], bool]:
+    """Index the owner's sorted bar/state pairs without dropping duplicates.
+
+    The inclusive timestamp window has the same empty-all semantics as the
+    original per-period scan. This index lives only for this daily read.
+    """
+    timestamps = tuple(bar.start_at for bar, _ in paired)
+    ineligible = [0]
+    for _, state in paired:
+        ineligible.append(ineligible[-1] + (not state.technical_eligible))
+
+    def eligible(start_at: datetime, end_at: datetime) -> bool:
+        if end_at < start_at:
+            return True
+        first = bisect_left(timestamps, start_at)
+        last = bisect_right(timestamps, end_at)
+        return ineligible[last] == ineligible[first]
+
+    return eligible
 
 
 _CURRENT_SESSION_SNAPSHOT_CACHE_MAX_ENTRIES = 64
@@ -1389,6 +1421,36 @@ class TaiwanBarService:
             limitations=tuple(dict.fromkeys((*limitations, *history_limitations))),
         )
 
+    def _completed_daily_inputs(self, repository, requirement: DataRequirementV2):
+        """Share exact completed-day evidence only inside the existing read scope."""
+        reads = _request_bar_reads.get()
+        key = ("completed_daily_inputs", id(self._db), requirement.model_dump_json())
+        if reads is not None and key in reads:
+            return reads[key]
+        with repository.completed_daily_candidate_read_scope():
+            result = MarketDataGateway().resolve_bars(
+                requirement, reader=TaiwanCompletedDailyCandidateReader(repository),
+            )
+            if not isinstance(result.resolved, ResolvedBarSeries):
+                raise RuntimeError("Taiwan daily gateway returned non-Bar payload")
+            base_bars = result.resolved.bars
+            day_states = repository.resolve_daily_days(
+                instrument=requirement.target.instrument,
+                start_date=requirement.request.start_at.astimezone(TAIWAN_TZ).date(),
+                end_date=requirement.request.end_at.astimezone(TAIWAN_TZ).date(),
+                resolved_bars=base_bars,
+            )
+        base_bars, day_states = repository.complete_no_trade_bars(
+            resolved_bars=base_bars, day_states=day_states,
+        )
+        metadata = repository.outward_state_metadata(tuple(
+            item.lineage.observation_id for item in base_bars if item.lineage.observation_id
+        ))
+        inputs = (result, tuple(base_bars), tuple(day_states), metadata)
+        if reads is not None:
+            reads[key] = inputs
+        return inputs
+
     def _read_daily_bars(
         self,
         *,
@@ -1455,18 +1517,9 @@ class TaiwanBarService:
             max_rows=base_row_limit,
             minimum_authority=AuthorityClass.DERIVED,
         )
-        result = MarketDataGateway().resolve_bars(
-            requirement,
-            reader=TaiwanCompletedDailyCandidateReader(repository),
-        )
-        if not isinstance(result.resolved, ResolvedBarSeries):
-            raise RuntimeError("Taiwan daily gateway returned non-Bar payload")
-        base_bars = list(result.resolved.bars)
+        result, completed_bars, day_states, metadata = self._completed_daily_inputs(repository, requirement)
+        base_bars = list(completed_bars)
         from app.market.tw_daily_day_state import TaiwanDailyState
-        day_states = repository.resolve_daily_days(instrument=instrument,
-            start_date=requested_from.date(), end_date=requested_to.date(), resolved_bars=base_bars)
-        base_bars, day_states = repository.complete_no_trade_bars(
-            resolved_bars=base_bars, day_states=day_states)
         nontrading_dates = frozenset(item.trade_date for item in day_states
             if item.state is TaiwanDailyState.INSTRUMENT_SUSPENDED)
         expected_sessions = tuple(item.trade_date for item in day_states if item.expected_session)
@@ -1477,13 +1530,6 @@ class TaiwanBarService:
         projection_limitations.extend(
             limitation for bar in base_bars if bar.derivation_kind
             for limitation in bar.limitations)
-        metadata = repository.outward_state_metadata(
-            tuple(
-                item.lineage.observation_id
-                for item in base_bars
-                if item.lineage.observation_id
-            )
-        )
         base_states: list[TaiwanBarOutwardState] = []
         for item in base_bars:
             state = metadata.get(item.lineage.observation_id or "", {})
@@ -1610,6 +1656,7 @@ class TaiwanBarService:
             component_dates = {
                 base.start_at.astimezone(TAIWAN_TZ).date() for base in ordered_base
             }
+            period_technical_eligible = _period_technical_eligibility(paired)
 
             def missing_period_components(item: BarObservation) -> int | None:
                 first = item.start_at.astimezone(TAIWAN_TZ).date()
@@ -1644,11 +1691,7 @@ class TaiwanBarService:
                     persisted=False,
                     source_interval="1d",
                     component_missing_trading_day_count=missing_period_components(item),
-                    technical_eligible=all(
-                        state.technical_eligible
-                        for base, state in zip(ordered_base, ordered_states)
-                        if item.start_at <= base.start_at <= item.end_at
-                    ),
+                    technical_eligible=period_technical_eligible(item.start_at, item.end_at),
                 )
                 for item in outward_bars
             )

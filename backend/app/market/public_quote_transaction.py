@@ -285,6 +285,22 @@ class TaiwanPublicQuoteTransaction:
             return True, "PUBLIC_QUOTE_RECEIPT_TIME_REGRESSION_REJECTED"
         existing_volume = row.total_volume_lots
         incoming_volume = incoming["total_volume_lots"]
+        existing_amount = None
+        if receipt.provider == "fugle_marketdata":
+            try:
+                previous = json.loads(row.raw_payload_json or "{}")
+                previous = previous.get("data", previous)
+                from app.market.providers.fugle_realtime import fugle_cumulative_fields
+                existing_amount = fugle_cumulative_fields(previous, trade_date=row.trade_date,
+                    received_at=_stored_as_utc(row.received_at)).get("cumulative_turnover_value")
+            except (ValueError, TypeError, AttributeError):
+                pass
+        if (receipt.provider == "fugle_marketdata" and (
+                (existing_volume is not None and incoming_volume is None)
+                or (existing_amount is not None and observation.cumulative_turnover_value is None))):
+            # HTTP and WS share the provider/event key. Preserve the complete
+            # observation and its original receipt, never splice clocks/fields.
+            return True, "FUGLE_SAME_EVENT_INCOMPLETE_SOURCE_REPLACEMENT_REJECTED"
         if (
             existing_volume is not None
             and incoming_volume is not None

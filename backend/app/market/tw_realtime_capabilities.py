@@ -48,6 +48,9 @@ FUGLE_QUOTE_RESOURCE_ID = "tw.fugle.aggregates.stream"
 FUGLE_PROVIDER = "fugle_marketdata"
 FUGLE_QUOTE_SOURCE = "fugle_aggregates_stream"
 FUGLE_QUOTE_PARSER_VERSION = "fugle.websocket.aggregates.v1"
+FUGLE_HTTP_QUOTE_SOURCE = "fugle_intraday_quote"
+FUGLE_HTTP_QUOTE_RESOURCE_ID = "tw.fugle.quote.http"
+FUGLE_HTTP_QUOTE_PARSER_VERSION = "fugle.http.quote.v1"
 
 _TW_INSTRUMENT_TYPES = (InstrumentType.STOCK, InstrumentType.ETF)
 _TW_VENUES = ("TWSE", "TPEX")
@@ -216,7 +219,18 @@ MIS_AUCTION_DESCRIPTOR = _mis_descriptor(
     ),
 )
 
+FUGLE_HTTP_QUOTE_DESCRIPTOR = FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR.model_copy(update={
+    "resource_id": FUGLE_HTTP_QUOTE_RESOURCE_ID,
+    "acquisition_modes": (AcquisitionMode.FETCH,),
+    "priority": 9,
+    "max_timeout_seconds": 5,
+    "max_external_calls_per_attempt": 1,
+    "max_subscriptions_per_attempt": 0,
+    "limitations": ("API_KEY_REQUIRED", "ROUND_LOT_ONLY", "CURRENT_SESSION_ONLY"),
+})
+
 TW_REALTIME_PROVIDER_DESCRIPTORS = (
+    FUGLE_HTTP_QUOTE_DESCRIPTOR,
     KGI_QUOTE_SNAPSHOT_DESCRIPTOR,
     KGI_ORDER_BOOK_DESCRIPTOR,
     KGI_AUCTION_DESCRIPTOR,
@@ -238,6 +252,14 @@ class TaiwanRealtimeSourceBinding:
 
 
 TW_REALTIME_SOURCE_BINDINGS = (
+    TaiwanRealtimeSourceBinding(
+        descriptor=FUGLE_HTTP_QUOTE_DESCRIPTOR,
+        source=FUGLE_HTTP_QUOTE_SOURCE,
+        parser_version=FUGLE_HTTP_QUOTE_PARSER_VERSION,
+        source_type="api",
+        auth_type="api_key",
+        reliability_level="vendor",
+    ),
     TaiwanRealtimeSourceBinding(
         descriptor=FUGLE_QUOTE_SNAPSHOT_DESCRIPTOR,
         source=FUGLE_QUOTE_SOURCE,

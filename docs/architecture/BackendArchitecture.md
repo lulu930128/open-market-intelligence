@@ -1,5 +1,26 @@
 # OMI Backend Architecture
 
+## 美股 daily 修訂的下游一致性
+
+Watchlist metrics、Portfolio valuation 與 legacy Volume Pace daily totals 經既有
+`USDailyOhlcvPlatform`／Gateway／canonical candidate 讀取，不以 SQL 最新列、adjusted close
+或跨 provider 最大成交量選價格／日量。Portfolio 使用 raw USD close 與實際 instrument venue；
+corporate-action position alignment 仍未驗證，不能把 raw price return 當 total return。
+
+`USDailyPriceTransaction` 在同一 DB transaction 將依賴修訂交易日及下一交易日 reference 的
+distribution checkpoint 標 stale／rebuild required，並保存造成失效的 raw receipt IDs。
+成功 commit 後沿用既有 intraday read-model cache 的 symbol generation invalidation，
+阻止舊 generation publisher 寫回。較舊 receipt 不覆蓋新資料，相同取得時間的不同 payload 拒絕處理。
+
+Distribution GET 仍只讀 checkpoint；舊 validation policy 的 snapshot 必須顯示 unverified／stale。
+Snapshot 記錄已選 Yahoo daily 的最早 receipt；跨有效交易日的重驗需求只用這個 metadata
+投影 stale，不掃描全市場。AI 保留 freshness、limitations 與 price lineage，內部 validation
+policy／revalidation input 留在 materialization owner，避免每個 capability 重複攜帶。
+只有原 EOD materialization owner 重建才清除 invalidation，coverage-only reconcile 不會清除。
+SQLite publication 固定 read transaction generation；並行修訂會使舊 snapshot 的 write upgrade
+失敗，由原 job failure handling 處理，不自動重拉 provider。Daily chart／technical 本來就由
+canonical reads 重算；Market Truth 繼續使用 typed component／evidence revisions。
+
 ## 美股 SIC 分類補齊與 EOD coverage 讀取
 
 `POST /api/us-market/stocks/sync-sec-sic` 接受 1–16 個明確股票代號，以既有
@@ -620,6 +641,12 @@ official source identity、raw receipt、15:15 release qualification、active in
 identity與deterministic duplicate reconciliation；consumer 不得再以
 `MAX(market_daily_price.trade_date)`、raw row存在或自己的provider priority決定
 completed session truth。
+
+Sector historical benchmark 與個股／TAIEX 共用當次 requested_at receipt cutoff。
+Canonical universe 可對最多 61 個指定日期批次讀取，仍逐日使用原 qualification、
+candidate priority、membership denominator 與 overflow 拒絕；joined ORM rows 以
+有界串流逐日解析，不一次 materialize 整段歷史。Bar identity 的 scalar fast path
+僅接受 exact JSON scalar types，canonical JSON bytes 與四種 identity digest 不變。
 
 衍生 consumer 只可從 canonical read port 取值：
 

@@ -5,6 +5,8 @@ from typing import Any, Iterable, Mapping
 
 from sqlalchemy.orm import Session
 
+from app.db.read_diagnostics import technical_read_phase
+
 from app.market import indicator_service
 from app.market.ohlc_overlay import point_date
 from app.market.technical_parameters import (
@@ -14,7 +16,7 @@ from app.market.technical_parameters import (
 from app.market.taiwan_industries import build_tw_sector_benchmark
 from app.market.trading_calendar import next_taiwan_trading_day
 from app.market.trading_calendar import TAIWAN_TZ
-from app.market.tw_bar_service import TaiwanBarService
+from app.market.tw_bar_service import TaiwanBarService, taiwan_bar_read_scope
 from app.research.technical.series import (
     ema_sma_seed,
     macd_sma_seed,
@@ -1718,6 +1720,7 @@ def _daily_points(
     *,
     to_date: date | None = None,
     limit: int = MAX_DAILY_BARS,
+    requested_at: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], Any]:
     to_time = (
         datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
@@ -1730,6 +1733,7 @@ def _daily_points(
         to_time=to_time,
         limit=max(1, min(int(limit), MAX_DAILY_BARS)),
         include_partial=False,
+        requested_at=requested_at,
     )
     bars = series.bars
     points = [
@@ -1782,6 +1786,7 @@ def _benchmark_points(
     db: Session,
     *,
     to_date: date | None = None,
+    requested_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     to_time = (
         datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
@@ -1790,6 +1795,7 @@ def _benchmark_points(
     )
     series = TaiwanBarService(db).read_bars(
         instrument_id="TAIEX",
+        requested_at=requested_at,
         interval="1d",
         to_time=to_time,
         limit=MAX_DAILY_BARS,
@@ -2080,6 +2086,7 @@ def build_tw_stock_period_price_map_evidence(
     }
 
 
+@taiwan_bar_read_scope()
 def build_tw_stock_technical_evidence(
     *,
     db: Session,
@@ -2094,12 +2101,16 @@ def build_tw_stock_technical_evidence(
     include_relative = requested_capabilities is None or bool(
         requested_capabilities & {"technical.structure", "technical.relative_strength"}
     )
-    parameters = get_technical_analysis_parameters()
-    daily, daily_lineage, daily_series = _daily_points(
-        db,
-        stock_id,
-        to_date=to_date,
-    )
+    with technical_read_phase(db, "parameters"):
+        parameters = get_technical_analysis_parameters()
+    requested_at = datetime.now(TAIWAN_TZ)
+    with technical_read_phase(db, "daily_bars"):
+        daily, daily_lineage, daily_series = _daily_points(
+            db,
+            stock_id,
+            to_date=to_date,
+            requested_at=requested_at,
+        )
     if not daily:
         return {
             "kind": "tw_stock_technical_evidence",
@@ -2115,308 +2126,323 @@ def build_tw_stock_technical_evidence(
         else None
     )
     bar_service = TaiwanBarService(db)
-    weekly_series = bar_service.read_bars(
-        instrument_id=stock_id,
-        interval="1w",
-        to_time=to_time,
-        limit=MAX_DAILY_BARS,
-        include_partial=False,
-    )
-    monthly_series = bar_service.read_bars(
-        instrument_id=stock_id,
-        interval="1mo",
-        to_time=to_time,
-        limit=MAX_DAILY_BARS,
-        include_partial=False,
-    )
-    weekly = _series_points(weekly_series)
-    monthly = _series_points(monthly_series)
-    methods = indicator_method_catalog(parameters)
-    end_date = point_date(daily[-1].get("time"))
-    current_partial_daily = None
-    current_partial_calculated = None
-    if to_date is None:
-        current_series = bar_service.read_bars(
+    with technical_read_phase(db, "weekly_bars"):
+        weekly_series = bar_service.read_bars(
             instrument_id=stock_id,
-            interval="1d",
+            interval="1w",
+            to_time=to_time,
             limit=MAX_DAILY_BARS,
-            include_partial=True,
+            include_partial=False,
+            requested_at=requested_at,
         )
-        if len(current_series.bars) > len(daily_series.bars):
-            current_partial_daily = _series_points(current_series)[-1]
-            current_calculated, _ = _technical_points(current_series, parameters)
-            current_partial_calculated = (
-                current_calculated[-1] if current_calculated else None
+    with technical_read_phase(db, "monthly_bars"):
+        monthly_series = bar_service.read_bars(
+            instrument_id=stock_id,
+            interval="1mo",
+            to_time=to_time,
+            limit=MAX_DAILY_BARS,
+            include_partial=False,
+            requested_at=requested_at,
+        )
+    with technical_read_phase(db, "current_bars"):
+        weekly = _series_points(weekly_series)
+        monthly = _series_points(monthly_series)
+        methods = indicator_method_catalog(parameters)
+        end_date = point_date(daily[-1].get("time"))
+        current_partial_daily = None
+        current_partial_calculated = None
+        if to_date is None:
+            current_series = bar_service.read_bars(
+                instrument_id=stock_id,
+                interval="1d",
+                limit=MAX_DAILY_BARS,
+                include_partial=True,
+                requested_at=requested_at,
             )
-    canonical_daily, daily_technical = _technical_points(daily_series, parameters)
-    canonical_weekly, weekly_technical = _technical_points(weekly_series, parameters)
-    canonical_monthly, monthly_technical = _technical_points(monthly_series, parameters)
-    timeframes = {
-        "daily": _snapshot_for_timeframe(
-            daily,
-            timeframe="daily",
-            parameters=parameters,
-            method_catalog=methods,
-            latest_observation_date=end_date,
-            current_partial_point=current_partial_daily,
-            calculated_points=canonical_daily,
-            current_partial_calculated=current_partial_calculated,
-            allow_internal_calculation=False,
-        ),
-        "weekly": _snapshot_for_timeframe(
-            weekly,
-            timeframe="weekly",
-            parameters=parameters,
-            method_catalog=methods,
-            latest_observation_date=end_date,
-            calculated_points=canonical_weekly,
-            allow_internal_calculation=False,
-        ),
-        "monthly": _snapshot_for_timeframe(
-            monthly,
-            timeframe="monthly",
-            parameters=parameters,
-            method_catalog=methods,
-            latest_observation_date=end_date,
-            calculated_points=canonical_monthly,
-            allow_internal_calculation=False,
-        ),
-    }
-    maximum_indicator_warmup = max(
-        int(method.get("warmup_bars") or 1)
-        for method in methods.values()
-    )
-    daily_coverage_points = [
-        *daily,
-        *([current_partial_daily] if current_partial_daily is not None else []),
-    ]
-    timeframe_corporate_actions = {
-        "daily": _corporate_contract_for_points(
-            corporate_event_history,
-            daily_coverage_points,
-            lookback_bars=maximum_indicator_warmup,
-        ),
-        "weekly": _corporate_contract_for_points(
-            corporate_event_history,
-            weekly,
-            lookback_bars=maximum_indicator_warmup,
-        ),
-        "monthly": _corporate_contract_for_points(
-            corporate_event_history,
-            monthly,
-            lookback_bars=maximum_indicator_warmup,
-        ),
-    }
-    for timeframe_name, snapshot in timeframes.items():
-        timeframe_contract = timeframe_corporate_actions[timeframe_name]
-        technical_series = {
-            "daily": daily_technical,
-            "weekly": weekly_technical,
-            "monthly": monthly_technical,
-        }[timeframe_name]
-        snapshot["input_quality"] = technical_series.input_quality
-        snapshot["warmup"] = technical_series.warmup
-        snapshot["corporate_action"] = _corporate_summary(timeframe_contract)
-        snapshot["decision_usable"] = bool(
-            timeframe_contract.get("coverage_status") == "complete"
-            and snapshot.get("completed")
-            and technical_series.decision_usable
+            if len(current_series.bars) > len(daily_series.bars):
+                current_partial_daily = _series_points(current_series)[-1]
+                current_calculated, _ = _technical_points(current_series, parameters)
+                current_partial_calculated = (
+                    current_calculated[-1] if current_calculated else None
+                )
+    with technical_read_phase(db, "indicators"):
+        canonical_daily, daily_technical = _technical_points(daily_series, parameters)
+        canonical_weekly, weekly_technical = _technical_points(weekly_series, parameters)
+        canonical_monthly, monthly_technical = _technical_points(monthly_series, parameters)
+        timeframes = {
+            "daily": _snapshot_for_timeframe(
+                daily,
+                timeframe="daily",
+                parameters=parameters,
+                method_catalog=methods,
+                latest_observation_date=end_date,
+                current_partial_point=current_partial_daily,
+                calculated_points=canonical_daily,
+                current_partial_calculated=current_partial_calculated,
+                allow_internal_calculation=False,
+            ),
+            "weekly": _snapshot_for_timeframe(
+                weekly,
+                timeframe="weekly",
+                parameters=parameters,
+                method_catalog=methods,
+                latest_observation_date=end_date,
+                calculated_points=canonical_weekly,
+                allow_internal_calculation=False,
+            ),
+            "monthly": _snapshot_for_timeframe(
+                monthly,
+                timeframe="monthly",
+                parameters=parameters,
+                method_catalog=methods,
+                latest_observation_date=end_date,
+                calculated_points=canonical_monthly,
+                allow_internal_calculation=False,
+            ),
+        }
+        maximum_indicator_warmup = max(
+            int(method.get("warmup_bars") or 1)
+            for method in methods.values()
         )
+        daily_coverage_points = [
+            *daily,
+            *([current_partial_daily] if current_partial_daily is not None else []),
+        ]
+        timeframe_corporate_actions = {
+            "daily": _corporate_contract_for_points(
+                corporate_event_history,
+                daily_coverage_points,
+                lookback_bars=maximum_indicator_warmup,
+            ),
+            "weekly": _corporate_contract_for_points(
+                corporate_event_history,
+                weekly,
+                lookback_bars=maximum_indicator_warmup,
+            ),
+            "monthly": _corporate_contract_for_points(
+                corporate_event_history,
+                monthly,
+                lookback_bars=maximum_indicator_warmup,
+            ),
+        }
+        for timeframe_name, snapshot in timeframes.items():
+            timeframe_contract = timeframe_corporate_actions[timeframe_name]
+            technical_series = {
+                "daily": daily_technical,
+                "weekly": weekly_technical,
+                "monthly": monthly_technical,
+            }[timeframe_name]
+            snapshot["input_quality"] = technical_series.input_quality
+            snapshot["warmup"] = technical_series.warmup
+            snapshot["corporate_action"] = _corporate_summary(timeframe_contract)
+            snapshot["decision_usable"] = bool(
+                timeframe_contract.get("coverage_status") == "complete"
+                and snapshot.get("completed")
+                and technical_series.decision_usable
+            )
 
-    swing_daily = daily[-SWING_LOOKBACK:]
-    swing_corporate_actions = _corporate_contract_for_points(
-        corporate_event_history,
-        swing_daily,
-    )
-    breakout_corporate_actions = _corporate_contract_for_points(
-        corporate_event_history,
-        daily,
-        lookback_bars=(
-            parameters.support_resistance_period + BREAKOUT_LIFECYCLE_BARS
-        ),
-    )
-    from app.market.tw_technical_service import TaiwanTechnicalService
+        swing_daily = daily[-SWING_LOOKBACK:]
+        swing_corporate_actions = _corporate_contract_for_points(
+            corporate_event_history,
+            swing_daily,
+        )
+        breakout_corporate_actions = _corporate_contract_for_points(
+            corporate_event_history,
+            daily,
+            lookback_bars=(
+                parameters.support_resistance_period + BREAKOUT_LIFECYCLE_BARS
+            ),
+        )
+        from app.market.tw_technical_service import TaiwanTechnicalService
 
-    advanced = TaiwanTechnicalService().calculate_advanced(
-        points=daily,
-        canonical_points=canonical_daily,
-        benchmark_points=_benchmark_points(db, to_date=to_date) if include_relative else [],
-        sector_benchmark=build_tw_sector_benchmark(
+        technical_service = TaiwanTechnicalService()
+    with technical_read_phase(db, "benchmark", active=include_relative):
+        benchmark_points = _benchmark_points(db, to_date=to_date, requested_at=requested_at) if include_relative else []
+    with technical_read_phase(db, "sector", active=include_relative):
+        sector_benchmark = build_tw_sector_benchmark(
             db,
             stock_id=stock_id,
+            requested_at=requested_at,
             trade_dates=[
                 parsed
                 for point in daily
                 if (parsed := point_date(point.get("time"))) is not None
             ],
-        ) if include_relative else None,
-        requested_capabilities=requested_capabilities,
-        parameters=parameters,
-        affected_swing_dates=tuple(swing_corporate_actions["affected_dates"]),
-        breakout_corporate_action_contract=dict(breakout_corporate_actions),
-    )
-    swings = advanced["swings"]
-    fibonacci = advanced["fibonacci"]
-    divergence = advanced["divergence"]
-    breakout = advanced["breakout"]
-    volume_profile = advanced["volume_profile"]
-    anchored_vwap = advanced["anchored_vwap"]
-    relative_strength = advanced["relative_strength"]
-    profile_corporate_actions = _corporate_contract_for_points(
-        corporate_event_history,
-        daily,
-        lookback_bars=PROFILE_LOOKBACK,
-    )
-    relative_strength_corporate_actions = _corporate_contract_for_points(
-        corporate_event_history,
-        daily,
-        lookback_bars=61,
-    )
-    anchor_start = point_date(anchored_vwap.get("anchor_time"))
-    anchored_vwap_corporate_actions = build_corporate_action_contract(
-        corporate_event_history,
-        analysis_start=anchor_start,
-        analysis_end=end_date,
-    )
-    indicator_source_refs = [
-        {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
-        {"type": "derived", "name": "app.market.technical_evidence"},
-        {"type": "external_or_cache", "name": "taiwan_corporate_event_history"},
-    ]
-    technical_source_refs = [
-        *indicator_source_refs,
-        {"type": "table", "name": "market_index_daily_stat"},
-    ]
-    capability_contracts = {
-        "swings": swing_corporate_actions,
-        "fibonacci": swing_corporate_actions,
-        "divergence": swing_corporate_actions,
-        "breakout": breakout_corporate_actions,
-        "volume_profile": profile_corporate_actions,
-        "anchored_vwap": anchored_vwap_corporate_actions,
-        "relative_strength": relative_strength_corporate_actions,
-    }
-    advanced_payloads = {
-        "swings": swings,
-        "fibonacci": fibonacci,
-        "divergence": divergence,
-        "breakout": breakout,
-        "volume_profile": volume_profile,
-        "anchored_vwap": anchored_vwap,
-        "relative_strength": relative_strength,
-    }
-    if requested_capabilities is not None and "technical.structure" not in requested_capabilities:
-        advanced_payloads = {key: value for key, value in advanced_payloads.items() if value}
-        capability_contracts = {key: value for key, value in capability_contracts.items() if key in advanced_payloads}
-    for capability_name, payload in advanced_payloads.items():
-        _apply_capability_corporate_contract(
-            payload,
-            contract=capability_contracts[capability_name],
-            source_refs=technical_source_refs,
+        ) if include_relative else None
+    with technical_read_phase(db, "advanced"):
+        advanced = technical_service.calculate_advanced(
+            points=daily,
+            canonical_points=canonical_daily,
+            benchmark_points=benchmark_points,
+            sector_benchmark=sector_benchmark,
+            requested_capabilities=requested_capabilities,
+            parameters=parameters,
+            affected_swing_dates=tuple(swing_corporate_actions["affected_dates"]),
+            breakout_corporate_action_contract=dict(breakout_corporate_actions),
         )
+    with technical_read_phase(db, "assemble"):
+        swings = advanced["swings"]
+        fibonacci = advanced["fibonacci"]
+        divergence = advanced["divergence"]
+        breakout = advanced["breakout"]
+        volume_profile = advanced["volume_profile"]
+        anchored_vwap = advanced["anchored_vwap"]
+        relative_strength = advanced["relative_strength"]
+        profile_corporate_actions = _corporate_contract_for_points(
+            corporate_event_history,
+            daily,
+            lookback_bars=PROFILE_LOOKBACK,
+        )
+        relative_strength_corporate_actions = _corporate_contract_for_points(
+            corporate_event_history,
+            daily,
+            lookback_bars=61,
+        )
+        anchor_start = point_date(anchored_vwap.get("anchor_time"))
+        anchored_vwap_corporate_actions = build_corporate_action_contract(
+            corporate_event_history,
+            analysis_start=anchor_start,
+            analysis_end=end_date,
+        )
+        indicator_source_refs = [
+            {"type": "resolved_market_data", "name": "tw.daily.ohlcv"},
+            {"type": "derived", "name": "app.market.technical_evidence"},
+            {"type": "external_or_cache", "name": "taiwan_corporate_event_history"},
+        ]
+        technical_source_refs = [
+            *indicator_source_refs,
+            {"type": "table", "name": "market_index_daily_stat"},
+        ]
+        capability_contracts = {
+            "swings": swing_corporate_actions,
+            "fibonacci": swing_corporate_actions,
+            "divergence": swing_corporate_actions,
+            "breakout": breakout_corporate_actions,
+            "volume_profile": profile_corporate_actions,
+            "anchored_vwap": anchored_vwap_corporate_actions,
+            "relative_strength": relative_strength_corporate_actions,
+        }
+        advanced_payloads = {
+            "swings": swings,
+            "fibonacci": fibonacci,
+            "divergence": divergence,
+            "breakout": breakout,
+            "volume_profile": volume_profile,
+            "anchored_vwap": anchored_vwap,
+            "relative_strength": relative_strength,
+        }
+        if requested_capabilities is not None and "technical.structure" not in requested_capabilities:
+            advanced_payloads = {key: value for key, value in advanced_payloads.items() if value}
+            capability_contracts = {key: value for key, value in capability_contracts.items() if key in advanced_payloads}
+        for capability_name, payload in advanced_payloads.items():
+            _apply_capability_corporate_contract(
+                payload,
+                contract=capability_contracts[capability_name],
+                source_refs=technical_source_refs,
+            )
 
-    indicator_warnings = list(
-        dict.fromkeys(
-            warning
-            for contract in timeframe_corporate_actions.values()
-            for warning in contract.get("warnings") or []
+        indicator_warnings = list(
+            dict.fromkeys(
+                warning
+                for contract in timeframe_corporate_actions.values()
+                for warning in contract.get("warnings") or []
+            )
         )
-    )
-    warnings = list(
-        dict.fromkeys(
-            warning
-            for contract in [
-                *timeframe_corporate_actions.values(),
-                *capability_contracts.values(),
-            ]
-            for warning in contract.get("warnings") or []
+        warnings = list(
+            dict.fromkeys(
+                warning
+                for contract in [
+                    *timeframe_corporate_actions.values(),
+                    *capability_contracts.values(),
+                ]
+                for warning in contract.get("warnings") or []
+            )
         )
-    )
-    daily_corporate_actions = timeframe_corporate_actions["daily"]
-    status = (
-        "partial"
-        if any(
-            contract.get("coverage_status") != "complete"
-            for contract in capability_contracts.values()
+        daily_corporate_actions = timeframe_corporate_actions["daily"]
+        status = (
+            "partial"
+            if any(
+                contract.get("coverage_status") != "complete"
+                for contract in capability_contracts.values()
+            )
+            or (include_relative and relative_strength.get("status") != "ready")
+            else "ready"
         )
-        or (include_relative and relative_strength.get("status") != "ready")
-        else "ready"
-    )
-    indicators = {
-        "kind": "tw_technical_indicator_snapshot",
-        "schema_version": INDICATOR_ALGORITHM_VERSION,
-        "algorithm_version": INDICATOR_ALGORITHM_VERSION,
-        "bar_series_fingerprint": daily_technical.bar_series_fingerprint,
-        "bar_series_revision": daily_technical.bar_series_revision,
-        "technical_revision": daily_technical.technical_revision,
-        "calculation_role": "backend_authoritative",
-        "parameter_contract": _indicator_parameter_contract(parameters),
-        "status": "ready" if timeframes["daily"]["decision_usable"] else "partial",
-        "decision_usable": timeframes["daily"]["decision_usable"],
-        "input_quality": daily_technical.input_quality,
-        "stock_id": stock_id,
-        "as_of": _json_date(end_date),
-        "price_basis": PRICE_BASIS,
-        "currency": "TWD",
-        "price_unit": "TWD",
-        "volume_unit": "shares",
-        "source_capability": "daily.ohlcv",
-        "measurement_lineage": {
+        indicators = {
+            "kind": "tw_technical_indicator_snapshot",
+            "schema_version": INDICATOR_ALGORITHM_VERSION,
+            "algorithm_version": INDICATOR_ALGORITHM_VERSION,
+            "bar_series_fingerprint": daily_technical.bar_series_fingerprint,
+            "bar_series_revision": daily_technical.bar_series_revision,
+            "technical_revision": daily_technical.technical_revision,
+            "calculation_role": "backend_authoritative",
+            "parameter_contract": _indicator_parameter_contract(parameters),
+            "status": "ready" if timeframes["daily"]["decision_usable"] else "partial",
+            "decision_usable": timeframes["daily"]["decision_usable"],
+            "input_quality": daily_technical.input_quality,
+            "stock_id": stock_id,
+            "as_of": _json_date(end_date),
+            "price_basis": PRICE_BASIS,
             "currency": "TWD",
             "price_unit": "TWD",
             "volume_unit": "shares",
             "source_capability": "daily.ohlcv",
-        },
-        "methods": methods,
-        "timeframes": timeframes,
-        "corporate_action": daily_corporate_actions,
-        "corporate_action_coverage_by_timeframe": {
-            name: _corporate_summary(contract)
-            for name, contract in timeframe_corporate_actions.items()
-        },
-        "missing": [],
-        "warnings": indicator_warnings,
-        "source_refs": indicator_source_refs,
-        "lineage": daily_lineage,
-        "freshness": {
-            "status": "current",
-            "latest_data_date": _json_date(
-                current_partial_daily.get("time") if current_partial_daily else end_date
-            ),
-            "finalized_daily_date": _json_date(end_date),
-            "period_semantics": "daily/weekly/monthly completed snapshots plus explicit current_partial when observed",
-        },
-    }
-    structure_v2 = build_technical_structure_v2(
-        indicators=indicators,
-        swings=swings,
-        fibonacci=fibonacci,
-        divergence=divergence,
-        breakout=breakout,
-        volume_profile=volume_profile,
-        anchored_vwap=anchored_vwap,
-        relative_strength=relative_strength,
-        parameters=parameters,
-    ) if requested_capabilities is None or "technical.structure" in requested_capabilities else None
-    return {
-        "kind": "tw_stock_technical_evidence",
-        "version": "tw.stock.technical.evidence.v1",
-        "status": status,
-        "as_of": _json_date(end_date),
-        "price_basis": PRICE_BASIS,
-        "indicators": indicators,
-        "swings": swings,
-        "fibonacci": fibonacci,
-        "divergence": divergence,
-        "breakout": breakout,
-        "volume_profile": volume_profile,
-        "anchored_vwap": anchored_vwap,
-        "relative_strength": relative_strength,
-        "structure_v2": structure_v2,
-        "missing": [],
-        "warnings": warnings,
-        "source_refs": technical_source_refs,
-    }
+            "measurement_lineage": {
+                "currency": "TWD",
+                "price_unit": "TWD",
+                "volume_unit": "shares",
+                "source_capability": "daily.ohlcv",
+            },
+            "methods": methods,
+            "timeframes": timeframes,
+            "corporate_action": daily_corporate_actions,
+            "corporate_action_coverage_by_timeframe": {
+                name: _corporate_summary(contract)
+                for name, contract in timeframe_corporate_actions.items()
+            },
+            "missing": [],
+            "warnings": indicator_warnings,
+            "source_refs": indicator_source_refs,
+            "lineage": daily_lineage,
+            "freshness": {
+                "status": "current",
+                "latest_data_date": _json_date(
+                    current_partial_daily.get("time") if current_partial_daily else end_date
+                ),
+                "finalized_daily_date": _json_date(end_date),
+                "period_semantics": "daily/weekly/monthly completed snapshots plus explicit current_partial when observed",
+            },
+        }
+        structure_v2 = build_technical_structure_v2(
+            indicators=indicators,
+            swings=swings,
+            fibonacci=fibonacci,
+            divergence=divergence,
+            breakout=breakout,
+            volume_profile=volume_profile,
+            anchored_vwap=anchored_vwap,
+            relative_strength=relative_strength,
+            parameters=parameters,
+        ) if requested_capabilities is None or "technical.structure" in requested_capabilities else None
+        return {
+            "kind": "tw_stock_technical_evidence",
+            "version": "tw.stock.technical.evidence.v1",
+            "status": status,
+            "as_of": _json_date(end_date),
+            "price_basis": PRICE_BASIS,
+            "indicators": indicators,
+            "swings": swings,
+            "fibonacci": fibonacci,
+            "divergence": divergence,
+            "breakout": breakout,
+            "volume_profile": volume_profile,
+            "anchored_vwap": anchored_vwap,
+            "relative_strength": relative_strength,
+            "structure_v2": structure_v2,
+            "missing": [],
+            "warnings": warnings,
+            "source_refs": technical_source_refs,
+        }
 
 
 __all__ = [

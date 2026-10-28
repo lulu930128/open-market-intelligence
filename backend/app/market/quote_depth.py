@@ -368,6 +368,22 @@ def project_taiwan_quote_price_usability(payload: dict[str, Any]) -> bool:
     return False
 
 
+def project_taiwan_selected_price_provider(payload: dict[str, Any]) -> str | None:
+    """Keep selected close provenance separate from its sibling snapshot.
+
+    A missing/unavailable close component leaves the snapshot-owned headline
+    intact (including MIS close). A selected component with unknown provider
+    stays unknown; neither the snapshot nor change reference can supply it.
+    """
+    basis = payload.get("headline_basis") or payload.get("quote_semantics")
+    if basis in {"session_close", "official_close", "latest_completed_session_close"}:
+        key = "quote.session_close" if basis == "session_close" else "quote.official_close"
+        component = (payload.get("data_core_components") or {}).get(key) or {}
+        if component and component.get("available") is not False:
+            return component.get("provider") or (component.get("lineage") or {}).get("provider")
+    return payload.get("provider")
+
+
 def project_taiwan_decision_price(
     payload: dict[str, Any], *, checked_at: datetime | None, session_date: Any = None,
 ) -> TaiwanDecisionPriceRead:
@@ -417,7 +433,7 @@ def project_taiwan_decision_price(
         # Completed close supports valuation, never a current executable quote.
         execution_usable=bool(valid and not close and freshness.get("is_live") is True),
         source_kind=str(basis), source=payload.get("headline_source") or payload.get("source"),
-        provider=payload.get("provider"), event_time=event, trade_date=day,
+        provider=project_taiwan_selected_price_provider(payload), event_time=event, trade_date=day,
         age_seconds=age, semantics=str(basis), quality=dict(freshness),
         reason="QUALIFIED_PRICE" if valid else "PRICE_NOT_DECISION_GRADE",
     )
@@ -528,6 +544,71 @@ def _raw_message_for_row(
     messages = payload.get("msgArray") if isinstance(payload, dict) else None
     message = messages[0] if isinstance(messages, list) and messages else None
     return message if isinstance(message, dict) else None
+
+
+def _trade_price_provenance(row: TaiwanStockQuoteSnapshot | None) -> dict[str, Any]:
+    """Label only verified saved evidence, never infer a raw field from price."""
+    if row is None:
+        return {}
+    field = None
+    event_at = _taiwan_exchange_datetime(row.quote_time)
+    if row.provider == TWSE_MIS_PROVIDER:
+        message = _raw_message_for_row(row)
+        if message is not None:
+            try:
+                snapshot_at = datetime.strptime(
+                    f"{message.get('d')} {message.get('t') or message.get('%')}",
+                    "%Y%m%d %H:%M:%S",
+                ).replace(tzinfo=TAIWAN_TZ)
+            except (TypeError, ValueError):
+                snapshot_at = None
+            trade = resolve_twse_mis_actual_trade(
+                expected_trade_date=row.trade_date,
+                observation_trade_date=message.get("d"),
+                provider_event_time=snapshot_at,
+                trial_status=message.get("ts"),
+                last_trade_price=message.get("z"),
+                last_trade_volume_lots=message.get("tv"),
+                cumulative_volume_lots=message.get("v"),
+                nested_trade=message.get("trade"),
+                observed_at=_local_now(row.fetched_at) if row.fetched_at else None,
+            )
+            if (trade["actual_trade_price_available"]
+                    and str(message.get("c")) == row.stock_id
+                    and trade["actual_trade_price"] == row.last_price
+                    and trade["actual_trade_price_as_of"] == event_at):
+                field = {"twse_mis_snapshot_z": "z",
+                         "twse_mis_nested_trade_z": "trade.z"}.get(trade["actual_trade_price_source"])
+    elif row.provider == KGI_SUPERPY_PROVIDER:
+        try:
+            raw = json.loads(row.raw_payload_json or "{}")
+        except (TypeError, ValueError):
+            raw = None
+        if isinstance(raw, dict):
+            try:
+                raw_event = datetime.strptime(str(raw.get("datetime")), "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
+            except ValueError:
+                raw_event = None
+            trade = resolve_twse_mis_actual_trade(
+                expected_trade_date=row.trade_date,
+                observation_trade_date=raw_event.date() if raw_event else None,
+                provider_event_time=raw_event, trial_status=raw.get("simtrade"),
+                last_trade_price=_as_float(raw.get("close")),
+                last_trade_volume_lots=raw.get("volume"),
+                cumulative_volume_lots=raw.get("total_volume"),
+            )
+            if (trade["actual_trade_price_available"]
+                    and str(raw.get("symbol")) == row.stock_id
+                    and all(value is not None and math.isfinite(value) and value > 0
+                            for value in (_as_float(raw.get("volume")), _as_float(raw.get("total_volume"))))
+                    and trade["actual_trade_price"] == row.last_price and raw_event == event_at):
+                field = "close"
+    return {
+        "provider": row.provider, "source": row.source,
+        "observation_id": f"taiwan_stock_quote_snapshot:{row.id}",
+        "raw_result_id": row.raw_result_id, "event_at": event_at,
+        "price_field": field, "field_verified": field is not None,
+    }
 
 
 def _observation_for_row(
@@ -826,17 +907,15 @@ def _price_semantics_contract(
         and row is not None
         and selected_trade_row.id != row.id
     )
-    provider_trade_field = (
-        "close"
-        if selected_trade_row is not None
-        and selected_trade_row.provider == KGI_SUPERPY_PROVIDER
-        else "z"
-    )
+    trade_provenance = _trade_price_provenance(selected_trade_row)
+    provider_trade_field = trade_provenance.get("price_field")
+    trade_provenance["selection"] = "same_session_cache" if actual_trade_price_cached else "current_snapshot"
     actual_trade_price_source = (
         f"same_session_snapshot_{provider_trade_field}"
-        if actual_trade_price_cached
+        if actual_trade_price_cached and provider_trade_field
+        else "same_session_cache" if actual_trade_price_cached
         else f"current_snapshot_{provider_trade_field}"
-        if current_row_has_trade
+        if current_row_has_trade and provider_trade_field
         else None
     )
     actual_trade_occurred = bool(
@@ -962,6 +1041,7 @@ def _price_semantics_contract(
         "actual_trade_occurred": actual_trade_occurred,
         "actual_trade_price_cached": actual_trade_price_cached,
         "actual_trade_price_source": actual_trade_price_source,
+        "actual_trade_price_lineage": trade_provenance,
         "actual_trade_price_as_of": (
             last_trade_time if last_trade_available else None
         ),
@@ -2341,6 +2421,8 @@ def project_taiwan_quote_evidence_bundle(
     # The parent describes the selected quote, never the age of a sibling book
     # or the latest unselected legacy row. Canonical component health owns it.
     quote_evidence = _component_evidence(quote_result, quote_result.resolved.quote)
+    from app.market.quote_volume import project_taiwan_cumulative_totals
+    response.update(project_taiwan_cumulative_totals(quote_result.resolved.quote))
     response["freshness"].update({
         **quote_evidence["freshness"],
         "is_stale": quote_evidence["freshness"]["status"] in {"stale", "missing", "unknown"},
@@ -2500,6 +2582,8 @@ def acquire_taiwan_quote_evidence_projection(
     policy: RealtimePolicy = RealtimePolicy.PREFER_LIVE,
     requested_at: datetime | None = None,
     requested_capabilities: Iterable[str] | None = None,
+    timeout_seconds: int | None = None,
+    max_external_calls: int | None = None,
 ) -> dict[str, Any]:
     """Explicit bounded acquisition followed by the same canonical projection."""
 
@@ -2509,6 +2593,8 @@ def acquire_taiwan_quote_evidence_projection(
         policy=policy,
         requested_at=_local_now(requested_at),
         requested_capabilities=requested_capabilities,
+        timeout_seconds=timeout_seconds,
+        max_external_calls=max_external_calls,
     )
     payload = project_taiwan_quote_evidence_bundle(
         db=db,

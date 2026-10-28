@@ -18,6 +18,9 @@ FUGLE_INTRADAY_PROVIDER = "fugle_marketdata"
 FUGLE_INTRADAY_SOURCE = "fugle_candles_stream"
 FUGLE_INTRADAY_RESOURCE_ID = "tw.fugle.candles.stream"
 FUGLE_INTRADAY_PARSER_VERSION = "fugle.websocket.candles.v1"
+FUGLE_HTTP_INTRADAY_SOURCE = "fugle_intraday_candles"
+FUGLE_HTTP_INTRADAY_RESOURCE_ID = "tw.fugle.candles.http"
+FUGLE_HTTP_INTRADAY_PARSER_VERSION = "fugle.http.candles.v1"
 
 KGI_INTRADAY_PROVIDER = "kgi_superpy"
 KGI_INTRADAY_SOURCE = "kgi_superpy_minute_kbars"
@@ -167,8 +170,18 @@ YAHOO_INTRADAY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     ),
 )
 
+FUGLE_HTTP_INTRADAY_DESCRIPTOR = NSTOCK_INTRADAY_DESCRIPTOR.model_copy(update={
+    "provider_key": FUGLE_INTRADAY_PROVIDER,
+    "resource_id": FUGLE_HTTP_INTRADAY_RESOURCE_ID,
+    "priority": 6,
+    "max_timeout_seconds": 5,
+    "limitations": ("API_KEY_REQUIRED", "CURRENT_SESSION_ONLY", "ROUND_LOT_ONLY",
+                    "CUMULATIVE_AVERAGE_NOT_MINUTE_TURNOVER"),
+})
+
 TW_INTRADAY_DESCRIPTORS = (
     FUGLE_INTRADAY_DESCRIPTOR,
+    FUGLE_HTTP_INTRADAY_DESCRIPTOR,
     KGI_INTRADAY_DESCRIPTOR,
     NSTOCK_INTRADAY_DESCRIPTOR,
     YAHOO_INTRADAY_DESCRIPTOR,
@@ -186,6 +199,12 @@ class TaiwanIntradaySourceBinding:
 
 
 _BINDINGS = (
+    TaiwanIntradaySourceBinding(
+        descriptor=FUGLE_HTTP_INTRADAY_DESCRIPTOR,
+        source=FUGLE_HTTP_INTRADAY_SOURCE,
+        parser_version=FUGLE_HTTP_INTRADAY_PARSER_VERSION,
+        auth_type="api_key",
+    ),
     TaiwanIntradaySourceBinding(
         descriptor=FUGLE_INTRADAY_DESCRIPTOR,
         source=FUGLE_INTRADAY_SOURCE,

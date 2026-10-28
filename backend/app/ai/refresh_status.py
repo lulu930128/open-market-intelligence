@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import agentic_policy, capability_contract
 from app.jobs import service as job_service
-from app.jobs.taiwan_intraday_demand import consumer_request
+from app.jobs.taiwan_intraday_demand import consumer_request, safe_demand_failure, FAILURE_REASONS
 
 
 AI_REFRESH_JOB_TYPE = "ai.tool_refresh"
@@ -180,12 +180,17 @@ def read_refresh_status(
             },
         }
         if demand is not None:
+            resume["arguments"]["analysis_horizon"] = "intraday"
             resume["arguments"]["market_data_params"] = {
                 "trade_date": demand["trade_date"], "include_intraday": True,
                 "intraday_interval": "1m",
             }
 
     error = None
+    demand_failure = safe_demand_failure(result.get("last_failure")) if demand else None
+    demand_reason = result.get("reason_code")
+    if not isinstance(demand_reason, str) or demand_reason not in PUBLIC_DEMAND_REASONS:
+        demand_reason = None
     if public_status in {"failed", "cancelled", "expired"}:
         error = {
             "code": f"AI_REFRESH_{public_status.upper()}",
@@ -194,6 +199,13 @@ def read_refresh_status(
                 "or source health for redacted diagnostics."
             ),
             "retryable": public_status == "failed",
+        }
+    if demand and public_status in {"partial", "failed"} and demand_reason in FAILURE_REASONS:
+        error = {
+            "code": demand_reason,
+            "message": "Background materialization failed; cached evidence may still be available.",
+            "retryable": True,
+            "diagnostic": demand_failure,
         }
 
     return {
@@ -235,17 +247,17 @@ def read_refresh_status(
         ),
         "requested_trade_date": demand["trade_date"] if demand else None,
         "reason_code": (
-            result.get("reason_code")
-            if demand and result.get("reason_code") in PUBLIC_DEMAND_REASONS else None
+            demand_reason if demand else None
         ),
         "next_retry_at": result.get("next_retry_at") if demand and public_status == "queued" else None,
         "expires_at": demand["expires_at"] if demand else None,
         "retry_not_before_at": result.get("retry_not_before_at") if demand else None,
         "materialization": ({
-            key: result.get(key) for key in (
+            **{key: result.get(key) for key in (
                 "reread_ready", "reread_trade_date", "snapshot_phase", "snapshot_revision",
                 "external_call_count", "bars_written_count",
-            )
+            )},
+            "last_failure": demand_failure,
         } if demand else None),
         "evidence_rebuild_required": evidence_rebuild_required,
         "retryable": bool(error and error.get("retryable")),

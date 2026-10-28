@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_payload_contract import bounded_int_param, payload_level, slot_envelope
 from app.resource_market.contract import normalize_resource_symbol
+from app.resource_market.sources import normalize_resource_interval
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,11 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return value
+
+
+def _event_clock(value: datetime | None) -> datetime | None:
+    # Resource persistence stores UTC; SQLite returns timezone-naive datetimes.
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)) if value else None
 
 
 def _row_dict(row: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -59,7 +65,8 @@ def read_resource_asset_context(
         raise ValueError(f"Unsupported resource asset target.id: {symbol}.")
 
     instrument = instruments[0]
-    requested_interval = str((market_data_params or {}).get("interval") or "1d").strip()
+    params = market_data_params or {}
+    requested_interval = normalize_resource_interval(str(params.get("interval") or "1d"))
     bar_limit = bounded_int_param(
         market_data_params,
         ("bars", "limit", "ohlcv_limit"),
@@ -73,16 +80,35 @@ def read_resource_asset_context(
         symbols=normalized_symbol,
         limit=1,
     )
-    bars = dependencies.resource_service.list_resource_ohlcv_bars(
-        db,
-        symbols=normalized_symbol,
-        interval=requested_interval,
-        limit=bar_limit,
-    )
+    selected = set(params.get("requested_capabilities") or [])
+    limits = params.get("capability_limits") or {}
+    intraday_interval = normalize_resource_interval(str(params.get("intraday_interval") or (
+        requested_interval if requested_interval in {"1m", "5m", "15m", "30m", "1h"} else "1m"
+    )))
+    if "intraday.bars" in selected and intraday_interval not in {"1m", "5m", "15m", "30m", "1h"}:
+        raise ValueError("Resource intraday.bars requires an intraday interval.")
+    interval_limits = {}
+    for capability, interval in (("daily.ohlcv", "1d"), ("intraday.bars", intraday_interval)):
+        if capability in selected:
+            interval_limits[interval] = bounded_int_param(
+                limits, (capability,), default=bar_limit, minimum=1, maximum=500,
+            )
+    if not selected:
+        interval_limits[requested_interval] = bar_limit
+    bars_by_interval = {
+        interval: dependencies.resource_service.list_resource_ohlcv_bars(
+            db, symbols=normalized_symbol, interval=interval, limit=limit,
+        ) for interval, limit in interval_limits.items()
+    }
+    bars_by_interval = {
+        interval: sorted(rows, key=lambda row: _event_clock(row.bar_time), reverse=True)
+        for interval, rows in bars_by_interval.items()
+    }
+    bars = bars_by_interval.get(requested_interval, [])
     source_health = dependencies.build_resource_source_health(
         db,
         symbols=normalized_symbol,
-        intervals=requested_interval,
+        intervals=",".join(interval_limits) or requested_interval,
         include_events=True,
         max_entries=20,
     )
@@ -96,9 +122,29 @@ def read_resource_asset_context(
         dependencies.resource_service.resource_ohlcv_bar_to_public_dict(row)
         for row in reversed(bars)
     ]
+    def interval_payload(interval):
+        rows = bars_by_interval.get(interval, [])
+        health = {**source_health, "entries": [entry for entry in source_health.get("entries", [])
+                  if entry.get("target") == f"{normalized_symbol}:{interval}"]}
+        status = _health_status(health, "ohlcv")
+        if instrument.get("root_folder") == "commodity" and any(entry.get("ok") for entry in health["entries"]):
+            status = "partial"
+        return {
+            "interval": interval, "sort_order": "asc",
+            "bars": [dependencies.resource_service.resource_ohlcv_bar_to_public_dict(row) for row in reversed(rows)],
+            "point_count": len(rows), "returned_point_count": len(rows),
+            "as_of": _json_value(_event_clock(rows[0].bar_time)) if rows else None,
+            "event_time": _json_value(_event_clock(rows[0].bar_time)) if rows else None,
+            "provider": instrument.get("provider"), "source": instrument.get("provider"),
+            "freshness": {"status": status if rows else "missing"},
+            "decision_usable": False, "limitations": ["watch_only", "best_effort_delayed"],
+        }
+
+    daily_chart = interval_payload("1d")
+    intraday_chart = interval_payload(intraday_interval)
     as_of_candidates = [
-        getattr(quote, "event_time", None),
-        *(getattr(row, "bar_time", None) for row in bars[:1]),
+        _event_clock(getattr(quote, "event_time", None)),
+        *(_event_clock(rows[0].bar_time) for rows in bars_by_interval.values() if rows),
     ]
     as_of = max(
         (value for value in as_of_candidates if isinstance(value, datetime)),
@@ -108,12 +154,14 @@ def read_resource_asset_context(
     quote_status = _health_status(source_health, "quote")
     chart_status = _health_status(source_health, "ohlcv")
     if instrument.get("root_folder") == "commodity":
-        health_entries = {entry["resource"]: entry for entry in source_health.get("entries", [])}
-        quote_health = health_entries.get("quote", {})
-        chart_health = health_entries.get("ohlcv", {})
+        quote_health = next((entry for entry in source_health.get("entries", [])
+                             if entry.get("resource") == "quote"), {})
         # Provider delay is not cache staleness. Keep the two axes separate.
         quote_status = "partial" if quote_health.get("ok") else quote_status
-        chart_status = "partial" if chart_health.get("ok") else chart_status
+        chart_statuses = [interval_payload(interval)["freshness"]["status"]
+                          for interval in bars_by_interval]
+        chart_status = ("stale" if "stale" in chart_statuses else "blocked" if "blocked" in chart_statuses
+                        else "missing" if "missing" in chart_statuses else "partial")
         if quote_payload:
             for field in ("event_time", "fetched_at"):
                 value = quote_payload.get(field)
@@ -146,8 +194,9 @@ def read_resource_asset_context(
     ]
     if not quote_payload:
         missing.append("resource_quote")
-    if not chart:
-        missing.append(f"resource_ohlcv.{requested_interval}")
+    for interval, rows in bars_by_interval.items():
+        if not rows:
+            missing.append(f"resource_ohlcv.{interval}")
     health_summary = source_health.get("summary") if isinstance(source_health, dict) else {}
     if quote_status == "stale" or chart_status == "stale":
         warnings.append("One or more resource cache entries are stale or delayed.")
@@ -178,13 +227,14 @@ def read_resource_asset_context(
             missing=[] if quote_payload else ["resource_quote"],
         ),
         "daily_chart": slot_envelope(
-            status=chart_status,
-            capability="resource_ohlcv_chart",
-            payload_ref="data.chart",
-            payload_level=level,
-            priority="core",
-            as_of=_json_value(getattr(bars[0], "bar_time", None)) if bars else None,
-            missing=[] if chart else [f"resource_ohlcv.{requested_interval}"],
+            status=daily_chart["freshness"]["status"], capability="resource_ohlcv_chart",
+            payload_ref="data.resolved_market_data.daily_ohlcv", payload_level=level, priority="core",
+            as_of=daily_chart["as_of"], missing=[] if daily_chart["bars"] else ["resource_ohlcv.1d"],
+        ),
+        "intraday": slot_envelope(
+            status=intraday_chart["freshness"]["status"], capability="resource_intraday_bars",
+            payload_ref="data.resolved_market_data.intraday_bars", payload_level=level, priority="core",
+            as_of=intraday_chart["as_of"], missing=[] if intraday_chart["bars"] else [f"resource_ohlcv.{intraday_interval}"],
         ),
         "trade_execution": slot_envelope(
             status="not_applicable",
@@ -217,6 +267,7 @@ def read_resource_asset_context(
             "instrument": instrument,
             "quote": quote_payload,
             "chart": chart,
+            "resolved_market_data": {"daily_ohlcv": daily_chart, "intraday_bars": intraday_chart},
             "interval": requested_interval,
             "bar_limit": bar_limit,
             "source_health": source_health,
@@ -232,6 +283,14 @@ def read_resource_asset_context(
                     "ohlcv_rows": len(chart),
                     "watch_only": True,
                     "provider_status": instrument.get("provider_status"),
+                },
+                "freshness_by_capability": {
+                    capability: {**payload["freshness"], "latest": payload["as_of"],
+                                 "source": "resource_interval_health"}
+                    for capability, interval, payload in (
+                        ("daily.ohlcv", "1d", daily_chart),
+                        ("intraday.bars", intraday_interval, intraday_chart),
+                    ) if interval in bars_by_interval
                 },
                 "freshness_by_domain": {
                     "quote": quote_status,

@@ -663,6 +663,10 @@ def _apply_taiwan_intraday_volume_reconciliation(
     for interval, series in series_map.items():
         if not isinstance(series, dict):
             continue
+        if series.get("trade_value_coverage") is not None:
+            from app.market.tw_intraday_value import reconcile_taiwan_intraday_volume
+            series["volume_reconciliation"] = reconcile_taiwan_intraday_volume(series, quote)
+            continue
         _apply_bar_volume_fallback(series)
         bar_trade_date = _contract_date_text(series.get("bar_volume_trade_date"))
         bar_latest_time = _contract_datetime(
@@ -1360,6 +1364,10 @@ def read_stock_quote_context(
         if isinstance(intraday_bars.get("series"), dict)
         else {}
     )
+    from app.market.tw_intraday_value import reconcile_taiwan_intraday_volume
+    for item in intraday_series.values():
+        if isinstance(item, dict):
+            item["volume_reconciliation"] = reconcile_taiwan_intraday_volume(item, quote)
     def canonical_provider(value: Any) -> str:
         provider = str(value or "").strip().lower()
         if provider.startswith("twse_mis"):
@@ -2240,7 +2248,8 @@ def read_stock_context(
                 "quote.order_book", "quote.auction", "quote.session_close"})
     requested_capabilities.update(("target.identity", "data.freshness"))
     plan = compile_tw_stock_read_plan(requested_capabilities)
-    execution = ReadExecution(db, tuple(TW_STOCK_READ_NODES[key] for key in plan))
+    execution = ReadExecution(db, tuple(TW_STOCK_READ_NODES[key] for key in plan),
+        total_seconds=min(45.0, max(0.0, float(params.get("read_budget_seconds", 45.0)))))
     read = execution.run
     missing: list[str] = []
     warnings: list[str] = []
@@ -2459,6 +2468,10 @@ def read_stock_context(
         if isinstance(intraday_bars.get("series"), dict)
         else {}
     )
+    from app.market.tw_intraday_value import reconcile_taiwan_intraday_volume
+    for item in intraday_series.values():
+        if isinstance(item, dict):
+            item["volume_reconciliation"] = reconcile_taiwan_intraday_volume(item, quote)
     if intraday_bars.get("enabled"):
         _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "market_intraday_bar"})
         for warning in intraday_bars.get("warnings") or []:
@@ -2476,6 +2489,23 @@ def read_stock_context(
         market_calendar_status=market_calendar_status, to_date=requested_trade_date,
         requested_capabilities=set(capability_dependency_closure(requested_capabilities)),
     ) if dependencies.build_tw_stock_technical_evidence is not None else {}, {})
+    if any(run["node"] == "technical_evidence" and run["status"] != "completed"
+           for run in execution.runs):
+        # A failed planned read is not a successful empty/legacy input. Retain
+        # observable report facts without upgrading unqualified fallback scores.
+        sufficiency = dict(technical_analysis.get("sufficiency") or {})
+        technical_analysis = _apply_technical_sufficiency_gate(
+            technical_analysis,
+            sufficiency={
+                **sufficiency,
+                "status": "partial",
+                "decision_usable": False,
+                "coverage_status": "partial",
+                "reason_codes": list(dict.fromkeys([
+                    *(sufficiency.get("reason_codes") or []), "READ_NODE_UNAVAILABLE",
+                ])),
+            },
+        )
     warnings.extend(technical_evidence.get("warnings") or [])
     for item in technical_evidence.get("source_refs") or []:
         _append_source_ref_once(source_refs, item)

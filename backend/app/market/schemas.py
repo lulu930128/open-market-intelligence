@@ -717,6 +717,10 @@ class TaiwanMarketVolumeBaselineRead(BaseModel):
     median_cumulative_trade_value: int | None = None
     pace_ratio: float | None = None
     status: str = "warming_up"
+    readiness_status: str | None = None
+    remaining_sample_days: int | None = Field(default=None, ge=0)
+    expected_ready_after_sessions: int | None = Field(default=None, ge=0)
+    next_fill: str | None = None
     sample_status: str = "empty"
     authority_status: str = "unavailable"
     decision_usable: bool = False
@@ -788,6 +792,9 @@ class TaiwanMarketVolumeStateRead(BaseModel):
         default_factory=TaiwanMarketTradeValueQualificationRead
     )
     baseline_readiness_status: str = "warming_up"
+    expected_5d_ready_after_sessions: int | None = Field(default=None, ge=0)
+    expected_20d_ready_after_sessions: int | None = Field(default=None, ge=0)
+    next_fill: str | None = None
     field_status: dict[str, Any] = Field(default_factory=dict)
     currency: str = "TWD"
     trade_value_unit: str = "TWD"
@@ -1511,6 +1518,8 @@ class TaiwanAuctionHistoryRead(BaseModel):
 
 
 class TaiwanStockQuoteDepthRead(BaseModel):
+    cumulative_trade_value: float | None = None
+    cumulative_trade_value_evidence: dict[str, Any] | None = None
     change_reference: TaiwanChangeReferenceRead = Field(default_factory=TaiwanChangeReferenceRead)
     stock_id: str
     stock_name: str | None = None
@@ -1642,6 +1651,7 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     actual_trade_occurred: bool = False
     actual_trade_price_cached: bool = False
     actual_trade_price_source: str | None = None
+    actual_trade_price_lineage: dict[str, Any] = Field(default_factory=dict)
     actual_trade_price_as_of: datetime | None = None
     last_trade_before_auction: bool = False
     auction_book_available: bool = False
@@ -1777,6 +1787,12 @@ class MarketIntradayChartPointRead(BaseModel):
     volume_status: str = "not_provided"
     trade_value: int | None = None
     approx_trade_value: float | None = None
+    trade_value_method: str | None = None
+    trade_value_currency: str | None = None
+    trade_value_authority: str | None = None
+    trade_value_official: bool = False
+    trade_value_asof: datetime | None = None
+    trade_value_asof_basis: str | None = None
     trade_value_status: str = "not_provided"
     transaction_count: int | None = None
     bar_close_time: datetime | None = None
@@ -1842,6 +1858,8 @@ class MarketIntradayVolumeReconciliationRead(BaseModel):
 
 
 class MarketIntradayChartRead(BaseModel):
+    window_trade_value: float | None = None
+    trade_value_coverage: dict[str, Any] | None = None
     materialization_jobs: list[dict[str, Any]] = Field(default_factory=list)
     repair_scope: dict[str, Any] | None = None
     stock_id: str
