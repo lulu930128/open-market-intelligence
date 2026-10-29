@@ -320,7 +320,7 @@ def test_timely_batch_survives_digest_tail_and_never_starts_io_after_scan_budget
     calls = []
     def fetch(codes, **kwargs):
         calls.append(clock.seconds)
-        clock.seconds += 19.8
+        clock.seconds += 3.8
         return [message(code) for code in codes]
     digest = provider.original_message_evidence
     def slow_digest(*args):
@@ -329,25 +329,25 @@ def test_timely_batch_survives_digest_tail_and_never_starts_io_after_scan_budget
     monkeypatch.setattr(provider.twse_mis, "fetch_stock_messages", fetch)
     monkeypatch.setattr(provider, "original_message_evidence", slow_digest)
     # Fast finalization still leaves a fractional allocation; the next IO fails
-    # honestly rather than completing another 19.8 seconds outside its budget.
+    # honestly rather than completing another 3.8 seconds outside its budget.
     def bounded(fetcher, seconds, *args, **kwargs):
-        if seconds < 19.8:
+        if seconds < 3.8:
             calls.append(clock.seconds)
             clock.seconds += seconds
             raise TimeoutError("fixture bounded IO")
         return fetcher(*args, **kwargs)
     monkeypatch.setattr(provider, "bounded_fetch", bounded)
-    outcome = provider.read_twse_mis_current_breadth(market, 20, universe_reader=lambda _: CODES)
+    outcome = provider.read_twse_mis_current_breadth(market, 4, universe_reader=lambda _: CODES)
     receipt = BreadthAcquisitionEvidence.model_validate(outcome.payload["acquisition_diagnostics"])
     assert receipt.eligible_stock_row_count == 100
     assert outcome.payload["message_count"] == 100 and outcome.payload["not_received_count"] == 1000
     assert outcome.status == "partial" and not outcome.payload["decision_usable"]
-    assert all(start < 20 for start in calls)
+    assert all(start < 4 for start in calls)
     assert receipt.batches[0].fetch_completed_in_budget
-    assert receipt.batches[0].fetch_decode_seconds == pytest.approx(19.8)
+    assert receipt.batches[0].fetch_decode_seconds == pytest.approx(3.8)
     assert receipt.batches[0].digest_seconds == pytest.approx(digest_seconds)
     assert receipt.batches[0].error is None
-    assert receipt.total_elapsed_seconds == pytest.approx(max(20, 19.8 + digest_seconds))
+    assert receipt.total_elapsed_seconds == pytest.approx(max(4, 3.8 + digest_seconds))
     assert receipt.deadline_exceeded is exceeded
     assert receipt.total_hard_deadline_seconds is None
     assert receipt.timing_policy == "bounded_io_cooperative_finalization"

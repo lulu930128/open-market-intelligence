@@ -27,6 +27,19 @@ class AcquisitionInFlight(RuntimeError):
 class AcquisitionDeadlineExceeded(TimeoutError):
     """Caller budget expired; this does not establish a socket timeout."""
 
+    def __init__(self, message: str, *, future: Future | None = None):
+        super().__init__(message)
+        self._future = future
+
+    def resume(self, seconds: float):
+        """Continue this caller's wait only; never start or release an IO slot."""
+        if self._future is None or not math.isfinite(seconds) or seconds <= 0:
+            raise self
+        completed, _ = wait((self._future,), timeout=seconds)
+        if not completed:
+            raise self
+        return self._future.result()
+
 
 def reset_io_slots() -> None:
     """Test/reset seam: never detach an active worker and allow another to spawn."""
@@ -73,7 +86,7 @@ blocks subsequent IO until completion instead of accumulating background workers
             raise AcquisitionInFlight("TWSE_MIS_RUNTIME_ADMISSION_PAUSED") from exc
     completed, _ = wait((future,), timeout=max(0.0, deadline - monotonic()))
     if not completed:
-        raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE")
+        raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE", future=future)
     # Resolve outside the wait: Future.result also raises the worker's own
     # TimeoutError, which must not be relabeled as caller budget exhaustion.
     return future.result()

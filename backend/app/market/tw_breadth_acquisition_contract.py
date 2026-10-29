@@ -22,6 +22,9 @@ class AcquisitionBatchEvidence(CanonicalModel):
     # Caller-side elapsed bounded_fetch duration (not provider socket wait).
     # Null for a batch that never entered its IO worker, including in-flight skips.
     caller_wait_seconds: float | None = Field(default=None, ge=0)
+    transport_budget_seconds: float | None = Field(default=None, ge=0, le=4)
+    initial_wait_deadline_exceeded: bool | None = None
+    resumed_wait_seconds: float | None = Field(default=None, ge=0)
     fetch_decode_seconds: float = Field(default=0, ge=0)
     transport_seconds: float | None = Field(default=None, ge=0)
     decode_seconds: float | None = Field(default=None, ge=0)

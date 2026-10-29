@@ -41,6 +41,7 @@ from app.market.trading_calendar import TAIWAN_SESSION_CLOSE_TIME, TAIWAN_CLOSE_
 TAIPEI_TZ = timezone(timedelta(hours=8))
 _CACHE_TTL_SECONDS = 30
 _BATCH_SIZE = 100
+_BATCH_MAX_WAIT_SECONDS = 4.0
 _MAX_CODES = 2_000
 _RESCUE_MAX_SYMBOLS = 32
 _RESCUE_MAX_BATCHES = 1
@@ -231,19 +232,32 @@ def _fetch_messages(
         next_code = batches[(index + 1) % len(batches)][0]
         try:
             remaining_seconds = max(0.0, deadline - monotonic())
+            batch_wait_seconds = min(remaining_seconds, _BATCH_MAX_WAIT_SECONDS)
+            evidence["transport_budget_seconds"] = batch_wait_seconds
             fetch_started = monotonic()
             phase_timing = {}
             # Time the bounded caller-side invocation, including caller deadline.
             # Unlike phase_timing, this receipt field cannot be mutated by a late worker.
             try:
                 batch_messages = bounded_fetch(
-                    twse_mis.fetch_stock_messages, remaining_seconds,
+                    twse_mis.fetch_stock_messages, batch_wait_seconds,
                     batch,
                     exchange="otc" if market == "TPEX" else "tse",
-                    timeout_seconds=max(0.001, remaining_seconds),
+                    timeout_seconds=max(0.001, batch_wait_seconds),
                     request=http_get,
                     phase_timing=phase_timing,
                 )
+            except AcquisitionDeadlineExceeded as exc:
+                # A per-batch wait is not the scan deadline. Keep the same
+                # worker and socket budget; spend only the scan's remainder.
+                # Nothing is published after the absolute deadline, and no
+                # completed rows from a previous scan are merged into this one.
+                evidence["initial_wait_deadline_exceeded"] = True
+                resume_started = monotonic()
+                try:
+                    batch_messages = exc.resume(max(0.0, deadline - resume_started))
+                finally:
+                    evidence["resumed_wait_seconds"] = max(0.0, monotonic() - resume_started)
             finally:
                 evidence["caller_wait_seconds"] = max(0.0, monotonic() - fetch_started)
             fetch_finished = monotonic()
