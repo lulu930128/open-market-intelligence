@@ -13,6 +13,14 @@ from app.market_data.contracts import OperationalStatus
 TAIPEI = timezone(timedelta(hours=8))
 
 
+def _pin_breadth_receipt_clock(monkeypatch):
+    class FixtureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 26, 10, 15, 1, tzinfo=TAIPEI).astimezone(tz)
+    monkeypatch.setattr(twse_mis_current_breadth, 'datetime', FixtureClock)
+
+
 def test_twse_mis_current_index_provider_parses_snapshot(monkeypatch) -> None:
     calls: list[tuple] = []
 
@@ -92,6 +100,7 @@ def test_yahoo_current_index_provider_parses_chart(monkeypatch) -> None:
 
 
 def test_twse_mis_current_breadth_keeps_partition_disjoint(monkeypatch) -> None:
+    _pin_breadth_receipt_clock(monkeypatch)
     twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
     codes = [f"{1000 + index:04d}" for index in range(1, 502)]
     messages = [
@@ -151,6 +160,7 @@ def _mis_messages(codes: list[str]) -> list[dict[str, str]]:
 
 
 def test_breadth_reports_actual_external_call_count(monkeypatch) -> None:
+    _pin_breadth_receipt_clock(monkeypatch)
     twse_mis_current_breadth.reset_twse_mis_current_breadth_provider()
     codes = [f"{1000 + index:04d}" for index in range(500)]
     calls: list[tuple[str, ...]] = []
@@ -177,6 +187,7 @@ def test_breadth_reports_actual_external_call_count(monkeypatch) -> None:
 
 
 def test_breadth_stops_new_batches_after_429(monkeypatch) -> None:
+    _pin_breadth_receipt_clock(monkeypatch)
     class RateLimited(Exception):
         status_code = 429
         headers = {"Retry-After": "30"}

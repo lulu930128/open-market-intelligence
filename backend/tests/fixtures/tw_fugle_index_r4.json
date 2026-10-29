@@ -1,0 +1,24 @@
+[
+  {
+    "symbol": "IX0001",
+    "started_at": "2026-10-29T03:10:44.060944+00:00",
+    "received_at": "2026-10-29T03:10:44.505672+00:00",
+    "raw_text": "{\"date\":\"2026-10-29\",\"type\":\"INDEX\",\"exchange\":\"TWSE\",\"market\":\"TSE\",\"symbol\":\"IX0001\",\"name\":\"發行量加權股價指數\",\"previousClose\":47035.58,\"openPrice\":47014.87,\"openTime\":1793235605000000,\"highPrice\":47015.45,\"highTime\":1793235860000000,\"lowPrice\":46171.04,\"lowTime\":1793241470000000,\"closePrice\":46217.27,\"closeTime\":1793243440000000,\"change\":-818.31,\"changePercent\":-1.74,\"amplitude\":1.8,\"total\":{\"transaction\":1661056,\"tradeValue\":494028298690,\"tradeVolume\":6455482,\"bidOrders\":16342515,\"askOrders\":19413555,\"bidVolume\":45073875,\"askVolume\":32404567,\"time\":1793243440000000},\"serial\":285746,\"lastUpdated\":1793243440000000}",
+    "status_code": 200,
+    "error": null,
+    "external_calls": 1,
+    "retry_after_seconds": null,
+    "content_hash": "15b497ff742c40a429bcb029cfcbfd7e60a2d1520f4f58351752e4ebd78598a1"
+  },
+  {
+    "symbol": "IX0043",
+    "started_at": "2026-10-29T03:10:44.505714+00:00",
+    "received_at": "2026-10-29T03:10:44.962680+00:00",
+    "raw_text": "{\"date\":\"2026-10-29\",\"type\":\"INDEX\",\"exchange\":\"TPEx\",\"market\":\"OTC\",\"symbol\":\"IX0043\",\"name\":\"櫃買指數\",\"previousClose\":394.61,\"openPrice\":396.4,\"openTime\":1793235605000000,\"highPrice\":397.17,\"highTime\":1793235665000000,\"lowPrice\":385.89,\"lowTime\":1793238835000000,\"closePrice\":386.52,\"closeTime\":1793243445000000,\"change\":-8.09,\"changePercent\":-2.05,\"amplitude\":2.86,\"total\":{\"transaction\":389452,\"tradeValue\":151950182570,\"tradeVolume\":1579972,\"bidOrders\":4716944,\"askOrders\":5376607,\"bidVolume\":12254114,\"askVolume\":8948937,\"time\":1793243445000000},\"serial\":1570,\"lastUpdated\":1793243445000000}",
+    "status_code": 200,
+    "error": null,
+    "external_calls": 1,
+    "retry_after_seconds": null,
+    "content_hash": "7ab4c09a97cbce0883c482fa1790a0c1d8ec5ca7cfd8a1fe0a76226c5e715773"
+  }
+]

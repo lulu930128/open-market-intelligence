@@ -257,7 +257,7 @@ class TaiwanCurrentMarketRepository:
             return True
         try:
             payload = json.loads(raw.raw_text or "")
-            actual_symbol = str(payload["data"]["symbol"]).strip().upper()
+            actual_symbol = str((payload.get("data") or payload)["symbol"]).strip().upper()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return False
         return actual_symbol == expected_symbol
@@ -285,7 +285,7 @@ class TaiwanCurrentMarketRepository:
                 limitations=("TW_CURRENT_INDEX_SCHEMA_UNAVAILABLE",),
             )
         recent_cutoff = requirement.request.from_date - timedelta(days=7)
-        provider_query = self._db.query(TaiwanCurrentIndexSnapshot.provider).filter(
+        provider_query = self._db.query(TaiwanCurrentIndexSnapshot.provider, TaiwanCurrentIndexSnapshot.source).filter(
             TaiwanCurrentIndexSnapshot.index_id == target.scope_key
         )
         providers = (
@@ -305,7 +305,7 @@ class TaiwanCurrentMarketRepository:
                 .all()
             )
         rows = []
-        for (provider,) in providers:
+        for provider, source_name in providers:
             latest_query = (
                 self._db.query(
                     TaiwanCurrentIndexSnapshot,
@@ -323,6 +323,10 @@ class TaiwanCurrentMarketRepository:
                 )
                 .filter(TaiwanCurrentIndexSnapshot.index_id == target.scope_key)
                 .filter(TaiwanCurrentIndexSnapshot.provider == provider)
+                .filter(TaiwanCurrentIndexSnapshot.source == source_name)
+                .filter(TaiwanCurrentIndexSnapshot.event_at <= requirement.requested_at.astimezone(TAIPEI_TZ).replace(tzinfo=None))
+                .filter(TaiwanCurrentIndexSnapshot.received_at <= requirement.requested_at.astimezone(timezone.utc))
+                .filter(RawFetchResult.fetched_at <= requirement.requested_at.astimezone(timezone.utc))
             )
             latest = (
                 latest_query.filter(
@@ -341,15 +345,15 @@ class TaiwanCurrentMarketRepository:
                 ).first()
             if latest is not None:
                 rows.append(latest)
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         candidates: list[ResolutionCandidate[MarketIndexObservation]] = []
         rejections: list[CandidateRowRejection] = []
         event_times: list[datetime] = []
         freshness_values: list[EvidenceFreshness] = []
         for row, raw, source in rows:
-            if row.provider in seen:
+            if (row.provider, row.source) in seen:
                 continue
-            seen.add(row.provider)
+            seen.add((row.provider, row.source))
             binding = current_source_binding(
                 provider=row.provider,
                 source=row.source,
@@ -465,6 +469,23 @@ class TaiwanCurrentMarketRepository:
                     )
                 )
                 continue
+            if row.source == "fugle_http_index_quote":
+                from app.market.providers.fugle_http import index_trade_value_observation
+                try:
+                    amount = index_trade_value_observation(json.loads(raw.raw_text or "{}"),
+                        scope=target.scope_key, lineage=observation.lineage)
+                    observation = MarketIndexObservation.model_validate({**observation.model_dump(),
+                        "cumulative_trade_value": amount})
+                except (KeyError, TypeError, ValueError):
+                    continue
+            amount_role = "cumulative_trade_value" in requirement.quality.required_fields
+            if amount_role:
+                amount = observation.cumulative_trade_value
+                if amount is None or amount.lineage.event_at > requirement.requested_at:
+                    continue
+                amount_age = (requirement.requested_at - amount.lineage.event_at).total_seconds()
+                if amount_age < 0 or amount_age > requirement.freshness.max_age_seconds:
+                    continue
             freshness = _freshness(requirement, observation.lineage.event_at)
             event_times.append(observation.lineage.event_at)
             freshness_values.append(freshness)

@@ -124,6 +124,7 @@ def build_taiwan_current_requirement(
     requested_at: datetime,
     policy: RealtimePolicy,
     acquiring: bool,
+    require_trade_value: bool = False,
 ) -> DataRequirementV2:
     if requested_at.tzinfo is None or requested_at.utcoffset() is None:
         raise ValueError("requested_at must be timezone-aware")
@@ -149,6 +150,8 @@ def build_taiwan_current_requirement(
         if dataset_id == TW_CURRENT_INDEX_DATASET_ID
         else ()
     )
+    if require_trade_value:
+        required_fields = (*required_fields, "cumulative_trade_value")
     max_external_calls = (
         20 if dataset_id == TW_CURRENT_BREADTH_DATASET_ID else 2
     )
@@ -180,7 +183,7 @@ def build_taiwan_current_requirement(
             max_external_calls=max_external_calls if acquiring else 0,
             max_subscriptions=0,
             timeout_seconds=40 if acquiring else 30,
-            max_candidates=3,
+            max_candidates=len(TW_CURRENT_INDEX_DESCRIPTORS) if dataset_id == TW_CURRENT_INDEX_DATASET_ID else 3,
             max_rows=10,
         ),
     )
@@ -191,6 +194,7 @@ def read_taiwan_current_index(
     *,
     index_id: str,
     requested_at: datetime | None = None,
+    require_trade_value: bool = False,
 ) -> MarketDataResultV1:
     now = requested_at or datetime.now(TAIWAN_TZ)
     requirement = build_taiwan_current_requirement(
@@ -200,6 +204,7 @@ def read_taiwan_current_index(
         requested_at=now,
         policy=RealtimePolicy.CACHE_ONLY,
         acquiring=False,
+        require_trade_value=require_trade_value,
     )
     return MarketDataGateway().resolve_market_index(
         requirement,
@@ -513,6 +518,8 @@ def refresh_taiwan_current_index(
         ProviderCapabilityDescriptorV2
     ] = TW_CURRENT_INDEX_DESCRIPTORS,
     acquisition: TaiwanCurrentIndexAcquisitionExecutor,
+    require_trade_value: bool = False,
+    completion_clock=None,
 ) -> MarketDataResultV1:
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("current index refresh requires prefer_live or require_live")
@@ -524,6 +531,7 @@ def refresh_taiwan_current_index(
         requested_at=now,
         policy=policy,
         acquiring=True,
+        require_trade_value=require_trade_value,
     )
     return MarketDataGateway().resolve_market_index(
         requirement,
@@ -533,6 +541,7 @@ def refresh_taiwan_current_index(
         transaction_port=TaiwanCurrentMarketTransaction(db),
         official_first=False,
         route_resolution_gate=True,
+        completion_clock=completion_clock,
     )
 
 
@@ -632,6 +641,22 @@ def project_taiwan_current_index(result: MarketDataResultV1) -> dict[str, object
         ],
         "limitations": limitations,
     }
+
+
+def project_taiwan_current_trade_value(result: MarketDataResultV1) -> dict[str, object]:
+    """Projection of the amount role; never borrow the price selection clock."""
+    index = result.resolved.market_index
+    amount = index.cumulative_trade_value if index is not None else None
+    if amount is None or not result.resolved.health.facts_usable:
+        return {"status": "missing", "trade_value": None,
+                "resolved_health": result.resolved.health.model_dump(mode="json")}
+    return {"status": "available", "market": amount.venue, "trade_date": amount.trade_date.isoformat(),
+        "as_of": amount.lineage.event_at.isoformat(), "trade_value": int(amount.value),
+        "currency": amount.currency, "trade_value_unit": amount.currency, "scope": amount.scope,
+        "trade_value_semantics": amount.semantics, "trade_value_is_estimate": amount.is_estimate,
+        "official_flag": amount.official, "provider": amount.lineage.provider, "source": amount.lineage.source,
+        "raw_result_id": amount.lineage.raw_receipt_id, "lineage": amount.lineage.model_dump(mode="json"),
+        "resolved_health": result.resolved.health.model_dump(mode="json")}
 
 
 def _project_auction_breadth(result: MarketDataResultV1) -> dict[str, object]:

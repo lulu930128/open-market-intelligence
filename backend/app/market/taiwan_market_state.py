@@ -24,6 +24,28 @@ MARKET_MINUTE_CALCULATION_VERSION = "tw.market.minute_state.derived.v4"
 VOLUME_COMPARISON_VERSION = "tw.market.volume_comparison.v1"
 
 
+def _vendor_reported_trade_value(component: dict[str, Any]) -> bool:
+    from app.market.tw_current_market_capabilities import current_source_binding, TW_CURRENT_INDEX_CAPABILITY_ID
+    lineage = component.get("lineage") or {}
+    binding = current_source_binding(provider=component.get("provider") or lineage.get("provider"),
+        source=component.get("source") or lineage.get("source"), capability_id=TW_CURRENT_INDEX_CAPABILITY_ID)
+    return bool(binding and binding.descriptor.authority.value == "vendor"
+        and binding.trade_value_scope is not None
+        and component.get("scope") == binding.trade_value_scope
+        and component.get("trade_value_semantics") == binding.trade_value_semantics
+        and component.get("trade_value_is_estimate") is False
+        and component.get("official_flag") is False
+        and component.get("currency") == component.get("trade_value_unit") == "TWD")
+
+
+def _component_trade_value_authority(component: dict[str, Any]) -> str:
+    if component.get("trade_value_is_estimate") is True:
+        return "estimated"
+    if component.get("trade_value_is_estimate") is False and component.get("official_flag") is True:
+        return "official"
+    return "vendor_reported" if _vendor_reported_trade_value(component) else "unavailable"
+
+
 def _volume_comparison_identity(component: dict[str, Any]) -> dict[str, Any]:
     """Project comparison semantics, preserving the original scope and lineage.
 
@@ -53,13 +75,15 @@ def _volume_comparison_identity(component: dict[str, Any]) -> dict[str, Any]:
         "venue": venue,
         "universe_class": universe,
         "trade_value_semantic_class": component.get("trade_value_semantics"),
-        "authority_class": "estimated" if estimate is True else "official" if estimate is False else None,
+        "authority_class": _component_trade_value_authority(component),
+        **({"provider": component.get("provider"), "source": source}
+           if _vendor_reported_trade_value(component) else {}),
     }
 
 
 def _row_comparison_identity(row: TaiwanMarketMinuteState) -> dict[str, Any]:
     evidence = _row_trade_value_evidence(row)
-    return _volume_comparison_identity({
+    return _volume_comparison_identity({**evidence,
         "market": row.market, "scope": evidence["scope"],
         "source": evidence["source"], "breadth_contract_version": evidence["breadth_contract_version"],
         "trade_value_semantics": row.trade_value_semantics,
@@ -94,7 +118,7 @@ def _trade_value_qualification(component: dict[str, Any]) -> dict[str, Any]:
     price_coverage_ratio = None
     estimate = component.get("trade_value_is_estimate")
     if estimate is False:
-        if component.get("official_flag") is not True:
+        if component.get("official_flag") is not True and not _vendor_reported_trade_value(component):
             reasons.append("OFFICIAL_AUTHORITY_UNVERIFIED")
     elif estimate is True:
         if component.get("trade_value_semantics") != "estimated_latest_price_x_cumulative_volume_lots":
@@ -227,6 +251,8 @@ def _market_minute_component_lineage(
     )
     component_inputs = (
         ("index_snapshot", index_component, _as_float(item.get("close")) is not None),
+        ("market_trade_value", item.get("trade_value_observation"),
+         isinstance(item.get("trade_value_observation"), dict) and item["trade_value_observation"].get("trade_value") is not None),
         (
             "market_breadth",
             breadth_component,
@@ -406,7 +432,8 @@ def _eligible_session_trade_value(
         component["domain"]: component
         for component in _market_minute_component_lineage(item=item, breadth=breadth)["components"]
     }
-    candidates = ((item, "index_snapshot", "market_index_summary"),
+    candidates = ((item.get("trade_value_observation") or {}, "market_trade_value", "market_trade_value"),
+                  (item, "index_snapshot", "market_index_summary"),
                   (breadth, "market_breadth", "breadth"))
     candidates = sorted(candidates, key=lambda candidate: candidate[0].get("trade_value_is_estimate") is True)
     for candidate, domain, source in candidates:
@@ -420,11 +447,12 @@ def _eligible_session_trade_value(
         candidate_at = _as_taiwan_datetime(candidate_event, naive_is_local=True)
         if (
             value is None
-            or not (estimate is True or official and (estimate is None or estimate is False))
+            or not (estimate is True or official and (estimate is None or estimate is False)
+                    or _vendor_reported_trade_value(candidate))
             or candidate.get("market") != item.get("market")
             or candidate_date != trade_date
             or event_at is None or event_at.date() != trade_date
-            or event_at.replace(second=0, microsecond=0) != minute_at.replace(second=0, microsecond=0)
+            or (domain != "market_trade_value" and event_at.replace(second=0, microsecond=0) != minute_at.replace(second=0, microsecond=0))
             or candidate_event is not None and (
                 candidate_at is None
                 or candidate_at.replace(second=0, microsecond=0) != event_at.replace(second=0, microsecond=0)
@@ -539,6 +567,7 @@ def persist_taiwan_market_minute_state(
         )
         value_domain = (
             "market_breadth" if trade_value_contract["source"] == "breadth"
+            else "market_trade_value" if trade_value_contract["source"] == "market_trade_value"
             else "index_snapshot"
         )
         value_component = next(
@@ -609,16 +638,18 @@ def persist_taiwan_market_minute_state(
         for component in component_lineage["components"]:
             component["owns_trade_value"] = component["domain"] == value_domain
             if component["owns_trade_value"]:
-                value_evidence = breadth if value_domain == "market_breadth" else item
+                value_evidence = (breadth if value_domain == "market_breadth" else
+                    item.get("trade_value_observation") if value_domain == "market_trade_value" else item)
                 component["trade_value_evidence"] = {
                     key: deepcopy(value_evidence.get(key))
-                    for key in ("official_flag", "total_count", "acquisition_diagnostics", "coverage_reason_counts")
+                    for key in ("official_flag", "total_count", "acquisition_diagnostics", "coverage_reason_counts",
+                                "provider", "source", "scope", "currency", "trade_value_unit", "lineage")
                 }
                 component["trade_value_evidence"]["official_flag"] = (
                     value_evidence.get("official_flag") is True
                     or value_domain == "index_snapshot" and value_evidence.get("official") is True
                 )
-                if value_domain == "index_snapshot":
+                if value_domain in {"index_snapshot", "market_trade_value"}:
                     component["trade_value_evidence"].update(
                         scope=value_evidence.get("scope") or "full_market",
                         source=component.get("source"),
@@ -871,12 +902,8 @@ def _trade_value_authority_status(
     ]
     if not usable_rows:
         return "unavailable"
-    estimated_count = sum(bool(row.trade_value_is_estimate) for row in usable_rows)
-    if estimated_count == len(usable_rows):
-        return "estimated"
-    if estimated_count:
-        return "mixed"
-    return "official"
+    authorities = {_component_trade_value_authority(_row_trade_value_evidence(row)) for row in usable_rows}
+    return next(iter(authorities)) if len(authorities) == 1 else "mixed"
 
 
 def _baseline_payload(
@@ -990,14 +1017,17 @@ def _current_trade_value_lineage_usable(component: dict[str, Any]) -> bool:
 
 def compose_taiwan_market_volume_state(
     volume_state: dict[str, Any], *, breadth: dict[str, Any] | None,
+    current_components: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
     """Read-only composition of canonical values and comparable baselines."""
     output = deepcopy(volume_state)
+    if current_components:
+        output["current_cumulative_trade_value"] = None
     current = _as_int(output.get("current_cumulative_trade_value"))
     if current is not None and current < 0:
         current = None
     if current is None:
-        markets = (breadth or {}).get("markets") or {}
+        markets = current_components or (breadth or {}).get("markets") or {}
         components = []
         for market in ("TWSE", "TPEX"):
             item = markets.get(market) if isinstance(markets, dict) else None
@@ -1011,7 +1041,7 @@ def compose_taiwan_market_volume_state(
                 **item, "market": market, "cumulative_trade_value": value,
                 "as_of": event.isoformat() if event else None,
                 "comparison_minute": event.strftime("%H:%M") if event else None,
-                "currency": "TWD", "trade_value_unit": "TWD",
+                "currency": item.get("currency", "TWD"), "trade_value_unit": item.get("trade_value_unit", "TWD"),
                 # Missing authority is unknown, never implicitly official.
                 "official_flag": item.get("official_flag") is True,
             })
@@ -1031,13 +1061,15 @@ def compose_taiwan_market_volume_state(
             and len(scopes) == 1 and scopes <= {
                 "full_market", "full_market_registered_stock_universe", "registered_universe",
                 "active_ordinary_stock_universe",
+                "venue_regular_market",
             }
             and all(
                 _as_taiwan_datetime(item["as_of"]).date() in dates
                 and taiwan_market_session_phase(_as_taiwan_datetime(item["as_of"])) in {"regular", "closing_auction", "close_resolution", "post_close"}
                 and item.get("trade_value_semantics") not in {None, "", "unavailable"}
                 and isinstance(item.get("trade_value_is_estimate"), bool)
-                and (item.get("trade_value_is_estimate") is True or item["official_flag"])
+                and item.get("currency") == "TWD" and item.get("trade_value_unit") == "TWD"
+                and (item.get("trade_value_is_estimate") is True or item["official_flag"] or _vendor_reported_trade_value(item))
                 and _current_trade_value_lineage_usable(item)
                 for item in components
             )
@@ -1054,22 +1086,40 @@ def compose_taiwan_market_volume_state(
             missing_markets=[market for market in ("TWSE", "TPEX") if market not in {item["market"] for item in components}],
             trade_value_components=components,
         )
-        authorities = {
-            "estimated" if item.get("trade_value_is_estimate") is True
-            else "official" if item.get("trade_value_is_estimate") is False and item["official_flag"] else "unavailable"
-            for item in components
-        }
+        authorities = {_component_trade_value_authority(item) for item in components}
         authority = next(iter(authorities)) if len(authorities) == 1 else "mixed" if authorities else "unavailable"
+        selection_source = "canonical_market_trade_value" if current_components else "canonical_market_breadth"
+        if current_components:
+            selected_at = max((item["as_of"] for item in components if item["as_of"]), default=None)
+            selected_identity = {item["market"]: _volume_comparison_identity(item) for item in components}
+            same_selection = (selected_at == output.get("as_of")
+                and selected_identity == {item["market"]: _volume_comparison_identity(item) for item in output.get("markets") or []})
+            output.update(markets=components, as_of=selected_at,
+                trade_date=next(iter(dates)).isoformat() if len(dates) == 1 and None not in dates else None,
+                comparison_minute=next(iter(minutes)) if len(minutes) == 1 else None,
+                current_value_source=selection_source,
+                official_cumulative_trade_value=None, estimated_cumulative_trade_value=None,
+                vendor_reported_cumulative_trade_value=None, trade_value_estimate=None,
+                trade_value_estimate_method="not_estimated",
+                current_trade_value_semantics=next(iter(semantics)) if len(semantics) == 1 else "mixed",
+                status="ready" if qualified else "partial")
+            if not same_selection or not qualified:
+                output["previous_minute_cumulative_trade_value"] = None
+                output["one_minute_trade_value_change"] = None
+                for key in ("previous_minute_cumulative_trade_value", "one_minute_trade_value_change"):
+                    output.setdefault("field_status", {})[key] = {"status": "missing",
+                        "reason": "Current component identity differs from the minute-state delta endpoint."}
         output["trade_value_authority_status"] = authority
         output["trade_value_status"] = f"{authority}_complete" if qualified else output["trade_value_coverage_status"]
         if qualified:
             prior_minute = output.get("as_of")
             output.update(
-                current_value_source="canonical_market_breadth",
+                current_value_source=selection_source,
                 trade_date=next(iter(dates)).isoformat(),
                 as_of=max(item["as_of"] for item in components),
                 comparison_minute=next(iter(minutes)), markets=components,
                 official_cumulative_trade_value=current if authority == "official" else None,
+                vendor_reported_cumulative_trade_value=current if authority == "vendor_reported" else None,
                 estimated_cumulative_trade_value=current if authority in {"estimated", "mixed"} else None,
                 trade_value_estimate=current if authority in {"estimated", "mixed"} else None,
                 trade_value_estimate_method="sum_market_estimates" if authority in {"estimated", "mixed"} else "not_estimated",
@@ -1082,7 +1132,7 @@ def compose_taiwan_market_volume_state(
             output["warnings"] = [warning for warning in output.get("warnings") or [] if warning != "TWSE and TPEX cumulative trade value are not both available at the selected minute."]
         output.setdefault("field_status", {})["current_cumulative_trade_value"] = {
             "status": "available" if qualified else "missing",
-            "source": "canonical_market_breadth" if qualified else None,
+            "source": selection_source if components else None,
             "reason": None if qualified else "TWSE and TPEX values require matching date, minute, scope, semantics, explicit authority and canonical lineage.",
         }
     return _qualify_volume_comparisons(output)
@@ -1113,7 +1163,7 @@ def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
         key = f"same_time_baseline_{days}d"
         baseline = output.setdefault(key, {})
         if (
-            output.get("current_value_source") == "canonical_market_breadth"
+            output.get("current_value_source") in {"canonical_market_breadth", "canonical_market_trade_value"}
             and (
                 baseline.get("comparison_minute") != output.get("comparison_minute")
                 or baseline.get("comparison_trade_date") != output.get("trade_date")
@@ -1187,12 +1237,33 @@ def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_taiwan_market_volume_state(
+    db: Session, *, lookback_days: int = 20, requested_at: datetime | None = None,
+) -> dict[str, Any]:
+    from app.market.tw_current_market_platform import read_taiwan_current_index, project_taiwan_current_trade_value
+    now = requested_at or datetime.now(timezone.utc)
+    persisted = _read_taiwan_market_minute_volume_state(db, lookback_days=lookback_days, requested_at=now)
+    components = {}
+    for venue, index_id in INDEX_ID_BY_MARKET.items():
+        item = project_taiwan_current_trade_value(read_taiwan_current_index(
+            db, index_id=index_id, requested_at=now, require_trade_value=True))
+        if item.get("trade_value") is not None:
+            components[venue] = item
+    if not components:
+        return persisted
+    return compose_taiwan_market_volume_state(persisted, breadth=None, current_components=components)
+
+
+def _read_taiwan_market_minute_volume_state(
     db: Session,
     *,
     lookback_days: int = 20,
+    requested_at: datetime | None = None,
 ) -> dict[str, Any]:
-    generated_at = datetime.now(timezone.utc)
-    latest_trade_date = db.query(TaiwanMarketMinuteState.trade_date).order_by(
+    generated_at = requested_at or datetime.now(timezone.utc)
+    cutoff = generated_at.astimezone(TAIWAN_TZ).replace(tzinfo=None)
+    latest_trade_date = db.query(TaiwanMarketMinuteState.trade_date).filter(
+        TaiwanMarketMinuteState.minute_at <= cutoff,
+        TaiwanMarketMinuteState.updated_at <= generated_at.astimezone(timezone.utc)).order_by(
         TaiwanMarketMinuteState.trade_date.desc()
     ).limit(1).scalar()
     if latest_trade_date is None:
@@ -1256,6 +1327,8 @@ def read_taiwan_market_volume_state(
     current_rows = (
         db.query(TaiwanMarketMinuteState)
         .filter(TaiwanMarketMinuteState.trade_date == latest_trade_date)
+        .filter(TaiwanMarketMinuteState.minute_at <= cutoff)
+        .filter(TaiwanMarketMinuteState.updated_at <= generated_at.astimezone(timezone.utc))
         .order_by(TaiwanMarketMinuteState.minute_at.asc())
         .all()
     )
@@ -1291,7 +1364,7 @@ def read_taiwan_market_volume_state(
     )
     official_current_value = (
         current_value
-        if current_value is not None and not trade_value_uses_estimate
+        if current_value is not None and _trade_value_authority_status(selected_rows) == "official"
         else None
     )
     estimated_current_value = (
@@ -1346,6 +1419,7 @@ def read_taiwan_market_volume_state(
         db.query(TaiwanMarketMinuteState)
         .filter(TaiwanMarketMinuteState.trade_date >= history_start)
         .filter(TaiwanMarketMinuteState.trade_date < latest_trade_date)
+        .filter(TaiwanMarketMinuteState.updated_at <= generated_at.astimezone(timezone.utc))
         .order_by(
             TaiwanMarketMinuteState.trade_date.asc(),
             TaiwanMarketMinuteState.minute_at.asc(),
@@ -1588,7 +1662,9 @@ def read_taiwan_market_volume_state(
             "best_available_combined_includes_estimate"
             if trade_value_uses_estimate
             else "official_combined_cumulative_trade_value"
-            if current_value is not None
+            if official_current_value is not None
+            else "vendor_reported_combined_cumulative_trade_value"
+            if current_value is not None and _trade_value_authority_status(selected_rows) == "vendor_reported"
             else "unavailable"
         ),
         "available_cumulative_trade_value": available_current_value,

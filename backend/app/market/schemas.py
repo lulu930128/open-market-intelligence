@@ -784,6 +784,7 @@ class TaiwanMarketVolumeStateRead(BaseModel):
     available_cumulative_trade_value: int | None = None
     estimated_cumulative_trade_value: int | None = None
     official_cumulative_trade_value: int | None = None
+    vendor_reported_cumulative_trade_value: int | None = None
     trade_value_available: bool = False
     trade_value_complete: bool = False
     # Completeness above describes aligned values; qualification proves scope

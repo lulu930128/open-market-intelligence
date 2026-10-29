@@ -321,6 +321,7 @@ class QuoteObservation(CanonicalModel):
     cumulative_lineage: SourceLineage | None = None
     cumulative_freshness: EvidenceFreshness | None = None
     cumulative_checked_at: datetime | None = None
+    first_trade_at: datetime | None = None
     open_price: Decimal | None = None
     high_price: Decimal | None = None
     low_price: Decimal | None = None
@@ -333,6 +334,8 @@ class QuoteObservation(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_quote_prices(self) -> QuoteObservation:
+        if self.first_trade_at is not None and self.first_trade_at.utcoffset() is None:
+            raise ValueError("first trade time must be timezone-aware")
         if (self.cumulative_turnover_value is None) != (self.cumulative_turnover_currency is None):
             raise ValueError("cumulative turnover requires value and currency together")
         if self.cumulative_event_at is not None and self.cumulative_event_at.utcoffset() is None:
@@ -745,6 +748,20 @@ class MarketBreadthObservation(CanonicalModel):
         return self
 
 
+class MarketTradeValueObservation(CanonicalModel):
+    """Reported venue turnover with its own event and receipt lineage."""
+    market: Market
+    venue: str
+    trade_date: date
+    value: Decimal = Field(ge=0)
+    currency: str = Field(min_length=3, max_length=3)
+    scope: str = Field(min_length=1)
+    semantics: str = Field(min_length=1)
+    is_estimate: bool = False
+    official: bool = False
+    lineage: SourceLineage
+
+
 class MarketIndexObservation(CanonicalModel):
     contract_version: str = "omi.market.index_observation.v1"
     market: Market
@@ -765,8 +782,19 @@ class MarketIndexObservation(CanonicalModel):
     official: bool = False
     provisional: bool = False
 
+    cumulative_trade_value: MarketTradeValueObservation | None = None
+
     @model_validator(mode="after")
     def _validate_market_index(self) -> MarketIndexObservation:
+        amount = self.cumulative_trade_value
+        if amount is not None and (
+            amount.value != self.trade_value or amount.currency != self.currency
+            or amount.venue != self.venue or amount.trade_date != self.trade_date
+            or amount.lineage.provider != self.lineage.provider
+            or amount.lineage.source != self.lineage.source
+            or amount.lineage.content_hash != self.lineage.content_hash
+        ):
+            raise ValueError("market index turnover identity mismatch")
         incomplete = any(
             value is None
             for value in (

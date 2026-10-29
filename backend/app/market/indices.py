@@ -4758,6 +4758,7 @@ def _shared_current_market_summary(
     allow_universe_fallback: bool = True,
 ) -> dict:
     from app.market.tw_current_market_platform import (
+        project_taiwan_current_trade_value,
         project_taiwan_current_breadth,
         project_taiwan_current_index,
         read_taiwan_current_breadth,
@@ -4787,6 +4788,8 @@ def _shared_current_market_summary(
             requested_at=now,
         )
         current = project_taiwan_current_index(index_result)
+        amount = project_taiwan_current_trade_value(read_taiwan_current_index(
+            db, index_id=index_id, requested_at=now, require_trade_value=True))
         breadth = project_taiwan_current_breadth(breadth_result)
         completed_auctions = read_taiwan_completed_auction_breadth(
             db, venue=venue, requested_at=now,
@@ -4906,7 +4909,8 @@ def _shared_current_market_summary(
                 "change_pct": change_pct,
                 "volume": None,
                 "estimated_volume": None,
-                "trade_value": breadth.get("trade_value"),
+                "trade_value": amount.get("trade_value"),
+                "trade_value_observation": amount,
                 "estimated_trade_value": None,
                 "ma20": None,
                 "price_vs_ma20": None,
@@ -4922,6 +4926,7 @@ def _shared_current_market_summary(
                 "breadth_lanes": breadth_lanes,
                 "current_data_core": {
                     "index": current,
+                    "trade_value": amount,
                     "breadth": breadth,
                 },
                 **completed_daily,
@@ -5145,6 +5150,8 @@ def _refresh_current_market_summary(
                     index_id=str(config["index_id"]),
                     requested_at=now,
                     acquisition=index_acquisition,
+                    require_trade_value=True,
+                    completion_clock=lambda: datetime.now(TAIPEI_TZ),
                 )
                 refresh_limitations.extend(index_result.limitations)
             if refresh_breadth:
@@ -5155,7 +5162,7 @@ def _refresh_current_market_summary(
                     acquisition=breadth_acquisition,
                 )
                 refresh_limitations.extend(breadth_result.limitations)
-        payload = _shared_current_market_summary(db, requested_at=now)
+        payload = _shared_current_market_summary(db, requested_at=datetime.now(TAIPEI_TZ))
         payload["acquisition_policy"] = "prefer_live"
         payload["cache_status"] = (
             "canonical_refresh"

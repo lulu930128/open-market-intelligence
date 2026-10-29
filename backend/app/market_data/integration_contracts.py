@@ -554,6 +554,7 @@ ResolvedPayload = (
 class MarketDataResultV1(CanonicalModel):
     contract_version: str = "omi.market.data_result.v1"
     requirement: DataRequirementV2
+    resolution_at: datetime | None = None
     result_kind: Literal[
         "quote",
         "depth",
@@ -573,6 +574,10 @@ class MarketDataResultV1(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_result_kind(self) -> MarketDataResultV1:
+        if self.resolution_at is not None and (
+            self.resolution_at.utcoffset() is None or self.resolution_at < self.requirement.requested_at
+        ):
+            raise ValueError("resolution_at must be aware and no earlier than requested_at")
         expected_type = {
             "quote": ResolvedQuote,
             "depth": ResolvedDepth,

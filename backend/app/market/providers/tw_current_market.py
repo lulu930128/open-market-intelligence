@@ -68,6 +68,7 @@ class CurrentMarketProviderPayload:
     external_calls: int = 1
     diagnostics: dict[str, Any] | None = None
     method: str = "GET"
+    raw_text: str | None = None
 
 
 PayloadReader = Callable[[str, int], CurrentMarketProviderPayload]
@@ -174,6 +175,8 @@ def _breadth_coverage_reason_counts(
 
 
 def _raw_text(payload: CurrentMarketProviderPayload) -> str:
+    if payload.raw_text is not None:
+        return payload.raw_text
     if payload.payload is None:
         return json.dumps({"acquisition_diagnostics": payload.diagnostics}, sort_keys=True) if payload.diagnostics else ""
     return json.dumps(
@@ -328,6 +331,7 @@ class CurrentIndexAdapter:
             raise ValueError("current index adapter requires dataset target")
         fetched_at = _aware(self._clock(), label="current index adapter clock")
         payload = self._reader(requirement.target.scope_key, route.timeout_seconds)
+        fetched_at = _aware(self._clock(), label="current index receipt clock")
         raw_text = _raw_text(payload)
         content_hash = sha256(raw_text.encode("utf-8")).hexdigest()
         observation: MarketIndexObservation | None = None
@@ -382,7 +386,14 @@ class CurrentIndexAdapter:
                 official=self.binding.descriptor.authority.value == "exchange",
                 provisional=True,
             )
+            if self.binding.source == "fugle_http_index_quote":
+                from app.market.providers.fugle_http import index_trade_value_observation
+                amount = index_trade_value_observation(json.loads(raw_text),
+                    scope=requirement.target.scope_key, lineage=observation.lineage)
+                observation = MarketIndexObservation.model_validate({**observation.model_dump(),
+                    "cumulative_trade_value": amount})
         except (TypeError, ValueError) as exc:
+            observation = None
             error = payload.error or str(exc)
         receipt = _receipt(
             binding=self.binding,

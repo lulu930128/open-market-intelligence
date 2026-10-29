@@ -34,6 +34,8 @@ class TaiwanCurrentSourceBinding:
     auth_type: str = "none"
     persistent_limitations: tuple[str, ...] = ()
     index_scope_symbols: tuple[tuple[str, str], ...] = ()
+    trade_value_scope: str | None = None
+    trade_value_semantics: str | None = None
 
 
 def _descriptor(
@@ -131,6 +133,14 @@ TWSE_MIS_CURRENT_INDEX_DESCRIPTOR = _descriptor(
     limitations=("PUBLIC_BEST_EFFORT_NO_SLA", "SNAPSHOT_NOT_BAR_SERIES"),
 )
 
+FUGLE_HTTP_CURRENT_INDEX_DESCRIPTOR = _descriptor(
+    provider="fugle_marketdata", capability=TW_CURRENT_INDEX_CAPABILITY_ID,
+    dataset=TW_CURRENT_INDEX_DATASET_ID, resource="tw.fugle.index.http_quote",
+    authority=AuthorityClass.VENDOR, scopes=("TAIEX", "TPEX"), priority=6,
+    live=True, sessions=_FUGLE_MATERIALIZABLE_SESSIONS,
+    limitations=("API_KEY_REQUIRED", "VENDOR_NOT_OFFICIAL", "VENUE_REGULAR_MARKET_SCOPE"),
+)
+
 YAHOO_CURRENT_INDEX_DESCRIPTOR = _descriptor(
     provider="yahoo_finance_chart",
     capability=TW_CURRENT_INDEX_CAPABILITY_ID,
@@ -160,12 +170,19 @@ TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR = _descriptor(
 
 TW_CURRENT_INDEX_DESCRIPTORS = (
     FUGLE_CURRENT_INDEX_DESCRIPTOR,
+    FUGLE_HTTP_CURRENT_INDEX_DESCRIPTOR,
     TWSE_MIS_CURRENT_INDEX_DESCRIPTOR,
     YAHOO_CURRENT_INDEX_DESCRIPTOR,
 )
 TW_CURRENT_BREADTH_DESCRIPTORS = (TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR,)
 
 TW_CURRENT_SOURCE_BINDINGS = (
+    TaiwanCurrentSourceBinding(
+        descriptor=FUGLE_HTTP_CURRENT_INDEX_DESCRIPTOR,
+        source="fugle_http_index_quote", parser_version="fugle.http.index.quote.v1",
+        auth_type="api_key", index_scope_symbols=(("TAIEX", "IX0001"), ("TPEX", "IX0043")),
+        trade_value_scope="venue_regular_market", trade_value_semantics="vendor_cumulative_trade_value",
+    ),
     TaiwanCurrentSourceBinding(
         descriptor=FUGLE_CURRENT_INDEX_DESCRIPTOR,
         source="fugle_indices_stream",

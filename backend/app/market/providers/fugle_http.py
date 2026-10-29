@@ -17,7 +17,7 @@ from time import monotonic
 from app.config import settings
 from app.market.providers._http import get
 from app.market.providers.fugle_realtime import (
-    FugleStreamRecord, TAIPEI_TZ, _decimal, _event_time, _iso_time, _lots,
+    FugleStreamRecord, TAIPEI_TZ, _decimal, _event_time, _iso_time, _microsecond_time, _lots,
     _validate_stock_payload_identity, fugle_quote_acquisition,
 )
 from app.market.tw_intraday_capabilities import (
@@ -67,7 +67,12 @@ def read_fugle_http(kind: str, symbol: str, timeout_seconds: int) -> FugleHttpPa
     # Canonical Taiwan stock/ETF codes can carry an uppercase suffix (00981A,
     # 00679B). Keep this a bounded ASCII path segment; instrument eligibility
     # still belongs to StockMaster and the canonical acquisition route.
-    if kind not in {"quote", "candles"} or not isinstance(symbol, str) or not re.fullmatch(r"[0-9]{4,6}[A-Z]?", symbol):
+    supported_symbol = isinstance(symbol, str) and (
+        re.fullmatch(r"[0-9]{4,6}[A-Z]?", symbol)
+        or (kind == "quote" and symbol in {"IX0001", "IX0043"})
+        or (kind == "snapshot_quotes" and symbol in {"TSE", "OTC"})
+    )
+    if kind not in {"quote", "candles", "snapshot_quotes"} or not supported_symbol:
         raise ValueError("unsupported Fugle HTTP target")
     key = str(settings.fugle_api_key or "").strip()
     if not key:
@@ -88,10 +93,13 @@ def read_fugle_http(kind: str, symbol: str, timeout_seconds: int) -> FugleHttpPa
     def run() -> None:
         global _cooldown_until
         try:
-            response = get(f"{BASE_URL}/{kind}/{symbol}", provider=FUGLE_PROVIDER,
+            url = (f"{BASE_URL.rsplit('/', 1)[0]}/snapshot/quotes/{symbol}"
+                   if kind == "snapshot_quotes" else f"{BASE_URL}/{kind}/{symbol}")
+            response = get(url, provider=FUGLE_PROVIDER,
                 resource=f"intraday.{kind}", target=symbol, timeout_seconds=budget,
                 headers={"X-API-KEY": key, "Accept": "application/json"},
-                params={"timeframe": "1", "sort": "asc"} if kind == "candles" else None,
+                params={"timeframe": "1", "sort": "asc"} if kind == "candles" else
+                    {"type": "COMMONSTOCK"} if kind == "snapshot_quotes" else None,
                 allow_redirects=False)
             code = response.status_code
             error = None if code == 200 else {
@@ -121,6 +129,57 @@ def read_fugle_http(kind: str, symbol: str, timeout_seconds: int) -> FugleHttpPa
     if not done.wait(budget):
         return FugleHttpPayload(error="FUGLE_TIMEOUT", external_calls=1)
     return outcome[0]
+
+
+def index_trade_value_observation(data: dict, *, scope: str, lineage: SourceLineage):
+    """Decode original HTTP receipt; total.time never borrows the price clock."""
+    from app.market_data.contracts import MarketTradeValueObservation
+    expected = {"TAIEX": ("IX0001", "TWSE", "TSE"), "TPEX": ("IX0043", "TPEx", "OTC")}[scope]
+    if (data.get("symbol"), data.get("exchange"), data.get("market")) != expected or data.get("type") != "INDEX":
+        raise ValueError("FUGLE_INDEX_SCOPE_MISMATCH")
+    day = date.fromisoformat(data["date"])
+    total = data.get("total") or {}
+    amount = _decimal(total.get("tradeValue"))
+    event = _microsecond_time(total.get("time"))
+    if amount is None or amount < 0 or amount != amount.to_integral_value() or event is None:
+        raise ValueError("FUGLE_INDEX_TURNOVER_INVALID")
+    # Keep the source clock verbatim. Eligibility checks both event and receipt
+    # against requested_at; a sub-second server/client skew is not a new clock.
+    if event.astimezone(TAIPEI_TZ).date() != day:
+        raise ValueError("FUGLE_INDEX_TURNOVER_CLOCK_INVALID")
+    return MarketTradeValueObservation(market="TW", venue="TWSE" if scope == "TAIEX" else "TPEX",
+        trade_date=day, value=amount, currency="TWD", scope="venue_regular_market",
+        semantics="vendor_cumulative_trade_value", official=False, is_estimate=False,
+        lineage=lineage.model_copy(update={"event_at": event}))
+
+
+def read_fugle_current_index(scope: str, timeout_seconds: int):
+    from app.market.providers.tw_current_market import CurrentMarketProviderPayload
+    symbol = {"TAIEX": "IX0001", "TPEX": "IX0043"}[scope]
+    result = read_fugle_http("quote", symbol, timeout_seconds)
+    normalized = None
+    error = result.error
+    if error is None:
+        try:
+            data = json.loads(result.raw_text)
+            # Validate scope and amount here, and again in the typed adapter and
+            # persisted decoder. RawResult retains the exact original payload.
+            lineage = SourceLineage(provider=FUGLE_PROVIDER, source="fugle_http_index_quote",
+                authority="vendor", raw_contract_version="fugle.http.index.quote.v1",
+                fetched_at=datetime.now(timezone.utc), content_hash=sha256(result.raw_text.encode()).hexdigest())
+            amount = index_trade_value_observation(data, scope=scope, lineage=lineage)
+            price_at = _microsecond_time(data.get("closeTime")) or _microsecond_time(data.get("lastUpdated"))
+            if price_at is None or price_at > lineage.fetched_at or price_at.astimezone(TAIPEI_TZ).date() != amount.trade_date:
+                raise ValueError("FUGLE_INDEX_PRICE_CLOCK_INVALID")
+            normalized = dict(trade_date=data["date"], as_of=price_at.isoformat(),
+                close=data.get("closePrice"), previous_close=data.get("previousClose"),
+                trade_value=int(amount.value), transaction_count=(data.get("total") or {}).get("transaction"))
+        except (ValueError, TypeError, KeyError):
+            error = "FUGLE_INDEX_SCHEMA_INVALID"
+    return CurrentMarketProviderPayload(payload=normalized, status="failed" if error else "available",
+        url=f"{BASE_URL}/quote/{symbol}", status_code=result.status_code, error=error,
+        detail_code=error, external_calls=result.external_calls, retry_after_seconds=result.retry_after_seconds,
+        raw_text=result.raw_text)
 
 
 def _identity(data: dict, requirement: DataRequirementV2, received: datetime) -> date:

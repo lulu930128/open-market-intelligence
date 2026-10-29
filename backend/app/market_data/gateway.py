@@ -911,6 +911,7 @@ class MarketDataGateway:
 
         initial_batch = self._read(requirement, reader)
         resolved = self._resolve(requirement, initial_batch)
+        resolution_at = requirement.requested_at
         final_batch = initial_batch
         acquisition_health: tuple[ProviderResourceHealth, ...] = ()
         persistence = _not_persisted("PERSISTENCE_NOT_REQUIRED")
@@ -958,10 +959,13 @@ class MarketDataGateway:
                 def post_acquisition(
                     acquired: BarAcquisitionResult,
                 ) -> tuple[BarCandidateBatch, object]:
+                    nonlocal resolution_at
                     reread_requirement = _post_acquisition_reread_requirement(
                         requirement,
                         acquired.receipts,
                     )
+                    resolution_at = max(resolution_at, reread_requirement.requested_at)
+                    reread_requirement = reread_requirement.model_copy(update={"requested_at": resolution_at})
                     batch = self._read(reread_requirement, reader)
                     return batch, self._resolve(reread_requirement, batch)
 
@@ -1014,6 +1018,7 @@ class MarketDataGateway:
                             requirement,
                             acquired.receipts,
                         )
+                        resolution_at = reread_requirement.requested_at
                         final_batch = self._read(reread_requirement, reader)
                         resolved = self._resolve(reread_requirement, final_batch)
                     elif acquisition.attempted:
@@ -1032,6 +1037,7 @@ class MarketDataGateway:
         return MarketDataResultV1(
             requirement=requirement,
             result_kind="bar_series",
+            resolution_at=resolution_at,
             resolved=resolved,
             provider_health=_merge_provider_health(
                 final_batch.provider_health,
@@ -1609,6 +1615,7 @@ class MarketDataGateway:
         transaction_port: MarketIndexTransactionPort | None = None,
         official_first: bool = True,
         route_resolution_gate: bool = False,
+        completion_clock=None,
     ) -> MarketDataResultV1:
         if not isinstance(requirement.target, DatasetTarget):
             raise ValueError("market index resolution requires a dataset target")
@@ -1659,7 +1666,13 @@ class MarketDataGateway:
                 def post_acquisition(
                     _acquired: MarketIndexAcquisitionResult,
                 ) -> tuple[MarketIndexCandidateBatch, ResolvedMarketIndex]:
-                    batch = reader.read_market_index_candidates(requirement)
+                    reread_requirement = requirement
+                    if completion_clock is not None:
+                        completed_at = completion_clock()
+                        if completed_at.utcoffset() is None or completed_at < requirement.requested_at:
+                            raise ValueError("acquisition completion clock must be aware and monotonic")
+                        reread_requirement = requirement.model_copy(update={"requested_at": completed_at})
+                    batch = reader.read_market_index_candidates(reread_requirement)
                     if len(batch.candidates) > requirement.bounds.max_candidates:
                         raise ValueError(
                             "candidate reader exceeded bounds.max_candidates"
@@ -1667,11 +1680,11 @@ class MarketDataGateway:
                     return batch, resolve_market_index(
                         batch.candidates,
                         policy=requirement.realtime_policy,
-                        now=requirement.requested_at,
+                        now=reread_requirement.requested_at,
                         max_age=timedelta(
                             seconds=requirement.freshness.max_age_seconds
                         ),
-                        requirement=requirement,
+                        requirement=reread_requirement,
                         official_first=official_first,
                     )
 
@@ -1716,6 +1729,11 @@ class MarketDataGateway:
                         acquired,
                     )
                     self._validate_persistence_result(acquired, persistence)
+                    if completion_clock is not None:
+                        completed_at = completion_clock()
+                        if completed_at.utcoffset() is None or completed_at < requirement.requested_at:
+                            raise ValueError("acquisition completion clock must be aware and monotonic")
+                        requirement = requirement.model_copy(update={"requested_at": completed_at})
                     final_batch = reader.read_market_index_candidates(requirement)
                     if len(final_batch.candidates) > requirement.bounds.max_candidates:
                         raise ValueError("candidate reader exceeded bounds.max_candidates")

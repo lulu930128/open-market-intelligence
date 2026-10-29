@@ -12,6 +12,7 @@ from app.market.providers.tw_current_market import CurrentBreadthAdapter, Curren
 from app.market.providers.twse_mis_current_breadth import read_twse_mis_current_breadth
 from app.market.providers.twse_mis_current_index import read_twse_mis_current_index
 from app.market.providers.yahoo_current_index import read_yahoo_current_index
+from app.market.providers.fugle_http import read_fugle_current_index
 from app.market.trading_calendar import TAIWAN_TZ, taiwan_presentation_session
 from app.market.tw_bar_materialization_transaction import (
     TaiwanBarMaterializationTransaction,
@@ -76,6 +77,10 @@ def build_current_market_executors(
     index = TaiwanCurrentIndexAcquisitionExecutor(
         (
             CurrentIndexAdapter(
+                _binding("fugle_marketdata", "fugle_http_index_quote", TW_CURRENT_INDEX_CAPABILITY_ID),
+                read_fugle_current_index, clock=clock,
+            ),
+            CurrentIndexAdapter(
                 _binding(
                     "twse_mis",
                     "twse_mis_index_snapshot",
@@ -128,6 +133,8 @@ def refresh_taiwan_current_index_operation(
         requested_at=now,
         policy=RealtimePolicy.PREFER_LIVE,
         acquisition=index,
+        require_trade_value=True,
+        completion_clock=lambda: datetime.now(TAIWAN_TZ),
     )
 
 
