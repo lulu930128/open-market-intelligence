@@ -45,10 +45,13 @@ def envelope(phase):
                "advance_count": 20, "decline_count": 10, "unchanged_count": 5,
                "coverage_count": 35, "universe_count": 100}
     indices = [{"index_id": identity, "value": 25000, "change_pct": 1, "as_of": stamp,
-                "trade_date": DAY.isoformat(), "freshness": {"status": "current"},
-                "current_for_requested_session": True, "source": "canonical_index",
-                "quote_semantics": "official_close" if phase == "postclose" else "intraday_last_trade",
-                "finalization": "final" if phase == "postclose" else "provisional",
+                "trade_date": DAY.isoformat(), "event_time": stamp,
+                "authority": "provider" if phase == "intraday" and identity == "TAIEX" else "official_exchange",
+                "freshness": {"status": "current"}, "decision_usable": True,
+                "current_for_requested_session": True,
+                "source": "fugle_indices_stream" if phase == "intraday" and identity == "TAIEX" else "twse_mis_index_snapshot",
+                "quote_semantics": "official_close" if phase == "postclose" else "current_session_last_trade",
+                "finalization": "final" if phase == "postclose" else "intraday",
                 "official_close_confirmed": phase == "postclose", "official_source": phase == "postclose",
                 "provisional": phase != "postclose",
                 "official_close": {"value": 24000, "trade_date": PREVIOUS.isoformat(),
@@ -88,6 +91,58 @@ def select(monkeypatch, phase, payload=None):
     db.commit.assert_not_called()
     db.flush.assert_not_called()
     return result, reader
+
+
+@pytest.mark.parametrize("identity", ["TAIEX", "TPEX"])
+@pytest.mark.parametrize("override", [
+    {}, {"freshness": {"status": "delayed"}},
+    {"quote_semantics": "intraday_last_trade"},
+    {"quote_semantics": "closing_auction_last_trade"},
+    {"quote_semantics": "official_close"},
+    {"freshness": {"status": "stale"}}, {"freshness": {}},
+    {"authority": "derived_proxy", "decision_usable": False},
+    {"authority": "unverified", "decision_usable": False},
+    {"authority": "unknown", "decision_usable": False},
+    {"authority": None, "decision_usable": False},
+    {"decision_usable": False}, {"decision_usable": None}, {"decision_usable": "true"},
+    {"current_for_requested_session": False}, {"finalization": "final"},
+    {"trade_date": str(PREVIOUS)}, {"trade_date": None},
+    {"event_time": None}, {"event_time": str(DAY)},
+    {"event_time": f"{DAY}T09:59:00"},
+    {"event_time": f"{DAY}T10:01:00+08:00"},
+    {"event_time": f"{PREVIOUS}T09:59:00+08:00"},
+])
+def test_intraday_formal_index_contract(monkeypatch, identity, override):
+    payload = envelope("intraday")
+    row = next(row for row in payload["data"]["market"]["indices"]["items"] if row["index_id"] == identity)
+    row.update(override)
+    model = select(monkeypatch, "intraday", payload)[0].model
+    accepted = not override or override == {"freshness": {"status": "delayed"}}
+    assert (identity in [item["index_id"] for item in model.indices["items"]]) is accepted
+    assert len(model.indices["items"]) == (2 if accepted else 1)
+
+
+def test_intraday_missing_resolver_qualification_stays_pending(monkeypatch):
+    payload = envelope("intraday")
+    for row in payload["data"]["market"]["indices"]["items"]:
+        row.pop("decision_usable")
+    model = select(monkeypatch, "intraday", payload)[0].model
+    assert model.indices["items"] == []
+
+
+def test_intraday_preserves_formal_sources_and_uses_event_not_receipt_clock(monkeypatch):
+    payload = envelope("intraday")
+    rows = payload["data"]["market"]["indices"]["items"]
+    for row in rows:
+        row["as_of"] = f"{DAY}T10:01:00+08:00"
+        row["event_time"] = f"{DAY}T10:00:00+08:00"
+    model = select(monkeypatch, "intraday", payload)[0].model
+    assert [(row["index_id"], row["authority"], row["source"]) for row in model.indices["items"]] == [
+        ("TAIEX", "provider", "fugle_indices_stream"),
+        ("TPEX", "official_exchange", "twse_mis_index_snapshot"),
+    ]
+    assert all(model.phase_selection["sections"][f"index.{identity}"]["status"] == "selected"
+               for identity in ("TAIEX", "TPEX"))
 
 
 @pytest.mark.parametrize("phase", ["preopen", "intraday", "postclose"])
@@ -137,7 +192,7 @@ def test_previous_day_or_later_same_day_never_fills_current_slots(monkeypatch, p
         payload["data"]["latest_trade_date"] = PREVIOUS.isoformat()
         for block in [*payload["data"]["market"]["indices"]["items"], payload["data"]["breadth"],
                       payload["data"]["volume_state"], *payload["data"]["breadth_by_market"].values()]:
-            block.update(trade_date=stamp[:10], as_of=stamp)
+            block.update(trade_date=stamp[:10], as_of=stamp, event_time=stamp)
         for block in payload["data"]["screening"].values():
             block.update(observed_trade_date=stamp[:10], as_of=stamp, event_time=stamp)
         model = select(monkeypatch, phase, payload)[0].model

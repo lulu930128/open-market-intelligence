@@ -636,7 +636,10 @@ class USIntradayMarketPlatform:
         if is_historical:
             # Full-session acquisition can fail its coverage requirement while
             # committed partial evidence remains useful and must stay visible.
-            reread = self.read_intraday_bars_for_trade_date(symbol=symbol, trade_date=start.date(), bars=1000, now=requested_at, completed_regular=session_scope == "regular")
+            # Gateway records its own persisted receipt cutoff even when strict
+            # full-session selection rejects useful partial observations.
+            completed_at = result.resolution_at or requested_at
+            reread = self.read_intraday_bars_for_trade_date(symbol=symbol, trade_date=start.date(), bars=1000, now=completed_at, completed_regular=session_scope == "regular")
             selected_bars = tuple(bar for bar in reread.result.resolved.bars if start <= bar.start_at < end)
             projection = project_resolved_us_bars(reread.result.resolved.model_copy(update={"bars": selected_bars}), max_bars=bars)
             coverage = regular_intraday_coverage([bar.start_at for bar in selected_bars], trade_date=start.date())

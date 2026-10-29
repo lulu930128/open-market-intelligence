@@ -336,6 +336,15 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Interval end 與 observed cutoff 分開。Provisional bar 不宣稱已觀測至未來區間終點；部分窗口與 consumer 截短均不冒充完整 session。量差核對要求同日、同單位、同範圍與時間對齊；負差保留為 correction／scope diagnostic，不能補零或分配到某分鐘。
 - `data_only` 的明示行情補值續接可走既有 market-cache Job owner，仍保留 `allow_llm=false`、`allow_write=false`。Action 在任何 IO 前綁定 target／capability／effective date／interval／session；相同 action 重送重讀 postcondition。Quote、session-close、graph read 與 intraday command 共用剩餘時間，cache-only／refresh off 不出網。
 
+## 市場金額、開盤證據與已完成區間的讀取界線
+
+- 指數價格與市場累計成交額是分開的 canonical roles。金額保留自己的 `total.time`、currency、scope、semantic 與 lineage；較新的價格 stream 不淘汰仍合格的 HTTP amount，也不能替它更新時間。Vendor reported actual、official 與 estimate 分開，歷史同時點比較必須保留相同 authority／scope identity；新 selection 不沿用舊 composition 或 delta。
+- 歷史／報告讀取的 receipt cutoff 必須穿透原始資料、canonical repository 與 persisted fallback。明示 refresh 的取得計畫保持 immutable；Gateway 可從實際 acquisition receipt 推進 `resolution_at`，只供 command completion 重讀。此時間不依是否通過完整 coverage 或是否有 selected bars 決定，也不改變 cache-only 的原始 as-of cutoff。
+- 開盤尚無成交需要同 symbol／date／regular scope 的正向證據。合格 Fugle `openTime` 表示首筆實際成交，可在原 receipt 可見範圍內解釋前綴空桶；試撮、單純缺列或第一根已取得 bar 不能自行證明 no-trade。較早的合格實際成交會否決矛盾的 opening proof；price-only observation 不滿足 positive cumulative 角色。
+- 已驗證 no-trade 可滿足 bucket coverage，但不增加 actual bar count、不合成 OHLC／volume。Opening evidence 參與 snapshot revision；若 bar storage revision 不可靠而為 `None`，仍禁止 snapshot reuse。補值 operation 按原 desired end 判斷完成，同時保留最新 tail 與 market semantics／quality 限制。
+- 聚合 interval 已結束只決定 finalization。缺少 base 1m evidence 的已結束 5m 仍為 partial、不可用於 technical；形成中的 tail 不把未來分鐘當歷史缺漏。Technical owner 可保留完整 completed prefix，將唯一且已流逝部分無缺口的 forming tail 放在既有 current-partial observation，不能升格為 completed 或隱藏內部 closed hole。Fill plan 使用 canonical coverage 與既有 refresh eligibility，repair recommendation 不覆蓋明示的 provider／market／budget denial。
+- 台灣早盤可顯示 US owner 選中的完整 regular interval close，但維持 provisional、非官方、research unusable 與日線修訂待確認。所有支撐完整性的 bars 均受 receipt cutoff 約束；盤後 headline 不替代 completed role。隔夜漲跌須有 exact prior US session reference；缺前一 session 時保留價格並將 change 設為 unavailable。Quote price date 與 completed-daily volume date 分別對外傳遞。
+
 ## Negative acceptance
 
 任何下列變更都必須被 architecture／contract review 拒絕：

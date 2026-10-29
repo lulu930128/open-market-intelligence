@@ -465,6 +465,8 @@ def _preview_payload(
 
 
 def _market_stance(breadth: dict[str, Any]) -> str:
+    if breadth.get("decision_usable") is not True:
+        return "資料不足"
     advance = _integer(breadth.get("advance_count")) or 0
     decline = _integer(breadth.get("decline_count")) or 0
     total = _integer(breadth.get("total_count")) or 0
@@ -713,8 +715,10 @@ def _build_tw_market_overview_preview(
     subject = f"[OMI 派報] 台股大盤總覽 {as_of}"
     lead = (
         f"台股大盤目前判定為{stance}。"
-        f"上漲 {breadth.get('advance_count', 0)}、下跌 {breadth.get('decline_count', 0)}、"
-        f"平盤 {breadth.get('unchanged_count', 0)}，覆蓋 {breadth.get('total_count', 0)} 檔。"
+        f"上漲 {_display(breadth.get('advance_count'))}、下跌 {_display(breadth.get('decline_count'))}、"
+        f"平盤 {_display(breadth.get('unchanged_count'))}，母體 {_display(breadth.get('total_count'))} 檔。"
+        f"方向已分類 {_display(breadth.get('classified_count'))}、未分類 {_display(breadth.get('unknown_count'))}"
+        f"（含確認未成交 {_display(breadth.get('valid_no_trade_count'))}；未成交不計入平盤）。"
     )
     focus_lines = _market_focus_lines(
         stance=stance,
@@ -974,9 +978,13 @@ def _latest_us_as_of(rows: list[dict[str, Any]], fallback: Any) -> str:
 
 
 def _us_source_label(row: dict[str, Any]) -> str:
-    if row.get("status") == "intraday":
-        source = _display(row.get("source"), "Yahoo")
-        return f"盤中 / {source}"
+    if row.get("current_quote_overlay_applied") is True:
+        source = _display(row.get("selected_source") or row.get("selected_provider") or row.get("source"))
+        label = {"pre_open": "盤前", "continuous": "盤中", "closing_auction": "收盤競價",
+                 "post_close": "盤後", "closed": "休市"}.get(row.get("selected_session"), "報價")
+        if row.get("quote_is_live") is not True:
+            label += "（非即時）"
+        return f"{label} / {source}"
     if row.get("trade_date"):
         return "日線"
     return _display(row.get("status"), "-")
@@ -992,7 +1000,7 @@ def _us_market_rows(rows: list[dict[str, Any]], *, limit: int = 8) -> list[list[
                 {"value": _stock_label(row), "strong": True},
                 {"value": _pct(row.get("change_pct")), "tone": tone, "strong": True},
                 _price(row.get("close")),
-                _compact_number(row.get("volume")),
+                f"{_compact_number(row.get('volume'))}（日線 {_display(row.get('volume_trade_date'))}）",
                 _us_source_label(row),
             ]
         )
@@ -1021,7 +1029,7 @@ def _us_structure_rows(
         [
             {"value": "盤中覆蓋", "strong": True},
             f"{breadth.get('intraday_count', 0)} / {breadth.get('total_count', 0)}",
-            "已取得 Yahoo 盤中 overlay 的檔數",
+            "已套用目前報價且 quote_is_live 的檔數；成交量另列已完成日線日期",
         ],
         [
             {"value": "日線新鮮度", "strong": True},
@@ -1054,7 +1062,7 @@ def _build_us_market_overview_preview(db: Session) -> dict[str, Any]:
     decline_count = sum(1 for row in ranked_rows if (_number(row.get("change_pct")) or 0) < 0)
     unchanged_count = max(len(ranked_rows) - advance_count - decline_count, 0)
     total_count = len(rows)
-    intraday_count = sum(1 for row in rows if row.get("status") == "intraday")
+    intraday_count = sum(1 for row in rows if row.get("current_quote_overlay_applied") is True and row.get("quote_is_live") is True)
     average_change_pct = (
         sum(_number(row.get("change_pct")) or 0 for row in ranked_rows) / len(ranked_rows)
         if ranked_rows
@@ -1096,10 +1104,10 @@ def _build_us_market_overview_preview(db: Session) -> dict[str, Any]:
     missing: list[str] = []
     if total_count <= 0:
         missing.append("us_watchlist_items")
-    if total_count > 0 and intraday_count <= 0:
-        warnings.append("尚未取得盤中 overlay；目前內容可能只反映最新本地日線。")
-    elif total_count > intraday_count:
-        warnings.append(f"盤中 overlay 覆蓋 {intraday_count}/{total_count} 檔，其餘使用最新本地日線。")
+    overlay_count = sum(row.get("current_quote_overlay_applied") is True for row in rows)
+    if total_count > 0:
+        warnings.append(f"即時報價 {intraday_count} 檔、非即時報價 {overlay_count - intraday_count} 檔、"
+                        f"未套用報價 {total_count - overlay_count} 檔；價格與日線成交量分別標示日期。")
     if not ranking.get("is_current", True):
         warnings.append(
             f"日線資料可能落後：target {ranking.get('target_trade_date') or '-'}，"
@@ -1134,7 +1142,8 @@ def _build_us_market_overview_preview(db: Session) -> dict[str, Any]:
         "## 成交量焦點",
         *(
             [
-                f"- {_stock_label(row)}: {_compact_number(row.get('volume'))}，{_pct(row.get('change_pct'))}"
+                f"- {_stock_label(row)}: {_compact_number(row.get('volume'))}（日線 {_display(row.get('volume_trade_date'))}，"
+                f"{_display(row.get('volume_unit'))}），{_pct(row.get('change_pct'))}；{_us_source_label(row)}"
                 for row in volume_leaders
             ]
             or ["- 暫無可用資料"]

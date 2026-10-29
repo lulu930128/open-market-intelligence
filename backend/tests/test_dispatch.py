@@ -420,7 +420,9 @@ class DispatchTests(unittest.TestCase):
                     "close": 141.25,
                     "change_pct": 3.2,
                     "volume": 120000000,
-                    "status": "intraday",
+                    "status": "current_quote", "current_quote_overlay_applied": True, "quote_is_live": True,
+                    "selected_session": "continuous", "selected_source": "yahoo_chart",
+                    "volume_trade_date": "2026-06-18", "volume_unit": "share", "volume_semantics": "completed_daily",
                     "source": "yahoo_chart",
                 },
                 {
@@ -430,7 +432,9 @@ class DispatchTests(unittest.TestCase):
                     "close": 202.5,
                     "change_pct": 0.4,
                     "volume": 48000000,
-                    "status": "intraday",
+                    "status": "current_quote", "current_quote_overlay_applied": True, "quote_is_live": True,
+                    "selected_session": "continuous", "selected_source": "yahoo_chart",
+                    "volume_trade_date": "2026-06-18", "volume_unit": "share", "volume_semantics": "completed_daily",
                     "source": "yahoo_chart",
                 },
                 {
@@ -464,6 +468,7 @@ class DispatchTests(unittest.TestCase):
         self.assertIn("NVDA NVIDIA Corporation", preview["body_text"])
         self.assertIn("即時結構", preview["body_html"])
         self.assertIn("盤中 / yahoo_chart", preview["body_html"])
+        self.assertIn("日線 2026-06-18", preview["body_text"])
         self.assertEqual(preview["metadata"]["breadth"]["intraday_count"], 2)
 
     def test_watchlist_deep_preview_renders_radar_v2_sections(self) -> None:

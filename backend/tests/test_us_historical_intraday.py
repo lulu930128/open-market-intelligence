@@ -37,7 +37,8 @@ def test_early_close_and_gap_identity():
 
 
 @pytest.mark.parametrize("count", [333, 390])
-def test_completed_session_acquisition_persists_rereads_and_is_idempotent(count):
+@pytest.mark.parametrize("receipt_delay", [0, 1])
+def test_completed_session_acquisition_persists_rereads_and_is_idempotent(count, receipt_delay):
     db = _db()
     calls = []
     def fetch(_route, requirement):
@@ -48,7 +49,7 @@ def test_completed_session_acquisition_persists_rereads_and_is_idempotent(count)
         end = datetime(2026, 9, 4, 13, 30, tzinfo=timezone.utc) + timedelta(minutes=count)
         return _yahoo_bars_payload(end, count=count), "https://fixture.invalid/intraday"
     platform = USIntradayMarketPlatform(
-        db, acquisition=USIntradayAcquisitionExecutor(fetchers={YAHOO_INTRADAY_RESOURCE_ID: fetch}, clock=lambda: NOW),
+        db, acquisition=USIntradayAcquisitionExecutor(fetchers={YAHOO_INTRADAY_RESOURCE_ID: fetch}, clock=lambda: NOW+timedelta(seconds=receipt_delay)),
         bar_descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
     )
     for _ in range(2):
@@ -58,7 +59,9 @@ def test_completed_session_acquisition_persists_rereads_and_is_idempotent(count)
         assert result.postcondition_satisfied is (count == 390)
         assert db.query(MarketIntradayBar).count() == count
     with patch("app.us_market.market_truth.USIntradayMarketPlatform", return_value=platform):
-        trend = read_us_historical_intraday_trend(db, symbol="AAPL", trade_date="2026-09-04", evaluated_at=NOW)
+        trend = read_us_historical_intraday_trend(db, symbol="AAPL", trade_date="2026-09-04", evaluated_at=NOW+timedelta(seconds=receipt_delay))
+    if receipt_delay:
+        assert not platform.read_intraday_bars_for_trade_date(symbol='AAPL',trade_date=date(2026,9,4),now=NOW).result.resolved.bars
     assert trend["point_count"] == count
     assert trend["trade_date"] == "2026-09-04"
     assert trend["is_live"] is False

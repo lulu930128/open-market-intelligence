@@ -45,7 +45,8 @@ def bar(db, symbol, day=DAY, close=100, volume=100, provider="yahoo_chart", fina
         source = SourceRegistry(source_name=f"{provider}.daily", source_type="fixture", category="market_data")
         db.add(source)
         db.flush()
-    received = received or datetime.combine(day, time(21), tzinfo=timezone.utc)
+    # Historical Yahoo receipt, not the revisable same-day chart candle.
+    received = received or datetime.combine(day + timedelta(days=1), time(8), tzinfo=timezone.utc)
     raw = RawFetchResult(source_id=source.id, fetched_at=received, content_hash="a" * 64,
                          raw_text="fixture", parser_version="fixture.v1")
     db.add(raw)

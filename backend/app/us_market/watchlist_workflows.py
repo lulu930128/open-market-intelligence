@@ -58,7 +58,8 @@ def _us_ranking_freshness(
     dependencies: USWatchlistWorkflowDependencies,
 ) -> dict:
     target_trade_date = dependencies.expected_daily_price_date()
-    row_dates = [_us_row_trade_date(row) for row in rows]
+    row_dates = [_parse_us_row_trade_date(row.get("daily_trade_date"))
+                 if "daily_trade_date" in row else _us_row_trade_date(row) for row in rows]
     latest_trade_date = max(
         (row_date for row_date in row_dates if row_date is not None),
         default=None,
@@ -202,6 +203,11 @@ def get_us_watchlist_ranking(
             "change": change,
             "change_pct": change_pct,
             "volume": volume,
+            "daily_trade_date": _parse_us_row_trade_date(latest.get("start_at")) if latest else None,
+            "price_trade_date": _parse_us_row_trade_date(latest.get("start_at")) if latest else None,
+            "volume_trade_date": _parse_us_row_trade_date(latest.get("start_at")) if latest else None,
+            "volume_semantics": "completed_daily",
+            "volume_unit": latest.get("volume_unit") if latest else None,
             "status": "ready" if close is not None else "no_data",
             "source": resolved_daily.get("selected_source"),
             "selected_provider": resolved_daily.get("selected_provider"),
@@ -226,11 +232,7 @@ def get_us_watchlist_ranking(
 
             if overlay is not None:
                 overlay_previous_close = _finite_float(overlay.get("previous_close"))
-                resolved_previous_close = (
-                    overlay_previous_close
-                    if overlay_previous_close is not None
-                    else previous_close
-                )
+                resolved_previous_close = overlay_previous_close
                 overlay_close = _finite_float(overlay.get("close"))
                 overlay_change = (
                     overlay_close - resolved_previous_close
@@ -246,6 +248,10 @@ def get_us_watchlist_ranking(
                 )
                 row["current_quote_overlay_applied"] = True
                 row["time"] = overlay["time"]
+                row["price_trade_date"] = overlay.get("trade_date")
+                row["trade_date"] = overlay.get("trade_date")
+                row["previous_close_trade_date"] = overlay.get("previous_close_trade_date")
+                row["previous_close_status"] = overlay.get("previous_close_status")
                 row["session"] = overlay["session"]
                 row["close"] = overlay_close
                 row["previous_close"] = resolved_previous_close

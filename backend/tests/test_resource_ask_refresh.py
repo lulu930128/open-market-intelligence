@@ -179,8 +179,8 @@ def test_successful_transport_with_old_event_remains_stale(db):
     assert result["evidence"]["data"]["quote.snapshot"]["freshness"]["status"] == "stale"
 
 
-@pytest.mark.parametrize("symbol", ["UNKNOWN", "", "TWD-USD"])
-def test_owner_rejects_unknown_and_noncommodity(db, symbol):
+@pytest.mark.parametrize("symbol", ["UNKNOWN", "", "NO-SUCH-FX"])
+def test_owner_rejects_unknown_resource(db, symbol):
     with patch.object(service, "fetch_yahoo_chart_payload_for_interval") as fetch:
         receipt = service.refresh_resource_for_answer(db, symbol=symbol, allow_external_fetch=True,
             realtime_policy="prefer_live", before_answer=True,
@@ -254,6 +254,21 @@ def test_weekend_completed_session_stays_read_only_in_v4(db):
         result = ask(db, selection={"include": ["quote.snapshot"]})
     fetch.assert_not_called()
     assert result["evidence"]["realtime"]["quote.snapshot"]["state"] == "latest_completed_session"
+
+
+def test_registered_fx_reaches_shared_refresh_owner(db):
+    with patch.object(service, 'market_data_subscription_skip_reason', return_value=None), \
+         patch('app.resource_market.source_health.build_resource_source_health', return_value={
+             'entries':[{'resource':'quote','ok':False},{'resource':'ohlcv','ok':False}]}), \
+         patch.object(service, 'refresh_resource_quotes', return_value={'status':'success','refreshed_count':1}) as refresh:
+        receipt=service.refresh_resource_for_answer(db,symbol='USD-TWD',allow_external_fetch=True,
+            realtime_policy='prefer_live',before_answer=True,
+            budget={'max_calls':1,'max_external_fetches':1,'max_total_seconds':5},
+            requested_capabilities=('quote.snapshot','daily.ohlcv'))
+    assert receipt['external_fetches']==1
+    refresh.assert_called_once()
+    assert refresh.call_args.kwargs['symbols']=='USD-TWD'
+    assert refresh.call_args.kwargs['include_daily'] is True
 
 
 def test_missing_price_never_counts_as_fresh(db):

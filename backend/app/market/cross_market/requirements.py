@@ -314,6 +314,9 @@ def resolve_cross_market_source_requirements(
                     capability=CROSS_MARKET_OVERNIGHT_CAPABILITY,
                     priority=factor_priority,
                 )
+            if adr_mapping is not None:
+                add_requirement(source_kind="resource_quote", symbol="USD-TWD", stock_id=stock_id,
+                    role="fx_alignment", capability=CROSS_MARKET_OVERNIGHT_CAPABILITY, priority=90)
 
         usable_relations = [item for item in registry.relations if item.decision_usable]
         if CROSS_MARKET_RELATIONS_CAPABILITY in capability_set:

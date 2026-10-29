@@ -75,6 +75,7 @@ from app.us_market.temporal_expectedness import (
 from app.us_market.trading_calendar import (
     US_MARKET_TIMEZONE,
     expected_us_intraday_trade_date,
+    latest_completed_us_intraday_trade_date,
     previous_us_trading_day,
     us_session_close_time,
 )
@@ -458,21 +459,31 @@ def _intraday_close_evidence(
     result: list[USCloseEvidence] = []
     freshness = _selected_freshness(bars)
     regular_buckets_by_date: dict[date, set[datetime]] = {}
+    support_receipts: dict[date, list[datetime]] = {}
     for candidate in bars.bars:
         local_start = candidate.start_at.astimezone(US_MARKET_TIMEZONE)
         if (
             us_session_for_timestamp(candidate.start_at)
             is MarketSession.CONTINUOUS
             and candidate.interval == "1m"
+            and candidate.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+            and candidate.end_at <= evaluated_at
+            and candidate.lineage.fetched_at <= evaluated_at
+            and (candidate.lineage.received_at is None or candidate.lineage.received_at <= evaluated_at)
         ):
             regular_buckets_by_date.setdefault(local_start.date(), set()).add(
                 local_start
             )
+            support_receipts.setdefault(local_start.date(), []).append(max(
+                candidate.lineage.fetched_at, candidate.lineage.received_at or candidate.lineage.fetched_at))
     for bar in bars.bars:
         local_start = bar.start_at.astimezone(US_MARKET_TIMEZONE)
         local_end = bar.end_at.astimezone(US_MARKET_TIMEZONE)
         trade_date = local_start.date()
         if trade_date not in target_dates:
+            continue
+        if (bar.end_at > evaluated_at or bar.lineage.fetched_at > evaluated_at
+            or (bar.lineage.received_at is not None and bar.lineage.received_at > evaluated_at)):
             continue
         session = us_session_for_timestamp(bar.start_at)
         formal_close = datetime.combine(
@@ -561,7 +572,7 @@ def _intraday_close_evidence(
                     authority=bar.lineage.authority,
                     session=session,
                     event_at=_event_at(bar.lineage, fallback=bar.end_at),
-                    fetched_at=_fetched_at(bar.lineage, fallback=evaluated_at),
+                    fetched_at=max(support_receipts.get(trade_date) or [_fetched_at(bar.lineage, fallback=evaluated_at)]),
                     finalization=bar.finalization,
                     release=USEvidenceRelease.NOT_APPLICABLE,
                     freshness=freshness,
@@ -924,9 +935,7 @@ def _read_components(
     target_trade_date = (
         expected_trade_date
         if expected_trade_date is not None
-        else latest_trade_date
-        if latest_trade_date is not None
-        else evaluated_at.astimezone(US_MARKET_TIMEZONE).date()
+        else latest_completed_us_intraday_trade_date(now=evaluated_at)
     )
     quote_read = intraday_platform.read_quote(symbol=symbol, now=evaluated_at)
     bars_read = intraday_platform.read_intraday_bars_for_trade_date(
@@ -992,11 +1001,7 @@ def _compose_us_market_truth_snapshot(
 
     expected_daily = expected_us_completed_daily_state(now=evaluated_at)
     local_date = evaluated_at.astimezone(US_MARKET_TIMEZONE).date()
-    latest_target = (
-        local_date
-        if market_phase in {"after_hours", "post_close"}
-        else expected_daily.expected_trade_date
-    )
+    latest_target = latest_completed_us_intraday_trade_date(now=evaluated_at)
     prior_target = previous_us_trading_day(latest_target, include_value=False)
     target_dates = {latest_target, prior_target, expected_daily.expected_trade_date}
 

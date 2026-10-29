@@ -7,7 +7,7 @@ from math import isfinite
 
 from app.dispatch.market_report_presentation import (
     MarketReportPresentation, _map, _rows, _number, _text, _stock,
-    coverage_summary, display_status, index_summary, phase_report_lines,
+    coverage_summary, display_status, index_summary, phase_dashboard_rows,
 )
 
 
@@ -119,16 +119,12 @@ def _render_png(model: MarketReportPresentation, *, stock: bool, technology: boo
     draw.rectangle((0, 0, 1600, 118), fill="#173e4b")
     text(48, 18, "個股分析板" if stock else "科技股雷達" if technology else "市場＋族群總覽", 38, 450, "#ffffff")
     text(530, 29, model.header, 24, 1022, "#d4e4e7")
-    text(48, 77, f"資料時間 {model.as_of}｜{model.daily_sample_scope}", 20, 1504, "#d4e4e7")
+    subtitle = model.stance if model.phase_selection and not stock and not technology else model.daily_sample_scope
+    text(48, 77, f"資料時間 {model.as_of}｜{subtitle}", 20, 1504, "#d4e4e7")
 
     if model.phase_selection and not stock and not technology:
-        for index, value in enumerate(phase_report_lines(model)[:31]):
-            text(48, 140 + index * 32, value, 20, 1504)
-        output = BytesIO()
-        canvas.save(output, format="PNG")
-        return output.getvalue()
-
-    if technology:
+        _draw_phase_dashboard(model, draw, text, line)
+    elif technology:
         pulse = model.technology_pulse
         text(48, 140, "Technology Pulse｜科技盤勢摘要", 28)
         text(48, 187, f"等權平均 {_number(pulse.get('average_change_pct'), percent=True)}", 32, 690,
@@ -275,3 +271,170 @@ def _render_png(model: MarketReportPresentation, *, stock: bool, technology: boo
     buffer = BytesIO()
     canvas.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _draw_phase_dashboard(model, draw, text, line):
+    """Structured phase view. All data comes from the detached selected model."""
+    selection = model.phase_selection
+    sections = _map(selection.get("sections"))
+    slots = phase_dashboard_rows(model)
+    muted = semantic_colors("missing")[0]
+    warning = semantic_colors("warning")[0]
+
+    def status(key):
+        return _text(_map(sections.get(key)).get("status"))
+
+    def stamp(row):
+        # Price event time must not be replaced by a newer receipt/as_of.
+        return _text(row.get("event_time") or row.get("as_of") or row.get("trade_date")
+                     or row.get("observed_trade_date"))
+
+    def freshness(row):
+        return _text(_map(row.get("freshness")).get("status") or row.get("freshness_status")
+                     or row.get("last_trade_recency") or row.get("status"))
+
+    def card(x, y, width, height, fill="#ffffff"):
+        draw.rounded_rectangle((x, y, x + width, y + height), radius=8, fill=fill)
+
+    index_label = {"preopen": "前一完成日官方收盤・歷史",
+                   "intraday": "當日實際成交", "postclose": "當日官方收盤"}[model.phase]
+    rows = _rows(model.indices.get("items"))
+    for x, identity in ((40, "TAIEX"), (820, "TPEX")):
+        row = next((item for item in rows if item.get("index_id") == identity), {})
+        card(x, 130, 740, 128)
+        text(x + 16, 136, f"{identity}｜{index_label}", 22, 708)
+        text(x + 16, 165, index_summary(row), 32, 430, change_color(row.get("change_pct")))
+        text(x + 465, 175, f"{status('index.' + identity)} / {freshness(row)}", 18, 257, muted)
+        text(x + 16, 210, f"{stamp(row)} · authority={_text(row.get('authority'))}", 18, 708)
+        text(x + 16, 234, f"{_text(row.get('source'))} · {_text(row.get('finalization'))}", 18, 708, muted)
+
+    breadth, volume = model.breadth, model.volume
+    card(40, 270, 740, 144)
+    card(820, 270, 740, 144)
+    label = "試撮廣度｜provisional・非正式成交" if model.phase == "preopen" else "市場廣度｜當日實際成交"
+    if model.phase == "postclose":
+        label = "市場廣度｜已完成時段・非官方定稿"
+    text(56, 276, label, 22, 708)
+    text(56, 306, f"漲 {_number(breadth.get('advance_count'))} / 跌 {_number(breadth.get('decline_count'))} / 平 {_number(breadth.get('unchanged_count'))}", 24, 708)
+    text(56, 340, f"{status('breadth')} / {freshness(breadth)} · {stamp(breadth)}", 18, 708, muted)
+    if model.phase == "postclose":
+        for offset, venue in enumerate(("TWSE", "TPEX")):
+            component = _map(model.breadth_by_market.get(venue))
+            text(56, 364 + offset * 23,
+                 f"{venue} {_text(component.get('finalization'))} · reconciliation={_text(_map(component.get('close_reconciliation')).get('status'))}"
+                 f" · 漲 {_number(component.get('advance_count'))} / 跌 {_number(component.get('decline_count'))}", 18, 708, muted)
+    else:
+        text(56, 364, f"coverage {_number(breadth.get('coverage_count'))} / {_number(breadth.get('universe_count'))} · authority={_text(breadth.get('authority'))}", 18, 708, muted)
+        text(56, 387, f"方向未分類 {_number(breadth.get('unknown_count'))}（含確認未成交 {_number(breadth.get('valid_no_trade_count'))}）· {_text(breadth.get('source'))}", 18, 708, muted)
+    value = volume.get("current_cumulative_trade_value")
+    volume_label = "當日累計成交值"
+    if value is None and volume.get("available_cumulative_trade_value") is not None:
+        value, volume_label = volume["available_cumulative_trade_value"], "可用部分成交值"
+    text(836, 276, "試撮不代表正式成交值" if model.phase == "preopen" else volume_label, 22, 708)
+    text(836, 306, _number(value, money=True), 24, 708, semantic_colors("flow")[0])
+    text(836, 340, f"{status('volume')} / {freshness(volume)} · {stamp(volume)}", 18, 708, muted)
+    text(836, 364, f"authority={_text(volume.get('trade_value_authority_status'))} · coverage={_text(volume.get('trade_value_coverage_status'))}", 18, 708, muted)
+    text(836, 387, f"來源 {_text(volume.get('source'))}", 18, 708, muted)
+
+    # Three compact ranking cards replace the generic chips area. Preopen keeps
+    # historical leaders separate from indicative candidates and groups.
+    candidates = _map(selection.get("candidates"))
+    groups = _map(selection.get("groups"))
+    daily_date = _text(selection.get("daily_sample_cap"))
+    for index in range(3):
+        x = 40 + index * 520
+        card(x, 426, 500, 110)
+        if model.phase == "preopen" and index == 2:
+            rows = slots["groups"]
+            row = rows[0] if rows else {}
+            label = "試撮族群｜provisional"
+            detail = f"{_text(row.get('group_name'))}  {_number(row.get('mean_return_pct'), percent=True)}"
+            dated = f"{stamp(groups)} · {status('groups')} / {freshness(groups)}"
+            note = "非正式成交；依上游選取順序"
+        elif model.phase == "intraday" or model.phase == "preopen" and index == 1:
+            offset = index if model.phase == "intraday" else 0
+            rows = slots["candidates"]
+            row = rows[offset] if offset < len(rows) else {}
+            label = f"盤中候選 {offset + 1:02}｜actual" if model.phase == "intraday" else "試撮個股｜provisional"
+            detail = f"{_stock(row)}  {_number(row.get('current_price'))}  {_number(row.get('change_pct'), percent=True)}"
+            dated = f"{stamp(row) if row else stamp(candidates)} · {status('candidates')} / {freshness(candidates)}"
+            note = ("非正式成交 · " if model.phase == "preopen" else "來源 ") + _text(_map(row.get("lineage")).get("source"))
+        else:
+            rows = slots["daily_leaders"]
+            row = rows[index] if index < len(rows) else {}
+            label = "歷史成交排行｜非即時" if model.phase == "preopen" else f"當日樣本成交排行 {index + 1:02}"
+            detail = f"{_stock(row)}  {_number(row.get('change_pct'), percent=True)}"
+            dated = f"{daily_date} · {status('daily_rankings')}"
+            note = f"成交 {_number(row.get('trade_value'), money=True)} · 非全市場定稿"
+        text(x + 14, 430, label, 20, 472)
+        text(x + 14, 457, detail, 22, 472, change_color(row.get("mean_return_pct") if model.phase == "preopen" and index == 2 else row.get("change_pct")))
+        text(x + 14, 487, dated, 18, 472, muted)
+        text(x + 14, 511, note, 18, 472, muted)
+
+    intraday = model.phase == "intraday"
+    for column, (key, label) in enumerate((("strong", "強勢族群"), ("weak", "弱勢族群"))):
+        x = 40 + column * 780
+        rows = slots["sectors"].get(key, [])[:6]
+        if intraday:
+            label = "盤中族群｜正向／平盤／未定" if key == "strong" else "盤中族群｜負向"
+            context = f"{stamp(groups)} · {status('groups')} / {freshness(groups)}"
+        else:
+            label = ("歷史樣本・" if model.phase == "preopen" else "當日樣本・") + label
+            context = f"{daily_date} · {status('daily_rankings')} · {freshness(model.sample_coverage)}；非即時排行"
+        text(x + 10, 548, label, 24, 600, semantic_colors("strength" if key == "strong" else "weakness")[0])
+        text(x + 650, 554, f"{len(rows)} / 6", 18, 80, muted)
+        text(x + 10, 582, context, 18, 720, muted)
+        for index in range(6):
+            y = 610 + index * 62
+            card(x, y, 740, 56)
+            if index >= len(rows):
+                text(x + 16, y + 14, f"— 無其他已選取族群 · {status('groups' if intraday else 'daily_rankings')}", 18, 708, muted)
+                continue
+            row = rows[index]
+            value = row.get("average_change_pct")
+            color = change_color(value)
+            text(x + 16, y + 1, f"{row.get('rank', index + 1):02}  {_text(row.get('industry'))}", 22, 375)
+            text(x + 410, y + 1, _number(value, percent=True), 22, 140, color)
+            # A fixed, zero-centered +/-10% scale; never derive rank or returns.
+            draw.rounded_rectangle((x + 574, y + 15, x + 724, y + 23), radius=4, fill="#e7edeb")
+            draw.line((x + 649, y + 11, x + 649, y + 27), fill="#a6b4b4", width=1)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value):
+                length = min(abs(value) / 10, 1) * 75
+                if length:
+                    left, right = (649 - length, 649) if value < 0 else (649, 649 + length)
+                    draw.rectangle((x + left, y + 15, x + right, y + 23), fill=color)
+            detail = f"漲 {_number(row.get('advance_count'))} / 跌 {_number(row.get('decline_count'))} · 上漲 {_number(row.get('positive_ratio'), ratio=True)}"
+            text(x + 16, y + 31, detail, 18, 470)
+            if intraday:
+                note = f"{freshness(row)} · 覆蓋 {_number(row.get('coverage_ratio'), ratio=True)}"
+            else:
+                note = f"代表 {_stock({'stock_id': row.get('top_stock_id'), 'stock_name': row.get('top_stock_name')})}"
+            text(x + 488, y + 31, note, 18, 236, muted)
+
+    text(48, 983, "跨市場｜獨立日期與狀態" + ("・隔夜基準" if model.phase == "preopen" else ""), 18, 600)
+    text(660, 983, "族群保留上游順位；按正負分欄，非全市場強弱榜；長條 ±10%。" if intraday else
+         "日線樣本強弱榜；非官方全市場定稿；長條 ±10%。", 18, 892, muted)
+    promoted = _rows(model.cross_market_strip.get("promoted"))
+    # Reserve three US slots and one crypto slot even when evidence is absent.
+    us_rows = [row for row in promoted if row.get("group") == "us"]
+    cross_slots = [us_rows[index] if index < len(us_rows) else {} for index in range(3)]
+    cross_slots.append(next((row for row in promoted if row.get("group") == "crypto"), {}))
+    for index, row in enumerate(cross_slots):
+        x = 40 + index * 390
+        card(x, 1012, 370, 126, "#e1e8e7")
+        group = "us" if index < 3 else "crypto"
+        label = _text(row.get("label") or row.get("id")) if row else (f"美國 {index + 1}" if group == "us" else "加密資產")
+        text(x + 12, 1016, label, 20, 346)
+        text(x + 12, 1043, f"{_number(row.get('price'))} {_text(row.get('currency'))}  {_number(row.get('change_pct'), percent=True)}", 20, 346, change_color(row.get("change_pct")))
+        text(x + 12, 1071, stamp(row), 18, 346, muted)
+        absent = next((item.get("status") for item in model.cross_market_strip.get("groups", []) if item.get("group") == group), "unavailable")
+        text(x + 12, 1093, f"{freshness(row) if row else absent} · authority={_text(row.get('authority'))}", 18, 346, muted)
+        text(x + 12, 1112, ("末分鐘收盤；非官方／日線修訂待確認"
+            if row.get("evidence_kind") == "finalized_regular_interval_close"
+            else f"來源 {_text(row.get('source'))}"), 18, 346, muted)
+    line(1148)
+    text(48, 1151, f"品質 {model.quality} · {len(model.full_limitations.get('warnings', []))} 項提醒 / {len(model.full_limitations.get('missing', []))} 項缺漏；partial 非完整市場，各卡日期獨立。", 18, 1504, warning)
+    note = ("盤前預期回顧 unavailable；缺不可變快照。session_final 不等於官方 final，各項發布獨立。" if model.phase == "postclose" else
+            "歷史排行與同日試撮分開；試撮非正式成交，隔夜末分鐘收盤另標限制。" if model.phase == "preopen" else
+            "盤中只列當日合格 actual evidence；未選取的資料保留 pending，不以昨日日線補位。")
+    text(48, 1174, note + " 僅供研究觀察。", 18, 1504, muted)

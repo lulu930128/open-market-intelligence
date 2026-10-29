@@ -153,6 +153,12 @@ class MarketReportPresentation:
         return _evidence(asdict(self))
 
 
+def _limited_completed_close(row: dict) -> bool:
+    return (row.get("status") == "provisional" and row.get("display_usable") is True
+            and row.get("research_usable") is False and row.get("official_close_proof") == "none"
+            and row.get("evidence_kind") == "finalized_regular_interval_close")
+
+
 def build_presentation(preview: dict, *, phase: str, report_date: date) -> MarketReportPresentation:
     if phase not in PHASE_LABELS:
         raise ValueError("Unsupported Discord market report phase.")
@@ -176,7 +182,7 @@ def build_presentation(preview: dict, *, phase: str, report_date: date) -> Marke
         assets = _rows(block.get("assets"))
         # Select upstream status only. Never infer freshness from clocks/dates.
         stale = [row for row in assets if row.get("status") == "stale"]
-        promoted = [row for row in assets if row.get("status") in {"current", "delayed", "usable"}
+        promoted = [row for row in assets if (row.get("status") in {"current", "delayed", "usable"} or _limited_completed_close(row))
                     and row.get("usable") is not False and block.get("status") != "stale"]
         groups[market] = {"label": label, "status": block.get("status"), "promoted": promoted,
                           "stale": stale if block.get("status") != "stale" else assets,
@@ -282,11 +288,13 @@ def build_cross_market_strip(groups: dict) -> dict:
     promoted = []
     statuses = []
     for market, group in groups.items():
-        rows = [row for row in _rows(group.get("promoted")) if row.get("status") in {"current", "usable"}]
+        rows = [row for row in _rows(group.get("promoted")) if row.get("status") in {"current", "usable"} or _limited_completed_close(row)]
         limit = {"us": 3, "crypto": 1}.get(market, 0)
         for row in rows[:limit]:
             promoted.append({"group": market, **{key: row.get(key) for key in (
                 "id", "label", "price", "currency", "change_pct", "status",
+                "as_of", "trade_date", "source", "authority",
+                "freshness_reason", "evidence_kind", "display_usable", "research_usable", "official_close_proof",
             )}, "availability": {key: "available" if row.get(key) is not None else "missing"
                                   for key in ("price", "change_pct")}})
         if group.get("stale") and not rows:
@@ -296,6 +304,32 @@ def build_cross_market_strip(groups: dict) -> dict:
         elif not limit:
             statuses.append({"group": market, "label": group["label"], "status": "可用"})
     return {"promoted": promoted, "groups": statuses}
+
+
+def phase_dashboard_rows(model: MarketReportPresentation) -> dict:
+    """Display slots from the selected model only; preserve owner rank and facts."""
+    selection = model.phase_selection
+    groups = _map(selection.get("groups"))
+    candidates = _map(selection.get("candidates"))
+    sectors = model.sector_radar
+    if model.phase == "intraday":
+        sectors = {"strong": [], "weak": []}
+        for rank, row in enumerate(_rows(groups.get("groups")), 1):
+            value = row.get("mean_return_pct")
+            # Sign controls the display column, just as it controls chart color.
+            # Unknowns stay visible; this does not produce a new strength ranking.
+            negative = isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) and value < 0
+            sectors["weak" if negative else "strong"].append({
+                **row, "rank": rank, "industry": row.get("group_name"),
+                "average_change_pct": value, "positive_ratio": row.get("advance_ratio"),
+            })
+    return {
+        "sectors": sectors,
+        "candidates": _rows(candidates.get("rows")),
+        "groups": _rows(groups.get("groups")),
+        # These arrays were already date-qualified by select_phase_preview.
+        "daily_leaders": model.value_leaders[:3],
+    }
 
 
 def sector_radar_rows(model: MarketReportPresentation) -> dict:
@@ -446,6 +480,7 @@ def phase_report_lines(model: MarketReportPresentation) -> list[str]:
     lines.append(f"{breadth_label}｜{status('breadth')}／{_text(breadth.get('status'))}｜"
                  f"漲 {_number(breadth.get('advance_count'))}／跌 {_number(breadth.get('decline_count'))}／平 {_number(breadth.get('unchanged_count'))}")
     lines.append(f"  {_stamp(breadth)}｜coverage={_text(breadth.get('coverage_count'))}/{_text(breadth.get('universe_count'))}｜source={_text(breadth.get('source'))}")
+    lines.append(f"  方向未分類 {_number(breadth.get('unknown_count'))}／其中已確認未成交 {_number(breadth.get('valid_no_trade_count'))}；未成交不計入平盤。")
     if model.phase == "postclose":
         for venue, row in model.breadth_by_market.items():
             lines.append(f"  {venue} 已完成時段廣度｜漲 {_number(row.get('advance_count'))}／跌 {_number(row.get('decline_count'))}｜"
@@ -488,6 +523,8 @@ def phase_report_lines(model: MarketReportPresentation) -> list[str]:
             lines.append("  隔夜美股基準 unavailable")
         for row in overnight:
             lines.append(f"  {_text(row.get('label') or row.get('id'))}｜{_number(row.get('change_pct'), percent=True)}｜as_of={_text(row.get('as_of'))}｜source={_text(row.get('source'))}")
+            if _limited_completed_close(row):
+                lines.append(f"  provisional｜{_text(row.get('freshness_reason'))}")
     elif model.phase == "postclose":
         lines.append(f"本交易日日線樣本｜{status('daily_rankings')}｜{model.daily_sample_scope}；官方發布狀態個別確認，非全市場定稿。")
         lines.append(f"  樣本 coverage={_text(model.sample_coverage.get('sample_count'))}/{_text(model.sample_coverage.get('universe_count'))}｜{_text(model.sample_coverage.get('status'))}")

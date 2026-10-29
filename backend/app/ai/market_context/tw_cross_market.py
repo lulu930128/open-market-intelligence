@@ -115,11 +115,39 @@ def _us_daily_asset(
         )
     except (LookupError, ValueError):
         return None
+    from app.us_market.trading_calendar import latest_completed_us_intraday_trade_date, previous_us_trading_day
+    from app.us_market.market_truth import read_us_market_truth_snapshot
+    from app.us_market.market_truth_contracts import USCloseEvidenceKind
     bars = list(result.result.resolved.bars)
+    expected = latest_completed_us_intraday_trade_date(now=now)
+    if not bars or bars[-1].end_at.date() != expected:
+        truth = read_us_market_truth_snapshot(db, symbol=symbol, evaluated_at=now)
+        close = next((item for item in truth.close_evidence
+            if item.evidence_id == truth.close_roles.latest_completed_id
+            and item.trade_date == expected and item.display_usable
+            and item.evidence_kind is USCloseEvidenceKind.FINALIZED_REGULAR_INTERVAL_CLOSE), None)
+        if close is not None:
+            prior_date = previous_us_trading_day(expected, include_value=False)
+            previous = next((bar for bar in bars if bar.end_at.date() == prior_date), None)
+            previous_close = float(previous.close_price) if previous else None
+            available_at = max(close.fetched_at, close.interval_end_at,
+                previous.lineage.fetched_at if previous else close.fetched_at)
+            return dict(id=symbol, label=label, price=float(close.price),
+                change_pct=(float(close.price) / previous_close - 1) * 100 if previous_close else None,
+                as_of=expected.isoformat(), trade_date=expected.isoformat(), expected_trade_date=expected.isoformat(),
+                previous_trade_date=prior_date.isoformat() if previous else None,
+                change_reason=None if previous else 'EXACT_PREVIOUS_COMPLETED_SESSION_MISSING',
+                available_at=available_at.isoformat(), session_end_at=close.interval_end_at.isoformat(),
+                provider=close.provider, source=close.source, authority=close.authority.value,
+                finalization=close.finalization.value, evidence_kind=close.evidence_kind.value,
+                display_usable=True, research_usable=False, official_close_proof=close.official_close_proof.value,
+                status='provisional', currency='USD', source_url=None,
+                freshness_reason='regular 末分鐘收盤，非官方／日線修訂待確認')
     if not bars:
         return None
     latest = bars[-1]
-    previous = bars[-2] if len(bars) > 1 else None
+    prior_date = previous_us_trading_day(latest.end_at.date(), include_value=False)
+    previous = next((bar for bar in bars if bar.end_at.date() == prior_date), None)
     close = float(latest.close_price)
     previous_close = float(previous.close_price) if previous is not None else None
     change_pct = (
@@ -127,12 +155,25 @@ def _us_daily_asset(
         if previous_close not in (None, 0)
         else None
     )
+    # The US owner has already applied its calendar, release, receipt cutoff
+    # and finalization gates. A session date is not an availability timestamp.
+    # Include both receipts because the reported change uses the prior close.
+    used_bars = (previous, latest) if previous is not None else (latest,)
+    available_at = max(max(bar.end_at, bar.lineage.fetched_at) for bar in used_bars)
     return {
         "id": symbol,
         "label": label,
         "price": close,
         "change_pct": change_pct,
+        "change_reason": None if previous else "EXACT_PREVIOUS_COMPLETED_SESSION_MISSING",
         "as_of": latest.end_at.date().isoformat(),
+        "trade_date": latest.end_at.date().isoformat(),
+        "expected_trade_date": result.expected_state.expected_trade_date.isoformat(),
+        "session_end_at": latest.end_at.isoformat(),
+        "available_at": available_at.isoformat(),
+        "previous_trade_date": previous.end_at.date().isoformat() if previous else None,
+        "finalization": latest.finalization.value,
+        "authority": latest.lineage.authority.value,
         "provider": latest.lineage.provider,
         "currency": "USD",
         "status": "current" if result.postcondition_satisfied else "stale",

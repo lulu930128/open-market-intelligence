@@ -72,8 +72,14 @@ def select_phase_preview(preview: dict, *, phase: str, now: datetime, daily_cap:
                 index_rows.append({**reference, "index_id": row.get("index_id"),
                                    "quote_semantics": "historical_official_close_reference"})
         elif phase == "intraday":
-            if (_in_report(row, now, day=day) and row.get("current_for_requested_session") is True
-                    and row.get("quote_semantics") == "intraday_last_trade"
+            if (_day(row.get("trade_date")) == day
+                    and _available_by(row.get("event_time"), now)
+                    and _in_report({"trade_date": row.get("trade_date"),
+                                    "event_time": row.get("event_time")}, now, day=day)
+                    and row.get("current_for_requested_session") is True
+                    and row.get("quote_semantics") == "current_session_last_trade"
+                    and row.get("decision_usable") is True
+                    and row.get("finalization") == "intraday"
                     and _map(row.get("freshness")).get("status") in {"current", "delayed"}):
                 index_rows.append(row)
         elif (_in_report(row, now, day=day) and row.get("official_close_confirmed") is True
@@ -179,10 +185,16 @@ def select_phase_preview(preview: dict, *, phase: str, now: datetime, daily_cap:
     data["market_chips"] = chips
     cross = _map(data.get("cross_market"))
     if "markets" in cross:
-        data["cross_market"] = {**cross, "markets": {
-            market: {**block, "assets": [row for row in _rows(block.get("assets"))
-                                        if _available_by(row.get("as_of"), now)]}
-            for market, block in _map(cross.get("markets")).items() if isinstance(block, dict)}}
+        selected_markets = {}
+        for market, block in _map(cross.get("markets")).items():
+            if not isinstance(block, dict):
+                continue
+            assets = _rows(block.get("assets"))
+            visible = [row for row in assets
+                       if _available_by(row.get("available_at") or row.get("as_of"), now)]
+            selected_markets[market] = {**block, "assets": visible, "available_count": len(visible),
+                "status": "missing" if not visible else "partial" if len(visible) < len(assets) else block.get("status")}
+        data["cross_market"] = {**cross, "markets": selected_markets}
     data["index_intraday"] = selected("index_intraday", _map(data.get("index_intraday")),
         phase == "intraday" and _map(data.get("index_intraday")).get("expected_trade_date") == day,
         "intraday series retains its own coverage and freshness")

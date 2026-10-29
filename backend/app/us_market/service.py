@@ -2225,10 +2225,11 @@ def _read_us_daily_previous_close_reference(
     *,
     symbol: str,
     now: datetime,
+    quote_trade_date: date | None = None,
 ) -> tuple[dict, object | None]:
     expected_state = expected_us_completed_daily_state(now=now)
     expected_date = expected_state.expected_trade_date
-    local_date = now.astimezone(US_MARKET_TIMEZONE).date()
+    local_date = quote_trade_date or now.astimezone(US_MARKET_TIMEZONE).date()
     prior_regular_date = previous_us_trading_day(
         local_date,
         include_value=False,
@@ -4259,15 +4260,31 @@ def _get_us_current_quote_overlay(
         return None
     selected_session = projection.get("selected_session")
 
+    try:
+        quote_at = datetime.fromisoformat(str(quote.get("event_at") or projection.get("selected_event_at")).replace("Z", "+00:00"))
+        if quote_at.utcoffset() is None or quote_at > requested_at:
+            return None
+    except ValueError:
+        return None
+    quote_date = quote_at.astimezone(US_MARKET_TIMEZONE).date()
+    if quote.get("trade_date") is not None and str(quote["trade_date"]) != quote_date.isoformat():
+        return None
+    from app.us_market.session_policy import us_session_for_timestamp
+    if selected_session != us_session_for_timestamp(quote_at).value:
+        return None
+    reference, _daily = _read_us_daily_previous_close_reference(
+        db, symbol=symbol, now=requested_at, quote_trade_date=quote_date)
     return {
         "time": quote.get("event_at") or projection.get("selected_event_at"),
         "session": selected_session,
         "close": float(latest_price),
-        # Daily previous-close semantics stay owned by the resolved Daily batch.
-        "previous_close": None,
+        "trade_date": quote_date,
+        "previous_close": reference.get("prior_regular_close"),
+        "previous_close_trade_date": reference.get("prior_regular_close_trade_date"),
+        "previous_close_status": reference.get("prior_regular_close_status"),
         "source": projection.get("selected_source"),
         "provider": projection.get("selected_provider"),
-        "has_extended_hours": selected_session == "extended",
+        "has_extended_hours": selected_session in {"pre_open", "post_close"},
         "selection_reason": projection.get("selection_reason"),
         "fallback_used": bool(projection.get("fallback_used")),
         "is_live": bool(

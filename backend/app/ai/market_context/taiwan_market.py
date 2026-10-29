@@ -218,7 +218,9 @@ def _build_tw_market_compact(
         "sample_weak_industries": weak_industries,
         "industry_strength_label": industry_strength_label,
         "index_intraday": index_intraday,
-        "cross_market": _compact_auxiliary_context(cross_market),
+        # The cross-market owner already bounds markets/assets. Preserve its
+        # facts and availability clocks for every selected-evidence consumer.
+        "cross_market": cross_market,
         # This owner already bounds per-stock rankings. Preserve required
         # aggregate facts; the auxiliary summary helper discards them entirely.
         "market_chips": market_chips,

@@ -939,6 +939,13 @@ class USWatchlistRankingItemRead(BaseModel):
     asset_type: str | None = None
     group_id: int
     trade_date: date | None = None
+    daily_trade_date: date | None = None
+    price_trade_date: date | None = None
+    volume_trade_date: date | None = None
+    volume_semantics: str | None = None
+    volume_unit: str | None = None
+    previous_close_trade_date: date | None = None
+    previous_close_status: str = "missing"
     time: str | None = None
     session: str | None = None
     close: float | None = None

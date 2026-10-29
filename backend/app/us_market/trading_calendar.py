@@ -205,6 +205,23 @@ def is_us_daily_price_finalized(
     ) >= us_daily_price_finalization_time(trade_date)
 
 
+def us_historical_daily_receipt_boundary(trade_date: date) -> datetime:
+    return datetime.combine(trade_date + timedelta(days=1), time.min, US_MARKET_TIMEZONE)
+
+
+def is_us_historical_daily_receipt(*, trade_date: date, fetched_at: datetime | None) -> bool:
+    """A same-exchange-date chart is still a revisable session observation.
+
+    Historical retrieval is a conservative vendor maturity gate, not official
+    close proof. Time passing never upgrades a previously captured receipt.
+    """
+    return bool(
+        fetched_at is not None
+        and is_us_trading_day(trade_date)
+        and _as_new_york_datetime(fetched_at) >= us_historical_daily_receipt_boundary(trade_date)
+    )
+
+
 def expected_us_daily_price_date(
     *,
     include_today: bool | None = None,
@@ -274,6 +291,8 @@ __all__ = [
     "latest_completed_us_intraday_trade_date",
     "is_us_early_close_day",
     "is_us_daily_price_finalized",
+    "is_us_historical_daily_receipt",
+    "us_historical_daily_receipt_boundary",
     "is_us_trading_day",
     "next_us_trading_day",
     "previous_us_trading_day",

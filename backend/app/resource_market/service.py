@@ -630,9 +630,9 @@ def refresh_resource_for_answer(
         return skip("external_refresh_not_authorized")
     if any(budget.get(key, 0) <= 0 for key in ("max_calls", "max_external_fetches", "max_total_seconds")):
         return skip("tool_budget_exhausted")
-    instruments = list_resource_instruments(root_folder="commodity", symbol=symbol)
+    instruments = list_resource_instruments(symbol=symbol)
     if not symbol.strip() or len(instruments) != 1:
-        return skip("unsupported_commodity")
+        return skip("unsupported_resource")
     instrument = instruments[0]
     if not {"quote.snapshot", "daily.ohlcv"}.intersection(requested_capabilities):
         return skip("no_quote_or_daily_capability_selected")

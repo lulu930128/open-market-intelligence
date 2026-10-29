@@ -293,11 +293,13 @@ class CrossMarketRefreshTests(unittest.TestCase):
         }
         self.assertEqual(
             requirement_symbols,
-            {"TSM", "^GSPC", "^IXIC", "QQQ", "^SOX", "SMH", "NVDA"},
+            {"TSM", "^GSPC", "^IXIC", "QQQ", "^SOX", "SMH", "NVDA", "USD-TWD"},
         )
-        self.assertEqual(plan["requirement_count"], 7)
+        self.assertEqual(plan["requirement_count"], 8)
         self.assertEqual(plan["planned_source_count"], 1)
-        self.assertEqual(plan["deferred_source_count"], 6)
+        self.assertEqual(plan["deferred_source_count"], 7)
+        fx = next(item for item in plan["requirements"] if item["symbol"] == "USD-TWD")
+        self.assertIn("cross_market.overnight", fx["required_for"])
         self.assertTrue(
             all(
                 item["deferred_reason"] == "execution_symbol_budget_exhausted"

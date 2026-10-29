@@ -372,6 +372,7 @@ class USIntradayBarRepository:
         request: BarCapabilityRequest,
         provider: str,
         limit: int,
+        requested_at: datetime,
         before: tuple[datetime, int] | None = None,
     ):
         """Read one stable descending provider page.
@@ -417,6 +418,9 @@ class USIntradayBarRepository:
             .filter(MarketIntradayBar.interval == request.interval)
             .filter(MarketIntradayBar.bar_time >= request.start_at)
             .filter(MarketIntradayBar.bar_time <= request.end_at)
+            .filter(RawFetchResult.fetched_at <= _utc(requested_at))
+            .filter(MarketIntradayBarLineage.fetched_at <= _utc(requested_at))
+            .filter(MarketIntradayBarLineage.received_at <= _utc(requested_at))
         )
         if before is not None:
             before_time, before_id = before
@@ -502,6 +506,7 @@ class USIntradayBarRepository:
                 request=request,
                 provider=descriptor.provider_key,
                 limit=budget,
+                requested_at=requirement.requested_at,
             )
             read_by_provider[descriptor.provider_key] = extend_unique(current)
             if len(current) < budget:
@@ -527,6 +532,7 @@ class USIntradayBarRepository:
                     request=request,
                     provider=descriptor.provider_key,
                     limit=extra_limit,
+                    requested_at=requirement.requested_at,
                     before=cursor_by_provider.get(descriptor.provider_key),
                 )
                 added = extend_unique(extra)

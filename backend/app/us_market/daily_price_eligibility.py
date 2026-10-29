@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
 from app.market_data.contracts import AuthorityClass, BarFinalization, InstrumentType
 from app.us_market.market_data.descriptors import US_DAILY_CANDIDATE_DESCRIPTORS
+from app.us_market.trading_calendar import is_us_historical_daily_receipt
 
 
 US_DAILY_REGISTERED_PROVIDERS = tuple(
@@ -83,6 +84,10 @@ def us_daily_candidate_issue(
         return USDailyEligibilityIssue("US_DAILY_PARSER_CONTRACT_MISMATCH")
     if raw.content_hash != row.raw_payload_hash:
         return USDailyEligibilityIssue("US_DAILY_CONTENT_HASH_MISMATCH")
+    if provider == "yahoo_chart" and not is_us_historical_daily_receipt(
+        trade_date=row.trade_date, fetched_at=raw.fetched_at,
+    ):
+        return USDailyEligibilityIssue("US_DAILY_VENDOR_REVISION_UNVERIFIED")
     if instrument_type is InstrumentType.INDEX:
         valid_volume = (
             row.volume_status == "not_applicable"
