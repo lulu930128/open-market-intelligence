@@ -1,0 +1,7 @@
+{
+  "id": 956445,
+  "fetched_at": "2026-10-29T03:40:12.414619",
+  "content_hash": "9694731053fd636462ab1eb2751f3442887fce94545ddb601b9bae97ec612908",
+  "parser_version": "fugle.http.quote.v1",
+  "raw_text": "{\"date\":\"2026-10-29\",\"type\":\"EQUITY\",\"exchange\":\"TWSE\",\"market\":\"TSE\",\"symbol\":\"00631L\",\"name\":\"元大台灣50正2\",\"referencePrice\":36.88,\"previousClose\":36.88,\"openPrice\":36.67,\"openTime\":1793235720331186,\"highPrice\":36.78,\"highTime\":1793235861329356,\"lowPrice\":35.57,\"lowTime\":1793244675102036,\"closePrice\":35.72,\"closeTime\":1793245210726306,\"avgPrice\":36.05,\"change\":-1.16,\"changePercent\":-3.15,\"amplitude\":3.28,\"lastPrice\":35.72,\"lastSize\":1,\"bids\":[{\"price\":35.71,\"size\":10},{\"price\":35.7,\"size\":102},{\"price\":35.69,\"size\":16},{\"price\":35.68,\"size\":40},{\"price\":35.67,\"size\":136}],\"asks\":[{\"price\":35.72,\"size\":1213},{\"price\":35.73,\"size\":2159},{\"price\":35.74,\"size\":993},{\"price\":35.75,\"size\":1213},{\"price\":35.76,\"size\":1270}],\"total\":{\"tradeValue\":4410827350,\"tradeVolume\":122366,\"tradeVolumeAtBid\":86031,\"tradeVolumeAtAsk\":34859,\"transaction\":11716,\"time\":1793245210726306},\"lastTrade\":{\"bid\":35.71,\"ask\":35.72,\"price\":35.72,\"size\":1,\"time\":1793245210726306,\"serial\":12907064},\"lastTrial\":{\"bid\":36.67,\"ask\":36.68,\"price\":36.68,\"size\":1455,\"time\":1793235715515258,\"serial\":476637},\"isContinuous\":true,\"serial\":12908303,\"lastUpdated\":1793245212509352}"
+}

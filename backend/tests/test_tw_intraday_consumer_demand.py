@@ -23,7 +23,7 @@ NOW = datetime(2026, 9, 16, 10, 0, tzinfo=TAIWAN_TZ)
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'demand.db'}", connect_args={"timeout": 20})
-    Base.metadata.create_all(engine, tables=[JobRun.__table__, StockMaster.__table__])
+    Base.metadata.create_all(engine)
     factory = sessionmaker(engine)
     with factory() as db:
         db.add_all([StockMaster(stock_id=code, stock_name=code, market="TWSE", instrument_type="stock", is_active=True)
@@ -46,8 +46,14 @@ def reread_stub(monkeypatch, *, ready=False, count=0, trade_date=None):
     calls = []
     def read(**kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(history=SimpleNamespace(requested_coverage_satisfied=ready), current_session_coverage=SimpleNamespace(
+        day = trade_date or NOW.date()
+        bucket = SimpleNamespace(expected_by_trading_policy=True, bucket_start=NOW - timedelta(minutes=1),
+            bucket_end=NOW, status=SimpleNamespace(value="observed_trade" if ready else "missing_evidence"))
+        return SimpleNamespace(history=SimpleNamespace(requested_coverage_satisfied=ready),
+            bucket_coverage=(bucket,), session_resolution=(SimpleNamespace(trade_date=day,
+                market_semantics_usable=True, conflict_bucket_count=0),), current_session_coverage=SimpleNamespace(
             trade_date=trade_date or NOW.date(), snapshot_bar_count=count,
+            expected_to=NOW,
             snapshot_phase=SimpleNamespace(value="ready" if ready else "warming"), snapshot_revision="a" * 64,
         ))
     monkeypatch.setattr(subject, "TaiwanBarService", lambda db: SimpleNamespace(read_current_session_bars=read))
@@ -288,7 +294,11 @@ def test_final_reread_is_mandatory_after_provider_and_persistence(env, monkeypat
     state = {"materialized": False, "reads": 0}
     def read(**kwargs):
         state["reads"] += 1
-        return SimpleNamespace(history=SimpleNamespace(requested_coverage_satisfied=state["materialized"]), current_session_coverage=SimpleNamespace(
+        return SimpleNamespace(history=SimpleNamespace(requested_coverage_satisfied=state["materialized"]),
+            bucket_coverage=(SimpleNamespace(expected_by_trading_policy=True, bucket_start=NOW-timedelta(minutes=1),
+                bucket_end=NOW,status=SimpleNamespace(value="observed_trade" if state["materialized"] else "missing_evidence")),),
+            session_resolution=(SimpleNamespace(trade_date=NOW.date(),market_semantics_usable=True,conflict_bucket_count=0),),
+            current_session_coverage=SimpleNamespace(expected_to=NOW,
             trade_date=NOW.date(), snapshot_bar_count=20 if state["materialized"] else 0,
             snapshot_phase=SimpleNamespace(value="ready" if state["materialized"] else "warming"), snapshot_revision="a" * 64,
         ))

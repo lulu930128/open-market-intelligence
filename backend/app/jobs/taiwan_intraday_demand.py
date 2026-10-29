@@ -260,8 +260,14 @@ def _reread(db: Session, request: dict, now: datetime) -> dict:
     coverage = series.current_session_coverage
     same_date = bool(coverage and coverage.trade_date.isoformat() == request["trade_date"])
     count = coverage.snapshot_bar_count if same_date else 0
-    ready = bool(same_date and count > 0 and coverage.snapshot_phase.value == "ready"
-                 and series.history.requested_coverage_satisfied)
+    target_end = datetime.fromisoformat(request["desired_coverage_end_at"]) if request.get("desired_coverage_end_at") else None
+    target_buckets = tuple(item for item in series.bucket_coverage
+        if item.expected_by_trading_policy and (target_end is None or item.bucket_end <= target_end))
+    covered = sum(item.status.value in {"observed_trade", "verified_no_trade"} for item in target_buckets)
+    manifest = next((item for item in series.session_resolution if item.trade_date == target), None)
+    ready = bool(same_date and target_buckets and covered == len(target_buckets)
+        and manifest and manifest.market_semantics_usable
+        and (target_end is None or coverage.expected_to >= target_end))
     if request.get("realtime_policy") == "require_live":
         # Validate policy through the canonical resolver; never equate full bars with live.
         from app.market.intraday_repository import TaiwanIntradayBarRepository
@@ -278,6 +284,12 @@ def _reread(db: Session, request: dict, now: datetime) -> dict:
         "reread_ready": ready,
         "snapshot_phase": coverage.snapshot_phase.value if coverage else "missing",
         "snapshot_revision": coverage.snapshot_revision if same_date else None,
+        "target_coverage_end_at": target_end.isoformat() if target_end else None,
+        "target_covered_bucket_count": covered,
+        "target_expected_bucket_count": len(target_buckets),
+        "latest_tail_missing_bucket_count": sum(
+            item.status.value == "missing_evidence" for item in series.bucket_coverage
+            if target_end is not None and item.bucket_start >= target_end),
     }
 
 

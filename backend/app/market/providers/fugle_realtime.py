@@ -594,8 +594,18 @@ def fugle_cumulative_fields(data: dict[str, Any], *, trade_date: date, received_
     value = _decimal(total.get("tradeValue"))
     if value is not None and value < 0:
         value = None
+    quantity = _lots(total.get("tradeVolume"))
+    opened = _microsecond_time(data.get("openTime"))
+    first_trade_at = opened if (
+        opened is not None and opened.date() == trade_date
+        and (9, 0) <= (opened.hour, opened.minute) <= (13, 30) and opened <= at <= received_at
+        and quantity is not None and quantity.value > 0
+        and _decimal(data.get("openPrice"), positive=True) is not None
+        and data.get("market") in {"TSE", "OTC"}
+    ) else None
     return {
-        "cumulative_quantity": _lots(total.get("tradeVolume")),
+        "cumulative_quantity": quantity,
+        "first_trade_at": first_trade_at,
         "cumulative_turnover_value": value,
         "cumulative_turnover_currency": "TWD" if value is not None else None,
         "cumulative_event_at": at,

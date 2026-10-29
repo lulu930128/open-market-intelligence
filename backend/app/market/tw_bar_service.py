@@ -72,6 +72,7 @@ from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReade
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market.exchange_calendar_cache import exchange_calendar_read_scope
 from app.market.intraday_repository import TaiwanIntradayBarRepository
+from app.market.public_quote_repository import TaiwanPublicQuoteRepository
 from app.market.public_quote_platform import (
     project_taiwan_session_close,
     read_taiwan_session_close,
@@ -829,6 +830,14 @@ class TaiwanBarService:
         storage_revision = TaiwanIntradayBarRepository(self._db).current_session_storage_revision(
             instrument_id=instrument_id, from_time=from_time, to_time=to_time,
         )
+        opening_evidence = TaiwanPublicQuoteRepository(self._db).load_opening_quote_evidence(
+            resolve_taiwan_instrument(self._db, instrument_id),
+            trade_date=trade_date, requested_at=local_now,
+        )
+        if storage_revision is not None:
+            storage_revision = hashlib.sha256((storage_revision + "|" + "|".join(
+                item.model_dump_json() for item in opening_evidence
+            )).encode()).hexdigest()
         cached = self._recent_current_session_snapshot(
             instrument_id=instrument_id,
             interval=requested_interval,
@@ -1210,6 +1219,13 @@ class TaiwanBarService:
                 trading_policy_version=TAIWAN_TRADING_POLICY_VERSION,
                 trading_policy=session_trading_policy,
                 as_of=now,
+                instrument=instrument,
+                opening_quote_evidence=(
+                    TaiwanPublicQuoteRepository(self._db).load_opening_quote_evidence(
+                        instrument, trade_date=trade_date, requested_at=now)
+                    if current_session and (not session_bars or session_bars[0].start_at.time() > TAIWAN_SESSION_OPEN_TIME)
+                    else ()
+                ),
             )
             base_coverage.extend(session_coverage)
 
@@ -1247,6 +1263,7 @@ class TaiwanBarService:
             if reusable is not None:
                 manifests.append(reusable.session_resolution[0].model_copy(update={
                     "coverage_status": coverage_status,
+                    "market_semantics_usable": session_trading_policy.market_semantics_usable,
                 }))
                 limitations.extend(reusable.limitations)
                 continue
@@ -1276,6 +1293,7 @@ class TaiwanBarService:
                     },
                     filled_bucket_count=result.resolved.composition.filled_bucket_count,
                     conflict_bucket_count=result.resolved.composition.conflict_bucket_count,
+                    market_semantics_usable=session_trading_policy.market_semantics_usable,
                     coverage_status=coverage_status,
                 )
             )
@@ -1390,6 +1408,25 @@ class TaiwanBarService:
                 ],
             },
         )
+        coverage_by_start = {item.bucket_start: item for item in outward_coverage}
+        # Conflict counts describe differences already resolved by candidate
+        # priority; selected bars retain the resolver's per-bucket qualification.
+        usable_dates = {item.trade_date for item in manifests if item.market_semantics_usable}
+        outward_states = []
+        for item in outward_bars:
+            coverage = coverage_by_start.get(item.start_at)
+            missing = getattr(coverage, "missing_evidence_count", 0)
+            complete = coverage is not None and missing == 0 and item.start_at.astimezone(TAIWAN_TZ).date() in usable_dates
+            ready = complete and item.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+            outward_states.append(TaiwanBarOutwardState(
+                start_at=item.start_at, finalization=item.finalization, authority=item.lineage.authority,
+                official=False, release_status=TaiwanReleaseStatus.NOT_APPLICABLE,
+                reconciliation_status=TaiwanReconciliationStatus.NOT_APPLICABLE,
+                persisted=requested_interval == "1m", source_interval="1m", technical_eligible=ready,
+                source_point_count=getattr(coverage, "component_count", 1), missing_evidence_count=missing,
+                quality_status="ok" if ready else "partial",
+                gap_reason="MISSING_BASE_1M_EVIDENCE" if missing else None,
+            ))
         return TaiwanBarSeriesRead(
             instrument=instrument,
             requested_interval=requested_interval,
@@ -1398,21 +1435,7 @@ class TaiwanBarService:
             derived=requested_interval != "1m",
             aggregation_version=aggregation_version,
             bars=outward_bars,
-            bar_states=tuple(
-                TaiwanBarOutwardState(
-                    start_at=item.start_at,
-                    finalization=item.finalization,
-                    authority=item.lineage.authority,
-                    official=False,
-                    release_status=TaiwanReleaseStatus.NOT_APPLICABLE,
-                    reconciliation_status=(
-                        TaiwanReconciliationStatus.NOT_APPLICABLE
-                    ),
-                    persisted=requested_interval == "1m",
-                    source_interval="1m",
-                )
-                for item in outward_bars
-            ),
+            bar_states=tuple(outward_states),
             bucket_coverage=outward_coverage,
             history=history,
             session_resolution=tuple(manifests),

@@ -55,8 +55,11 @@ def project_taiwan_bar_series(
                 "transaction_count": bar.trade_count,
                 "finalization": bar.finalization.value,
                 "finalized": bar.finalization.value != "provisional",
-                "is_partial": bar.finalization.value == "provisional",
+                "is_partial": state.quality_status == "partial" if state and state.quality_status else bar.finalization.value == "provisional",
                 "source_interval": state.source_interval if state else series.base_interval,
+                "source_point_count": state.source_point_count if state else None,
+                "gap_reason": state.gap_reason if state else None,
+                "missing_evidence_count": state.missing_evidence_count if state else None,
                 "indicator_eligible": (
                     state.technical_eligible if state is not None else True
                 ),
@@ -66,7 +69,7 @@ def project_taiwan_bar_series(
                     bar.volume.unit.value if bar.volume is not None else None
                 ),
                 "volume_status": bar.volume_status,
-                "quality_status": (
+                "quality_status": state.quality_status if state and state.quality_status else (
                     "partial"
                     if bar.finalization.value == "provisional"
                     else "ok"

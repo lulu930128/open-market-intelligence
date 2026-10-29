@@ -30,7 +30,11 @@ from app.market_data.contracts import (
     BarFinalization,
     BarObservation,
     Quantity,
+    QuantityUnit,
+    QuoteObservation,
+    InstrumentKey,
     SourceLineage,
+    TradeObservationState,
 )
 
 
@@ -99,6 +103,57 @@ def observed_trade_coverage(
     )
 
 
+def _opening_no_trade_proof(bars, observations, *, instrument, trade_date, as_of):
+    """A zero cumulative total (or proven first execution) bounds a prefix.
+
+    This is historical bucket evidence, not a current-price freshness override.
+    An indicative price, awaiting enum or first available bar proves nothing.
+    """
+    if instrument is None or as_of is None:
+        return None
+    proofs = []
+    session_start, _ = _session_bounds(trade_date)
+    for quote in observations:
+        lineage = quote.lineage
+        at = quote.cumulative_event_at or lineage.event_at
+        quantity = quote.cumulative_quantity
+        if (quote.instrument != instrument or quote.trade_date != trade_date
+                or at is None or _local(at).date() != trade_date
+                or not session_start <= at <= as_of
+                or lineage.received_at is None or not at <= lineage.received_at <= as_of
+                or not at <= lineage.fetched_at <= as_of
+                or not lineage.raw_receipt_id or not lineage.content_hash
+                or quantity is None or quantity.unit is not QuantityUnit.SHARE):
+            continue
+        zero = (quantity.value == 0 and quote.last_trade_price is None
+                and quote.open_price is None
+                and quote.trade_state in {TradeObservationState.AWAITING_FIRST_TRADE,
+                                          TradeObservationState.INDICATIVE_OBSERVED})
+        first = (quote.trade_state is TradeObservationState.TRADE_OBSERVED
+                 and quote.last_trade_price is not None and quote.last_trade_quantity is not None
+                 and quote.last_trade_quantity.unit is QuantityUnit.SHARE
+                 and quote.last_trade_quantity.value == quantity.value > 0
+                 and lineage.event_at is not None and lineage.event_at <= at)
+        opened = (quote.first_trade_at if quote.open_price is not None and quantity.value > 0
+                  and quote.cumulative_scope == "regular_board_lot" else None)
+        if opened is not None and not (session_start <= opened <= at and _local(opened).date() == trade_date):
+            opened = None
+        if not (zero or first or opened):
+            continue
+        end = _local(opened or (lineage.event_at if first else at)).replace(second=0, microsecond=0)
+        if any(bar.start_at < end for bar in bars):
+            continue  # Contradictory actual bars cannot be excused by zero totals.
+        if any(other.instrument == instrument and other.trade_date == trade_date
+               and other.cumulative_quantity is not None and other.cumulative_quantity.value > 0
+               and other.lineage.event_at is not None and other.lineage.event_at < end
+               for other in observations):
+            continue
+        proofs.append((end, lineage.raw_receipt_id,
+                       "provider_opening_execution_time" if opened else
+                       "first_execution_equals_session_cumulative" if first else "session_cumulative_quantity_zero"))
+    return max(proofs, default=None)
+
+
 def continuous_session_coverage(
     bars: tuple[BarObservation, ...],
     *,
@@ -106,13 +161,15 @@ def continuous_session_coverage(
     trading_policy_version: str,
     trading_policy: TaiwanInstrumentTradingPolicy | None = None,
     as_of: datetime | None = None,
+    instrument: InstrumentKey | None = None,
+    opening_quote_evidence: tuple[QuoteObservation, ...] = (),
 ) -> tuple[BarBucketCoverage, ...]:
     """Build conservative coverage for a proven continuous-matching policy.
 
     The closing-auction window is not a time-bar expectation while the 13:30
     closing-match component contract remains deferred. Missing continuous
-    minutes are always ``missing_evidence``; row absence never becomes
-    ``verified_no_trade``.
+    minutes remain ``missing_evidence`` unless independent cumulative quote
+    evidence proves an opening prefix had no trades. No bars are synthesized.
     """
 
     by_start = {_local(bar.start_at): bar for bar in bars}
@@ -123,6 +180,8 @@ def continuous_session_coverage(
         tzinfo=TAIWAN_TZ,
     )
     result: list[BarBucketCoverage] = []
+    opening_proof = _opening_no_trade_proof(bars, opening_quote_evidence,
+        instrument=instrument, trade_date=trade_date, as_of=as_of)
     cursor = session_start
     coverage_end = session_end
     if as_of is not None:
@@ -177,6 +236,16 @@ def continuous_session_coverage(
                     coverage_algorithm_version="tw.bar.coverage.v2",
                 )
             )
+        elif opening_proof is not None and end <= opening_proof[0]:
+            result.append(BarBucketCoverage(
+                bucket_start=cursor, bucket_end=end,
+                status=BarBucketCoverageStatus.VERIFIED_NO_TRADE,
+                expected_by_trading_policy=True, evidence_refs=(opening_proof[1],),
+                reason_code="OPENING_PREFIX_VERIFIED_NO_TRADE",
+                qualification_method=opening_proof[2], verified_by="taiwan_bar_coverage_evaluator",
+                trading_policy_version=trading_policy_version,
+                coverage_algorithm_version="tw.bar.coverage.v3",
+            ))
         else:
             result.append(
                 BarBucketCoverage(

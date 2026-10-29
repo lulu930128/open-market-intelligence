@@ -1,0 +1,7 @@
+{
+  "id": 953720,
+  "fetched_at": "2026-10-29 01:31:18.929444",
+  "content_hash": "03f522c3a65c10f35ebb8d3c3393bbf69aa8dfe27d69767485e35e127cf779ed",
+  "parser_version": "fugle.http.quote.v1",
+  "raw_text": "{\"date\":\"2026-10-29\",\"type\":\"EQUITY\",\"exchange\":\"TWSE\",\"market\":\"TSE\",\"symbol\":\"00981A\",\"name\":\"主動統一台股增長\",\"referencePrice\":28.65,\"previousClose\":28.65,\"openPrice\":28.59,\"openTime\":1793235720861081,\"highPrice\":28.66,\"highTime\":1793236200578379,\"lowPrice\":28.1,\"lowTime\":1793237464386364,\"closePrice\":28.12,\"closeTime\":1793237478202739,\"avgPrice\":28.43,\"change\":-0.53,\"changePercent\":-1.85,\"amplitude\":1.95,\"lastPrice\":28.12,\"lastSize\":1,\"bids\":[{\"price\":28.12,\"size\":13},{\"price\":28.11,\"size\":161},{\"price\":28.1,\"size\":319},{\"price\":28.09,\"size\":398},{\"price\":28.08,\"size\":548}],\"asks\":[{\"price\":28.13,\"size\":104},{\"price\":28.14,\"size\":488},{\"price\":28.15,\"size\":1441},{\"price\":28.16,\"size\":1523},{\"price\":28.17,\"size\":1870}],\"total\":{\"tradeValue\":930884860,\"tradeVolume\":32739,\"tradeVolumeAtBid\":18521,\"tradeVolumeAtAsk\":12485,\"transaction\":2426,\"time\":1793237478202739},\"lastTrade\":{\"bid\":28.12,\"ask\":28.13,\"price\":28.12,\"size\":1,\"time\":1793237478202739,\"serial\":4170514},\"lastTrial\":{\"bid\":28.59,\"ask\":28.6,\"price\":28.59,\"size\":1787,\"time\":1793235716245844,\"serial\":478072},\"isContinuous\":true,\"serial\":4171634,\"lastUpdated\":1793237478711285}"
+}

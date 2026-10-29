@@ -32,7 +32,7 @@ from app.market.technical_parameters import (
     build_taiwan_technical_parameter_contract,
     get_technical_analysis_parameters,
 )
-from app.market.tw_bar_contracts import TaiwanBarSeriesRead
+from app.market.tw_bar_contracts import TaiwanBarSeriesRead, TaiwanDerivedBucketCoverage
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.contracts import (
     AuthorityClass,
@@ -178,10 +178,25 @@ def _terminal_current_partial_index(series: TaiwanBarSeriesRead) -> int | None:
     ]
     if not ineligible:
         return None
-    if ineligible != [len(series.bar_states) - 1] or series.requested_interval != "1d":
+    if ineligible != [len(series.bar_states) - 1]:
         return -1
     state = series.bar_states[-1]
     bar = series.bars[-1]
+    if series.derived and series.base_interval == "1m" and series.requested_interval.endswith(("m", "h")):
+        coverage = next((item for item in series.bucket_coverage if item.bucket_start == bar.start_at), None)
+        manifest = next((item for item in series.session_resolution
+                         if item.trade_date == bar.start_at.astimezone(TAIWAN_TZ).date()), None)
+        if (bar.finalization is BarFinalization.PROVISIONAL
+            and state.finalization is BarFinalization.PROVISIONAL
+            and state.authority is AuthorityClass.DERIVED and not state.persisted and not state.official
+            and state.source_interval == "1m" and state.missing_evidence_count == 0
+            and state.gap_reason is None and isinstance(coverage, TaiwanDerivedBucketCoverage)
+            and coverage.missing_evidence_count == 0 and coverage.component_count > 0
+            and manifest is not None and manifest.market_semantics_usable):
+            return len(series.bars) - 1
+        return -1
+    if series.requested_interval != "1d":
+        return -1
     if not (
         bar.finalization is BarFinalization.PROVISIONAL
         and state.finalization is BarFinalization.PROVISIONAL

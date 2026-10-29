@@ -155,6 +155,7 @@ class TaiwanSessionResolutionManifest(CanonicalModel):
     rejected_candidate_reasons: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     filled_bucket_count: int = Field(default=0, ge=0)
     conflict_bucket_count: int = Field(default=0, ge=0)
+    market_semantics_usable: bool = False
     coverage_status: TaiwanHistoryStatus
 
     @model_validator(mode="after")
@@ -335,6 +336,10 @@ class TaiwanBarOutwardState(CanonicalModel):
     source_interval: str
     technical_eligible: bool = True
     component_missing_trading_day_count: int | None = Field(default=None, ge=0)
+    source_point_count: int | None = Field(default=None, ge=0)
+    missing_evidence_count: int | None = Field(default=None, ge=0)
+    quality_status: Literal["ok", "partial"] | None = None
+    gap_reason: str | None = None
 
 
 class TaiwanBarReadDiagnostics(CanonicalModel):

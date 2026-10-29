@@ -7033,11 +7033,24 @@ def _historical_intraday_fill_state(
         if not target_date:
             return None
         try:
-            eligibility = completed_taiwan_intraday_repair_eligibility(str(target_date), now=datetime.now(timezone.utc))
+            eligibility = completed_taiwan_intraday_repair_eligibility(str(target_date), now=now or datetime.now(timezone.utc))
         except (TypeError, ValueError):
             return None
         if not eligibility["completed"]:
-            return None
+            if current_state is None:
+                return None
+            coverage = value.get("series_coverage") or {}
+            needs_repair = (coverage.get("repair_recommended") is True
+                or isinstance(coverage.get("missing_bucket_count"), int) and coverage["missing_bucket_count"] > 0
+                or coverage.get("requested_coverage_satisfied") is False)
+            satisfied = _fill_payload_is_satisfied(current_state) and not needs_repair
+            return {"satisfied": satisfied, "refresh_required": not satisfied,
+                "refresh_possible_now": current_state.get("refresh_possible_now") is True,
+                "reason_code": "current_session_intraday",
+                "market_data_params": {"trade_date": str(target_date),
+                    "intraday_interval": value.get("requested_interval") or "1m",
+                    "session_scope": value.get("session_scope") or "regular"},
+                "coverage_status": value.get("coverage_status", "missing")}
         coverage = value.get("series_coverage") or {}
         freshness = value.get("freshness") or {}
         complete = value.get("is_partial") is False and (
@@ -7904,11 +7917,14 @@ def build_fill_plan(
                 }
             )
             continue
+        action_params = fill_state.get("market_data_params") if fill_state else None
+        if scope_type in {"stock", "tw_stock"} and capability_id == "intraday.bars":
+            action_params = _taiwan_fill_window(action_params)
         action_id = fill_action_id(
             capability_id=capability_id,
             target=target,
             selection_version=str(selection.get("version") or ""),
-            market_data_params=fill_state.get("market_data_params") if fill_state else None,
+            market_data_params=action_params,
         )
         actions.append(
             {
@@ -7949,7 +7965,7 @@ def build_fill_plan(
                     or operation in canonical_fill_operations_writing_cache()
                 ),
                 "requires_external_fetch": True,
-                **({"market_data_params": fill_state["market_data_params"]} if fill_state else {}),
+                **({"market_data_params": action_params} if action_params else {}),
             }
         )
     for capability_id in selected_list:
@@ -7997,6 +8013,8 @@ def build_fill_plan(
                 },
                 "output": selection.get("output"),
                 "realtime_policy": "prefer_live",
+                **({"analysis_horizon": "intraday"}
+                   if scope_type in {"stock", "tw_stock"} and action["capability"] == "intraday.bars" else {}),
                 "allow_external_fetch": True,
                 **({"market_data_params": action["market_data_params"]} if action.get("market_data_params") else {}),
                 **({"tool_budget": {"max_calls": 1, "max_external_fetches": 1, "max_total_seconds": 30}}
@@ -8464,6 +8482,22 @@ def _fill_target_identity(target: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _taiwan_fill_window(params: dict[str, Any] | None) -> dict[str, Any]:
+    from app.market.trading_calendar import taiwan_presentation_session
+    session_date = taiwan_presentation_session(datetime.now(timezone.utc))["trade_date"].isoformat()
+    params = params or {}
+    trade_date = str(params.get("trade_date") or session_date)
+    session_scope = params.get("session_scope") or "regular"
+    # The current TW bar projection names its regular window current_session.
+    # Use the public scope for both invoke and binding; do not alias other dates.
+    if session_scope == "current_session" and trade_date == session_date:
+        session_scope = "regular"
+    return {"trade_date": trade_date,
+        "session_scope": session_scope,
+        "intraday_interval": params.get("intraday_interval") or params.get("interval") or "1m",
+        "fill_plan_session": session_date}
+
+
 def fill_action_id(
     *,
     capability_id: str,
@@ -8471,6 +8505,10 @@ def fill_action_id(
     selection_version: str = public_contract.CAPABILITY_SELECTION_VERSION,
     market_data_params: dict[str, Any] | None = None,
 ) -> str:
+    if capability_id == "intraday.bars" and target.get("type") in {"stock", "tw_stock"}:
+        # Both generation and validation bind the same effective window. A
+        # previous-session plan cannot silently become a new day's command.
+        market_data_params = _taiwan_fill_window(market_data_params)
     action_seed = json.dumps(
         {
             "capability": capability_id,
@@ -8480,6 +8518,8 @@ def fill_action_id(
                 "trade_date": market_data_params["trade_date"],
                 "session_scope": market_data_params.get("session_scope") or "regular",
                 "interval": market_data_params.get("intraday_interval") or market_data_params.get("interval") or "1m",
+                **({"fill_plan_session": market_data_params["fill_plan_session"]}
+                   if market_data_params.get("fill_plan_session") else {}),
             }} if capability_id == "intraday.bars" and market_data_params and market_data_params.get("trade_date") else {}),
         },
         ensure_ascii=False,

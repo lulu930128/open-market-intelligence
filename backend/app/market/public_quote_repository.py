@@ -89,6 +89,61 @@ class TaiwanPublicQuoteRepository:
         self._lineage_batch: dict[int, tuple | None] = {}
         self._price_states_batch: dict[str, dict] = {}
 
+    def load_opening_quote_evidence(
+        self, instrument: InstrumentKey, *, trade_date: date, requested_at: datetime,
+    ) -> tuple[QuoteObservation, ...]:
+        """Bounded historical prefix proof; reuse canonical lineage decoding.
+
+        Keep the earliest positive cumulative observation as a contradiction
+        guard, alongside the latest zero observations. No latest-price fallback.
+        """
+        if instrument.market is not Market.TW or instrument.instrument_type not in {
+            InstrumentType.STOCK, InstrumentType.ETF,
+        }:
+            return ()
+        model = TaiwanStockQuoteSnapshot
+        with self._db.no_autoflush:
+            visible = (self._db.query(model, RawFetchResult, SourceRegistry)
+                .options(defer(model.raw_payload_json), defer(model.bid_levels_json), defer(model.ask_levels_json),
+                    load_only(RawFetchResult.id, RawFetchResult.source_id, RawFetchResult.fetched_at,
+                        RawFetchResult.content_hash, RawFetchResult.parser_version))
+                .join(RawFetchResult, model.raw_result_id == RawFetchResult.id)
+                .join(SourceRegistry, model.source_id == SourceRegistry.id)
+                .filter(model.stock_id == instrument.symbol, model.market == instrument.venue,
+                        model.trade_date == trade_date,
+                        model.quote_time <= _as_taiwan(requested_at).replace(tzinfo=None),
+                        model.received_at <= _as_utc(requested_at),
+                        RawFetchResult.fetched_at <= _as_utc(requested_at)))
+            rows = visible.filter(model.total_volume_lots == 0).order_by(model.quote_time.desc(), model.id.desc()).limit(8).all()
+            positives = visible.filter(model.total_volume_lots > 0).order_by(model.quote_time.asc(), model.id.asc()).limit(32).all()
+            qualified_positive = None
+            for row, raw, source in positives:
+                read = self._decode_row(instrument, row, joined_lineage=(raw, source), lineage_preloaded=True)
+                observation = read.observation
+                quantity = observation.cumulative_quantity if observation is not None else None
+                event = (observation.cumulative_event_at or observation.lineage.event_at) if observation else None
+                if (quantity is not None and quantity.unit is QuantityUnit.SHARE and quantity.value > 0
+                    and event is not None and _as_taiwan(event).date() == trade_date
+                    and event <= requested_at):
+                    qualified_positive = read.observation
+                    break
+            # Exhausted or malformed positive evidence cannot prove an empty
+            # opening. Never let LIMIT-before-decode hide a known contradiction.
+            if positives and qualified_positive is None:
+                return ()
+            # A later HTTP receipt may carry the exchange's first execution
+            # time even when the earliest positive quote was a price-only feed.
+            opening_rows = visible.filter(model.provider == "fugle_marketdata", model.total_volume_lots > 0).order_by(
+                model.quote_time.desc(), model.id.desc()).limit(8).all()
+            opening = tuple(read.observation for row, raw, source in opening_rows
+                if (read := self._decode_row(instrument, row, joined_lineage=(raw, source),
+                    lineage_preloaded=True)).observation is not None
+                and read.observation.first_trade_at is not None)
+            zero_observations = tuple(read.observation for row, raw, source in rows
+                if (read := self._decode_row(instrument, row,
+                    joined_lineage=(raw, source), lineage_preloaded=True)).observation is not None)
+            return zero_observations + ((qualified_positive,) if qualified_positive is not None else ()) + opening
+
     def preload_quote_candidates(
         self, instruments: tuple[InstrumentKey, ...], *, requested_at: datetime,
     ) -> None:

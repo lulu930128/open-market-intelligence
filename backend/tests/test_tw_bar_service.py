@@ -471,8 +471,14 @@ def test_current_session_read_excludes_previous_session() -> None:
         assert delta.current_session_coverage.snapshot_bar_count == 5
         assert delta.identity.series_revision != result.identity.series_revision
         revision_queries = [query for query in recent_snapshot_queries if query.lstrip().upper().startswith("SELECT")]
-        assert len(revision_queries) == 2
-        assert "intraday_generation" in revision_queries[-1]
+        # Snapshot reuse still avoids loading base bars. Opening proof adds
+        # bounded metadata reads and participates in the snapshot revision.
+        assert len(revision_queries) <= 6
+        assert not any('FROM market_intraday_bar ' in query for query in revision_queries)
+        opening_queries = [q for q in revision_queries if 'FROM taiwan_stock_quote_snapshot' in q]
+        assert len(opening_queries) == 3
+        assert all('LIMIT' in q and 'raw_text' not in q for q in opening_queries)
+        assert sum("intraday_generation" in query for query in revision_queries) == 1
         assert all("market_intraday_bar.open_price" not in query for query in revision_queries)
         assert delta.read_diagnostics.snapshot_cache_status == "hit"
         assert delta.read_diagnostics.final_series_revision == delta.identity.series_revision

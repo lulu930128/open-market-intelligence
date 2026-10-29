@@ -14,7 +14,8 @@ from app.db.models import StockMaster
 from app.market.intraday_repository import TaiwanIntradayBarRepository
 from app.market.intraday_transaction import TaiwanIntradayBarTransaction
 from app.market.trading_calendar import taiwan_presentation_session, is_taiwan_trading_day, taiwan_market_session
-from app.market.tw_bar_contracts import TaiwanBarSeriesRead
+from app.market.tw_bar_contracts import TaiwanBarSeriesRead, BarBucketCoverageStatus
+from app.market.public_quote_repository import TaiwanPublicQuoteRepository
 from app.market.tw_instrument import (
     normalize_taiwan_instrument_id,
     resolve_taiwan_instrument,
@@ -442,9 +443,17 @@ def refresh_taiwan_intraday_bars(
         from app.market.tw_instrument_trading_policy import TAIWAN_TRADING_POLICY_VERSION, resolve_taiwan_instrument_trading_policy
         trading_policy = resolve_taiwan_instrument_trading_policy(get_taiwan_disposition_status(
             instrument.symbol, market=instrument.venue, now=now, trade_date=target_trade_date))
-        expected = continuous_session_coverage((), trade_date=target_trade_date,
-            trading_policy_version=TAIWAN_TRADING_POLICY_VERSION, trading_policy=trading_policy, as_of=now)
-        minimum = max(1, sum(item.expected_by_trading_policy and item.bucket_end <= requirement.request.end_at
+        opening = TaiwanPublicQuoteRepository(db).load_opening_quote_evidence(
+            instrument, trade_date=target_trade_date, requested_at=now)
+        # Existing actual bars veto contradictory zero-cumulative evidence.
+        cached_bars = tuple(bar for candidate in TaiwanIntradayBarRepository(db)
+            .read_bar_candidates(requirement).candidates for bar in candidate.bars) if opening else ()
+        expected = continuous_session_coverage(cached_bars, trade_date=target_trade_date,
+            trading_policy_version=TAIWAN_TRADING_POLICY_VERSION, trading_policy=trading_policy, as_of=now,
+            instrument=instrument, opening_quote_evidence=opening)
+        minimum = max(1, sum(item.expected_by_trading_policy
+                             and item.status is not BarBucketCoverageStatus.VERIFIED_NO_TRADE
+                             and item.bucket_end <= requirement.request.end_at
                              for item in expected))
         requirement = requirement.model_copy(update={"request": requirement.request.model_copy(update={
             "coverage": BarCoverageRequirement(minimum_bar_count=minimum)})})
