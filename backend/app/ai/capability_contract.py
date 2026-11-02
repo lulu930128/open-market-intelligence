@@ -8,6 +8,7 @@ from typing import Any
 
 from app.ai import capability_resolution_registry, public_contract
 from app.ai.projection_temporal import series_point_sort_key, series_point_time
+from app.ai.market_context import taiwan_swing_research
 
 
 OUTPUT_MODES = {"evidence_only", "decision", "decision_with_evidence"}
@@ -339,6 +340,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "last_trade_volume_shares",
             "lot_size",
             "volume_scope",
+            "cumulative_trade_value",
+            "cumulative_trade_value_evidence",
             "volume_source",
             "volume_source_field",
             "provider_volume_available",
@@ -550,6 +553,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "last_trade_volume_shares",
             "lot_size",
             "volume_scope",
+            "cumulative_trade_value",
+            "cumulative_trade_value_evidence",
             "volume_source",
             "volume_source_field",
             "provider_volume_available",
@@ -1185,6 +1190,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "unallocated_volume_lots",
             "volume_reconciliation",
             "cumulative_trade_value",
+            "window_trade_value",
+            "trade_value_coverage",
             "available_cumulative_trade_value",
             "estimated_cumulative_trade_value",
             "trade_value_status",
@@ -1361,6 +1368,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "unallocated_volume_lots",
             "volume_reconciliation",
             "cumulative_trade_value",
+            "window_trade_value",
+            "trade_value_coverage",
             "available_cumulative_trade_value",
             "estimated_cumulative_trade_value",
             "trade_value_status",
@@ -4277,6 +4286,50 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         side_effect_policy="cache_read_only_no_refresh",
     ),
     CapabilitySpec(
+        capability_id="screening.swing_discovery", schema_version="tw.swing.prefilter.v1",
+        domain="screening", slot="screening_swing_discovery", scopes=("market",), markets=("TW",),
+        paths=("compact.screening.swing_discovery", "data.screening.swing_discovery"),
+        fields=taiwan_swing_research.DISCOVERY_FIELDS, default_fields=taiwan_swing_research.DISCOVERY_FIELDS,
+        default_limit=20, title="Taiwan bounded universe swing discovery",
+        description="One cache-only completed-daily cheap scan, at most 20 batches of 100 stocks, then bounded Top-N detailed research. Returns lightweight summaries and separate scope/progress/quality coverage. Internal checkpoint and full-universe rows are omitted; incomplete inputs remain partial.",
+        parameter_schema=taiwan_swing_research.parameter_schema(taiwan_swing_research.SwingDiscoveryParameters),
+        frequency="daily", unit_semantics="TWD_percent_and_universe_counts",
+        event_time_basis="completed_trade_date_and_receipt_cutoff", side_effect_policy="cache_read_only_no_refresh",
+    ),
+    CapabilitySpec(
+        capability_id="screening.swing", schema_version="tw.swing.screen.v1",
+        domain="screening", slot="screening_swing", scopes=("market",), markets=("TW",),
+        paths=("compact.screening.swing", "data.screening.swing"),
+        fields=taiwan_swing_research.SWING_FIELDS, default_fields=taiwan_swing_research.SWING_FIELDS,
+        default_limit=20, title="Taiwan completed-daily swing research",
+        description="Cache-only Long/Short research over 1-100 explicit stock_ids, one 10/15-session horizon. Selected-universe sample only; coverage and exclusions precede pagination. No refresh, trigger or execution.",
+        parameter_schema=taiwan_swing_research.parameter_schema(taiwan_swing_research.SwingScreenRequest),
+        frequency="daily", unit_semantics="TWD_and_selected_universe_counts",
+        event_time_basis="completed_trade_date_and_receipt_cutoff",
+        side_effect_policy="cache_read_only_no_refresh",
+    ),
+    CapabilitySpec(
+        capability_id="research.trade_setup", schema_version="tw.trade_setup.math.v1",
+        domain="research", slot="research_trade_setup", scopes=("market",), markets=("TW",),
+        paths=("compact.research.trade_setup", "data.research.trade_setup"),
+        fields=taiwan_swing_research.SETUP_FIELDS, default_fields=taiwan_swing_research.SETUP_FIELDS,
+        default_limit=2, title="Taiwan proposed trade setup calculator",
+        description="Pure F03 evaluator. Supply setup.symbol/date/direction/entry/stop/targets/quantity, 10/15-session horizon and explicit cost assumptions. Missing costs remain unknown; proposed only, never an order or trigger.",
+        parameter_schema=taiwan_swing_research.parameter_schema(taiwan_swing_research.TradeSetupParameters),
+        unit_semantics="TWD_shares_and_gross_net_RR", event_time_basis="caller_scenario_date",
+        side_effect_policy="pure_read_only",
+    ),
+    CapabilitySpec(
+        capability_id="research.trade_eligibility", schema_version="tw.trade_eligibility.v1",
+        domain="research", slot="research_trade_eligibility", scopes=("market",), markets=("TW",),
+        paths=("compact.research.trade_eligibility", "data.research.trade_eligibility"),
+        fields=taiwan_swing_research.ELIGIBILITY_FIELDS, default_fields=taiwan_swing_research.ELIGIBILITY_FIELDS,
+        default_limit=100, title="Taiwan swing event and regulation eligibility",
+        description="F04 bounded existing event/regulation cache reader for an explicit stock_id, market, cutoff and 10/15-session entry window. Broker borrow, funding and current quote remain unknown without backend evidence.",
+        parameter_schema=taiwan_swing_research.parameter_schema(taiwan_swing_research.EligibilityRequest),
+        event_time_basis="holding_sessions_and_receipt_cutoff", side_effect_policy="cache_read_only_no_refresh",
+    ),
+    CapabilitySpec(
         capability_id="screening.price_map", schema_version="tw.screening.price_map.v1",
         domain="screening", slot="screening_price_map", scopes=("market",), markets=("TW",),
         paths=("compact.screening.price_map", "data.screening.price_map"),
@@ -4288,13 +4341,13 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
                         "expected_basis_date", "rows", "coverage", "pagination", "facts_usable_for_ranking",
                         "intraday_research_usable", "execution_grade_usable", "cache_policy", "missing", "warnings"),
         default_limit=200, title="Taiwan Price Map screening",
-        description="Cache-only screening over revisioned completed-period zones and canonical current observations. Reactions require ordered samples; indicative observations are separate from actual trades.",
+        description="Cache-only screening over revisioned zones and canonical actual, indicative or completed_daily observations. Completed daily uses finalized official close positions only; it cannot confirm intraday touching, reactions or retests.",
         parameter_schema={
             "type": "object", "properties": {
                 "timeframe": {"type": "string", "enum": ["daily", "weekly", "monthly"], "default": "daily"},
                 "zone_side": {"type": "string", "enum": ["any", "upside", "downside"], "default": "any"},
-                "relation": {"type": "string", "enum": ["near_zone", "touching", "above_zone", "below_zone", "support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest"], "default": "near_zone"},
-                "lane": {"type": "string", "enum": ["actual", "indicative"], "default": "actual"},
+                "relation": {"type": "string", "enum": ["near_zone", "touching", "above_zone", "below_zone", "support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest", "within_zone"], "default": "near_zone"},
+                "lane": {"type": "string", "enum": ["actual", "indicative", "completed_daily"], "default": "actual"},
                 "near_pct": {"type": "number", "minimum": 0, "maximum": 5, "default": 0.5},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0},
@@ -4817,6 +4870,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "ranked_count",
             "matched_count",
             "radar_count",
+            "returned_count",
             "no_data_count",
             "error_count",
             "trade_date",
@@ -4839,6 +4893,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "ranked_count",
             "matched_count",
             "radar_count",
+            "returned_count",
             "no_data_count",
             "error_count",
             "trade_date",
@@ -5905,7 +5960,7 @@ def _normalized_parameters(
     ignored_capabilities: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Any]]:
     if raw_parameters is None:
-        return {}
+        raw_parameters = {}
     if not isinstance(raw_parameters, dict):
         raise ValueError(
             "selection.parameters must be an object keyed by capability id."
@@ -5969,6 +6024,11 @@ def _normalized_parameters(
                     "min_observed_periods must not exceed window."
                 )
         output[normalized_id] = normalized_parameters
+    for capability_id in selected:
+        if capability_id in {"screening.swing", "screening.swing_discovery", "research.trade_setup", "research.trade_eligibility"}:
+            output[capability_id] = taiwan_swing_research.validate_parameters(
+                capability_id, output.get(capability_id, {}),
+            )
     return output
 
 
@@ -6654,6 +6714,8 @@ def _canonical_intraday_value(value: Any) -> Any:
         "unallocated_volume_lots",
         "volume_reconciliation",
         "cumulative_trade_value",
+        "window_trade_value",
+        "trade_value_coverage",
         "available_cumulative_trade_value",
         "estimated_cumulative_trade_value",
         "lot_size",
@@ -6918,6 +6980,11 @@ def project_selected_data(
             capability_id,
             limit_map.get(aliases.get(capability_id, ""), spec.default_limit),
         )
+        if capability_id in {"screening.swing", "screening.swing_discovery", "research.trade_setup", "research.trade_eligibility"}:
+            projected[capability_id] = taiwan_swing_research.project_research_payload(
+                capability_id, raw_value, fields=fields, limit=int(raw_limit),
+            )
+            continue
         if isinstance(raw_value, dict) and raw_value.get("schema_version") == dict(spec.market_schema_versions).get("US") and raw_value.get("market") == "US":
             # Group limits apply to leading groups, never recursively to the
             # reference lineage, warnings, or already-bounded member samples.
@@ -6937,6 +7004,15 @@ def project_selected_data(
             # The integration already bounds items/bytes. Generic recursive list
             # limits would drop co-mentioned companies or truncate original titles.
             projected[capability_id] = {key: raw_value[key] for key in fields if key in raw_value}
+            continue
+        if capability_id in {"watchlist.ranking", "watchlist.radar"} and isinstance(raw_value, dict):
+            # Ranked results are already ordered by their market owner. Keep
+            # leaders; chronological series retain the generic latest-tail rule.
+            value = dict(raw_value)
+            if isinstance(value.get("results"), list):
+                value["results"] = value["results"][:int(raw_limit)]
+                value["returned_count"] = len(value["results"])
+            projected[capability_id] = _project_fields(value, fields=fields, limit=int(raw_limit))
             continue
         projected[capability_id] = _reconcile_projected_series_counts(
             capability_id,
@@ -6974,6 +7050,8 @@ def _projected_returned_count(value: Any, *, included: bool) -> int:
         return len(value)
     if not isinstance(value, dict):
         return 1
+    if value.get("version") == "tw.swing.screen.v1":
+        return len(value.get("candidates") or [])
     for key in (
         "returned_count",
         "returned_point_count",
@@ -7008,6 +7086,8 @@ def _canonical_available_count(value: Any, *, included: bool) -> int | None:
 
     if not included or not isinstance(value, dict):
         return None
+    if value.get("version") == "tw.swing.screen.v1":
+        return (value.get("coverage") or {}).get("candidate_count")
     for key in (
         "point_count",
         "snapshot_point_count",
@@ -7144,6 +7224,27 @@ def _fill_payload_is_satisfied(item: dict[str, Any]) -> bool:
     return item.get("status_class") == "ready" and item.get("payload_included") is True
 
 
+def request_accepts_evidence(canonical: dict[str, Any]) -> bool:
+    """Keep a valid asynchronous request separate from evidence completion."""
+    if canonical.get("ok") is not True:
+        return False
+    if canonical.get("request_status") == "completed":
+        return True
+    if canonical.get("request_status") != "background_in_progress":
+        return False
+    target = canonical.get("target") or {}
+    spec = public_contract.TARGETS.get(target.get("type"))
+    continuation = canonical.get("continuation") or {}
+    return bool(
+        spec and spec.target_type != "auto"
+        and (not spec.requires_id or target.get("id"))
+        and target.get("identity_status") != "unresolved"
+        and not canonical.get("error")
+        and not (continuation.get("resolution") or {}).get("error")
+        and not (continuation.get("clarification") or {}).get("required")
+    )
+
+
 def build_manifest(
     *,
     canonical: dict[str, Any],
@@ -7200,8 +7301,7 @@ def build_manifest(
         if capability_id == "target.identity":
             status = (
                 "unresolved"
-                if canonical.get("ok") is not True
-                or canonical.get("request_status") != "completed"
+                if not request_accepts_evidence(canonical)
                 else "ready"
                 if canonical.get("target")
                 else "missing"
@@ -7255,7 +7355,9 @@ def build_manifest(
         )
         payload_truncated = bool(
             isinstance(projected_value, dict)
-            and projected_value.get("truncated") is True
+            and (projected_value.get("truncated") is True or (
+                capability_id in {"screening.swing", "screening.swing_discovery"} and projected_value.get("response_truncated") is True
+            ))
         )
         realtime = (realtime_assessments or {}).get(capability_id)
         if realtime is None and isinstance(projected_data.get(capability_id), dict):
@@ -7598,7 +7700,7 @@ def build_fill_plan(
     already_attempted_actions: list[dict[str, Any]] = []
     already_satisfied: list[dict[str, Any]] = []
     not_applicable: list[dict[str, Any]] = []
-    if canonical.get("ok") is not True or canonical.get("request_status") != "completed":
+    if not request_accepts_evidence(canonical):
         return {
             "version": "omi.fill.plan.v1",
             "plan_id": fill_plan_id(target=target, action_ids=[]),
@@ -7663,6 +7765,8 @@ def build_fill_plan(
         job_id = job.get("job_id")
         if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
             continue
+        if job.get("status") not in {"queued", "running"}:
+            continue
         for capability_id in _capabilities_for_tool_run(
             run=run,
             selected=selected,
@@ -7724,6 +7828,18 @@ def build_fill_plan(
                 }
             )
             continue
+        # Active repair remains pollable even when cached evidence is usable or
+        # the original request cannot currently satisfy require_live.
+        if capability_id in background_jobs_by_capability:
+            jobs.append(
+                {
+                    **background_jobs_by_capability[capability_id],
+                    "capability_status": item.get("status"),
+                    "status_class": item.get("status_class"),
+                    "payload_included": item.get("payload_included") is True,
+                }
+            )
+            continue
         if _fill_payload_is_satisfied(item):
             already_satisfied.append(
                 {
@@ -7743,16 +7859,6 @@ def build_fill_plan(
                 "resolution_type": "unfillable_action",
                 "reason": fill_state.get("reason_code"),
             })
-            continue
-        if capability_id in background_jobs_by_capability:
-            jobs.append(
-                {
-                    **background_jobs_by_capability[capability_id],
-                    "capability_status": item.get("status"),
-                    "status_class": item.get("status_class"),
-                    "payload_included": item.get("payload_included") is True,
-                }
-            )
             continue
         if (
             capability_id in attempted_capabilities
@@ -8475,11 +8581,16 @@ def build_refresh_reconciliation(
 
 
 def _fill_target_identity(target: dict[str, Any]) -> dict[str, Any]:
-    return {
+    identity = {
         key: target[key]
         for key in ("type", "id", "market")
         if target.get(key) not in (None, "")
     }
+    # Resource identity defaults to lower case; explicit scope resolution uses
+    # upper case. Canonicalize that same market in invokes and both bindings.
+    if identity.get("type") == "resource_asset" and str(identity.get("market", "")).casefold() == "resource":
+        identity["market"] = "resource"
+    return identity
 
 
 def _taiwan_fill_window(params: dict[str, Any] | None) -> dict[str, Any]:

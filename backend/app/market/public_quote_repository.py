@@ -393,6 +393,18 @@ class TaiwanPublicQuoteRepository:
                     cumulative = fugle_cumulative_fields(data, trade_date=row.trade_date, received_at=_as_utc(row.received_at))
             except (ValueError, TypeError, AttributeError):
                 pass  # Missing totals do not invalidate the independent price observation.
+        price_limits = None
+        if row.provider == "twse_mis":
+            from app.market.providers.tw_public_quote import parse_twse_mis_quote_payload, quote_observation_from_twse_mis
+            try:
+                message = parse_twse_mis_quote_payload(raw.raw_text, target_symbol=instrument.symbol)
+                parsed = quote_observation_from_twse_mis(instrument=instrument, message=message,
+                    session=MarketSession(row.market_session), received_at=_as_utc(row.received_at),
+                    fetched_at=_as_utc(raw.fetched_at), content_hash=raw.content_hash)
+                if parsed.trade_date == row.trade_date and parsed.price_limits is not None:
+                    price_limits = parsed.price_limits.model_copy(update={"lineage": parsed.lineage})
+            except (ValueError, TypeError):
+                pass  # Independent limit evidence remains unknown; price truth is unchanged.
         quote = QuoteObservation(
             instrument=instrument,
             lineage=SourceLineage(
@@ -425,6 +437,7 @@ class TaiwanPublicQuoteRepository:
             high_price=_price(row.high_price),
             low_price=_price(row.low_price),
             previous_close=_price(row.previous_close),
+            price_limits=price_limits,
         )
         return PersistedPublicQuoteRead(
             observation=quote,

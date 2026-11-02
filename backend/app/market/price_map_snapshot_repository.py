@@ -6,20 +6,21 @@ from hashlib import sha256
 import json
 
 from sqlalchemy import inspect
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.db.models import StockMaster, TaiwanPriceMapSnapshot, TaiwanTechnicalInputRevision
 from app.market.stock_price_map_schemas import METHODOLOGY_VERSION
+from app.market.tw_universe import list_taiwan_stock_universe
 
 
 def read_price_map_external_revision() -> str:
-    from app.market.tw_corporate_events import taiwan_corporate_event_revision
-    from app.market.exchange_calendar_cache import read_exchange_calendar_cache
+    from app.market.tw_corporate_events import taiwan_corporate_event_semantic_revision
+    from app.market.exchange_calendar_cache import exchange_calendar_semantic_revision
     from app.market.technical_evidence import ADVANCED_ALGORITHM_VERSION, INDICATOR_ALGORITHM_VERSION
     from app.market.tw_bar_aggregation import TAIWAN_BAR_AGGREGATION_VERSION
     from app.market.tw_technical_service import INPUT_QUALITY_VERSION
     from app.market.trading_calendar import TAIWAN_MARKET_HOLIDAYS, TAIWAN_EMERGENCY_MARKET_CLOSURES
-    return sha256(json.dumps({"corporate": taiwan_corporate_event_revision(),
+    return sha256(json.dumps({"corporate": taiwan_corporate_event_semantic_revision(),
         "algorithms": [INDICATOR_ALGORITHM_VERSION, ADVANCED_ALGORITHM_VERSION, TAIWAN_BAR_AGGREGATION_VERSION],
         "input_quality": INPUT_QUALITY_VERSION,
         "calendar_builtin": {
@@ -30,7 +31,7 @@ def read_price_map_external_revision() -> str:
             day.isoformat(): {"name": item.name, "reason_code": item.reason_code, "source": item.source}
             for day, item in TAIWAN_EMERGENCY_MARKET_CLOSURES.items()
         },
-        "calendar": read_exchange_calendar_cache().get("markets", {}).get("tw", {})},
+        "calendar": exchange_calendar_semantic_revision("tw")},
         sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -62,20 +63,20 @@ def read_input_revisions(db: Session, stock_ids: list[str]) -> dict[str, int]:
     return {row.stock_id: row.generation for row in rows}
 
 
-def read_price_map_snapshots(db: Session, stock_ids: list[str], timeframe: str) -> dict[str, TaiwanPriceMapSnapshot]:
+def read_price_map_snapshots(db: Session, stock_ids: list[str], timeframe: str, *, include_payload: bool = True) -> dict[str, TaiwanPriceMapSnapshot]:
     if len(stock_ids) > 5000:
         raise ValueError("Price Map snapshot read exceeds bounded universe")
-    return {row.stock_id: row for row in db.query(TaiwanPriceMapSnapshot).filter(
+    query = db.query(TaiwanPriceMapSnapshot)
+    if not include_payload:
+        query = query.options(defer(TaiwanPriceMapSnapshot.payload_json))
+    return {row.stock_id: row for row in query.filter(
         TaiwanPriceMapSnapshot.stock_id.in_(stock_ids),
         TaiwanPriceMapSnapshot.timeframe == timeframe,
     ).all()}
 
 
 def read_price_map_universe(db: Session, *, markets: tuple[str, ...] = ("TWSE", "TPEX"), stock_ids: tuple[str, ...] = ()) -> list[StockMaster]:
-    query = db.query(StockMaster).filter(StockMaster.is_active.is_(True), StockMaster.instrument_type == "stock", StockMaster.market.in_(markets))
-    if stock_ids:
-        query = query.filter(StockMaster.stock_id.in_(stock_ids))
-    rows = query.order_by(StockMaster.stock_id).limit(5001).all()
+    rows = list_taiwan_stock_universe(db, markets=markets, stock_ids=stock_ids)
     if len(rows) > 5000:
         raise ValueError("Price Map universe exceeds 5000; specify a bounded universe")
     return rows

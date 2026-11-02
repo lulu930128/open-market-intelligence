@@ -104,6 +104,9 @@ class USCloseComparisonSemantics(str, Enum):
     OFFICIAL_VS_REGULAR_INTERVAL = "official_vs_regular_interval"
     OFFICIAL_VS_PROVIDER_HINT = "official_vs_provider_hint"
     INTERVAL_VS_PROVIDER_HINT = "interval_vs_provider_hint"
+    DAILY_VS_DAILY = "daily_vs_daily"
+    DAILY_VS_REGULAR_INTERVAL = "daily_vs_regular_interval"
+    DAILY_VS_PROVIDER_HINT = "daily_vs_provider_hint"
     SAME_SEMANTICS = "same_semantics"
 
 
@@ -122,7 +125,7 @@ class USCloseEvidence(CanonicalModel):
     observation_id: str = Field(min_length=1, max_length=256)
     semantic_fingerprint: str = Field(min_length=16, max_length=128)
     instrument: InstrumentKey
-    trade_date: date
+    trade_date: date | None
     price: Decimal = Field(gt=0)
     price_unit: PriceUnit
     currency: str | None = Field(default=None, min_length=3, max_length=3)
@@ -165,6 +168,8 @@ class USCloseEvidence(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_close_evidence(self) -> "USCloseEvidence":
+        if self.trade_date is None and self.evidence_kind is not USCloseEvidenceKind.PROVIDER_PREVIOUS_CLOSE_HINT:
+            raise ValueError("dated close evidence requires an independently known trade date")
         has_start = self.interval_start_at is not None
         has_end = self.interval_end_at is not None
         if has_start != has_end:

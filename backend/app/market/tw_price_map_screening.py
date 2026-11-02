@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from math import isfinite
 from typing import Any
@@ -17,8 +17,12 @@ from app.market.price_map_reaction import price_map_reaction
 from app.market.technical_parameters import get_technical_analysis_parameters
 from app.market.trading_calendar import TAIWAN_TZ, latest_completed_taiwan_session_date
 from app.market.tw_intraday_state import read_tw_price_map_observations
+from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
+from app.market_data.contracts import AuthorityClass, BarFinalization
 
-RELATIONS = ("near_zone", "touching", "above_zone", "below_zone", "support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest")
+POSITION_RELATIONS = ("near_zone", "touching", "above_zone", "below_zone")
+REACTION_RELATIONS = ("support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest")
+RELATIONS = (*POSITION_RELATIONS, *REACTION_RELATIONS, "within_zone")
 STRUCTURE_TIMEFRAMES = ("daily", "weekly", "monthly")
 SCANNER_VERSION = "tw.screening.price_map.v1"
 
@@ -33,10 +37,14 @@ def normalize_price_map_scan_parameters(parameters: dict | None) -> dict[str, An
     zone_side = raw.get("zone_side", "any")
     if zone_side not in {"any", "upside", "downside"}:
         raise ValueError("Invalid Price Map zone_side")
-    if timeframe not in STRUCTURE_TIMEFRAMES or relation not in RELATIONS or lane not in {"actual", "indicative"}:
+    if timeframe not in STRUCTURE_TIMEFRAMES or relation not in RELATIONS or lane not in {"actual", "indicative", "completed_daily"}:
         raise ValueError("Unsupported Price Map timeframe, relation, or observation lane")
-    if lane == "indicative" and relation not in RELATIONS[:4]:
+    if lane == "indicative" and relation not in POSITION_RELATIONS:
         raise ValueError("Indicative observations cannot confirm trade reaction events")
+    if lane == "completed_daily" and relation not in {"near_zone", "within_zone", "above_zone", "below_zone"}:
+        raise ValueError("Completed daily close only supports closing price position, not intraday touch or reaction")
+    if relation == "within_zone" and lane != "completed_daily":
+        raise ValueError("within_zone requires completed_daily observations")
     limit, offset = raw.get("limit", 20), raw.get("offset", 0)
     if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 200 or not 0 <= offset <= 5000:
         raise ValueError("Price Map scanner pagination is out of range")
@@ -56,6 +64,50 @@ def normalize_price_map_scan_parameters(parameters: dict | None) -> dict[str, An
                 stock_ids=tuple(dict.fromkeys(s.strip() for s in stock_ids)))
 
 
+def _read_completed_daily_observations(db: Session, *, stock_ids: list[str], basis_date: date,
+        now: datetime) -> dict[str, dict[str, Any]]:
+    """Compose the existing exact-session official reader; never use intraday state or carry a stale close."""
+    repository = TaiwanOfficialDailyBarRepository(db, available_at=now)
+    result = {}
+    for start in range(0, len(stock_ids), 500):
+        symbols = tuple(stock_ids[start:start + 500])
+        daily = repository.load_market_universe(trade_date=basis_date, symbols=symbols,
+            max_rows=max(128, len(symbols) * 4))
+        metadata = repository.outward_state_metadata(tuple(bar.lineage.observation_id for bar in daily.bars))
+        rejected = {}
+        for symbol, reason in daily.rejection_reasons:
+            rejected.setdefault(symbol, []).append(reason)
+        for symbol in symbols:
+            result[symbol] = {"research_usable": False,
+                "reason_codes": rejected.get(symbol) or ["COMPLETED_DAILY_CLOSE_MISSING"]}
+        for bar in daily.bars:
+            lineage = bar.lineage
+            reasons = []
+            if (bar.finalization not in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+                    or bar.start_at.astimezone(TAIWAN_TZ).date() != basis_date):
+                reasons.append("COMPLETED_DAILY_NOT_FINALIZED")
+            if (lineage.authority != AuthorityClass.EXCHANGE or not lineage.raw_receipt_id
+                    or not lineage.content_hash or not lineage.observation_id or not lineage.fetched_at
+                    or lineage.fetched_at > now or bar.price_basis != "raw"):
+                reasons.append("COMPLETED_DAILY_LINEAGE_UNQUALIFIED")
+            price = float(bar.close_price)
+            if not isfinite(price) or price <= 0:
+                reasons.append("COMPLETED_DAILY_CLOSE_INVALID")
+            result[bar.instrument.symbol] = {
+                "market": bar.instrument.venue, "trade_date": basis_date, "price": price,
+                "event_time": bar.end_at, "received_at": lineage.fetched_at,
+                "price_semantics": "official_finalized_daily_close", "finalization": bar.finalization.value,
+                "authority": lineage.authority.value, "price_basis": bar.price_basis,
+                **metadata.get(lineage.observation_id, {}),
+                "has_actual_trade": False, "research_usable": not reasons, "decision_usable": not reasons,
+                "reason_codes": reasons, "samples": [], "lineage": lineage.model_dump(mode="json"),
+                "source_refs": [{"type": "resolved_market_data", "name": "taiwan_official_daily",
+                    "provider": lineage.provider, "source": lineage.source,
+                    "observation_id": lineage.observation_id, "raw_receipt_id": lineage.raw_receipt_id}],
+            }
+    return result
+
+
 def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | None = None, generated_at: datetime | None = None) -> dict[str, Any]:
     request = normalize_price_map_scan_parameters(parameters)
     now = generated_at or datetime.now(TAIWAN_TZ)
@@ -67,10 +119,12 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
     ready_storage = snapshot_storage_available(db)
     snapshots = read_price_map_snapshots(db, stock_ids, request["timeframe"]) if ready_storage else {}
     revisions = read_input_revisions(db, stock_ids) if ready_storage else {}
-    observations = read_tw_price_map_observations(db, stock_ids=stock_ids, now=now, lane=request["lane"])
+    expected_basis = latest_completed_taiwan_session_date(now)
+    completed_daily = request["lane"] == "completed_daily"
+    observations = (_read_completed_daily_observations(db, stock_ids=stock_ids, basis_date=expected_basis, now=now)
+        if completed_daily else read_tw_price_map_observations(db, stock_ids=stock_ids, now=now, lane=request["lane"]))
     params = get_technical_analysis_parameters()
     corporate_revision = read_price_map_external_revision()
-    expected_basis = latest_completed_taiwan_session_date(now)
     reasons: Counter[str] = Counter()
     counts: Counter[str] = Counter()
     matches = []
@@ -126,11 +180,11 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
             if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)) or not 0 < lower < upper or not isfinite(lower + upper):
                 continue
             distance = max(lower - price, price - upper, 0) / price * 100
-            relation = "touching" if lower <= price <= upper else "above_zone" if price > upper else "below_zone"
+            relation = ("within_zone" if completed_daily else "touching") if lower <= price <= upper else "above_zone" if price > upper else "below_zone"
             wanted = request["relation"]
             reaction = None
             matched = (distance <= request["near_pct"]) if wanted == "near_zone" else relation == wanted
-            if wanted in RELATIONS[4:]:
+            if wanted in REACTION_RELATIONS:
                 published = snapshot.published_at
                 if published is None:
                     continue
@@ -164,6 +218,8 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
     warnings = [] if complete else ["Requested universe is only partially covered; pagination does not change coverage."]
     if request["lane"] == "indicative":
         warnings.append("Indicative matching prices are not actual trades and are not decision usable.")
+    if completed_daily:
+        warnings.append("Finalized daily close position only; no intraday touch, reaction or retest sequence is inferred.")
     return {
         "kind": "tw_price_map_screening", "version": SCANNER_VERSION, "status": status,
         "freshness_status": "current" if complete else status, "computed_at": now, "as_of": now,
@@ -176,8 +232,9 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
         "pagination": {"offset": request["offset"], "limit": request["limit"], "total": len(matches), "returned": len(selected_rows)},
         "empty_result_is_valid": complete and not matches,
         "facts_usable": complete or bool(matches), "facts_usable_for_ranking": complete or bool(matches),
-        "decision_usable": complete and request["lane"] == "actual",
+        "decision_usable": complete and request["lane"] in {"actual", "completed_daily"},
         "intraday_research_usable": bool(matches) and request["lane"] == "actual", "execution_grade_usable": False,
         "cache_policy": "cache_only_no_refresh_no_build", "missing": list(sorted(reasons)), "warnings": warnings,
-        "source_refs": [{"type": "derived", "name": "taiwan_price_map_snapshot"}, {"type": "resolved_market_data", "name": "taiwan_intraday_stock_state"}],
+        "source_refs": [{"type": "derived", "name": "taiwan_price_map_snapshot"},
+            {"type": "resolved_market_data", "name": "taiwan_official_daily" if completed_daily else "taiwan_intraday_stock_state"}],
     }

@@ -91,15 +91,18 @@ function Get-OmiLifecycleSourceId {
         foreach ($name in @('scripts/omi-launcher.ps1', 'scripts/omi-runtime-control.ps1',
             'scripts/run-service-logged.ps1', 'scripts/OmiRuntimeControl.cs', 'scripts/OmiOwnedShutdown.cs', 'scripts/apply-omi-update.ps1',
             'backend/owned_backend_entry.py', 'scripts/omi-schema-maintenance.py', 'scripts/backup-omi-sqlite.py',
-            'backend/alembic/env.py', '.venv/pyvenv.cfg') +
-            @(Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'backend/alembic/versions') -Filter '*.py' |
-                Sort-Object Name | ForEach-Object { 'backend/alembic/versions/' + $_.Name })) {
-            $bytes = [IO.File]::ReadAllBytes((Join-Path $script:RepoRoot $name))
+            '.venv/pyvenv.cfg')) {
+            $path = Join-Path $script:RepoRoot $name
+            [Omi.OwnedShutdown.ProductionSession]::RejectReparse($path)
+            $label = [Text.Encoding]::UTF8.GetBytes($name + [char]0)
+            $buffer.Write($label, 0, $label.Length)
+            $bytes = [IO.File]::ReadAllBytes($path)
             $hash = $sha.ComputeHash($bytes)
             $buffer.Write($hash, 0, $hash.Length)
         }
         return ([BitConverter]::ToString($sha.ComputeHash($buffer.ToArray()))).Replace('-', '').ToLowerInvariant()
-    } finally { $buffer.Dispose(); $sha.Dispose() }
+    } catch { throw 'SOURCE_DIGEST_UNKNOWN' }
+    finally { $buffer.Dispose(); $sha.Dispose() }
 }
 
 function Assert-OmiProductionBackendStartPreflight {
@@ -109,6 +112,9 @@ function Assert-OmiProductionBackendStartPreflight {
     if (-not $script:OwnsMutex -or
         $script:BackendReload -or $script:IsPackagedRelease -or
         (Get-OmiLifecycleSourceId) -cne $script:LoadedLifecycleSourceId) { throw 'SOURCE_ADOPTION_NOT_ATTESTED' }
+    if ($script:BackendStartSchemaPin -and (Get-OmiSchemaSourceRelease) -cne $script:BackendStartSchemaPin) {
+        throw 'RESTART_SOURCE_CHANGED'
+    }
     if (@(Get-ListeningProcessIdsOnPort -Port $script:BackendPort -RequireObservation).Count -ne 0) { throw 'FIXED_PORT_NOT_FREE' }
     if (-not (Test-TcpPortBindable -Port $script:BackendPort -HostName $script:BackendHost -ServiceName 'Backend' -Quiet)) {
         throw 'FIXED_PORT_NOT_BINDABLE'
@@ -134,11 +140,13 @@ function New-OmiProductionOwnedBackend {
 }
 
 function Get-OmiBackendApplicationRelease {
-    return [Omi.OwnedShutdown.ProductionSession]::ApplicationRelease($script:RepoRoot)
+    try { return [Omi.OwnedShutdown.ProductionSession]::ApplicationRelease($script:RepoRoot) }
+    catch { throw 'SOURCE_DIGEST_UNKNOWN' }
 }
 
 function Get-OmiSchemaSourceRelease {
-    return [Omi.OwnedShutdown.ProductionSession]::SchemaSourceRelease($script:RepoRoot)
+    try { return [Omi.OwnedShutdown.ProductionSession]::SchemaSourceRelease($script:RepoRoot) }
+    catch { throw 'SOURCE_DIGEST_UNKNOWN' }
 }
 
 function Assert-OmiBackendApplicationRelease {
@@ -157,6 +165,16 @@ function Get-OmiSchemaReceiptHash {
     } catch {return $null}
 }
 
+function Test-OmiSchemaWorkerNotDispatched {
+    param([string]$RequestId)
+    $record=$script:LastSchemaOperation
+    $owned=$script:OwnedBackendSession
+    if ($null -eq $record -or $record.request_id -cne $RequestId -or $record.phase -cne 'FAILED' -or
+        $record.migration_outcome -cne 'NOT_ATTEMPTED' -or $record.successor_outcome -cne 'NOT_ATTEMPTED' -or
+        $null -eq $owned -or -not [object]::ReferenceEquals($script:BackendProcess,$owned.RunnerProcess)) {return $false}
+    try {return $owned.CanRecoverSchemaBeforeWorker($RequestId)} catch {return $false}
+}
+
 function Assert-OmiSchemaRecoveryAdmission {
     # A receipt never creates authority. It must match the terminal record this
     # owner persisted, plus the retained worker result; process gates run anew.
@@ -164,15 +182,72 @@ function Assert-OmiSchemaRecoveryAdmission {
     if ($null -eq $fence) { return }
     if (-not $fence.TerminalHash -or -not (Test-Path -LiteralPath $fence.Path) -or
         (Get-OmiSchemaReceiptHash -Path $fence.Path) -cne $fence.TerminalHash -or
-        (-not $fence.NoEffects -and -not $fence.WorkerSettled)) {
+        (-not $fence.NoEffects -and -not $fence.WorkerSettled -and
+            -not (Test-OmiSchemaWorkerNotDispatched -RequestId ([IO.Path]::GetFileName($fence.Path).Replace('.operation.jsonl',''))))) {
         throw 'SCHEMA_MAINTENANCE_RECONCILIATION_REQUIRED'
     }
+}
+
+function Get-OmiOperationDiagnostics {
+    param([string]$RequestId, [Exception]$Failure, [string]$StopOutcome='UNKNOWN',
+        [string]$MigrationOutcome='UNKNOWN', [string]$SuccessorOutcome='UNKNOWN')
+    # Only this owner's in-memory record is projected. Never import historical
+    # operations, expose private paths, or turn this observation into admission.
+    $result=[Omi.RuntimeControl.OperationDiagnostics]::new()
+    $result.request_id=$RequestId
+    $result.observed_at=[DateTime]::UtcNow.ToString('o')
+    $result.stop_outcome=$StopOutcome; $result.migration_outcome=$MigrationOutcome
+    $result.successor_outcome=$SuccessorOutcome
+    $record=$script:LastSchemaOperation
+    if ($null -ne $record -and $record.request_id -ceq $RequestId) {
+        foreach ($name in @('phase','failed_phase','failure_code','error_type','migration_outcome','successor_outcome',
+            'worker_outcome','worker_phase','worker_failed_phase','worker_failure_code','worker_error_type',
+            'schema_revision_observed','schema_revision_basis','schema_revision_observed_at','next_action')) {
+            if ($null -ne $record[$name]) { $result.$name=$record[$name] }
+        }
+        if ($null -ne $record.stop) { $result.stop_outcome=$record.stop.state }
+        $fence=$script:SchemaRecoveryFence
+        $expected=Join-Path (Join-Path $script:RuntimeControlStore 'schema-maintenance') ($RequestId+'.operation.jsonl')
+        if ($null -ne $fence -and $fence.Path -ceq $expected) {
+            $result.recovery_fence.no_effects=$fence.NoEffects
+            $result.recovery_fence.worker_settled=$fence.WorkerSettled
+            $result.recovery_fence.worker_not_dispatched=Test-OmiSchemaWorkerNotDispatched -RequestId $RequestId
+            try {Assert-OmiRuntimeControllerOwner; $result.recovery_fence.owner_attested=$true}
+            catch {$result.recovery_fence.owner_attested=$false}
+            $owned=$script:OwnedBackendSession
+            if ($null -ne $owned -and [object]::ReferenceEquals($script:BackendProcess,$owned.RunnerProcess) -and
+                (($owned.CanStartAfterStop -and $owned.LastStop.ExactExit -and -not $owned.LastStop.Forced -and
+                    -not $owned.LastStop.ForcedExitConfirmed) -or $owned.CanRecoverFailedStart)) {
+                $result.recovery_fence.retained_generation='EXACT_EXIT'
+            }
+            $matched=$fence.TerminalHash -and (Get-OmiSchemaReceiptHash -Path $fence.Path) -ceq $fence.TerminalHash
+            $result.recovery_fence.terminal_receipt=if ($matched) {'MATCHED'} else {'UNCONFIRMED'}
+            $result.recovery_fence.admission=if ($matched -and ($fence.NoEffects -or $fence.WorkerSettled -or
+                $result.recovery_fence.worker_not_dispatched)) {
+                'RECHECK_REQUIRED'
+            } else {'RECONCILIATION_REQUIRED'}
+        }
+    } elseif ($null -ne $Failure -and $StopOutcome -cin @('NOT_ATTEMPTED','PREVIOUSLY_STOPPED') -and
+        $MigrationOutcome -ceq 'NOT_ATTEMPTED' -and $SuccessorOutcome -ceq 'NOT_ATTEMPTED') {
+        $result.phase='BEFORE_START'; $result.failed_phase='BEFORE_START'
+    }
+    if ($null -ne $Failure) {
+        $result.failure_code=[Omi.RuntimeControl.OperationDiagnostics]::FailureCode($Failure)
+        $result.error_type=[Omi.RuntimeControl.OperationDiagnostics]::ErrorType($Failure.GetType().Name)
+    }
+    if ($result.successor_outcome -ceq 'VERIFIED') { $result.next_action='Status' }
+    return [Omi.RuntimeControl.OperationDiagnostics]::Sanitize($result,$RequestId)
 }
 
 function Assert-OmiSchemaCompatibility {
     param([Parameter(Mandatory=$true)][string]$ExpectedRelease,
         [string]$DatabasePath, [string]$SchemaLockPath, [switch]$Upgrade, [switch]$PassThru)
     Assert-OmiBackendApplicationRelease -ExpectedRelease $ExpectedRelease
+    $schemaSource = Get-OmiSchemaSourceRelease
+    $script:RestartCompatibilityObservation = [pscustomobject]@{
+        Session=$script:OwnedBackendSession; TargetRelease=$ExpectedRelease; SchemaSource=$schemaSource
+        State='UNKNOWN'; Reason='RESTART_COMPATIBILITY_NOT_ATTESTED'; ObservedAt=[DateTime]::UtcNow.ToString('o'); SchemaRevision=$null; SchemaHead=$null
+    }
     # The fixed inspector reads configured SQLite metadata only. No migration,
     # shell, data rows, repair or credential values are returned.
     $liveUrl=if ($script:OwnedBackendSession.Alive) {$script:BackendBaseUrl} else {''}
@@ -180,10 +255,21 @@ function Assert-OmiSchemaCompatibility {
         $output=[Omi.OwnedShutdown.ProductionSession]::ReadStartCompatibility($script:RepoRoot,$liveUrl,$DatabasePath,$SchemaLockPath,[bool]$Upgrade)
         $proof=$output | ConvertFrom-Json
     } catch { throw 'RESTART_COMPATIBILITY_NOT_ATTESTED' }
+    $script:RestartCompatibilityObservation.SchemaRevision=[Omi.RuntimeControl.OperationDiagnostics]::Revision($proof.schema_generation.current)
+    $script:RestartCompatibilityObservation.SchemaHead=[Omi.RuntimeControl.OperationDiagnostics]::Revision($proof.schema_generation.head)
+    if ($proof.contract -ceq 'omi.start-compatibility.v1' -and $proof.compatible -ceq $false) {
+        $script:RestartCompatibilityObservation.State = 'INCOMPATIBLE'
+    }
     if ($proof.contract -cne 'omi.start-compatibility.v1' -or $proof.compatible -cne $true -or
         ($script:OwnedBackendSession.Alive -and ($proof.backend_pid -ne $script:OwnedBackendSession.ChildPid -or
             $proof.owner_id -cne $script:RuntimeController.OwnerId))) { throw 'RESTART_COMPATIBILITY_NOT_ATTESTED' }
     Assert-OmiBackendApplicationRelease -ExpectedRelease $ExpectedRelease
+    if ((Get-OmiSchemaSourceRelease) -cne $schemaSource) { throw 'RESTART_SOURCE_CHANGED' }
+    if (-not $Upgrade) {
+        $script:BackendStartSchemaPin = $schemaSource
+        $script:RestartCompatibilityObservation.State = 'COMPATIBLE'
+        $script:RestartCompatibilityObservation.Reason = $null
+    }
     if ($PassThru) { return $proof }
 }
 
@@ -210,7 +296,7 @@ function Invoke-OmiLauncherCommand {
 function Invoke-OmiRemoteControlOperation {
     param([string]$RequestId,[string]$Action)
     if (-not $script:RuntimeController.BeginRemoteOperation($RequestId)) { return }
-    $verified=$false; $migration='NOT_ATTEMPTED'; $successor='NOT_ATTEMPTED'; $after=$null; $stop='NOT_ATTEMPTED'; $failure=$null
+    $verified=$false; $migration='NOT_ATTEMPTED'; $successor='NOT_ATTEMPTED'; $after=$null; $stop='NOT_ATTEMPTED'; $failure=$null; $failureException=$null
     $before=$script:OwnedBackendSession
     $factoryAttemptsBefore=[long]$script:BackendFactoryAttemptCount
     try {
@@ -225,6 +311,7 @@ function Invoke-OmiRemoteControlOperation {
         if ($verified) { $successor='VERIFIED' }
     } catch {
         $failure=$_.Exception.Message
+        $failureException=$_.Exception
         throw
     } finally {
         if ($null -ne $before.LastStop -and $before.LastStop.RequestId -ceq $RequestId) {$stop=$before.LastStop.State}
@@ -236,12 +323,18 @@ function Invoke-OmiRemoteControlOperation {
         } elseif (-not $verified -and [long]$script:BackendFactoryAttemptCount -gt $factoryAttemptsBefore) {
             $successor=if ([object]::ReferenceEquals($before,$script:OwnedBackendSession)) {'ATTEMPTED_UNCONFIRMED'} else {'FAILED_UNCONFIRMED'}
         }
+        $diagnosticsJson=$null
+        try {
+            $script:LastRuntimeOperationDiagnostics=Get-OmiOperationDiagnostics -RequestId $RequestId -Failure $failureException `
+                -StopOutcome $stop -MigrationOutcome $migration -SuccessorOutcome $successor
+            $diagnosticsJson=$script:LastRuntimeOperationDiagnostics | ConvertTo-Json -Depth 6 -Compress
+        } catch { $script:LastRuntimeOperationDiagnostics=$null }
         Publish-OmiRuntimeControlStatus
-        $script:RuntimeController.CompleteRemoteOperation($RequestId,$verified,$stop,$migration,$successor,$after,$failure)
+        $script:RuntimeController.CompleteRemoteOperation($RequestId,$verified,$stop,$migration,$successor,$after,$failure,$diagnosticsJson)
     }
 }
 
-function Assert-OmiManualBackendStartOwner {
+function Assert-OmiRuntimeControllerOwner {
     # This is local tray authority inside the original owner, not a new control channel.
     if (-not $script:OwnsMutex -or $null -eq $script:Mutex -or
         $script:Mutex.SafeWaitHandle.IsClosed -or $script:Mutex.SafeWaitHandle.IsInvalid -or
@@ -251,6 +344,10 @@ function Assert-OmiManualBackendStartOwner {
         $script:RuntimeController.OwnerId -cne $script:LoadedRuntimeControllerOwnerId) {
         throw 'BACKEND_START_OWNER_NOT_ATTESTED'
     }
+}
+
+function Assert-OmiManualBackendStartOwner {
+    Assert-OmiRuntimeControllerOwner
     $owned = $script:OwnedBackendSession
     # Controller initialization precedes service config. The retained session's
     # birth endpoint is the authority, including a non-default selected port.
@@ -263,6 +360,9 @@ function Assert-OmiManualBackendStartOwner {
         [string]::IsNullOrWhiteSpace($script:LoadedLifecycleSourceId) -or
         (Get-OmiLifecycleSourceId) -cne $script:LoadedLifecycleSourceId) {
         throw 'SOURCE_ADOPTION_NOT_ATTESTED'
+    }
+    if ($script:BackendStartSchemaPin -and (Get-OmiSchemaSourceRelease) -cne $script:BackendStartSchemaPin) {
+        throw 'RESTART_SOURCE_CHANGED'
     }
 }
 
@@ -478,6 +578,33 @@ function Publish-OmiRuntimeControlStatus {
         $backend.ownership_reason = 'OWNED_START_READINESS_UNCONFIRMED'
     }
     $blockers = @()
+    $sourceState = 'UNKNOWN'; $targetRelease = $null; $schemaState = 'CHECK_REQUIRED_BEFORE_STOP'; $schemaObservedAt = $null
+    $updateAction = $null
+    if ($null -ne $owned) {
+        try {
+            # Same retained owner, endpoint and loaded lifecycle gate as BEFORE_STOP.
+            Assert-OmiManualBackendStartOwner
+            $targetRelease = Get-OmiBackendApplicationRelease
+            $schemaSource = Get-OmiSchemaSourceRelease
+            $sourceState = 'ATTESTED'
+            $known = $script:RestartCompatibilityObservation
+            if ($null -ne $known -and [object]::ReferenceEquals($known.Session, $owned) -and
+                $known.TargetRelease -ceq $targetRelease -and $known.SchemaSource -ceq $schemaSource) {
+                $schemaState = $known.State
+                $schemaObservedAt = $known.ObservedAt
+                if ($known.Reason) { $blockers += $known.Reason }
+            }
+        } catch {
+            $reason = $_.Exception.Message
+            if ($reason -cnotin @('SOURCE_ADOPTION_NOT_ATTESTED', 'SOURCE_DIGEST_UNKNOWN',
+                'RESTART_SOURCE_CHANGED', 'FIXED_ENDPOINT_CHANGED', 'BACKEND_START_OWNER_NOT_ATTESTED')) {
+                $reason = 'SOURCE_DIGEST_UNKNOWN'
+            }
+            if ($reason -in @('FIXED_ENDPOINT_CHANGED', 'BACKEND_START_OWNER_NOT_ATTESTED')) { $reason = 'OWNER_NOT_ATTESTED' }
+            $blockers += $reason
+            if ($reason -eq 'SOURCE_ADOPTION_NOT_ATTESTED') { $updateAction = 'ApplyUpdate' }
+        }
+    }
     if ($script:ServiceStopInProgress -or $script:ServiceStartRequestInProgress) { $blockers += 'BUSY' }
     if ($null -eq $identity) { $blockers += 'OWNER_NOT_ATTESTED' }
     elseif ($null -eq $script:OwnedBackendSession) { $blockers += 'OWNED_BOOTSTRAP_REQUIRED' }
@@ -494,7 +621,20 @@ function Publish-OmiRuntimeControlStatus {
             selected_host = $script:FrontendHost; selected_port = $script:FrontendPort; readiness = 'UNATTESTED' }
         mcp_dependency = @{ status = 'unknown'; identity = 'UNATTESTED'; reason = 'EXTERNAL_ADAPTER_NOT_ATTESTED' }
         restart = @{ available = ($blockers.Count -eq 0); reason = $(if ($blockers.Count) { $blockers[0] } else { 'AUTHENTICATED_REMOTE_INTENT_REQUIRED' })
-            blockers = $blockers; approval = 'authenticated_remote_intent'; writer_drain = 'graceful_then_owned_cutoff_180s' }
+            blockers = $blockers; update_action = $updateAction
+            diagnostics = @{ source = $sourceState; target_release_id = $targetRelease; schema = $schemaState
+                schema_observed_at = $schemaObservedAt
+                schema_action = 'CheckStart_then_explicit_SchemaUpgrade_or_approved_release'; observation_only = $true }
+            approval = 'authenticated_remote_intent'; writer_drain = 'graceful_then_owned_cutoff_180s' }
+    }
+    $status.last_operation=$script:LastRuntimeOperationDiagnostics
+    $status.update_operation=$script:UpdateOperation
+    $status.schema_reconciliation=$null
+    if ($null -ne $script:LastSchemaOperation) {
+        # Reconcile only the original owner's retained evidence. No worker,
+        # migration, receipt rewrite or lifecycle action runs on this read path.
+        try {$status.schema_reconciliation=Get-OmiOperationDiagnostics -RequestId $script:LastSchemaOperation.request_id}
+        catch {$status.schema_reconciliation=$null}
     }
     $script:RuntimeController.Publish(($status | ConvertTo-Json -Depth 6 -Compress), $identity, ($null -ne $identity))
     $script:RuntimeControlLastPublish = [DateTime]::UtcNow

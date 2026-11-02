@@ -27,7 +27,7 @@ from app.market_data.eod_coverage import (
 from app.us_market.daily_market_state import expected_us_completed_daily_state
 from app.us_market.catalog_store import us_common_stock_universe_filters
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
-from app.us_market.daily_price_eligibility import us_daily_sql_eligibility_filters
+from app.us_market.daily_price_eligibility import us_daily_sql_eligibility_filters, us_daily_expected_receipt_filter
 from app.utils.owner_checkpoint import OwnerOutcomeUnknown
 
 
@@ -92,6 +92,12 @@ class USFullMarketEodLifecycle:
         from app.us_market.sector_distribution import build_us_sector_distribution
 
         now = now or datetime.now(timezone.utc)
+        # Pin the SQLite read generation through publication. A concurrent
+        # daily correction must make the write upgrade fail (BUSY_SNAPSHOT),
+        # rather than let an older build overwrite its invalidation marker.
+        connection = db.connection()
+        if connection.dialect.name == "sqlite" and not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN")
         coverage = self.compute_coverage(db, expected_trade_date=self.expected_trade_date(now=now))
         snapshot = build_us_sector_distribution(db, now=now, coverage=coverage)
         row = persist_eod_coverage(db, coverage, detail_extra={"us_sector_distribution": snapshot.model_dump(mode="json")})
@@ -139,6 +145,7 @@ class USFullMarketEodLifecycle:
                     canonical_rows.with_entities(USDailyPrice.symbol)
                     .filter(USDailyPrice.symbol.in_(symbols))
                     .filter(USDailyPrice.trade_date == expected_trade_date)
+                    .filter(us_daily_expected_receipt_filter(expected_trade_date))
                     .distinct()
                     .all()
                 )

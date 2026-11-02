@@ -500,6 +500,11 @@ TAIWAN_TSMC_ALIASES = (
     "tsmc",
 )
 US_SYMBOL_STOPWORDS = {
+    "MISSING",
+    "STALE",
+    "DELAYED",
+    "BREADTH",
+    "MARKET",
     "A",
     "AI",
     "ALL",
@@ -535,6 +540,12 @@ US_SYMBOL_STOPWORDS = {
     "WHAT",
     "YOU",
 }
+US_MARKET_INDEX_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9$.:])(?:S\s*&\s*P\s*500|Nasdaq(?:\s+(?:Composite|100))?"
+    r"|Dow\s+Jones|標普\s*500|標準普爾\s*500|那斯達克|納斯達克|道瓊(?:工業)?)"
+    r"(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
 US_EXCHANGE_SYMBOL_PATTERN = re.compile(
     r"\b(?:NASDAQ|NYSE|AMEX|NYSEARCA|ARCA|CBOE|OTC|OTCMKTS)[:：]\s*([A-Za-z][A-Za-z0-9.$-]{0,15})\b",
     flags=re.IGNORECASE,

@@ -49,6 +49,111 @@ namespace Omi.RuntimeControl {
         public string issuer = "launcher_local_ui";
         public string consumed_at;
     }
+    // Safe owner observations. Lifecycle still rechecks its retained native gates.
+    public sealed class RecoveryFenceObservation {
+        public string terminal_receipt = "UNKNOWN";
+        public bool? no_effects;
+        public bool? worker_settled;
+        public bool? worker_not_dispatched;
+        public bool? owner_attested;
+        public string retained_generation = "UNKNOWN";
+        public string admission = "UNKNOWN";
+    }
+    public sealed class OperationDiagnostics {
+        public string request_id;
+        public string observed_at;
+        public string phase = "UNKNOWN";
+        public string failed_phase;
+        public string failure_code;
+        public string error_type;
+        public string stop_outcome = "UNKNOWN";
+        public string migration_outcome = "UNKNOWN";
+        public string worker_outcome = "UNKNOWN";
+        public string worker_phase = "UNKNOWN";
+        public string worker_failed_phase;
+        public string worker_failure_code;
+        public string worker_error_type;
+        public string successor_outcome = "UNKNOWN";
+        public string schema_revision_observed;
+        public string schema_revision_basis = "UNKNOWN";
+        public string schema_revision_observed_at;
+        public RecoveryFenceObservation recovery_fence = new RecoveryFenceObservation();
+        public string next_action = "ReadOperation_then_reconcile_retained_generation";
+        public bool observation_only { get { return true; } }
+        static readonly HashSet<string> failures = new HashSet<string>(StringComparer.Ordinal) {
+            "BACKEND_START_OWNER_NOT_ATTESTED", "FIXED_ENDPOINT_CHANGED", "SOURCE_ADOPTION_NOT_ATTESTED",
+            "CONTROLLER_UNAVAILABLE",
+            "FIXED_LAUNCHER_INVOCATION_REQUIRED", "FIXED_LAUNCHER_SCRIPT_REQUIRED", "FIXED_LAUNCHER_EXECUTABLE_REQUIRED",
+            "LAUNCHER_MUTEX_OWNER_UNVERIFIED", "LAUNCHER_PROCESS_UNVERIFIED", "LAUNCHER_IMAGE_UNVERIFIED",
+            "LAUNCHER_COMMAND_LINE_UNVERIFIED", "OWNER_CHANNEL_MISMATCH",
+            "SOURCE_DIGEST_UNKNOWN", "RESTART_SOURCE_CHANGED", "RESTART_COMPATIBILITY_NOT_ATTESTED",
+            "SCHEMA_CONFIGURED_TARGET_UNAVAILABLE", "NO_CONFIGURED_TARGET", "SERVICE_OPERATION_IN_PROGRESS",
+            "SCHEMA_MAINTENANCE_NO_REPLAY", "SCHEMA_MAINTENANCE_RECONCILIATION_REQUIRED", "SCHEMA_OWNER_AMBIGUOUS",
+            "SCHEMA_FAILED_START_NOT_ATTESTED", "SCHEMA_RUNNING_OWNER_NOT_ATTESTED", "SCHEMA_GRACEFUL_EXIT_REQUIRED",
+            "SCHEMA_ADMISSION_NOT_ATTESTED", "SCHEMA_SOURCE_CHANGED", "SCHEMA_WORKER_HANDSHAKE_FAILED",
+            "SCHEMA_ADMISSION_LOST", "SCHEMA_APPLY_UNCONFIRMED", "PREVIOUS_EXACT_STOP_NOT_ATTESTED",
+            "BACKEND_START_NO_REPLAY", "BACKEND_START_RETIREMENT_REQUIRED", "BACKEND_START_UNCONFIRMED",
+            "BACKEND_START_READINESS_UNCONFIRMED", "BACKEND_START_IDENTITY_UNCONFIRMED", "RESTART_RELEASE_NOT_ADOPTED",
+            "FIXED_PORT_NOT_FREE", "FIXED_PORT_NOT_BINDABLE", "PORT_OBSERVATION_UNAVAILABLE",
+            "FAILED_START_PROCESS_OBSERVATION_UNKNOWN", "FAILED_START_OTHER_BACKEND_PRESENT",
+            "FAILED_START_RECOVERY_REPLAY", "FAILED_START_RECOVERY_NOT_ATTESTED", "OWNED_START_UNKNOWN",
+            "OWNED_START_EXIT_CONFIRMED", "ABSOLUTE_PATH_REQUIRED", "PATH_ALIAS_REFUSED",
+            "CANONICAL_SCHEMA_LOCK_REQUIRED", "SCHEMA_LOCK_BUSY", "KNOWN_BEHIND_REVISION_REQUIRED",
+            "KNOWN_REVISION_REQUIRED", "MIGRATION_COMMITTED_HEAD_UNCONFIRMED",
+            "BACKUP_SOURCE_MISMATCH", "RESTORE_COPY_HASH_MISMATCH", "RESTORE_COPY_CHECK_FAILED",
+            "SCHEMA_BACKUP_TIMEOUT", "SCHEMA_RESTORE_TIMEOUT", "SCHEMA_MIGRATION_TIMEOUT", "SCHEMA_QUERY_INTERRUPTED",
+            "MAINTENANCE_SOURCE_OR_LEASE_CHANGED", "MIGRATION_INTEGRITY_FAILED", "MIGRATION_TRANSACTION_OR_HEAD_LOST",
+            "SQLITE_TARGET_UNSUPPORTED", "SQLITE_TARGET_ALIAS", "SQLITE_TARGET_NOT_LOCAL_FIXED_DISK",
+            "MAINTENANCE_CONNECTION_TARGET_MISMATCH", "US_EOD_OBLIGATION_INDEX_DEFINITION_MISMATCH",
+            "SCHEMA_MAINTENANCE_FAILED", "UNCLASSIFIED_FAILURE"
+        };
+        public static string FailureCode(Exception error) {
+            string code = "UNCLASSIFIED_FAILURE";
+            for (int depth = 0; error != null && depth < 8; depth++, error = error.InnerException)
+                if (failures.Contains(error.Message)) code = error.Message;
+            return code;
+        }
+        public static string Safe(string value, string vocabulary, string fallback) {
+            return value != null && Array.IndexOf(vocabulary.Split('|'), value) >= 0 ? value : fallback;
+        }
+        public static string ErrorType(string value) {
+            return Safe(value, "RuntimeException|MethodInvocationException|IOException|UnauthorizedAccessException|InvalidOperationException|ArgumentException|TimeoutException|Win32Exception|RuntimeError|OperationalError|IntegrityError|OSError|PermissionError|TimeoutError|ValueError|UNKNOWN", "UNKNOWN");
+        }
+        public static string Revision(string value) {
+            return value != null && System.Text.RegularExpressions.Regex.IsMatch(value, @"\A[0-9]{8}_[0-9]{4}\z") ? value : null;
+        }
+        public static OperationDiagnostics Sanitize(OperationDiagnostics value, string requestId) {
+            Guid parsed;
+            if (value == null || value.request_id != requestId || !Guid.TryParseExact(requestId, "D", out parsed)) return null;
+            const string phases = "INTENT|ADMISSION|POST_STOP_OWNER_CHECK|POST_STOP_RELEASE_CHECK|APPLY_STOPPED|STARTING_ONCE|COMPLETE|FAILED|BEFORE_START|CONFIGURED_TARGET|EXCLUSIVE|BACKUP|RESTORE_VERIFY|BACKUP_VERIFIED|MIGRATING|COMMITTING|COMMITTED|AT_HEAD|UNKNOWN";
+            value.phase = Safe(value.phase, phases, "UNKNOWN");
+            value.failed_phase = Safe(value.failed_phase, phases, null);
+            value.failure_code = value.failure_code == null ? null : (failures.Contains(value.failure_code) ? value.failure_code : "UNCLASSIFIED_FAILURE");
+            value.error_type = value.error_type == null ? null : ErrorType(value.error_type);
+            value.stop_outcome = Safe(value.stop_outcome, "stopped|forced_stopped|blocked|unknown|NOT_ATTEMPTED|PREVIOUSLY_STOPPED|UNKNOWN", "UNKNOWN");
+            value.migration_outcome = Safe(value.migration_outcome, "NOT_ATTEMPTED|NOT_NEEDED|COMMITTED|FAILED_TRANSACTION_REQUIRES_INSPECTION|UNKNOWN", "UNKNOWN");
+            value.worker_outcome = Safe(value.worker_outcome, "NOT_ATTEMPTED|SETTLED|UNCONFIRMED|UNKNOWN", "UNKNOWN");
+            value.worker_phase = Safe(value.worker_phase, phases, "UNKNOWN");
+            value.worker_failed_phase = Safe(value.worker_failed_phase, phases, null);
+            value.worker_failure_code = value.worker_failure_code == null ? null : (failures.Contains(value.worker_failure_code) ? value.worker_failure_code : "UNCLASSIFIED_FAILURE");
+            value.worker_error_type = value.worker_error_type == null ? null : ErrorType(value.worker_error_type);
+            value.successor_outcome = Safe(value.successor_outcome, "NOT_ATTEMPTED|STARTING|VERIFIED|FAILED_UNCONFIRMED|ATTEMPTED_UNCONFIRMED|UNKNOWN", "UNKNOWN");
+            value.schema_revision_observed = Revision(value.schema_revision_observed);
+            value.schema_revision_basis = Safe(value.schema_revision_basis, "CHECK_START|WORKER_BEFORE|WORKER_COMMITTED|WORKER_AT_HEAD|UNKNOWN", "UNKNOWN");
+            DateTime observed;
+            value.observed_at = value.observed_at != null && value.observed_at.Length <= 40 && DateTime.TryParse(value.observed_at, out observed)
+                ? observed.ToUniversalTime().ToString("o") : null;
+            value.schema_revision_observed_at = value.schema_revision_observed_at != null && value.schema_revision_observed_at.Length <= 40 &&
+                DateTime.TryParse(value.schema_revision_observed_at, out observed) ? observed.ToUniversalTime().ToString("o") : null;
+            if (value.schema_revision_observed == null) { value.schema_revision_basis = "UNKNOWN"; value.schema_revision_observed_at = null; }
+            value.recovery_fence = value.recovery_fence ?? new RecoveryFenceObservation();
+            value.recovery_fence.terminal_receipt = Safe(value.recovery_fence.terminal_receipt, "MATCHED|UNCONFIRMED|UNKNOWN", "UNKNOWN");
+            value.recovery_fence.admission = Safe(value.recovery_fence.admission, "RECHECK_REQUIRED|RECONCILIATION_REQUIRED|UNKNOWN", "UNKNOWN");
+            value.recovery_fence.retained_generation = Safe(value.recovery_fence.retained_generation, "EXACT_EXIT|UNKNOWN", "UNKNOWN");
+            value.next_action = Safe(value.next_action, "Status|CheckStart_then_new_UUID_with_retained_generation|ReadOperation_and_Plan_then_reconcile_worker_and_generation|ReadOperation_then_reconcile_retained_generation|Status_then_CheckStart_configured_target_diagnostics", "ReadOperation_then_reconcile_retained_generation");
+            return value;
+        }
+    }
     public sealed class Receipt {
         public string schema = "omi.runtime-control.v1";
         public string request_id;
@@ -77,6 +182,10 @@ namespace Omi.RuntimeControl {
         public Identity backend_preflight_identity;
         public string[] blockers;
         public LocalApproval local_approval;
+        public OperationDiagnostics diagnostics;
+        // Fresh same-owner observation, never persisted or substituted for the
+        // consumed operation's historical terminal result.
+        public OperationDiagnostics reconciliation;
     }
     public sealed class Controller : IDisposable {
         const int Limit = 16384;
@@ -98,7 +207,7 @@ namespace Omi.RuntimeControl {
             "BACKEND_PREFLIGHT_NOT_ATTESTED", "WRITER_ADMISSION_NOT_ATTESTED", "SAFE_START_UNAVAILABLE",
             "OWNED_BOOTSTRAP_REQUIRED", "APPROVAL_DENIED", "NONTERMINAL_WRITER_PREFLIGHT_UNAVAILABLE", "PREFLIGHT_REARMED",
             "RESTART_SOURCE_CHANGED", "RESTART_ABORT_PROTOCOL_UNAVAILABLE", "RESTART_COMPATIBILITY_NOT_ATTESTED",
-            "SCHEMA_CONFIGURED_TARGET_UNAVAILABLE"
+            "SCHEMA_CONFIGURED_TARGET_UNAVAILABLE", "SOURCE_DIGEST_UNKNOWN", "RECEIPT_STORE_CAPACITY_REACHED"
         };
         volatile bool stopping;
         Thread thread;
@@ -325,6 +434,8 @@ namespace Omi.RuntimeControl {
                 DateTime consumed;
                 if (value.local_approval.consumed_at != null && !DateTime.TryParse(value.local_approval.consumed_at, out consumed)) throw new IOException("STORE_UNAVAILABLE");
             }
+            value.diagnostics = OperationDiagnostics.Sanitize(value.diagnostics, value.request_id);
+            value.reconciliation = null;
             return value;
         }
         void Recover() {
@@ -351,11 +462,47 @@ namespace Omi.RuntimeControl {
             for (int i = 0; i < 64; i++) difference |= actual[i] ^ tokenHash[i];
             return difference == 0;
         }
+        Dictionary<string, object> StoreObservation() {
+            int count = 0;
+            try {
+                ValidateAcl(directory, true);
+                foreach (var ignored in Directory.EnumerateFiles(directory, "*.json")) {
+                    count++;
+                    if (count >= Capacity) break;
+                }
+                return new Dictionary<string, object> {
+                    {"state", count >= Capacity ? "FULL" : "AVAILABLE"}, {"count", count}, {"capacity", Capacity},
+                    {"reason", count >= Capacity ? "RECEIPT_STORE_CAPACITY_REACHED" : null},
+                    {"next_action", count >= Capacity ? "Preserve_receipts_then_operator_review_retention_design_no_retry" : null}
+                };
+            } catch {
+                return new Dictionary<string, object> {{"state", "UNKNOWN"}, {"count", null}, {"capacity", Capacity},
+                    {"reason", "STORE_UNAVAILABLE"}, {"next_action", "Reconcile_receipt_store_without_deleting_history"}};
+            }
+        }
         public void Publish(string statusJson, Identity ownedBackend, bool attested) {
             lock (gate) {
                 if (statusJson.Length > Limit) throw new ArgumentException("RESPONSE_TOO_LARGE");
                 var status = json.Deserialize<Dictionary<string, object>>(statusJson);
+                foreach (var field in new[] { "last_operation", "schema_reconciliation" }) {
+                    if (status.ContainsKey(field)) {
+                        try {
+                            var diagnostic = json.Deserialize<OperationDiagnostics>(json.Serialize(status[field]));
+                            status[field] = OperationDiagnostics.Sanitize(diagnostic, diagnostic == null ? null : diagnostic.request_id);
+                        } catch { status[field] = null; }
+                    }
+                }
                 var restart = status.ContainsKey("restart") ? status["restart"] as Dictionary<string, object> : null;
+                var store = StoreObservation();
+                status["receipt_store"] = store;
+                if (restart != null && store["reason"] != null) {
+                    var blockers = new List<object>();
+                    var existing = restart.ContainsKey("blockers") ? restart["blockers"] as System.Collections.IEnumerable : null;
+                    if (existing != null) foreach (var item in existing) blockers.Add(item);
+                    blockers.Add(store["reason"]);
+                    restart["available"] = false; restart["reason"] = store["reason"];
+                    restart["blockers"] = blockers; restart["next_action"] = store["next_action"];
+                }
                 // Writer/source/readiness observations are not admission authority.
                 // The authenticated exact owned Backend may request bounded stop.
                 // A locally started successor must retire accepted intent for
@@ -395,7 +542,25 @@ namespace Omi.RuntimeControl {
                     if (request["action"] == "Status") return snapshot != null && (DateTime.UtcNow - published).TotalSeconds < 15
                         ? snapshot : "{\"schema\":\"omi.runtime-control.v1\",\"owner_id\":null,\"reason\":\"OWNER_NOT_ATTESTED\"}";
                     string id = Id(request["request_id"]);
-                    if (request["action"] == "ReadOperation") return json.Serialize(Read(id));
+                    if (request["action"] == "ReadOperation") {
+                        var operation = Read(id);
+                        operation.reconciliation = null;
+                        if (operation.action == "SchemaUpgrade" && operation.owner_id == OwnerId &&
+                            operation.state != "accepted" && operation.state != "running" && snapshot != null &&
+                            (DateTime.UtcNow - published).TotalSeconds < 15) {
+                            var status = json.Deserialize<Dictionary<string, object>>(snapshot);
+                            if (status.ContainsKey("schema_reconciliation")) {
+                                var current = json.Deserialize<OperationDiagnostics>(json.Serialize(status["schema_reconciliation"]));
+                                current = OperationDiagnostics.Sanitize(current, id);
+                                DateTime observed;
+                                if (current != null && DateTime.TryParse(current.observed_at, out observed) &&
+                                    observed.ToUniversalTime() <= DateTime.UtcNow &&
+                                    (DateTime.UtcNow - observed.ToUniversalTime()).TotalSeconds < 15)
+                                    operation.reconciliation = current;
+                            }
+                        }
+                        return json.Serialize(operation);
+                    }
                     if (request["action"] != "RestartBackend" && !offline) throw new ArgumentException();
                     if (!Authorized(request["token"])) return "{\"schema\":\"omi.runtime-control.v1\",\"error\":\"RUNTIME_CONTROL_FORBIDDEN\"}";
                     // Exact replay returns the durable original, including after owner replacement.
@@ -409,8 +574,13 @@ namespace Omi.RuntimeControl {
                     if (!ValidIdentity(pipeClient)) return json.Serialize(new Receipt { request_id = id, action = request["action"],
                         owner_id = OwnerId, state = "blocked", reason = ownerAttested ? "BACKEND_PREFLIGHT_NOT_ATTESTED" : "OWNER_NOT_ATTESTED" });
                     var acceptedDeadline = new Omi.OwnedShutdown.LifecycleDeadline();
-                    int count = 0;
-                    foreach (var ignored in Directory.EnumerateFiles(directory, "*.json")) if (++count >= Capacity) throw new IOException();
+                    var store = StoreObservation();
+                    if (store["reason"] != null) return json.Serialize(new Receipt {
+                        request_id = id, action = request["action"], owner_id = OwnerId,
+                        state = "unknown", reason = (string)store["reason"], next_action = (string)store["next_action"],
+                        stop_outcome = "NOT_ATTEMPTED", migration_outcome = "NOT_ATTEMPTED", successor_outcome = "NOT_ATTEMPTED",
+                        blockers = new[] {(string)store["reason"]}
+                    }); // Not accepted or persisted: no execution authority was minted.
                     var receipt = new Receipt { request_id = id, owner_id = OwnerId, before = backend,
                         action = request["action"], actor = "authenticated_pipe_client",
                         requester = pipeClient, confirmation = Confirmation(request["action"]),
@@ -492,6 +662,10 @@ namespace Omi.RuntimeControl {
         }
         public void CompleteRemoteOperation(string id, bool verified, string stop, string migration,
                 string successor, Identity after, string failure) {
+            CompleteRemoteOperation(id, verified, stop, migration, successor, after, failure, null);
+        }
+        public void CompleteRemoteOperation(string id, bool verified, string stop, string migration,
+                 string successor, Identity after, string failure, string diagnosticsJson) {
             lock (gate) {
                 var receipt = Read(Id(id));
                 if (!OfflineAction(receipt.action) || active != id || receipt.state != "running" || receipt.owner_id != OwnerId)
@@ -505,10 +679,31 @@ namespace Omi.RuntimeControl {
                 receipt.stop_outcome = stop; receipt.migration_outcome = migration;
                 receipt.successor_outcome = successor; receipt.after = after;
                 receipt.next_action = verified ? "Status" : "ReadOperation_then_reconcile_retained_generation";
+                if (diagnosticsJson != null) {
+                    try { receipt.diagnostics = OperationDiagnostics.Sanitize(json.Deserialize<OperationDiagnostics>(diagnosticsJson), receipt.request_id); }
+                    catch { receipt.diagnostics = null; } // Diagnostics must never change completion/admission.
+                    if (receipt.diagnostics != null) {
+                        receipt.diagnostics.stop_outcome = receipt.stop_outcome;
+                        receipt.diagnostics.migration_outcome = receipt.migration_outcome;
+                        receipt.diagnostics.successor_outcome = receipt.successor_outcome;
+                    }
+                }
                 // Fixed diagnostics only; never persist arbitrary exception text or paths.
                 if (failure == "SCHEMA_CONFIGURED_TARGET_UNAVAILABLE") {
                     receipt.reason = failure; receipt.state = "blocked";
                     receipt.next_action = "Status_then_CheckStart_configured_target_diagnostics";
+                }
+                if (!verified && successor == "NOT_ATTEMPTED" && migration == "NOT_ATTEMPTED" &&
+                    (stop == "NOT_ATTEMPTED" || stop == "PREVIOUSLY_STOPPED") &&
+                    (failure == "SOURCE_ADOPTION_NOT_ATTESTED" || failure == "SOURCE_DIGEST_UNKNOWN" ||
+                     failure == "RESTART_SOURCE_CHANGED" || failure == "RESTART_COMPATIBILITY_NOT_ATTESTED")) {
+                    receipt.reason = failure;
+                    receipt.state = failure == "SOURCE_DIGEST_UNKNOWN" ? "unknown" : "blocked";
+                    receipt.preflight_stage = "BEFORE_START";
+                    receipt.blockers = new[] {failure};
+                    receipt.next_action = failure == "SOURCE_ADOPTION_NOT_ATTESTED" ? "Explicit_ApplyUpdate_required"
+                        : failure == "SOURCE_DIGEST_UNKNOWN" ? "Restore_source_readability_then_Status_no_automatic_retry"
+                        : "CheckStart_then_explicit_SchemaUpgrade_or_approved_release";
                 }
                 Save(receipt); active = null;
             }
@@ -606,11 +801,14 @@ namespace Omi.RuntimeControl {
                            stopped.Reason == "ALL_WRITERS_DRAIN_UNAVAILABLE") receipt.reason = stopped.Reason;
                 if (stopped == null && (beforeStopReason == "RESTART_SOURCE_CHANGED" ||
                     beforeStopReason == "RESTART_COMPATIBILITY_NOT_ATTESTED" ||
-                    beforeStopReason == "SOURCE_ADOPTION_NOT_ATTESTED" || beforeStopReason == "OWNER_NOT_ATTESTED")) {
-                    receipt.state = "blocked"; receipt.reason = beforeStopReason;
+                    beforeStopReason == "SOURCE_ADOPTION_NOT_ATTESTED" || beforeStopReason == "SOURCE_DIGEST_UNKNOWN" ||
+                    beforeStopReason == "OWNER_NOT_ATTESTED")) {
+                    receipt.state = beforeStopReason == "SOURCE_DIGEST_UNKNOWN" ? "unknown" : "blocked";
+                    receipt.reason = beforeStopReason;
                     receipt.stop_outcome = "NOT_ATTEMPTED"; receipt.preflight_stage = "BEFORE_STOP";
                     receipt.next_action = beforeStopReason == "SOURCE_ADOPTION_NOT_ATTESTED"
-                        ? "Explicit_Launcher_update_required"
+                        ? "Explicit_ApplyUpdate_required"
+                        : beforeStopReason == "SOURCE_DIGEST_UNKNOWN" ? "Restore_source_readability_then_Status_no_automatic_retry"
                         : beforeStopReason == "OWNER_NOT_ATTESTED" ? "Status_then_reconcile_retained_owner"
                         : "CheckStart_then_explicit_SchemaUpgrade_or_approved_release";
                 }

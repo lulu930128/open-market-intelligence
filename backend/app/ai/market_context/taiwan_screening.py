@@ -7,6 +7,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.ai.market_context.taiwan_projection import _with_evidence_passport
+from app.ai.market_context.taiwan_swing_research import read_research_capability
 from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.tw_screening import build_tw_screening_snapshot
 from app.market.tw_price_map_screening import build_tw_price_map_screening_snapshot
@@ -22,6 +23,10 @@ SCREENING_CAPABILITIES = frozenset(
         "screening.coverage",
         "screening.intraday",
         "screening.price_map",
+        "screening.swing",
+        "screening.swing_discovery",
+        "research.trade_setup",
+        "research.trade_eligibility",
         "market.hot_groups",
         "market.sectors",
     }
@@ -186,11 +191,26 @@ def read_tw_screening_context(
 
     freshness_by_capability: dict[str, dict[str, Any]] = {}
     screening: dict[str, Any] = {}
+    research: dict[str, Any] = {}
     market: dict[str, Any] = {}
     missing: list[str] = []
     warnings: list[str] = []
     source_refs: list[dict[str, Any]] = []
     as_of_values: list[Any] = []
+    for capability in ("screening.swing", "screening.swing_discovery", "research.trade_setup", "research.trade_eligibility"):
+        if capability not in requested_capabilities:
+            continue
+        payload = read_research_capability(db, capability, capability_parameters.get(capability) or {})
+        container = screening if capability.startswith("screening.") else research
+        container[capability.split(".", 1)[1]] = payload
+        freshness_by_capability[capability] = {
+            "status": payload["freshness_status"], "is_current": False,
+            "facts_usable": payload["facts_usable"], "decision_usable": False,
+            "as_of": payload["as_of"], "refresh_recommended": False,
+        }
+        missing.extend(payload["missing"])
+        warnings.extend(payload.get("limitations") or [])
+        as_of_values.append(payload["as_of"])
     if price_map_snapshot is not None:
         screening["price_map"] = deepcopy(price_map_snapshot)
         freshness_by_capability["screening.price_map"] = {
@@ -314,6 +334,13 @@ def read_tw_screening_context(
             "as_of": as_of,
         },
     }
+    for capability, slot in (("screening.swing", "screening_swing"),
+                             ("screening.swing_discovery", "screening_swing_discovery"),
+                             ("research.trade_setup", "research_trade_setup"),
+                             ("research.trade_eligibility", "research_trade_eligibility")):
+        if capability in freshness_by_capability:
+            slots[slot] = _slot(capability=capability, payload_ref=capability,
+                freshness=freshness_by_capability[capability], missing=missing, warnings=warnings)
     if "screening.price_map" in freshness_by_capability:
         slots["screening_price_map"] = _slot(
             capability="screening.price_map", payload_ref="screening.price_map",
@@ -394,6 +421,7 @@ def read_tw_screening_context(
         },
         "as_of": as_of,
         "screening": screening,
+        "research": research,
         "market": market,
         "freshness_by_domain": {
             "screening": (
@@ -417,6 +445,8 @@ def read_tw_screening_context(
         "freshness_by_capability": freshness_by_capability,
         "slots": slots,
     }
+    if research:
+        compact["freshness_by_domain"]["research"] = "partial"
     envelope = {
         "kind": "market_overview",
         "generated_at": generated_at,
@@ -424,6 +454,7 @@ def read_tw_screening_context(
         "scope": {"type": "market", "market": "TW"},
         "data": {
             "screening": screening,
+            "research": research,
             "market": market,
             "freshness_by_domain": compact["freshness_by_domain"],
             "freshness_by_capability": freshness_by_capability,
@@ -483,6 +514,8 @@ def merge_tw_screening_context(
         else {}
     )
     merged_compact["screening"] = deepcopy(screening)
+    merged_data["research"] = deepcopy(screening_data.get("research") or {})
+    merged_compact["research"] = deepcopy(screening_data.get("research") or {})
 
     screening_market = (
         screening_data.get("market")

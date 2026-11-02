@@ -301,6 +301,15 @@ class USResolvedQuoteValueRead(BaseModel):
     high_price: str | None = None
     low_price: str | None = None
     previous_close: str | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_source: str | None = None
+    previous_close_provider: str | None = None
+    previous_close_price_basis: Literal["raw", "adjusted", "provider_default"] | None = None
+    previous_close_reason_code: str | None = None
+    provider_previous_close_hint: str | None = None
+    provider_previous_close_hint_trade_date: str | None = None
+    provider_previous_close_hint_price_basis: Literal["raw", "adjusted", "provider_default"] | None = None
+    provider_previous_close_hint_limitations: list[str] = Field(default_factory=list)
     event_at: str | None = None
     received_at: str | None = None
     fetched_at: str | None = None

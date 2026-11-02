@@ -19,6 +19,7 @@ from app.market_data.integration_contracts import (
 from app.market_data.registry import DATASET_REGISTRY, evaluate_dataset_health
 from app.market_data.resolution import BarSeriesCandidate
 from app.us_market.daily_price_repository import USDailyBarRepository
+from app.us_market.trading_calendar import us_daily_revision_check_due, expected_us_daily_price_date
 from sqlalchemy.orm import Session
 
 
@@ -51,6 +52,7 @@ class USCompletedDailyCandidateReader:
             )
         )
         candidates = []
+        revision_check_due = False
         latest_date = None
         for series in stored.series:
             bars = series.bars[-request.max_bars :]
@@ -58,12 +60,21 @@ class USCompletedDailyCandidateReader:
                 continue
             series_latest = bars[-1].end_at.astimezone(US_EASTERN).date()
             latest_date = max(latest_date, series_latest) if latest_date else series_latest
+            series_revision_due = (
+                series.provider == "yahoo_chart"
+                and series_latest == expected_date
+                and expected_date == expected_us_daily_price_date(now=requirement.requested_at)
+                and us_daily_revision_check_due(
+                    fetched_at=bars[-1].lineage.fetched_at, now=requirement.requested_at,
+                )
+            )
+            revision_check_due = revision_check_due or series_revision_due
             candidates.append(
                 BarSeriesCandidate(
                     bars=bars,
                     freshness=(
                         EvidenceFreshness.FRESH
-                        if series_latest >= expected_date
+                        if series_latest >= expected_date and not series_revision_due
                         else EvidenceFreshness.STALE
                     ),
                     provider_priority=series.provider_priority,
@@ -85,7 +96,8 @@ class USCompletedDailyCandidateReader:
             rejections=stored.rejections,
             limitations=tuple(
                 dict.fromkeys(
-                    rejection.reason_code for rejection in stored.rejections
+                    [rejection.reason_code for rejection in stored.rejections]
+                    + (["US_DAILY_REVISION_CHECK_DUE"] if revision_check_due else [])
                 )
             ),
         )

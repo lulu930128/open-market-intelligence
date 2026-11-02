@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import importlib.util
 import sqlite3
 import time
 from urllib.parse import urlsplit
@@ -30,20 +29,13 @@ from app.db.migrations import get_head_revision, inspect_database_schema
 
 LIMITATIONS = [
     "Backend exit releases its lease; exclusion is reacquired, not transferred",
-    "External writes committed before BEGIN IMMEDIATE are included in backup",
+    "External writes committed before BEGIN IMMEDIATE remain in the source database",
     "SQLite writers excluded only while maintenance reservation is held",
     "External readers allowed; rollback-journal readers may prevent commit",
     "After commit external writers may resume before successor readiness",
     "No protection against non-SQLite file writes or privileged interference",
     "No automatic restore, downgrade, retry or duplicate successor",
 ]
-
-
-def _backup_module():
-    spec = importlib.util.spec_from_file_location("omi_sqlite_backup", ROOT / "scripts/backup-omi-sqlite.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def maintenance_source_id():
@@ -56,7 +48,13 @@ def maintenance_source_id():
     return digest.hexdigest()
 
 
-def apply_stopped(*, database: Path, schema_lock_path: Path, backup_path: Path,
+def maintenance_phase_seconds(database_bytes: int) -> int:
+    # Bound migration SQL cooperatively; no whole-database validation or copies.
+    unit = 32 * 1024 * 1024
+    return max(120, min(7200, (database_bytes + unit - 1) // unit))
+
+
+def apply_stopped(*, database: Path, schema_lock_path: Path,
                   receipt_path: Path, request_id: str, expected_source: str | None = None) -> dict:
     """Private worker implementation, also exercised with disposable fixtures.
 
@@ -74,7 +72,7 @@ def apply_stopped(*, database: Path, schema_lock_path: Path, backup_path: Path,
     UUID(request_id)
     receipt = dict(contract="omi.schema-apply.v1", request_id=request_id, status="UNKNOWN",
                    phase="INTENT", sequence=0, retry_allowed=False,
-                   backup="NOT_ATTEMPTED", migration="NOT_ATTEMPTED", startup="OWNER_ONLY",
+                   backup="NOT_REQUESTED", migration="NOT_ATTEMPTED", startup="OWNER_ONLY",
                    limitations=LIMITATIONS, frontend_interrupted=False)
     try:
         stream = receipt_path.open("x", encoding="utf-8", newline="\n")
@@ -89,10 +87,11 @@ def apply_stopped(*, database: Path, schema_lock_path: Path, backup_path: Path,
     lock = ProcessFileLock(schema_lock_path)
     engine = connection = lease = None
     committed = False
+    phase_deadline = None
     with stream:
         try:
             persist("INTENT")
-            for path in (database, schema_lock_path, backup_path, receipt_path):
+            for path in (database, schema_lock_path, receipt_path):
                 if not path.is_absolute():
                     raise RuntimeError("ABSOLUTE_PATH_REQUIRED")
                 for part in (path, *path.parents):
@@ -122,46 +121,23 @@ def apply_stopped(*, database: Path, schema_lock_path: Path, backup_path: Path,
             from alembic.script import ScriptDirectory
             from app.db.migrations import create_alembic_config
             graph = ScriptDirectory.from_config(create_alembic_config("sqlite://"))
-            if before not in {r.revision for r in graph.walk_revisions()} or before == graph.get_current_head():
-                raise RuntimeError("KNOWN_BEHIND_REVISION_REQUIRED")
-            persist("BACKUP", before_revision=before, target_revision=graph.get_current_head(), backup="RUNNING")
-            backup = _backup_module()
-            proof = backup.backup_sqlite_database(source=database, output=backup_path,
-                                                  integrity_check="full", max_seconds=120)
-            if backup._database_snapshot(connection.connection.driver_connection) != proof["snapshot"]:
-                raise RuntimeError("BACKUP_SOURCE_MISMATCH")
-            # Independent restore COPY only; the source database is never replaced.
-            restored = backup_path.with_name(backup_path.name + ".restore-check")
-            restore_deadline = time.monotonic() + 120
-            with backup_path.open("rb") as src, restored.open("xb") as dst:
-                for block in iter(lambda: src.read(8 * 1024 * 1024), b""):
-                    backup._check_deadline(restore_deadline)
-                    dst.write(block)
-                dst.flush()
-                os.fsync(dst.fileno())
-            if backup._sha256(restored, deadline=restore_deadline) != proof["sha256"]:
-                raise RuntimeError("RESTORE_COPY_HASH_MISMATCH")
-            restored_db = sqlite3.connect(restored.as_uri() + "?mode=ro", uri=True, timeout=0)
-            try:
-                restored_db.set_progress_handler(lambda: int(time.monotonic() >= restore_deadline), 1000)
-                if (restored_db.execute("PRAGMA integrity_check").fetchall() != [("ok",)] or
-                        backup._database_snapshot(restored_db) != proof["snapshot"]):
-                    raise RuntimeError("RESTORE_COPY_CHECK_FAILED")
-            finally:
-                restored_db.close()
-            proof["restore_copy"] = str(restored)
-            proof["restore_verified"] = True
-            proof["maintenance_reservation"] = "BEGIN_IMMEDIATE"
-            persist("BACKUP_VERIFIED", backup=proof)
+            head = graph.get_current_head()
+            if before not in {r.revision for r in graph.walk_revisions()}:
+                raise RuntimeError("KNOWN_REVISION_REQUIRED")
+            if before == head:
+                persist("AT_HEAD", status="SUCCEEDED", migration="NOT_NEEDED",
+                        before_revision=before, after_revision=before, target_revision=head)
+                return receipt
+            phase_seconds = maintenance_phase_seconds(database.stat().st_size)
             if not lease.held or maintenance_source_id() != source_id:
                 raise RuntimeError("MAINTENANCE_SOURCE_OR_LEASE_CHANGED")
-            persist("MIGRATING", migration="RUNNING")
-            deadline = time.monotonic() + 120
+            persist("MIGRATING", migration="RUNNING", before_revision=before,
+                    target_revision=head, phase_budget_seconds=phase_seconds)
+            deadline = time.monotonic() + phase_seconds
+            phase_deadline = deadline
             connection.connection.driver_connection.set_progress_handler(
                 lambda: int(time.monotonic() >= deadline), 1000)
             run_database_migrations(connection=connection)
-            if connection.exec_driver_sql("PRAGMA integrity_check").fetchall() != [("ok",)]:
-                raise RuntimeError("MIGRATION_INTEGRITY_FAILED")
             if not lease.held or maintenance_source_id() != source_id:
                 raise RuntimeError("MAINTENANCE_SOURCE_OR_LEASE_CHANGED")
             after = MigrationContext.configure(connection).get_current_revision()
@@ -169,20 +145,27 @@ def apply_stopped(*, database: Path, schema_lock_path: Path, backup_path: Path,
             connection.connection.driver_connection.set_authorizer(None)
             connection.commit()  # Only this owner commits; busy readers fail, no retry.
             committed = True
-            persist("COMMITTED", status="SUCCEEDED", migration="COMMITTED")
+            observed = MigrationContext.configure(connection).get_current_revision()
+            if observed != head:
+                raise RuntimeError("MIGRATION_COMMITTED_HEAD_UNCONFIRMED")
+            persist("COMMITTED", status="SUCCEEDED", migration="COMMITTED", after_revision=observed)
         except Exception as exc:
             phase = receipt["phase"]
             # No exception text/SQL/parameters/connection strings in receipts.
             known_codes = {
                 "ABSOLUTE_PATH_REQUIRED", "PATH_ALIAS_REFUSED", "CANONICAL_SCHEMA_LOCK_REQUIRED",
-                "SCHEMA_LOCK_BUSY", "KNOWN_BEHIND_REVISION_REQUIRED", "BACKUP_SOURCE_MISMATCH",
-                "RESTORE_COPY_HASH_MISMATCH", "RESTORE_COPY_CHECK_FAILED",
-                "MAINTENANCE_SOURCE_OR_LEASE_CHANGED", "MIGRATION_INTEGRITY_FAILED",
+                "SCHEMA_LOCK_BUSY", "KNOWN_REVISION_REQUIRED", "MIGRATION_COMMITTED_HEAD_UNCONFIRMED",
+                "MAINTENANCE_SOURCE_OR_LEASE_CHANGED",
                 "MIGRATION_TRANSACTION_OR_HEAD_LOST", "SQLITE_TARGET_UNSUPPORTED", "SQLITE_TARGET_ALIAS",
                 "SQLITE_TARGET_NOT_LOCAL_FIXED_DISK", "MAINTENANCE_CONNECTION_TARGET_MISMATCH",
                 "US_EOD_OBLIGATION_INDEX_DEFINITION_MISMATCH",
             }
             error_code = str(exc) if isinstance(exc, RuntimeError) and str(exc) in known_codes else "SCHEMA_MAINTENANCE_FAILED"
+            interrupted = isinstance(exc, sqlite3.OperationalError) and getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT
+            if isinstance(exc, TimeoutError) or (interrupted and phase_deadline is not None and time.monotonic() >= phase_deadline):
+                error_code = "SCHEMA_MIGRATION_TIMEOUT" if phase == "MIGRATING" else error_code
+            elif interrupted:
+                error_code = "SCHEMA_QUERY_INTERRUPTED"
             persist("FAILED", status="FAILED" if not committed else "UNKNOWN", failed_phase=phase,
                     error_type=type(exc).__name__, error_code=error_code,
                     migration="COMMITTED" if committed else (
@@ -231,8 +214,8 @@ def owner_worker() -> int:
                 creation(os.getppid()) != boot["launcher_created"] or
                 len(boot["nonce"]) != 64):
             raise ValueError("OWNER_CHANNEL_MISMATCH")
-        _attest_launcher_parent(ROOT / "scripts/omi-launcher.ps1", "OpenMarketIntelligenceLauncher")
         result.update(request_id=boot["request_id"], nonce=boot["nonce"])
+        _attest_launcher_parent(ROOT / "scripts/omi-launcher.ps1", "OpenMarketIntelligenceLauncher")
         challenge = os.urandom(32).hex()
         print(json.dumps(dict(result, state="CHALLENGE", challenge=challenge)), flush=True)
         authorization = json.loads(sys.stdin.readline(16385))
@@ -251,11 +234,19 @@ def owner_worker() -> int:
                 Path(target.database) != database or settings.runtime_lock_dir / "schema.lock" != lock):
             raise ValueError("CONFIGURED_TARGET_MISMATCH")
         receipt = apply_stopped(database=database, schema_lock_path=lock,
-                               backup_path=Path(boot["backup"]), receipt_path=Path(boot["receipt"]),
+                               receipt_path=Path(boot["receipt"]),
                                request_id=boot["request_id"], expected_source=boot["source_release"])
         result.update(status=receipt["status"], migration=receipt["migration"])
     except Exception as exc:
         result.update(error_type=type(exc).__name__)
+        codes = {
+            "OWNER_FRAME_INVALID", "OWNER_CHANNEL_MISMATCH", "OWNER_CAPABILITY_NOT_CONSUMED",
+            "CONFIGURED_TARGET_MISMATCH", "WINDOWS_LAUNCHER_REQUIRED", "LAUNCHER_PROCESS_UNVERIFIED",
+            "LAUNCHER_IMAGE_UNVERIFIED", "WINDOWS_DIRECTORY_UNVERIFIED", "FIXED_LAUNCHER_EXECUTABLE_REQUIRED",
+            "LAUNCHER_COMMAND_LINE_UNVERIFIED", "FIXED_LAUNCHER_SCRIPT_REQUIRED",
+            "FIXED_LAUNCHER_INVOCATION_REQUIRED", "LAUNCHER_MUTEX_OWNER_UNVERIFIED",
+        }
+        result["error_code"] = str(exc) if str(exc) in codes else "SCHEMA_WORKER_FAILED"
     print(json.dumps(result), flush=True)
     return 0 if result["status"] == "SUCCEEDED" else 2
 
@@ -341,7 +332,14 @@ def _attest_launcher_parent(expected_script: Path, mutex_name: str):
                 position += 2
             else:
                 raise RuntimeError("FIXED_LAUNCHER_INVOCATION_REQUIRED")
-        if lower[offset + 2:] not in ([], ["-launcheraction", "run"]):
+        tail = lower[offset + 2:]
+        if len(tail) == 2 and tail[0] == "-updaterequestid":
+            try:
+                if str(UUID(tail[1])) != tail[1]:
+                    raise ValueError()
+            except ValueError:
+                raise RuntimeError("FIXED_LAUNCHER_INVOCATION_REQUIRED") from None
+        elif tail not in ([], ["-launcheraction", "run"]):
             raise RuntimeError("FIXED_LAUNCHER_INVOCATION_REQUIRED")
         mutex = kernel.OpenMutexW(0x0001, False, mutex_name)  # MUTANT_QUERY_STATE
         owner = MutantOwner()
@@ -464,7 +462,7 @@ def start_compatibility(*, database_url: str, lock_path: Path, database: Path | 
     """Read-only pre-stop gate; paths are locally configured, never pipe inputs.
 
     A head match is not all-writer exclusion or permission to migrate. The worker
-    still owns backup, schema lock, reservation and Alembic transaction.
+    still owns schema lock, reservation and Alembic transaction.
     """
     from sqlalchemy.engine import make_url
     target = make_url(database_url)

@@ -18,6 +18,10 @@ from app.runtime_admission import AdmissionCommitted, OwnedWorkThread as Thread
 EXAMPLE_FIELDS = ("c", "d", "t", "z", "v", "tv", "ts", "pz", "ps", "o", "h", "l", "y")
 _IO_LOCK = Lock()
 _IN_FLIGHT: dict[str, Future] = {}
+# Admission metadata only, sharing the existing venue slot. A denied interactive
+# caller gets one short handoff window; repeated denials cannot extend it.
+_INTERACTIVE_HANDOFF: dict[str, tuple[Future, float]] = {}
+_HANDOFF_SECONDS = 2.0
 
 
 class AcquisitionInFlight(RuntimeError):
@@ -47,9 +51,10 @@ def reset_io_slots() -> None:
         if any(not future.done() for future in _IN_FLIGHT.values()):
             raise AcquisitionInFlight("TWSE_MIS_TRANSPORT_RESET_REQUIRES_IDLE")
         _IN_FLIGHT.clear()
+        _INTERACTIVE_HANDOFF.clear()
 
 
-def bounded_fetch(fetch: Callable, seconds: float, *args, **kwargs):
+def bounded_fetch(fetch: Callable, seconds: float, *args, interactive: bool = False, **kwargs):
     """Bound caller wait even when requests' socket timeout is not a wall deadline.
 
 One daemon IO slot per venue (at most two), no queue/retries. A late response cannot mutate the provider
@@ -64,16 +69,34 @@ blocks subsequent IO until completion instead of accumulating background workers
         raise AcquisitionDeadlineExceeded("TWSE_MIS_ACQUISITION_DEADLINE")
     with _IO_LOCK:
         previous = _IN_FLIGHT.get(venue)
+        handoff = _INTERACTIVE_HANDOFF.get(venue)
         if previous is not None and not previous.done():
+            if interactive and (handoff is None or handoff[0] is not previous):
+                _INTERACTIVE_HANDOFF[venue] = (previous, float("inf"))
             raise AcquisitionInFlight("TWSE_MIS_PREVIOUS_TRANSPORT_IN_FLIGHT")
+        if handoff is not None:
+            if not interactive and monotonic() < handoff[1]:
+                raise AcquisitionInFlight("TWSE_MIS_INTERACTIVE_HANDOFF")
+            _INTERACTIVE_HANDOFF.pop(venue, None)
         future = Future()
         _IN_FLIGHT[venue] = future
 
         def run():
             try:
-                future.set_result(fetch(*args, **kwargs))
+                result = fetch(*args, **kwargs)
             except BaseException as exc:
-                future.set_exception(exc)
+                result, error = None, exc
+            else:
+                error = None
+            # Publish completion and the handoff deadline atomically. Never
+            # detach a live worker merely because a caller deadline expired.
+            with _IO_LOCK:
+                if (_INTERACTIVE_HANDOFF.get(venue) or (None,))[0] is future:
+                    _INTERACTIVE_HANDOFF[venue] = (future, monotonic() + _HANDOFF_SECONDS)
+                if error is None:
+                    future.set_result(result)
+                else:
+                    future.set_exception(error)
 
         try:
             # The runtime must retain timed-out IO through actual completion.

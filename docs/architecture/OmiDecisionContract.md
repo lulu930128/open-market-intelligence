@@ -4,6 +4,15 @@
 `omi.decision.v3` 與 `omi.ai.ask.v2` 只保留在 backend 私有 builder 與測試
 seam，不再由 HTTP、SSE、MCP 或 OpenAPI 接受/宣告。
 
+台股完成日線 Swing research 沿用同一 v4 selection、CapabilitySpec.paths、query planner
+及市場 reader。首版以 `target.type=market, market=TW` 明示股票及 10/15 交易日參數；
+有界 subset 的 coverage、sample-only、排除原因、receipt cutoff 與 owner revisions 隨 evidence
+保留，不推廣為全市場。數值方案由既有 Market pure evaluator 計算，Decimal 以字串保留
+精度，缺成本保持 unknown；proposed 不推導 trigger 或 execution。事件／法規只讀既有
+cache，沒有後端報價、券商券源與資金證據時維持 unknown。窄 field projection 保留品質
+限制；reader 不 refresh、不建 Journal、不寫 DB。Public MCP schema 由既有 snapshot
+generator 產生，Source 接線完成與 running Backend／external MCP adoption 分開驗收。
+
 US canonical quote 的 previous close 與 change reference 由 Market Truth 選取。AI compact
 projection 保留 exact reference 的 null、reason、trade date 與 price basis；不得用 latest cached
 Daily 回填被拒絕的 reference。無日期證明的 provider metadata 只作 hint，不能因 HTTP／MCP／AI

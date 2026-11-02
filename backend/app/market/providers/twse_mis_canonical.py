@@ -26,6 +26,7 @@ from app.market_data.contracts import (
     QuantityUnit,
     QuoteObservation,
     SourceLineage,
+    SessionPriceLimits,
     TradeObservationState,
 )
 
@@ -202,20 +203,23 @@ def canonical_snapshot_from_twse_mis(
         observation_trade_date=observed_date,
         provider_event_time=event_at,
         trial_status=message.get("ts"),
-        last_trade_price=float(raw_last_price) if raw_last_price is not None else None,
+        last_trade_price=raw_last_price,
         last_trade_volume_lots=(
             int(last_trade_volume) if last_trade_volume is not None else None
         ),
         cumulative_volume_lots=(
-            int(cumulative_volume) if cumulative_volume is not None else None
+            cumulative_volume if cumulative_volume is not None else None
         ),
+        nested_trade=message.get("trade"),
+        observed_at=fetched_at,
     )
-    actual_price = (
-        raw_last_price if actual_trade["actual_trade_price_available"] else None
-    )
+    actual_price = actual_trade["actual_trade_price_decimal"]
     quote_observation = QuoteObservation(
         instrument=instrument,
-        lineage=lineage,
+        lineage=(
+            lineage.model_copy(update={"event_at": actual_trade["actual_trade_price_as_of"]})
+            if actual_price is not None else lineage
+        ),
         trade_date=observed_date,
         currency="TWD",
         state=(
@@ -236,13 +240,25 @@ def canonical_snapshot_from_twse_mis(
         ),
         last_trade_price=actual_price,
         last_trade_quantity=(
-            _lots_to_shares(message.get("tv")) if actual_price is not None else None
+            _lots_to_shares(
+                actual_trade["actual_trade_volume_lots"]
+                if actual_trade["actual_trade_price_source"] == "twse_mis_nested_trade_z"
+                else message.get("tv")
+            )
+            if actual_price is not None else None
         ),
         cumulative_quantity=_lots_to_shares(message.get("v")),
         open_price=_decimal(message.get("o"), positive=True),
         high_price=_decimal(message.get("h"), positive=True),
         low_price=_decimal(message.get("l"), positive=True),
         previous_close=_decimal(message.get("y"), positive=True),
+        price_limits=(SessionPriceLimits(trade_date=observed_date,
+            lower=_decimal(message.get("w"), positive=True),
+            upper=_decimal(message.get("u"), positive=True), lineage=lineage)
+            if observed_date and _decimal(message.get("w"), positive=True) is not None
+            and _decimal(message.get("u"), positive=True) is not None
+            and _decimal(message.get("w"), positive=True) <= _decimal(message.get("u"), positive=True)
+            else None),
     )
 
     bids = _depth_levels(message.get("b"), message.get("g"))

@@ -119,3 +119,26 @@ def test_remote_dispatch_and_schema_selector_have_no_dialog_or_actor_wire():
     assert "BeginRemoteOperation($RequestId)" in remote
     for forbidden in ("MessageBox", "OpenFileDialog", "launcher_local_operator", "BeginLocalOperation"):
         assert forbidden not in remote + selector
+
+
+def test_remote_completion_keeps_safe_inner_preflight_reason_and_unknown_schema(tmp_path):
+    scenario = START_SETUP + r'''
+$script:RuntimeController | Add-Member ScriptMethod BeginRemoteOperation {param($id);return $true}
+$script:RuntimeController | Add-Member ScriptMethod CompleteRemoteOperation {
+    param($id,$verified,$stop,$migration,$successor,$after,$failure,$diagnosticsJson)
+    $diagnostic=$diagnosticsJson|ConvertFrom-Json
+    if ($failure -cne 'SCHEMA_CONFIGURED_TARGET_UNAVAILABLE' -or $diagnostic.failure_code -cne 'RESTART_COMPATIBILITY_NOT_ATTESTED' -or
+        $diagnostic.failed_phase -cne 'BEFORE_START' -or $diagnostic.request_id -cne $id -or
+        $diagnostic.schema_revision_observed -or $diagnostic.recovery_fence.admission -cne 'UNKNOWN' -or
+        $migration -cne 'NOT_ATTEMPTED' -or $successor -cne 'NOT_ATTEMPTED' -or $verified) {throw 'DIAGNOSTIC_PROJECTION_WRONG'}
+    $script:Calls.Add('diagnostic-completed')
+}
+function Invoke-OmiConfiguredSchemaUpgrade {
+    param($RequestId,[switch]$RemoteRequest)
+    throw [InvalidOperationException]::new('SCHEMA_CONFIGURED_TARGET_UNAVAILABLE',[IO.IOException]::new('RESTART_COMPATIBILITY_NOT_ATTESTED'))
+}
+try {Invoke-OmiRemoteControlOperation -RequestId ([Guid]::NewGuid().ToString('D')) -Action 'SchemaUpgrade'}
+catch {if ($_.Exception.Message -cne 'SCHEMA_CONFIGURED_TARGET_UNAVAILABLE') {throw}}
+if (-not $script:Calls.Contains('diagnostic-completed') -or $script:LastRuntimeOperationDiagnostics.phase -cne 'BEFORE_START') {throw 'PUBLICATION_LOST'}
+'''
+    _run_isolated_launcher(tmp_path, scenario)

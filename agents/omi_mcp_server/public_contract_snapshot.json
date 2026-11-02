@@ -383,11 +383,15 @@
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
+                "research.trade_eligibility",
+                "research.trade_setup",
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
                 "screening.price_map",
                 "screening.ranking",
+                "screening.swing",
+                "screening.swing_discovery",
                 "source.health",
                 "target.identity",
                 "technical.anchored_vwap",
@@ -474,11 +478,15 @@
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
+                "research.trade_eligibility",
+                "research.trade_setup",
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
                 "screening.price_map",
                 "screening.ranking",
+                "screening.swing",
+                "screening.swing_discovery",
                 "source.health",
                 "target.identity",
                 "technical.anchored_vwap",
@@ -568,11 +576,15 @@
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
+                "research.trade_eligibility",
+                "research.trade_setup",
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
                 "screening.price_map",
                 "screening.ranking",
+                "screening.swing",
+                "screening.swing_discovery",
                 "source.health",
                 "target.identity",
                 "technical.anchored_vwap",
@@ -843,6 +855,371 @@
                 },
                 "type": "object"
               },
+              "research.trade_eligibility": {
+                "additionalProperties": false,
+                "properties": {
+                  "as_of_trade_date": {
+                    "format": "date",
+                    "title": "As Of Trade Date",
+                    "type": "string"
+                  },
+                  "candidate_research_eligible": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "const": "unknown",
+                        "type": "string"
+                      }
+                    ],
+                    "default": "unknown",
+                    "title": "Candidate Research Eligible"
+                  },
+                  "direction": {
+                    "enum": [
+                      "long",
+                      "short"
+                    ],
+                    "title": "Direction",
+                    "type": "string"
+                  },
+                  "entry_trade_date": {
+                    "format": "date",
+                    "title": "Entry Trade Date",
+                    "type": "string"
+                  },
+                  "horizon_sessions": {
+                    "enum": [
+                      10,
+                      15
+                    ],
+                    "title": "Horizon Sessions",
+                    "type": "integer"
+                  },
+                  "market": {
+                    "enum": [
+                      "TWSE",
+                      "TPEX"
+                    ],
+                    "title": "Market",
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "exclusiveMinimum": 0,
+                    "title": "Quantity",
+                    "type": "integer"
+                  },
+                  "requested_at": {
+                    "format": "date-time",
+                    "title": "Requested At",
+                    "type": "string"
+                  },
+                  "stock_id": {
+                    "maxLength": 20,
+                    "minLength": 1,
+                    "title": "Stock Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "stock_id",
+                  "market",
+                  "direction",
+                  "as_of_trade_date",
+                  "requested_at",
+                  "entry_trade_date",
+                  "horizon_sessions",
+                  "quantity"
+                ],
+                "title": "EligibilityRequest",
+                "type": "object"
+              },
+              "research.trade_setup": {
+                "additionalProperties": false,
+                "properties": {
+                  "costs": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "charge_rounding": {
+                        "default": "nearest",
+                        "enum": [
+                          "nearest",
+                          "up",
+                          "down"
+                        ],
+                        "title": "Charge Rounding",
+                        "type": "string"
+                      },
+                      "commission_quantum": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Commission Quantum"
+                      },
+                      "commission_rate": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Commission Rate"
+                      },
+                      "entry_slippage_bps": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Entry Slippage Bps"
+                      },
+                      "exit_slippage_bps": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Exit Slippage Bps"
+                      },
+                      "minimum_commission": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Minimum Commission"
+                      },
+                      "sell_tax_rate": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Sell Tax Rate"
+                      },
+                      "short_borrow_cost": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Short Borrow Cost"
+                      },
+                      "tax_quantum": {
+                        "anyOf": [
+                          {
+                            "minimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Tax Quantum"
+                      }
+                    },
+                    "title": "CostInput",
+                    "type": "object"
+                  },
+                  "horizon_sessions": {
+                    "enum": [
+                      10,
+                      15
+                    ],
+                    "title": "Horizon Sessions",
+                    "type": "integer"
+                  },
+                  "setup": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "as_of_trade_date": {
+                        "format": "date",
+                        "title": "As Of Trade Date",
+                        "type": "string"
+                      },
+                      "direction": {
+                        "enum": [
+                          "long",
+                          "short"
+                        ],
+                        "title": "Direction",
+                        "type": "string"
+                      },
+                      "entry": {
+                        "anyOf": [
+                          {
+                            "exclusiveMinimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          }
+                        ],
+                        "title": "Entry"
+                      },
+                      "price_rounding": {
+                        "default": "reject",
+                        "enum": [
+                          "reject",
+                          "nearest",
+                          "up",
+                          "down"
+                        ],
+                        "title": "Price Rounding",
+                        "type": "string"
+                      },
+                      "quantity": {
+                        "exclusiveMinimum": 0,
+                        "title": "Quantity",
+                        "type": "integer"
+                      },
+                      "stop": {
+                        "anyOf": [
+                          {
+                            "exclusiveMinimum": 0.0,
+                            "type": "number"
+                          },
+                          {
+                            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                            "type": "string"
+                          }
+                        ],
+                        "title": "Stop"
+                      },
+                      "symbol": {
+                        "maxLength": 20,
+                        "minLength": 1,
+                        "title": "Symbol",
+                        "type": "string"
+                      },
+                      "target_quantities": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "type": "integer"
+                            },
+                            "maxItems": 2,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Target Quantities"
+                      },
+                      "targets": {
+                        "items": {
+                          "anyOf": [
+                            {
+                              "exclusiveMinimum": 0.0,
+                              "type": "number"
+                            },
+                            {
+                              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                              "type": "string"
+                            }
+                          ]
+                        },
+                        "maxItems": 2,
+                        "minItems": 1,
+                        "title": "Targets",
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "symbol",
+                      "as_of_trade_date",
+                      "direction",
+                      "entry",
+                      "stop",
+                      "targets",
+                      "quantity"
+                    ],
+                    "title": "SetupInput",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "setup",
+                  "costs",
+                  "horizon_sessions"
+                ],
+                "title": "TradeSetupParameters",
+                "type": "object"
+              },
               "screening.intraday": {
                 "additionalProperties": false,
                 "properties": {
@@ -925,7 +1302,8 @@
                     "default": "actual",
                     "enum": [
                       "actual",
-                      "indicative"
+                      "indicative",
+                      "completed_daily"
                     ],
                     "type": "string"
                   },
@@ -957,7 +1335,8 @@
                       "support_reaction",
                       "resistance_reaction",
                       "breakout_retest",
-                      "breakdown_retest"
+                      "breakdown_retest",
+                      "within_zone"
                     ],
                     "type": "string"
                   },
@@ -1107,6 +1486,263 @@
                 },
                 "type": "object"
               },
+              "screening.swing": {
+                "additionalProperties": false,
+                "properties": {
+                  "as_of_trade_date": {
+                    "format": "date",
+                    "title": "As Of Trade Date",
+                    "type": "string"
+                  },
+                  "direction": {
+                    "default": "both",
+                    "enum": [
+                      "long",
+                      "short",
+                      "both"
+                    ],
+                    "title": "Direction",
+                    "type": "string"
+                  },
+                  "feature_version": {
+                    "const": "tw.swing.screen.v1",
+                    "default": "tw.swing.screen.v1",
+                    "title": "Feature Version",
+                    "type": "string"
+                  },
+                  "horizon_sessions": {
+                    "default": 10,
+                    "enum": [
+                      10,
+                      15
+                    ],
+                    "title": "Horizon Sessions",
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "default": 20,
+                    "maximum": 200,
+                    "minimum": 1,
+                    "title": "Limit",
+                    "type": "integer"
+                  },
+                  "minimum_turnover_twd": {
+                    "default": 5000000,
+                    "minimum": 0,
+                    "title": "Minimum Turnover Twd",
+                    "type": "number"
+                  },
+                  "mode": {
+                    "default": "both",
+                    "enum": [
+                      "aggressive",
+                      "confirmed",
+                      "both"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "near_structure_pct": {
+                    "default": 2,
+                    "exclusiveMinimum": 0,
+                    "maximum": 5,
+                    "title": "Near Structure Pct",
+                    "type": "number"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "maximum": 5000,
+                    "minimum": 0,
+                    "title": "Offset",
+                    "type": "integer"
+                  },
+                  "requested_at": {
+                    "format": "date-time",
+                    "title": "Requested At",
+                    "type": "string"
+                  },
+                  "short_price_cap": {
+                    "default": 200,
+                    "exclusiveMinimum": 0,
+                    "maximum": 200,
+                    "title": "Short Price Cap",
+                    "type": "number"
+                  },
+                  "stock_ids": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "title": "Stock Ids",
+                    "type": "array"
+                  },
+                  "top_n": {
+                    "default": 100,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "title": "Top N",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "stock_ids",
+                  "as_of_trade_date",
+                  "requested_at"
+                ],
+                "title": "SwingScreenRequest",
+                "type": "object"
+              },
+              "screening.swing_discovery": {
+                "additionalProperties": false,
+                "description": "One bounded public read; the native checkpoint remains internal.",
+                "properties": {
+                  "as_of_trade_date": {
+                    "format": "date",
+                    "title": "As Of Trade Date",
+                    "type": "string"
+                  },
+                  "batch_size": {
+                    "default": 100,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "title": "Batch Size",
+                    "type": "integer"
+                  },
+                  "detail_batch_size": {
+                    "default": 10,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "title": "Detail Batch Size",
+                    "type": "integer"
+                  },
+                  "direction": {
+                    "default": "both",
+                    "enum": [
+                      "long",
+                      "short",
+                      "both"
+                    ],
+                    "title": "Direction",
+                    "type": "string"
+                  },
+                  "horizon_sessions": {
+                    "default": 10,
+                    "enum": [
+                      10,
+                      15
+                    ],
+                    "title": "Horizon Sessions",
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "default": 20,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "title": "Limit",
+                    "type": "integer"
+                  },
+                  "markets": {
+                    "default": [
+                      "TWSE",
+                      "TPEX"
+                    ],
+                    "items": {
+                      "enum": [
+                        "TWSE",
+                        "TPEX"
+                      ],
+                      "type": "string"
+                    },
+                    "title": "Markets",
+                    "type": "array"
+                  },
+                  "max_batches": {
+                    "default": 20,
+                    "maximum": 20,
+                    "minimum": 1,
+                    "title": "Max Batches",
+                    "type": "integer"
+                  },
+                  "max_detail_batches": {
+                    "default": 10,
+                    "maximum": 10,
+                    "minimum": 1,
+                    "title": "Max Detail Batches",
+                    "type": "integer"
+                  },
+                  "minimum_turnover_twd": {
+                    "default": 5000000,
+                    "minimum": 0,
+                    "title": "Minimum Turnover Twd",
+                    "type": "number"
+                  },
+                  "mode": {
+                    "default": "both",
+                    "enum": [
+                      "aggressive",
+                      "confirmed",
+                      "both"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "near_structure_pct": {
+                    "default": 2,
+                    "exclusiveMinimum": 0,
+                    "maximum": 5,
+                    "title": "Near Structure Pct",
+                    "type": "number"
+                  },
+                  "requested_at": {
+                    "format": "date-time",
+                    "title": "Requested At",
+                    "type": "string"
+                  },
+                  "short_price_cap": {
+                    "default": 200,
+                    "exclusiveMinimum": 0,
+                    "maximum": 200,
+                    "title": "Short Price Cap",
+                    "type": "number"
+                  },
+                  "stock_ids": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 100,
+                        "minItems": 1,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Stock Ids"
+                  },
+                  "top_n": {
+                    "default": 20,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "title": "Top N",
+                    "type": "integer"
+                  },
+                  "with_detail": {
+                    "default": true,
+                    "title": "With Detail",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "as_of_trade_date",
+                  "requested_at"
+                ],
+                "title": "SwingDiscoveryParameters",
+                "type": "object"
+              },
               "technical.price_map": {
                 "additionalProperties": false,
                 "properties": {
@@ -1184,11 +1820,15 @@
                 "quote.snapshot",
                 "regulation.disposition",
                 "regulation.trading_restrictions",
+                "research.trade_eligibility",
+                "research.trade_setup",
                 "resource.metadata",
                 "screening.coverage",
                 "screening.intraday",
                 "screening.price_map",
                 "screening.ranking",
+                "screening.swing",
+                "screening.swing_discovery",
                 "source.health",
                 "target.identity",
                 "technical.anchored_vwap",
@@ -1447,6 +2087,8 @@
           "last_trade_volume_shares",
           "lot_size",
           "volume_scope",
+          "cumulative_trade_value",
+          "cumulative_trade_value_evidence",
           "volume_source",
           "volume_source_field",
           "provider_volume_available",
@@ -1655,6 +2297,8 @@
           "last_trade_volume_shares",
           "lot_size",
           "volume_scope",
+          "cumulative_trade_value",
+          "cumulative_trade_value_evidence",
           "volume_source",
           "volume_source_field",
           "provider_volume_available",
@@ -2392,6 +3036,8 @@
           "unallocated_volume_lots",
           "volume_reconciliation",
           "cumulative_trade_value",
+          "window_trade_value",
+          "trade_value_coverage",
           "available_cumulative_trade_value",
           "estimated_cumulative_trade_value",
           "trade_value_status",
@@ -2570,6 +3216,8 @@
           "unallocated_volume_lots",
           "volume_reconciliation",
           "cumulative_trade_value",
+          "window_trade_value",
+          "trade_value_coverage",
           "available_cumulative_trade_value",
           "estimated_cumulative_trade_value",
           "trade_value_status",
@@ -6735,6 +7383,958 @@
         "writes_cache": false
       },
       {
+        "capability_id": "screening.swing_discovery",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "version",
+          "status",
+          "request",
+          "as_of",
+          "feature_revision",
+          "snapshot_id",
+          "calendar_coverage_known",
+          "canonical_generations_pinned",
+          "coverage",
+          "sample_only",
+          "research_sample_only",
+          "top_stock_ids",
+          "ranked_prefilter",
+          "candidates",
+          "available_count",
+          "returned_count",
+          "response_truncated",
+          "prefilter_empty_result_is_valid",
+          "empty_result_is_valid",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "trigger_ready",
+          "execution_ready",
+          "limitations",
+          "missing",
+          "cache_policy"
+        ],
+        "default_limit": 20,
+        "deprecated": false,
+        "description": "One cache-only completed-daily cheap scan, at most 20 batches of 100 stocks, then bounded Top-N detailed research. Returns lightweight summaries and separate scope/progress/quality coverage. Internal checkpoint and full-universe rows are omitted; incomplete inputs remain partial.",
+        "domain": "screening",
+        "event_time_basis": "completed_trade_date_and_receipt_cutoff",
+        "fields": [
+          "version",
+          "status",
+          "request",
+          "as_of",
+          "feature_revision",
+          "snapshot_id",
+          "calendar_coverage_known",
+          "canonical_generations_pinned",
+          "coverage",
+          "sample_only",
+          "research_sample_only",
+          "top_stock_ids",
+          "ranked_prefilter",
+          "candidates",
+          "available_count",
+          "returned_count",
+          "response_truncated",
+          "prefilter_empty_result_is_valid",
+          "empty_result_is_valid",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "trigger_ready",
+          "execution_ready",
+          "limitations",
+          "missing",
+          "cache_policy"
+        ],
+        "fill_operations": {},
+        "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "description": "One bounded public read; the native checkpoint remains internal.",
+          "properties": {
+            "as_of_trade_date": {
+              "format": "date",
+              "title": "As Of Trade Date",
+              "type": "string"
+            },
+            "batch_size": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Batch Size",
+              "type": "integer"
+            },
+            "detail_batch_size": {
+              "default": 10,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Detail Batch Size",
+              "type": "integer"
+            },
+            "direction": {
+              "default": "both",
+              "enum": [
+                "long",
+                "short",
+                "both"
+              ],
+              "title": "Direction",
+              "type": "string"
+            },
+            "horizon_sessions": {
+              "default": 10,
+              "enum": [
+                10,
+                15
+              ],
+              "title": "Horizon Sessions",
+              "type": "integer"
+            },
+            "limit": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "markets": {
+              "default": [
+                "TWSE",
+                "TPEX"
+              ],
+              "items": {
+                "enum": [
+                  "TWSE",
+                  "TPEX"
+                ],
+                "type": "string"
+              },
+              "title": "Markets",
+              "type": "array"
+            },
+            "max_batches": {
+              "default": 20,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Max Batches",
+              "type": "integer"
+            },
+            "max_detail_batches": {
+              "default": 10,
+              "maximum": 10,
+              "minimum": 1,
+              "title": "Max Detail Batches",
+              "type": "integer"
+            },
+            "minimum_turnover_twd": {
+              "default": 5000000,
+              "minimum": 0,
+              "title": "Minimum Turnover Twd",
+              "type": "number"
+            },
+            "mode": {
+              "default": "both",
+              "enum": [
+                "aggressive",
+                "confirmed",
+                "both"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "near_structure_pct": {
+              "default": 2,
+              "exclusiveMinimum": 0,
+              "maximum": 5,
+              "title": "Near Structure Pct",
+              "type": "number"
+            },
+            "requested_at": {
+              "format": "date-time",
+              "title": "Requested At",
+              "type": "string"
+            },
+            "short_price_cap": {
+              "default": 200,
+              "exclusiveMinimum": 0,
+              "maximum": 200,
+              "title": "Short Price Cap",
+              "type": "number"
+            },
+            "stock_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 100,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Stock Ids"
+            },
+            "top_n": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Top N",
+              "type": "integer"
+            },
+            "with_detail": {
+              "default": true,
+              "title": "With Detail",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "as_of_trade_date",
+            "requested_at"
+          ],
+          "title": "SwingDiscoveryParameters",
+          "type": "object"
+        },
+        "paths": [
+          "compact.screening.swing_discovery",
+          "data.screening.swing_discovery"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.swing.prefilter.v1",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "cache_read_only_no_refresh",
+        "slot": "screening_swing_discovery",
+        "title": "Taiwan bounded universe swing discovery",
+        "unit_semantics": "TWD_percent_and_universe_counts",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "screening.swing",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "version",
+          "status",
+          "request",
+          "ranking_policy",
+          "ranking_config_hash",
+          "snapshot_id",
+          "universe_stock_ids",
+          "coverage",
+          "assessments",
+          "candidates",
+          "empty_result_is_valid",
+          "response_truncated",
+          "cache_policy",
+          "as_of",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "limitations",
+          "missing",
+          "sample_only"
+        ],
+        "default_limit": 20,
+        "deprecated": false,
+        "description": "Cache-only Long/Short research over 1-100 explicit stock_ids, one 10/15-session horizon. Selected-universe sample only; coverage and exclusions precede pagination. No refresh, trigger or execution.",
+        "domain": "screening",
+        "event_time_basis": "completed_trade_date_and_receipt_cutoff",
+        "fields": [
+          "version",
+          "status",
+          "request",
+          "ranking_policy",
+          "ranking_config_hash",
+          "snapshot_id",
+          "universe_stock_ids",
+          "coverage",
+          "assessments",
+          "candidates",
+          "empty_result_is_valid",
+          "response_truncated",
+          "cache_policy",
+          "as_of",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "limitations",
+          "missing",
+          "sample_only"
+        ],
+        "fill_operations": {},
+        "frequency": "daily",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "as_of_trade_date": {
+              "format": "date",
+              "title": "As Of Trade Date",
+              "type": "string"
+            },
+            "direction": {
+              "default": "both",
+              "enum": [
+                "long",
+                "short",
+                "both"
+              ],
+              "title": "Direction",
+              "type": "string"
+            },
+            "feature_version": {
+              "const": "tw.swing.screen.v1",
+              "default": "tw.swing.screen.v1",
+              "title": "Feature Version",
+              "type": "string"
+            },
+            "horizon_sessions": {
+              "default": 10,
+              "enum": [
+                10,
+                15
+              ],
+              "title": "Horizon Sessions",
+              "type": "integer"
+            },
+            "limit": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "minimum_turnover_twd": {
+              "default": 5000000,
+              "minimum": 0,
+              "title": "Minimum Turnover Twd",
+              "type": "number"
+            },
+            "mode": {
+              "default": "both",
+              "enum": [
+                "aggressive",
+                "confirmed",
+                "both"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "near_structure_pct": {
+              "default": 2,
+              "exclusiveMinimum": 0,
+              "maximum": 5,
+              "title": "Near Structure Pct",
+              "type": "number"
+            },
+            "offset": {
+              "default": 0,
+              "maximum": 5000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            },
+            "requested_at": {
+              "format": "date-time",
+              "title": "Requested At",
+              "type": "string"
+            },
+            "short_price_cap": {
+              "default": 200,
+              "exclusiveMinimum": 0,
+              "maximum": 200,
+              "title": "Short Price Cap",
+              "type": "number"
+            },
+            "stock_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "title": "Stock Ids",
+              "type": "array"
+            },
+            "top_n": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Top N",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stock_ids",
+            "as_of_trade_date",
+            "requested_at"
+          ],
+          "title": "SwingScreenRequest",
+          "type": "object"
+        },
+        "paths": [
+          "compact.screening.swing",
+          "data.screening.swing"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.swing.screen.v1",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "cache_read_only_no_refresh",
+        "slot": "screening_swing",
+        "title": "Taiwan completed-daily swing research",
+        "unit_semantics": "TWD_and_selected_universe_counts",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "research.trade_setup",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "setup",
+          "cost_assumptions",
+          "price_adjustments",
+          "gross_risk",
+          "net_stop_loss",
+          "stop_scenario",
+          "target_scenarios",
+          "staged_target_scenario",
+          "missing_costs",
+          "limitations",
+          "schema_version",
+          "status",
+          "execution_ready",
+          "execution_eligibility",
+          "as_of",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "missing",
+          "horizon_sessions",
+          "trigger_ready"
+        ],
+        "default_limit": 2,
+        "deprecated": false,
+        "description": "Pure F03 evaluator. Supply setup.symbol/date/direction/entry/stop/targets/quantity, 10/15-session horizon and explicit cost assumptions. Missing costs remain unknown; proposed only, never an order or trigger.",
+        "domain": "research",
+        "event_time_basis": "caller_scenario_date",
+        "fields": [
+          "setup",
+          "cost_assumptions",
+          "price_adjustments",
+          "gross_risk",
+          "net_stop_loss",
+          "stop_scenario",
+          "target_scenarios",
+          "staged_target_scenario",
+          "missing_costs",
+          "limitations",
+          "schema_version",
+          "status",
+          "execution_ready",
+          "execution_eligibility",
+          "as_of",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "missing",
+          "horizon_sessions",
+          "trigger_ready"
+        ],
+        "fill_operations": {},
+        "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "costs": {
+              "additionalProperties": false,
+              "properties": {
+                "charge_rounding": {
+                  "default": "nearest",
+                  "enum": [
+                    "nearest",
+                    "up",
+                    "down"
+                  ],
+                  "title": "Charge Rounding",
+                  "type": "string"
+                },
+                "commission_quantum": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Commission Quantum"
+                },
+                "commission_rate": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Commission Rate"
+                },
+                "entry_slippage_bps": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Entry Slippage Bps"
+                },
+                "exit_slippage_bps": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Exit Slippage Bps"
+                },
+                "minimum_commission": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Minimum Commission"
+                },
+                "sell_tax_rate": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Sell Tax Rate"
+                },
+                "short_borrow_cost": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Short Borrow Cost"
+                },
+                "tax_quantum": {
+                  "anyOf": [
+                    {
+                      "minimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Tax Quantum"
+                }
+              },
+              "title": "CostInput",
+              "type": "object"
+            },
+            "horizon_sessions": {
+              "enum": [
+                10,
+                15
+              ],
+              "title": "Horizon Sessions",
+              "type": "integer"
+            },
+            "setup": {
+              "additionalProperties": false,
+              "properties": {
+                "as_of_trade_date": {
+                  "format": "date",
+                  "title": "As Of Trade Date",
+                  "type": "string"
+                },
+                "direction": {
+                  "enum": [
+                    "long",
+                    "short"
+                  ],
+                  "title": "Direction",
+                  "type": "string"
+                },
+                "entry": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    }
+                  ],
+                  "title": "Entry"
+                },
+                "price_rounding": {
+                  "default": "reject",
+                  "enum": [
+                    "reject",
+                    "nearest",
+                    "up",
+                    "down"
+                  ],
+                  "title": "Price Rounding",
+                  "type": "string"
+                },
+                "quantity": {
+                  "exclusiveMinimum": 0,
+                  "title": "Quantity",
+                  "type": "integer"
+                },
+                "stop": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                      "type": "string"
+                    }
+                  ],
+                  "title": "Stop"
+                },
+                "symbol": {
+                  "maxLength": 20,
+                  "minLength": 1,
+                  "title": "Symbol",
+                  "type": "string"
+                },
+                "target_quantities": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "integer"
+                      },
+                      "maxItems": 2,
+                      "minItems": 1,
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Target Quantities"
+                },
+                "targets": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "exclusiveMinimum": 0.0,
+                        "type": "number"
+                      },
+                      {
+                        "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "maxItems": 2,
+                  "minItems": 1,
+                  "title": "Targets",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "symbol",
+                "as_of_trade_date",
+                "direction",
+                "entry",
+                "stop",
+                "targets",
+                "quantity"
+              ],
+              "title": "SetupInput",
+              "type": "object"
+            }
+          },
+          "required": [
+            "setup",
+            "costs",
+            "horizon_sessions"
+          ],
+          "title": "TradeSetupParameters",
+          "type": "object"
+        },
+        "paths": [
+          "compact.research.trade_setup",
+          "data.research.trade_setup"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.trade_setup.math.v1",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "pure_read_only",
+        "slot": "research_trade_setup",
+        "title": "Taiwan proposed trade setup calculator",
+        "unit_semantics": "TWD_shares_and_gross_net_RR",
+        "writes_cache": false
+      },
+      {
+        "capability_id": "research.trade_eligibility",
+        "compatibility_schema_versions": [],
+        "default_fields": [
+          "version",
+          "request",
+          "evidence",
+          "research_eligible",
+          "regulation_eligible",
+          "borrow_available",
+          "funding_sufficient",
+          "broker_execution_eligible",
+          "current_price_eligible",
+          "holding_sessions",
+          "event_risk",
+          "event_coverage_complete",
+          "event_policy",
+          "observed_event_risk_score",
+          "event_risk_score",
+          "ineligibility_reason",
+          "cache_policy",
+          "as_of",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "limitations",
+          "missing",
+          "execution_ready",
+          "trigger_ready"
+        ],
+        "default_limit": 100,
+        "deprecated": false,
+        "description": "F04 bounded existing event/regulation cache reader for an explicit stock_id, market, cutoff and 10/15-session entry window. Broker borrow, funding and current quote remain unknown without backend evidence.",
+        "domain": "research",
+        "event_time_basis": "holding_sessions_and_receipt_cutoff",
+        "fields": [
+          "version",
+          "request",
+          "evidence",
+          "research_eligible",
+          "regulation_eligible",
+          "borrow_available",
+          "funding_sufficient",
+          "broker_execution_eligible",
+          "current_price_eligible",
+          "holding_sessions",
+          "event_risk",
+          "event_coverage_complete",
+          "event_policy",
+          "observed_event_risk_score",
+          "event_risk_score",
+          "ineligibility_reason",
+          "cache_policy",
+          "as_of",
+          "freshness_status",
+          "facts_usable",
+          "decision_usable",
+          "limitations",
+          "missing",
+          "execution_ready",
+          "trigger_ready"
+        ],
+        "fill_operations": {},
+        "frequency": "request",
+        "market_schema_versions": [],
+        "market_scopes": [],
+        "markets": [
+          "TW"
+        ],
+        "parameter_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "as_of_trade_date": {
+              "format": "date",
+              "title": "As Of Trade Date",
+              "type": "string"
+            },
+            "candidate_research_eligible": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              ],
+              "default": "unknown",
+              "title": "Candidate Research Eligible"
+            },
+            "direction": {
+              "enum": [
+                "long",
+                "short"
+              ],
+              "title": "Direction",
+              "type": "string"
+            },
+            "entry_trade_date": {
+              "format": "date",
+              "title": "Entry Trade Date",
+              "type": "string"
+            },
+            "horizon_sessions": {
+              "enum": [
+                10,
+                15
+              ],
+              "title": "Horizon Sessions",
+              "type": "integer"
+            },
+            "market": {
+              "enum": [
+                "TWSE",
+                "TPEX"
+              ],
+              "title": "Market",
+              "type": "string"
+            },
+            "quantity": {
+              "exclusiveMinimum": 0,
+              "title": "Quantity",
+              "type": "integer"
+            },
+            "requested_at": {
+              "format": "date-time",
+              "title": "Requested At",
+              "type": "string"
+            },
+            "stock_id": {
+              "maxLength": 20,
+              "minLength": 1,
+              "title": "Stock Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stock_id",
+            "market",
+            "direction",
+            "as_of_trade_date",
+            "requested_at",
+            "entry_trade_date",
+            "horizon_sessions",
+            "quantity"
+          ],
+          "title": "EligibilityRequest",
+          "type": "object"
+        },
+        "paths": [
+          "compact.research.trade_eligibility",
+          "data.research.trade_eligibility"
+        ],
+        "refresh_requires_market_open_scopes": [],
+        "refresh_strategies": {},
+        "replacement_capabilities": [],
+        "schema_version": "tw.trade_eligibility.v1",
+        "scopes": [
+          "market"
+        ],
+        "side_effect_policy": "cache_read_only_no_refresh",
+        "slot": "research_trade_eligibility",
+        "title": "Taiwan swing event and regulation eligibility",
+        "unit_semantics": "field_defined",
+        "writes_cache": false
+      },
+      {
         "capability_id": "screening.price_map",
         "compatibility_schema_versions": [],
         "default_fields": [
@@ -6760,7 +8360,7 @@
         ],
         "default_limit": 200,
         "deprecated": false,
-        "description": "Cache-only screening over revisioned completed-period zones and canonical current observations. Reactions require ordered samples; indicative observations are separate from actual trades.",
+        "description": "Cache-only screening over revisioned zones and canonical actual, indicative or completed_daily observations. Completed daily uses finalized official close positions only; it cannot confirm intraday touching, reactions or retests.",
         "domain": "screening",
         "event_time_basis": "completed_structure_and_current_observation",
         "fields": [
@@ -6803,7 +8403,8 @@
               "default": "actual",
               "enum": [
                 "actual",
-                "indicative"
+                "indicative",
+                "completed_daily"
               ],
               "type": "string"
             },
@@ -6835,7 +8436,8 @@
                 "support_reaction",
                 "resistance_reaction",
                 "breakout_retest",
-                "breakdown_retest"
+                "breakdown_retest",
+                "within_zone"
               ],
               "type": "string"
             },
@@ -7555,6 +9157,7 @@
           "ranked_count",
           "matched_count",
           "radar_count",
+          "returned_count",
           "no_data_count",
           "error_count",
           "trade_date",
@@ -7581,6 +9184,7 @@
           "ranked_count",
           "matched_count",
           "radar_count",
+          "returned_count",
           "no_data_count",
           "error_count",
           "trade_date",
@@ -8474,10 +10078,10 @@
         "writes_cache": false
       }
     ],
-    "x-omi-capability-registry-digest": "1b651b5cdbbd2fa820f5f796aacb891acd252ac14965c918290c81510159255a",
+    "x-omi-capability-registry-digest": "6e902eb0fe0e11590253404231ff226345682762dbe99905a22a8548afeb4102",
     "x-omi-capability-registry-version": "omi.capability.registry.v3",
     "x-omi-capability-selection-version": "omi.capability.selection.v2",
-    "x-omi-public-contract-digest": "1b651b5cdbbd2fa820f5f796aacb891acd252ac14965c918290c81510159255a",
+    "x-omi-public-contract-digest": "6e902eb0fe0e11590253404231ff226345682762dbe99905a22a8548afeb4102",
     "x-omi-targets": [
       {
         "deprecated": false,
@@ -8795,6 +10399,10 @@
     "market.chips",
     "screening.ranking",
     "screening.coverage",
+    "screening.swing_discovery",
+    "screening.swing",
+    "research.trade_setup",
+    "research.trade_eligibility",
     "screening.price_map",
     "screening.intraday",
     "market.hot_groups",
@@ -8820,7 +10428,7 @@
   ],
   "capability_registry_version": "omi.capability.registry.v3",
   "contract_version": "omi.decision.v4",
-  "digest": "1b651b5cdbbd2fa820f5f796aacb891acd252ac14965c918290c81510159255a",
+  "digest": "6e902eb0fe0e11590253404231ff226345682762dbe99905a22a8548afeb4102",
   "schema_version": "omi.mcp.public_contract_snapshot.v1",
   "selection_version": "omi.capability.selection.v2",
   "target_types": [

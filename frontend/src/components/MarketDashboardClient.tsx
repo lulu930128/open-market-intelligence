@@ -17,7 +17,6 @@ import ResourceMarketPanel from "@/components/ResourceMarketPanel";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import TaiwanFuturesDetailPanel from "@/components/TaiwanFuturesDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
-import USSectorDistributionPanel from "@/components/market-dashboard/USSectorDistributionPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import WatchlistRadarPanel from "@/components/WatchlistRadarPanel";
 import {
@@ -1940,7 +1939,6 @@ export default function MarketDashboardClient({
                     companyProfile={selectedUsContextProfile}
                     onError={handleUsMarketTapeError}
                   />
-                  <USSectorDistributionPanel />
                 </div>
 
                 <USStockDetailPanel

@@ -14,11 +14,12 @@ from decimal import Decimal
 import json
 
 from pydantic import ValidationError
-from sqlalchemy import and_, func, or_
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy import and_, case, func, or_, select, union_all
+from sqlalchemy.orm import Session, aliased, load_only
 
 from app.db.models import (
     MarketDailyPrice,
+    MarketDailyPriceRevision,
     MarketDailyPriceLineage,
     MarketDailyPriceReconciliation,
     RawFetchResult,
@@ -193,7 +194,7 @@ def _receipt_is_release_qualified(
     return _as_aware_utc(fetched_at) >= release_at
 
 
-def taiwan_official_daily_release_qualified_filter():
+def taiwan_official_daily_release_qualified_filter(price=MarketDailyPrice):
     """Return the persisted-receipt equivalent of the per-row release gate.
 
     Raw receipt timestamps are stored as UTC-naive values in the local SQLite
@@ -202,7 +203,7 @@ def taiwan_official_daily_release_qualified_filter():
     """
 
     fetched_date = func.date(RawFetchResult.fetched_at)
-    trade_date = func.date(MarketDailyPrice.trade_date)
+    trade_date = func.date(price.trade_date)
     fetched_time = func.time(RawFetchResult.fetched_at)
     return or_(
         fetched_date > trade_date,
@@ -232,6 +233,73 @@ class TaiwanOfficialDailyBarRepository:
         self._latest_batch_dates: dict[str, date] = {}
         self._capture_daily_candidate_read = False
         self._daily_candidate_handoff: tuple[int, datetime | None, DailyBarCandidateRead] | None = None
+
+    def _price_rows(self, *, symbols=None, end_date=date.max, start_date=None, trade_dates=None, row_ids=None):
+        """One receipt-visible revision per source/symbol/day, in the same reader.
+
+        Restrict both branches before ranking; a bounded read never ranks the
+        whole market's history. Legacy rows can prove earlier visibility only
+        through an identical successful receipt (same source/hash/parser).
+        Changed payloads without a retained revision cannot be reconstructed.
+        """
+        if self._available_at is None:
+            return MarketDailyPrice
+        current_raw, earlier_raw = aliased(RawFetchResult), aliased(RawFetchResult)
+        retained_raw = aliased(RawFetchResult)
+        retained_visible = select(MarketDailyPriceRevision.id).join(
+            retained_raw, retained_raw.id == MarketDailyPriceRevision.raw_result_id,
+        ).where(
+            MarketDailyPriceRevision.id == MarketDailyPrice.id,
+            retained_raw.fetched_at <= self._available_at,
+        ).correlate(MarketDailyPrice).exists()
+        earlier = select(earlier_raw.id).where(
+            # Legacy inference must never override an actual retained revision
+            # with later quality/finality just because its Raw hash is identical.
+            ~retained_visible,
+            earlier_raw.source_id == current_raw.source_id,
+            earlier_raw.content_hash == current_raw.content_hash,
+            current_raw.content_hash.isnot(None),
+            current_raw.content_hash != "",
+            earlier_raw.parser_version == current_raw.parser_version,
+            current_raw.parser_version.isnot(None),
+            earlier_raw.status_code == 200, earlier_raw.error_message.is_(None),
+            earlier_raw.fetched_at <= self._available_at,
+        ).order_by(earlier_raw.fetched_at.desc(), earlier_raw.id.desc()).limit(1).correlate(current_raw, MarketDailyPrice)
+        effective_raw_id = case(
+            (current_raw.fetched_at > self._available_at, earlier.scalar_subquery()),
+            else_=MarketDailyPrice.raw_result_id,
+        )
+        branches = []
+        for model in (MarketDailyPrice, MarketDailyPriceRevision):
+            columns = [effective_raw_id.label("raw_result_id")
+                       if model is MarketDailyPrice and column.name == "raw_result_id"
+                       else getattr(model, column.name)
+                       for column in MarketDailyPrice.__table__.columns]
+            statement = select(*columns).where(model.trade_date <= end_date)
+            if symbols is not None:
+                statement = statement.where(model.stock_id.in_(symbols))
+            if row_ids is not None:
+                statement = statement.where(model.id.in_(row_ids))
+            if start_date is not None:
+                statement = statement.where(model.trade_date >= start_date)
+            if trade_dates is not None:
+                statement = statement.where(model.trade_date.in_(trade_dates))
+            if model is MarketDailyPrice:
+                statement = statement.outerjoin(current_raw, current_raw.id == model.raw_result_id)
+            branches.append(statement)
+        history = union_all(*branches).subquery()
+        ranked = select(*history.c, func.row_number().over(
+            partition_by=(history.c.source_id, history.c.stock_id, history.c.trade_date),
+            order_by=(RawFetchResult.fetched_at.desc(), history.c.raw_result_id.desc(), history.c.id.desc()),
+        ).label("revision_rank")).outerjoin(
+            RawFetchResult, RawFetchResult.id == history.c.raw_result_id,
+        ).where(or_(
+            RawFetchResult.fetched_at <= self._available_at,
+            and_(history.c.raw_result_id.is_(None), history.c.updated_at <= self._available_at),
+        )).subquery()
+        visible = select(*(ranked.c[column.name] for column in MarketDailyPrice.__table__.columns)).where(
+            ranked.c.revision_rank == 1).subquery()
+        return aliased(MarketDailyPriceRevision, visible, adapt_on_names=True)
 
     @contextmanager
     def completed_daily_candidate_read_scope(self):
@@ -263,53 +331,54 @@ class TaiwanOfficialDailyBarRepository:
         ):
             raise ValueError("latest daily batch requires at most 100 stocks/ETFs")
         self._latest_batch = {item.symbol: [] for item in instruments}
+        price = self._price_rows(symbols=tuple(item.symbol for item in instruments), end_date=end_date)
         for venue in sorted({item.venue for item in instruments}):
             members = [item for item in instruments if item.venue == venue]
             bindings = _bindings_for_instrument(members[0])
             sources = tuple(item.source_name for item in bindings)
             latest_query = self._db.query(
-                MarketDailyPrice.stock_id.label("symbol"),
-                func.max(MarketDailyPrice.trade_date).label("trade_date"),
-            ).join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id).join(
-                SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id,
+                price.stock_id.label("symbol"),
+                func.max(price.trade_date).label("trade_date"),
+            ).join(RawFetchResult, RawFetchResult.id == price.raw_result_id).join(
+                SourceRegistry, SourceRegistry.id == price.source_id,
             ).filter(
-                MarketDailyPrice.stock_id.in_([item.symbol for item in members]),
-                MarketDailyPrice.trade_date <= end_date,
+                price.stock_id.in_([item.symbol for item in members]),
+                price.trade_date <= end_date,
                 SourceRegistry.source_name.in_(sources),
-                taiwan_official_daily_release_qualified_filter(),
+                taiwan_official_daily_release_qualified_filter(price),
             )
             if self._available_at is not None:
                 latest_query = latest_query.filter(RawFetchResult.fetched_at <= self._available_at)
-            latest = latest_query.group_by(MarketDailyPrice.stock_id).subquery()
+            latest = latest_query.group_by(price.stock_id).subquery()
             ranked_query = self._db.query(
-                MarketDailyPrice.id.label("id"),
+                price.id.label("id"),
                 latest.c.trade_date.label("latest_date"),
                 func.row_number().over(
-                    partition_by=MarketDailyPrice.stock_id,
-                    order_by=MarketDailyPrice.id.asc(),
+                    partition_by=price.stock_id,
+                    order_by=price.id.asc(),
                 ).label("ordinal"),
             ).join(latest, and_(
-                MarketDailyPrice.stock_id == latest.c.symbol,
-                MarketDailyPrice.trade_date >= latest.c.trade_date,
-            )).join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id).outerjoin(
-                RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id,
-            ).filter(MarketDailyPrice.trade_date <= end_date, SourceRegistry.source_name.in_(sources))
+                price.stock_id == latest.c.symbol,
+                price.trade_date >= latest.c.trade_date,
+            )).join(SourceRegistry, SourceRegistry.id == price.source_id).outerjoin(
+                RawFetchResult, RawFetchResult.id == price.raw_result_id,
+            ).filter(price.trade_date <= end_date, SourceRegistry.source_name.in_(sources))
             if self._available_at is not None:
                 ranked_query = ranked_query.filter(or_(
                     RawFetchResult.fetched_at <= self._available_at,
-                    and_(RawFetchResult.id.is_(None), MarketDailyPrice.updated_at <= self._available_at),
+                    and_(RawFetchResult.id.is_(None), price.updated_at <= self._available_at),
                 ))
             ranked = ranked_query.subquery()
             rows = self._db.query(
-                MarketDailyPrice, RawFetchResult, SourceRegistry, MarketDailyPriceLineage,
+                price, RawFetchResult, SourceRegistry, MarketDailyPriceLineage,
                 ranked.c.latest_date,
             ).options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS)).join(
-                ranked, ranked.c.id == MarketDailyPrice.id,
-            ).outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id).join(
-                SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id,
-            ).outerjoin(MarketDailyPriceLineage, MarketDailyPriceLineage.daily_price_id == MarketDailyPrice.id).filter(
+                ranked, ranked.c.id == price.id,
+            ).outerjoin(RawFetchResult, RawFetchResult.id == price.raw_result_id).join(
+                SourceRegistry, SourceRegistry.id == price.source_id,
+            ).outerjoin(MarketDailyPriceLineage, MarketDailyPriceLineage.daily_price_id == price.id).filter(
                 ranked.c.ordinal <= len(bindings) + 129,
-            ).order_by(MarketDailyPrice.trade_date.asc(), MarketDailyPrice.id.asc()).all()
+            ).order_by(price.trade_date.asc(), price.id.asc()).all()
             for row, raw, source, lineage, latest_date in rows:
                 self._latest_batch[row.stock_id].append((row, raw, source, lineage))
                 self._latest_batch_dates[row.stock_id] = latest_date
@@ -338,22 +407,23 @@ class TaiwanOfficialDailyBarRepository:
         bindings = _bindings_for_instrument(instrument)
         source_names = tuple(item.source_name for item in bindings)
         binding_by_source = {item.source_name: item for item in bindings}
+        price = self._price_rows(symbols=(instrument.symbol,), end_date=end_date)
         query = (
             self._db.query(
-                MarketDailyPrice,
+                price,
                 RawFetchResult,
                 SourceRegistry,
                 MarketDailyPriceLineage,
             )
             .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
-            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .outerjoin(RawFetchResult, RawFetchResult.id == price.raw_result_id)
+            .join(SourceRegistry, SourceRegistry.id == price.source_id)
             .outerjoin(
                 MarketDailyPriceLineage,
-                MarketDailyPriceLineage.daily_price_id == MarketDailyPrice.id,
+                MarketDailyPriceLineage.daily_price_id == price.id,
             )
-            .filter(MarketDailyPrice.stock_id == instrument.symbol)
-            .filter(MarketDailyPrice.trade_date <= end_date)
+            .filter(price.stock_id == instrument.symbol)
+            .filter(price.trade_date <= end_date)
             .filter(SourceRegistry.source_name.in_(source_names))
         )
         if self._available_at is not None:
@@ -362,12 +432,12 @@ class TaiwanOfficialDailyBarRepository:
                     RawFetchResult.fetched_at <= self._available_at,
                     and_(
                         RawFetchResult.id.is_(None),
-                        MarketDailyPrice.updated_at <= self._available_at,
+                        price.updated_at <= self._available_at,
                     ),
                 )
             )
         rows = (
-            query.order_by(MarketDailyPrice.trade_date.desc(), MarketDailyPrice.id.desc())
+            query.order_by(price.trade_date.desc(), price.id.desc())
             .limit(5000 * len(bindings) + 1)
             .yield_per(min(max_rows, 256))
         )
@@ -449,9 +519,10 @@ class TaiwanOfficialDailyBarRepository:
         bindings = _bindings_for_instrument(instrument)
         binding_by_source = {item.source_name: item for item in bindings}
 
+        price = self._price_rows(symbols=(query.instrument.symbol,), start_date=query.start_date, end_date=query.end_date)
         stored_query = (
             self._db.query(
-                MarketDailyPrice,
+                price,
                 RawFetchResult,
                 SourceRegistry,
                 MarketDailyPriceLineage,
@@ -459,16 +530,16 @@ class TaiwanOfficialDailyBarRepository:
             .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
             .outerjoin(
                 RawFetchResult,
-                RawFetchResult.id == MarketDailyPrice.raw_result_id,
+                RawFetchResult.id == price.raw_result_id,
             )
-            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+            .join(SourceRegistry, SourceRegistry.id == price.source_id)
             .outerjoin(
                 MarketDailyPriceLineage,
-                MarketDailyPriceLineage.daily_price_id == MarketDailyPrice.id,
+                MarketDailyPriceLineage.daily_price_id == price.id,
             )
-            .filter(MarketDailyPrice.stock_id == instrument.symbol)
-            .filter(MarketDailyPrice.trade_date >= query.start_date)
-            .filter(MarketDailyPrice.trade_date <= query.end_date)
+            .filter(price.stock_id == instrument.symbol)
+            .filter(price.trade_date >= query.start_date)
+            .filter(price.trade_date <= query.end_date)
             .filter(SourceRegistry.source_name.in_(tuple(binding_by_source)))
         )
         if self._available_at is not None:
@@ -477,12 +548,12 @@ class TaiwanOfficialDailyBarRepository:
                     RawFetchResult.fetched_at <= self._available_at,
                     and_(
                         RawFetchResult.id.is_(None),
-                        MarketDailyPrice.updated_at <= self._available_at,
+                        price.updated_at <= self._available_at,
                     ),
                 )
             )
         rows = self._latest_batch.get(instrument.symbol, []) if self._latest_batch is not None else (
-            stored_query.order_by(MarketDailyPrice.trade_date.asc(), MarketDailyPrice.id.asc())
+            stored_query.order_by(price.trade_date.asc(), price.id.asc())
             .limit(query.max_rows * len(bindings) + 129)
             .all()
         )
@@ -789,11 +860,12 @@ class TaiwanOfficialDailyBarRepository:
             and captured[2].query == query else self.load_daily_bars(query))
         ids = {item.storage_row_id for item in stored.rejections if item.reason_code == "MISSING_REQUIRED_OHLC"}
         ids.update(row_id for series in stored.series for row_id in series.storage_row_ids)
-        rows = (self._db.query(MarketDailyPrice, RawFetchResult, SourceRegistry)
+        price = self._price_rows(symbols=(instrument.symbol,), start_date=start_date, end_date=end_date)
+        rows = (self._db.query(price, RawFetchResult, SourceRegistry)
                 .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS, RawFetchResult.status_code, RawFetchResult.error_message))
-                .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
-                .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-                .filter(MarketDailyPrice.id.in_(ids)).all()) if ids else []
+                .join(RawFetchResult, RawFetchResult.id == price.raw_result_id)
+                .join(SourceRegistry, SourceRegistry.id == price.source_id)
+                .filter(price.id.in_(ids)).all()) if ids else []
         activity = {}
         for row, raw, source in rows:
             if raw.status_code != 200 or raw.error_message or not raw.content_hash:
@@ -891,14 +963,20 @@ class TaiwanOfficialDailyBarRepository:
                 continue
         if not row_ids:
             return {}
+        price = self._price_rows(row_ids=row_ids)
         rows = (
-            self._db.query(MarketDailyPrice)
-            .filter(MarketDailyPrice.id.in_(row_ids))
+            self._db.query(price)
+            .filter(price.id.in_(row_ids))
             .all()
         )
         reconciliations = (
             self._db.query(MarketDailyPriceReconciliation)
             .filter(MarketDailyPriceReconciliation.daily_price_id.in_(row_ids))
+        )
+        if self._available_at is not None:
+            reconciliations = reconciliations.filter(MarketDailyPriceReconciliation.checked_at <= self._available_at)
+        reconciliations = (
+            reconciliations
             .order_by(
                 MarketDailyPriceReconciliation.checked_at.desc(),
                 MarketDailyPriceReconciliation.id.desc(),
@@ -1007,28 +1085,29 @@ class TaiwanOfficialDailyBarRepository:
             return {day: TaiwanOfficialDailyUniverseRead(
                 trade_date=day, limitations=("ACTIVE_STOCK_UNIVERSE_EMPTY",),
             ) for day in trade_dates}
+        price = self._price_rows(symbols=universe_symbols, end_date=trade_dates[-1], trade_dates=trade_dates)
         query = (
             self._db.query(
-                MarketDailyPrice,
+                price,
                 RawFetchResult,
                 SourceRegistry,
                 StockMaster,
             )
             .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .outerjoin(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
-            .outerjoin(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-            .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)
-            .filter(MarketDailyPrice.trade_date.in_(trade_dates))
-            .filter(MarketDailyPrice.stock_id.in_(universe_symbols))
+            .outerjoin(RawFetchResult, RawFetchResult.id == price.raw_result_id)
+            .outerjoin(SourceRegistry, SourceRegistry.id == price.source_id)
+            .join(StockMaster, StockMaster.stock_id == price.stock_id)
+            .filter(price.trade_date.in_(trade_dates))
+            .filter(price.stock_id.in_(universe_symbols))
         )
         if self._available_at is not None:
             query = query.filter(RawFetchResult.fetched_at <= self._available_at)
         rows = (
             query.order_by(
-                MarketDailyPrice.trade_date.asc(),
-                MarketDailyPrice.stock_id.asc(),
+                price.trade_date.asc(),
+                price.stock_id.asc(),
                 SourceRegistry.priority.asc(),
-                MarketDailyPrice.id.desc(),
+                price.id.desc(),
             )
             .limit(max_rows * len(trade_dates) + 1)
             .yield_per(256)
@@ -1138,6 +1217,8 @@ class TaiwanOfficialDailyBarRepository:
                         else None
                     ),
                     instrument_name=row.stock_name or stock.stock_name,
+                    volume_status="observed" if row.trade_volume is not None else "missing",
+                    price_basis="raw",
                     turnover_value=(
                         Decimal(row.trade_value) if row.trade_value is not None else None
                     ),
@@ -1146,7 +1227,7 @@ class TaiwanOfficialDailyBarRepository:
                     price_change=(
                         _decimal(row.price_change) if row.price_change is not None else None
                     ),
-                    finalization=BarFinalization.FINAL,
+                    finalization=BarFinalization(row.finalization) if row.finalization else BarFinalization.FINAL,
                 )
             except (TypeError, ValueError, ValidationError):
                 rejected += 1
@@ -1390,10 +1471,11 @@ class TaiwanOfficialDailyBarRepository:
                 continue
         if not row_ids:
             return {}
+        price = self._price_rows(row_ids=row_ids)
         rows = (
-            self._db.query(MarketDailyPrice, SourceRegistry)
-            .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-            .filter(MarketDailyPrice.id.in_(tuple(set(row_ids))))
+            self._db.query(price, SourceRegistry)
+            .join(SourceRegistry, SourceRegistry.id == price.source_id)
+            .filter(price.id.in_(tuple(set(row_ids))))
             .all()
         )
         return {

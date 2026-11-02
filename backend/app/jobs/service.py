@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 import json
 import logging
 import re
-from threading import BoundedSemaphore, Lock, RLock
+from threading import BoundedSemaphore, RLock
 import time
 from typing import Any
 
@@ -120,7 +120,7 @@ _materialization_slots = {
     "market_background": BoundedSemaphore(MARKET_BACKGROUND_MAX_IN_FLIGHT),
     "market_completed": BoundedSemaphore(settings.taiwan_completed_materialization_concurrency),
 }
-_enqueue_lock = Lock()
+_enqueue_lock = RLock()
 
 
 class JobRunNotFoundError(Exception):
@@ -129,6 +129,10 @@ class JobRunNotFoundError(Exception):
 
 class JobAdmissionClosed(RuntimeError):
     pass
+
+
+class JobExecutionCapacityFull(RuntimeError):
+    """No callable was submitted; the durable owner may defer within its bounds."""
 
 
 @dataclass(frozen=True)
@@ -870,7 +874,7 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
             if slots is None:
                 raise ValueError("Unknown job execution lane")
             if not slots.acquire(blocking=False):
-                raise RuntimeError("MARKET_MATERIALIZATION_QUEUE_FULL")
+                raise JobExecutionCapacityFull("MARKET_MATERIALIZATION_QUEUE_FULL")
         try:
             if execution_lane == "default":
                 executor = _get_executor()
@@ -1050,6 +1054,51 @@ def _enqueue_job(
         db.refresh(job)
 
     return job, True
+
+
+@contextmanager
+def job_target_transaction(db: Session):
+    """Serialize a durable target decision before enqueue/continuation.
+
+    Acquire the existing enqueue lock before SQLite's writer reservation, in
+    the same order as enqueue_job. Never hold a DB writer while waiting for
+    another enqueue that is itself waiting to commit.
+    """
+    with _enqueue_admission(), _enqueue_lock:
+        if db.new or db.dirty or db.deleted:
+            raise RuntimeError("JOB_TARGET_UNEXPECTED_WRITES")
+        db.rollback()
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            yield
+        finally:
+            db.rollback()
+
+
+def continue_job(db: Session, *, job_id: int, task: JobTask) -> bool:
+    """Rearm one terminal JobRun, retaining its durable owner checkpoint.
+
+    The caller owns eligibility/cooldown. CAS prevents simultaneous continuation;
+    the existing admission fence and queued-pause codec still own execution.
+    """
+    with _enqueue_admission():
+        previous = _from_json(get_job(db, job_id).result_json)
+        changed = db.query(JobRun).filter(JobRun.id == job_id,
+            JobRun.status.in_(TERMINAL_STATUSES)).update({
+                JobRun.status: "queued", JobRun.ended_at: None,
+                JobRun.error_message: None, JobRun.updated_at: utc_now(),
+                JobRun.message: "Queued bounded continuation.",
+            }, synchronize_session=False)
+        db.commit()
+        if not changed:
+            return False
+        try:
+            submit_job_task(task, job_id)
+        except JobAdmissionClosed:
+            _persist_job_pause(job_id, task, (), "default", {"safe_point": "not_started"})
+        except Exception as exc:
+            fail_job(db, job_id, error_message=f"Failed to submit continuation: {exc}", result=previous)
+        return True
 
 
 def shutdown_job_executor(wait: bool = False) -> None:

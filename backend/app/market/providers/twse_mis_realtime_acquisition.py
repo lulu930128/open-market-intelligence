@@ -103,7 +103,7 @@ def _default_reader(
 
     # Same process-local venue slot as breadth. A timed-out worker retains it
     # until transport completion; late responses cannot publish cache/guard state.
-    return bounded_fetch(fetch, seconds, exchange=exchange_code_for_venue(venue))
+    return bounded_fetch(fetch, seconds, interactive=True, exchange=exchange_code_for_venue(venue))
 
 
 @dataclass(frozen=True, slots=True)

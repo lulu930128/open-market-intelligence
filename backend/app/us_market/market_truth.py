@@ -81,12 +81,6 @@ from app.us_market.trading_calendar import (
 )
 
 
-_VERIFIED_PREVIOUS_CLOSE_CONTRACTS = {
-    "yahoo.chart.v8",
-    "twelve_data.quote.v1",
-}
-
-
 @dataclass(frozen=True)
 class _USMarketTruthComponents:
     quote_read: object
@@ -331,7 +325,7 @@ def _close_payload(
     evidence_key: str,
     observation_id: str,
     instrument: InstrumentKey,
-    trade_date: date,
+    trade_date: date | None,
     price: Decimal,
     currency: str | None,
     price_basis: str,
@@ -359,7 +353,7 @@ def _close_payload(
         "evidence_key": evidence_key,
         "observation_id": observation_id,
         "instrument": instrument.model_dump(mode="json"),
-        "trade_date": trade_date.isoformat(),
+        "trade_date": trade_date.isoformat() if trade_date is not None else None,
         "price": str(price),
         "price_unit": price_unit.value,
         "currency": normalized_currency,
@@ -494,7 +488,7 @@ def _intraday_close_evidence(
         if (
             session is MarketSession.CONTINUOUS
             and local_end == formal_close
-            and bar.finalization is not BarFinalization.PROVISIONAL
+            and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
         ):
             kind = USCloseEvidenceKind.FINALIZED_REGULAR_INTERVAL_CLOSE
             session_open = datetime.combine(
@@ -609,15 +603,15 @@ def _provider_hint_evidence(
     )
     payload = _close_payload(
         evidence_key=(
-            f"provider_hint:{quote.instrument.symbol}:{expected_trade_date}:"
+            f"provider_hint:{quote.instrument.symbol}:undated:"
             f"{quote.lineage.provider}"
         ),
         observation_id=observation_id,
         instrument=quote.instrument,
-        trade_date=expected_trade_date,
+        trade_date=None,
         price=quote.previous_close,
         currency=quote.currency,
-        price_basis="raw",
+        price_basis="provider_default",
         evidence_kind=USCloseEvidenceKind.PROVIDER_PREVIOUS_CLOSE_HINT,
         provider=quote.lineage.provider,
         source=quote.lineage.source,
@@ -638,10 +632,7 @@ def _provider_hint_evidence(
             expected_trade_date=expected_trade_date,
             quote_trade_date=quote.trade_date,
             same_observation_provider=True,
-            provider_semantics_verified=(
-                quote.lineage.raw_contract_version
-                in _VERIFIED_PREVIOUS_CLOSE_CONTRACTS
-            ),
+            provider_semantics_verified=False,
             stronger_conflict=stronger_conflict,
         ),
     )
@@ -777,6 +768,7 @@ def _comparison_evidence(
         purpose is not USComparisonPurpose.RESEARCH_CHANGE
         and hint is not None
         and hint.display_usable
+        and hint.trade_date is not None
         and hint.trade_date < headline.trade_date
     ):
         return hint

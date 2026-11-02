@@ -13,6 +13,8 @@ from app.market.daily_ohlcv_platform import (
 )
 from app.market.official_breadth_platform import read_taiwan_official_breadth
 from app.market.financial_contract import build_database_financial_contract
+from app.market.tw_swing_screening import SwingScreenRequest, SwingScreenResult, build_tw_swing_screening_snapshot
+from app.ai.market_context.taiwan_swing_research import SwingDiscoveryParameters, SwingDiscoveryRead, read_swing_discovery
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_BROKER_BRANCH,
     TAIWAN_DATASET_DAILY_PRICE,
@@ -1547,12 +1549,69 @@ def get_stock_overnight_impact(
         ) from exc
 
 
+@router.get("/screening/swing-discovery", response_model=SwingDiscoveryRead)
+def get_taiwan_swing_discovery(
+    as_of_trade_date: date = Query(),
+    requested_at: datetime = Query(),
+    horizon_sessions: int = Query(default=10, ge=10, le=15, json_schema_extra={"enum": [10, 15]}),
+    direction: Literal["long", "short", "both"] = Query(default="both"),
+    mode: Literal["aggressive", "confirmed", "both"] = Query(default="both"),
+    markets: list[str] = Query(default=["TWSE", "TPEX"], min_length=1, max_length=2),
+    top_n: int = Query(default=20, ge=1, le=100),
+    batch_size: int = Query(default=100, ge=1, le=100),
+    max_batches: int = Query(default=20, ge=1, le=20),
+    detail_batch_size: int = Query(default=10, ge=1, le=100),
+    max_detail_batches: int = Query(default=10, ge=1, le=10),
+    with_detail: bool = Query(default=True),
+    short_price_cap: float = Query(default=200, gt=0, le=200),
+    minimum_turnover_twd: float = Query(default=5_000_000, ge=0),
+    near_structure_pct: float = Query(default=2, gt=0, le=5),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        parameters = SwingDiscoveryParameters(as_of_trade_date=as_of_trade_date, requested_at=requested_at,
+            horizon_sessions=horizon_sessions, direction=direction, mode=mode, markets=tuple(markets),
+            top_n=top_n, batch_size=batch_size, max_batches=max_batches, detail_batch_size=detail_batch_size,
+            max_detail_batches=max_detail_batches, with_detail=with_detail, short_price_cap=short_price_cap,
+            minimum_turnover_twd=minimum_turnover_twd, near_structure_pct=near_structure_pct, limit=limit)
+        return read_swing_discovery(db, parameters)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/screening/swing", response_model=SwingScreenResult)
+def get_taiwan_swing_screening(
+    stock_ids: list[str] = Query(min_length=1, max_length=100),
+    as_of_trade_date: date = Query(),
+    requested_at: datetime = Query(),
+    horizon_sessions: int = Query(default=10, ge=10, le=15, json_schema_extra={"enum": [10, 15]}),
+    direction: Literal["long", "short", "both"] = Query(default="both"),
+    mode: Literal["aggressive", "confirmed", "both"] = Query(default="both"),
+    short_price_cap: float = Query(default=200, gt=0, le=200),
+    minimum_turnover_twd: float = Query(default=5_000_000, ge=0),
+    near_structure_pct: float = Query(default=2, gt=0, le=5),
+    top_n: int = Query(default=100, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=5000),
+    db: Session = Depends(get_db),
+):
+    try:
+        request = SwingScreenRequest(stock_ids=tuple(stock_ids), as_of_trade_date=as_of_trade_date,
+            requested_at=requested_at, horizon_sessions=horizon_sessions, direction=direction,
+            mode=mode, short_price_cap=short_price_cap, minimum_turnover_twd=minimum_turnover_twd,
+            near_structure_pct=near_structure_pct, top_n=top_n, limit=limit, offset=offset)
+        return build_tw_swing_screening_snapshot(db, request=request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @router.get("/screening/price-map")
 def get_taiwan_price_map_screening(
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     relation: str = Query(default="near_zone"),
     zone_side: str = Query(default="any", pattern="^(any|upside|downside)$"),
-    lane: str = Query(default="actual", pattern="^(actual|indicative)$"),
+    lane: str = Query(default="actual", pattern="^(actual|indicative|completed_daily)$"),
     near_pct: float = Query(default=0.5, ge=0, le=5),
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0, le=5000),

@@ -522,6 +522,20 @@ def _us_resolved_quote(
     if price is None:
         return {}
 
+    if quote_snapshot.get("schema_version") == "omi.market.us_truth_quote_compat.v1":
+        # The market owner already selected the exact comparison role. Keep
+        # explicit nulls; latest cached Daily and vendor hints cannot refill it.
+        previous_close_reference = {
+            "previous_close": value.get("previous_close"),
+            "previous_close_source": value.get("previous_close_source"),
+            "previous_close_trade_date": value.get("previous_close_trade_date"),
+            "previous_close_provider": value.get("previous_close_provider"),
+            "change_reference_price": value.get("previous_close"),
+            "change_reference_type": "headline_change",
+            "change_reference_trade_date": value.get("previous_close_trade_date"),
+            "change_reference_source": value.get("previous_close_source"),
+        }
+
     previous_close = _optional_float(
         (previous_close_reference or {}).get("previous_close")
     )
@@ -609,6 +623,14 @@ def _us_resolved_quote(
         "session_phase": session_phase,
         "provider": quote_snapshot.get("selected_provider"),
         "previous_close": previous_close,
+        "previous_close_price_basis": value.get("previous_close_price_basis"),
+        "previous_close_reason_code": value.get("previous_close_reason_code"),
+        "provider_previous_close_hint": {
+            "price": value.get("provider_previous_close_hint"),
+            "trade_date": value.get("provider_previous_close_hint_trade_date"),
+            "price_basis": value.get("provider_previous_close_hint_price_basis"),
+            "limitations": value.get("provider_previous_close_hint_limitations", []),
+        },
         "previous_close_source": (previous_close_reference or {}).get(
             "previous_close_source"
         ),

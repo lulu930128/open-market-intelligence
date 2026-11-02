@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+import pytest
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -68,6 +69,24 @@ from app.us_market.market_data.descriptors import (
     TWELVE_INTRADAY_RESOURCE_ID,
     TWELVE_QUOTE_RESOURCE_ID,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_legacy_scheduler_flags(monkeypatch):
+    # These tests exercise the independent legacy lanes. Local .env may enable
+    # dynamic universe/EOD jobs, whose isolated coverage lives separately.
+    monkeypatch.setattr(settings, "enable_us_dynamic_equity_materializer_universe", False)
+    monkeypatch.setattr(settings, "enable_us_intraday_reconciliation", False)
+    from app.db.session import engine
+
+    def deny_configured_database(*args, **kwargs):
+        pytest.fail("Materializer fixture attempted to connect the configured application database")
+
+    event.listen(engine, "do_connect", deny_configured_database)
+    try:
+        yield
+    finally:
+        event.remove(engine, "do_connect", deny_configured_database)
 
 
 class _FakeDb:

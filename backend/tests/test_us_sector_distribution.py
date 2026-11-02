@@ -378,6 +378,8 @@ def test_large_us_snapshot_stays_nonempty_within_v4_budget(db, monkeypatch, budg
     caps = ["market.sectors", "market.hot_groups", "market.breadth"]
     limits = {cap: selection_limit for cap in caps}
     intermediate = merge_us_distribution_context({}, snapshot, set(caps), limits=limits)
+    assert "yahoo_daily_receipt_at" not in intermediate["data"]["market"]["sectors"]["provenance"]
+    assert snapshot.provenance["daily_validation_policy"] == "historical_vendor_receipt.v1"
     assert len(json.dumps(intermediate, ensure_ascii=False).encode()) < 64000
     assert len(snapshot.industries) == 150 and len(snapshot.industries[0].members) == 5
     monkeypatch.setattr(ask_execution, "read_us_sector_distribution", Mock(return_value=snapshot))

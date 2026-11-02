@@ -317,7 +317,7 @@ def _install_fake_components(monkeypatch, components) -> None:
     )
 
 
-def test_snapshot_is_deterministic_and_uses_limited_hint(monkeypatch) -> None:
+def test_snapshot_is_deterministic_and_rejects_undated_hint(monkeypatch) -> None:
     quote, intraday, daily = _fake_components(include_regular_close=False)
     sessions: list[object] = []
     read_times: list[datetime] = []
@@ -408,12 +408,17 @@ def test_snapshot_is_deterministic_and_uses_limited_hint(monkeypatch) -> None:
         if item.purpose is USComparisonPurpose.HEADLINE_CHANGE
     )
     assert headline_reference.reason_code == (
-        "PROVIDER_PREVIOUS_CLOSE_LIMITED"
+        "COMPARISON_REFERENCE_UNAVAILABLE"
     )
     assert headline_metric.calculation_status is (
-        USChangeCalculationStatus.LIMITED
+        USChangeCalculationStatus.MISSING
     )
-    assert headline_metric.absolute_change == Decimal("1")
+    assert headline_metric.absolute_change is None
+    hint = next(item for item in first.close_evidence if item.evidence_kind is USCloseEvidenceKind.PROVIDER_PREVIOUS_CLOSE_HINT)
+    assert hint.trade_date is None
+    assert hint.price_basis == "provider_default"
+    assert hint.display_usable is False
+    assert "HINT_DATE_UNVERIFIED" in hint.limitations
     assert {item.purpose for item in first.change_metrics} == set(
         USComparisonPurpose
     )
@@ -862,8 +867,8 @@ def test_truth_shadow_diff_is_diagnostic_and_bounded(monkeypatch) -> None:
             "market_phase": "pre_market",
             "price": "201",
             "previous_close": None,
-            "change": "1",
-            "change_percent": "0.5",
+            "change": None,
+            "change_percent": None,
         },
         truth=snapshot,
     )

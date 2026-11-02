@@ -325,6 +325,8 @@ roots = [
   "backend/app/ai",
   "backend/app/market",
   "backend/app/watchlists",
+  "backend/app/us_market/watchlist_metrics.py",
+  "backend/app/us_market/valuation.py",
 ]
 extensions = [".py"]
 modules = ["app.db.models"]

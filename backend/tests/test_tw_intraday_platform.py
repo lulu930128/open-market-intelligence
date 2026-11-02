@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import inspect
 import json
+import socket
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -50,6 +51,17 @@ from app.market_data.contracts import (
 
 
 TAIPEI = timezone(timedelta(hours=8))
+
+
+@pytest.fixture(autouse=True)
+def isolated_legacy_provider_routes(monkeypatch):
+    from app.config import settings
+    # These fixtures inject NStock/Yahoo only. An operator's configured Fugle
+    # credential must not enable another route or real HTTP in source tests.
+    monkeypatch.setattr(settings, "fugle_api_key", None)
+    def deny_network(*args, **kwargs):
+        raise AssertionError("intraday platform fixtures forbid provider network IO")
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
 
 
 def _instrument() -> InstrumentKey:

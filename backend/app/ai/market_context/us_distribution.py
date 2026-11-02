@@ -39,6 +39,11 @@ def merge_us_distribution_context(result: dict, snapshot: USSectorDistributionRe
                                   limits: dict | None = None) -> dict:
     output = deepcopy(result)
     payload = snapshot.model_dump(mode="json", exclude={"sectors", "industries", "hot_groups"})
+    # Materialization validation metadata stays with its owner. The outward
+    # projection carries the resulting freshness/limitations and price lineage,
+    # without repeating internal revalidation inputs in every capability slot.
+    for field in ("daily_validation_policy", "yahoo_daily_receipt_at"):
+        payload["provenance"].pop(field, None)
     data = output.setdefault("data", {})
     compact = data.setdefault("compact", {})
     output.setdefault("kind", "market_overview")

@@ -10,20 +10,197 @@ from sqlalchemy.orm import sessionmaker
 
 from app.jobs import eod_coverage
 from app.jobs import scheduler
-from app.db.models import Base, JobRun
+from app.db.models import Base, JobRun, StockMaster
+from app.market.trading_calendar import TAIWAN_TZ
 
 
-def test_eod_coverage_scheduler_has_immediate_startup_catchup() -> None:
+@pytest.mark.parametrize("interval", [30, 45])
+def test_us_eod_coverage_scheduler_keeps_interval_and_immediate_startup(interval) -> None:
     fake_scheduler = Mock()
+    now = datetime(2026, 11, 2, 9, 0, tzinfo=scheduler._timezone())
 
-    with patch.object(scheduler.settings, "enable_eod_coverage_scheduler", True):
+    with (
+        patch.object(scheduler.settings, "enable_eod_coverage_scheduler", True),
+        patch.object(scheduler.settings, "scheduler_eod_coverage_markets", "TW,US"),
+        patch.object(scheduler.settings, "scheduler_eod_coverage_interval_minutes", interval),
+        patch.object(scheduler, "datetime", wraps=datetime) as clock,
+    ):
+        clock.now.return_value = now
         assert scheduler._add_market_eod_coverage_reconcile_job(fake_scheduler) is True
 
     kwargs = fake_scheduler.add_job.call_args.kwargs
     assert kwargs["trigger"] == "interval"
+    assert kwargs["minutes"] == interval
+    assert kwargs["kwargs"] == {"markets": ("US",)}
     assert kwargs["id"] == "market_eod_coverage_reconcile"
     assert kwargs["max_instances"] == 1
-    assert kwargs["next_run_time"] is not None
+    assert kwargs["replace_existing"] is True and kwargs["coalesce"] is True
+    assert kwargs["next_run_time"] == now
+
+
+def test_tw_eod_cron_next_fire_times_use_taiwan_timezone_without_startup_catchup():
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    jobs = BackgroundScheduler(timezone="UTC")
+    with (
+        patch.object(scheduler.settings, "enable_eod_coverage_scheduler", True),
+        patch.object(scheduler.settings, "scheduler_eod_coverage_markets", "TW"),
+    ):
+        assert scheduler._add_market_eod_coverage_reconcile_job(jobs)
+    assert not jobs.running and len(jobs.get_jobs()) == 1
+    job = jobs.get_job("taiwan_eod_coverage_reconcile")
+    assert job.kwargs == {"markets": ("TW",)}
+    assert not hasattr(job, "next_run_time")  # Cron chooses the first slot on startup.
+    trigger = job.trigger
+    # UTC caller clock must still select the TW afternoon release window.
+    first = trigger.get_next_fire_time(None, datetime(2026, 11, 2, 7, 14, tzinfo=timezone.utc))
+    assert first == datetime(2026, 11, 2, 15, 20, tzinfo=TAIWAN_TZ)
+    actual = [first]
+    for _ in range(5):
+        actual.append(trigger.get_next_fire_time(actual[-1], actual[-1] + timedelta(seconds=1)))
+    assert [(tick.hour, tick.minute) for tick in actual] == [
+        (15, 20), (15, 35), (15, 50), (16, 5), (16, 20), (16, 35),
+    ]
+    assert trigger.get_next_fire_time(None, datetime(2026, 11, 2, 22, 0, tzinfo=TAIWAN_TZ)).minute == 5
+    last = datetime(2026, 11, 6, 23, 50, tzinfo=TAIWAN_TZ)
+    assert trigger.get_next_fire_time(last, last + timedelta(seconds=1)) == datetime(
+        2026, 11, 9, 15, 20, tzinfo=TAIWAN_TZ)
+    assert trigger.get_next_fire_time(None, datetime(2026, 11, 7, 12, tzinfo=TAIWAN_TZ)) == datetime(
+        2026, 11, 9, 15, 20, tzinfo=TAIWAN_TZ)
+
+
+@pytest.mark.parametrize("markets,expected_ids", [
+    ("TW", {"taiwan_eod_coverage_reconcile"}),
+    ("US", {"market_eod_coverage_reconcile"}),
+    ("tw,US,TW,us", {"taiwan_eod_coverage_reconcile", "market_eod_coverage_reconcile"}),
+    ("", set()),
+    ("JP", set()),
+])
+def test_eod_registration_is_market_scoped_and_replaces_existing_ids(markets, expected_ids):
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    jobs = BackgroundScheduler(timezone="UTC")
+    # Paused, in-memory test scheduler: no production job or provider is run.
+    jobs.start(paused=True)
+    try:
+        with (
+            patch.object(scheduler.settings, "enable_eod_coverage_scheduler", True),
+            patch.object(scheduler.settings, "scheduler_eod_coverage_markets", markets),
+            patch.object(scheduler.settings, "scheduler_eod_coverage_interval_minutes", 30),
+        ):
+            for _ in range(2):
+                assert scheduler._add_market_eod_coverage_reconcile_job(jobs) is bool(expected_ids)
+        assert {job.id for job in jobs.get_jobs()} == expected_ids
+        assert len(jobs.get_jobs()) == len(expected_ids)
+        if "market_eod_coverage_reconcile" in expected_ids:
+            assert jobs.get_job("market_eod_coverage_reconcile").trigger.interval == timedelta(minutes=30)
+    finally:
+        jobs.shutdown(wait=False)
+
+
+def test_disabled_eod_scheduler_registers_nothing():
+    jobs = Mock()
+    with patch.object(scheduler.settings, "enable_eod_coverage_scheduler", False):
+        assert scheduler._add_market_eod_coverage_reconcile_job(jobs) is False
+    jobs.add_job.assert_not_called()
+
+
+@pytest.mark.parametrize("configured,selected,expected", [
+    ("TW,US,TW,US", ("TW",), ["TW"]),
+    ("TW,US,TW,US", ("US",), ["US"]),
+    ("TW,US,TW,US", None, ["TW", "US"]),
+    ("TW", ("US",), []),
+    ("US", ("TW",), []),
+    ("TW,US", (), []),
+])
+def test_enqueue_market_filter_respects_configuration_and_deduplicates(configured, selected, expected):
+    with (
+        patch.object(scheduler.settings, "scheduler_eod_coverage_markets", configured),
+        patch("app.us_market.daily_rollout.us_daily_full_market_acquisition_enabled", return_value=True),
+        patch.object(scheduler, "SessionLocal", return_value=Mock()) as session,
+        patch.object(scheduler, "expected_eod_trade_date", return_value=date(2026, 11, 2)),
+        patch.object(scheduler, "should_enqueue_eod_reconcile", return_value=True),
+        patch.object(scheduler, "enqueue_eod_coverage_reconcile", return_value=(Mock(id=1), True)) as enqueue,
+    ):
+        scheduler.enqueue_market_eod_coverage_reconcile(markets=selected)
+    assert [call.kwargs["market"] for call in enqueue.call_args_list] == expected
+    assert session.call_count == len(expected)
+
+
+@pytest.mark.parametrize("market,backoff", [("TW", 900), ("US", 1800)])
+def test_eod_market_specific_backoff_reaches_existing_job_owner(market, backoff):
+    with (
+        patch.object(scheduler.settings, "scheduler_eod_coverage_markets", "TW,US"),
+        patch.object(scheduler.settings, "scheduler_eod_coverage_error_backoff_seconds", 1800),
+        patch.object(scheduler.settings, "scheduler_eod_coverage_tw_error_backoff_seconds", 900),
+        patch("app.us_market.daily_rollout.us_daily_full_market_acquisition_enabled", return_value=True),
+        patch.object(scheduler, "SessionLocal", return_value=Mock()),
+        patch.object(scheduler, "expected_eod_trade_date", return_value=date(2026, 11, 2)),
+        patch.object(scheduler, "should_enqueue_eod_reconcile", return_value=True),
+        patch.object(scheduler, "enqueue_eod_coverage_reconcile", return_value=(Mock(id=1), True)) as enqueue,
+    ):
+        scheduler.enqueue_market_eod_coverage_reconcile(markets=(market,))
+    enqueue.assert_called_once()
+    assert enqueue.call_args.kwargs["error_backoff_seconds"] == backoff
+
+
+def test_tw_existing_provider_retry_boundary_is_not_shortened_by_scheduler():
+    from app.market_data import eod_coverage as owner
+
+    now = datetime(2026, 11, 2, 7, 20, tzinfo=timezone.utc)
+    row = Mock(status="partial", repair_status="rate_limited", next_retry_at=now + timedelta(hours=1))
+    db = Mock()
+    db.query.return_value.filter.return_value.filter.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = row
+    with patch.object(owner, "compute_eod_coverage", return_value=Mock(universe_hash="fixture")):
+        assert not owner.should_enqueue_eod_reconcile(
+            db, market="TW", expected_trade_date=now.date(), now=now + timedelta(minutes=15))
+        assert owner.should_enqueue_eod_reconcile(
+            db, market="TW", expected_trade_date=now.date(), now=row.next_retry_at)
+
+
+@pytest.mark.parametrize("retry_after,expected_backoff", [(0, 900), (3600, 3600)])
+def test_tw_900s_backoff_preserves_longer_provider_retry_after(retry_after, expected_backoff):
+    from app.market.daily_ohlcv_platform import qualify_taiwan_eod_universe
+    from app.market_data import eod_coverage as owner
+    from app.observability.provider_http import ProviderHttpError, ProviderHttpFailure, ProviderRequestContext
+
+    now = datetime(2026, 11, 2, 7, 20, tzinfo=timezone.utc)
+    failure = ProviderHttpFailure(
+        context=ProviderRequestContext(market="tw", provider="twse", resource="daily_price", target="TWSE"),
+        status="rate_limited", source_url="https://example.invalid/fixture", http_status_code=429,
+        rate_limited=True, retry_after_seconds=retry_after, error_message="fixture HTTP 429")
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with sessionmaker(engine)() as db:
+            db.add(StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"))
+            db.commit()
+            with (
+                patch.object(owner, "utc_now", return_value=now),
+                patch.object(owner, "taiwan_bulk_eod_refresh_window", return_value=(True, None, "fixture")),
+            ):
+                result = owner.reconcile_eod_coverage(
+                    db, market="TW", expected_trade_date=now.date(), error_backoff_seconds=900,
+                    taiwan_daily_qualifier=qualify_taiwan_eod_universe,
+                    taiwan_venue_refresher=Mock(side_effect=ProviderHttpError("fixture HTTP 429", failure=failure)))
+                retry_at = now + timedelta(seconds=expected_backoff)
+                assert result["postcondition_met"] is False
+                assert result["checkpoint"]["next_retry_at"].replace(tzinfo=timezone.utc) == retry_at
+                assert not owner.should_enqueue_eod_reconcile(
+                    db, market="TW", expected_trade_date=now.date(), now=retry_at - timedelta(seconds=1),
+                    taiwan_daily_qualifier=qualify_taiwan_eod_universe)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("clock,expected", [
+    (datetime(2026, 11, 2, 7, 14, tzinfo=timezone.utc), date(2026, 10, 30)),
+    (datetime(2026, 11, 2, 7, 20, tzinfo=timezone.utc), date(2026, 11, 2)),
+    (datetime(2026, 11, 7, 7, 20, tzinfo=timezone.utc), date(2026, 11, 6)),
+    (datetime(2026, 10, 9, 7, 20, tzinfo=timezone.utc), date(2026, 10, 8)),
+])
+def test_tw_eod_expected_date_keeps_official_release_and_holiday_calendar(clock, expected):
+    assert scheduler.expected_eod_trade_date("TW", now=clock) == expected
 
 
 def test_scheduler_skips_healthy_or_backed_off_markets_without_enqueuing() -> None:

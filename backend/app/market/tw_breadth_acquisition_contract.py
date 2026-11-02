@@ -25,6 +25,7 @@ class AcquisitionBatchEvidence(CanonicalModel):
     transport_budget_seconds: float | None = Field(default=None, ge=0, le=4)
     initial_wait_deadline_exceeded: bool | None = None
     resumed_wait_seconds: float | None = Field(default=None, ge=0)
+    admission_detail_code: str | None = Field(default=None, max_length=64)
     fetch_decode_seconds: float = Field(default=0, ge=0)
     transport_seconds: float | None = Field(default=None, ge=0)
     decode_seconds: float | None = Field(default=None, ge=0)

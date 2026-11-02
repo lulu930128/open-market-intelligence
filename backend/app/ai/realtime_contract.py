@@ -173,6 +173,41 @@ def _latest_time(value: Any, *, keys: set[str]) -> datetime | None:
     return max(candidates) if candidates else None
 
 
+def _intraday_observation_time(value: Any) -> datetime | None:
+    """Read only selected observations, never coverage/request/receipt clocks."""
+    candidates: list[datetime] = []
+    event_keys = {"event_at", "event_time", "quote_time", "selected_event_at", "provider_event_time", "bar_time"}
+
+    def visit(item: Any, *, bar: bool = False, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(item, list):
+            for point in item[-100:]:
+                visit(point, bar=True, depth=depth + 1)
+        elif isinstance(item, dict):
+            keys = event_keys | ({"time", "start_at", "end_at", "bar_close_time"} if bar else set())
+            for key in keys:
+                parsed = _parse_datetime(item.get(key))
+                if parsed is not None:
+                    candidates.append(parsed)
+            for key in ("points", "bars", "latest_point", "lineage"):
+                visit(item.get(key), bar=key == "latest_point", depth=depth + 1)
+            series = item.get("series")
+            if isinstance(series, dict):
+                for key, child in series.items():
+                    if key in INTERVAL_SECONDS or key in {"points", "bars"}:
+                        visit(child, depth=depth + 1)
+            elif isinstance(series, list):
+                visit(series, depth=depth + 1)
+
+    # A single canonical bar can also be the selected payload itself.
+    single_bar = isinstance(value, dict) and all(
+        key in value for key in ("start_at", "end_at", "close_price")
+    )
+    visit(value, bar=single_bar)
+    return max(candidates) if candidates else None
+
+
 def _first_text(value: Any, *keys: str) -> str | None:
     if not isinstance(value, dict):
         return None
@@ -421,11 +456,20 @@ def classify_observation(
     market: str | None,
     realtime_policy: str,
     now: datetime | None = None,
+    capability_id: str | None = None,
 ) -> dict[str, Any]:
     checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     market_name = str(market or "unknown").strip()
     market_key = market_name.casefold()
-    event_at = _latest_time(value, keys=OBSERVATION_TIME_KEYS)
+    interval_seconds = _interval_seconds(value)
+    intraday_bar_observation = _is_intraday_bar_observation(value, interval_seconds) or (
+        capability_id == "intraday.bars" and interval_seconds is not None and interval_seconds < 86_400
+    )
+    event_at = (
+        _intraday_observation_time(value)
+        if capability_id == "intraday.bars" or intraday_bar_observation
+        else _latest_time(value, keys=OBSERVATION_TIME_KEYS)
+    )
     received_at = _latest_time(value, keys=RECEIVED_TIME_KEYS)
     event_age_seconds = _age_seconds(checked_at, event_at)
     received_age_seconds = _age_seconds(checked_at, received_at)
@@ -540,11 +584,6 @@ def classify_observation(
         and str(provider_snapshot_freshness or "").casefold()
         in {"live", "fresh", "current"}
         and current_session_satisfied is True
-    )
-    interval_seconds = _interval_seconds(value)
-    intraday_bar_observation = _is_intraday_bar_observation(
-        value,
-        interval_seconds,
     )
     continuous = market_key in CONTINUOUS_MARKETS
     expected_provider_delay_seconds = (
@@ -800,6 +839,11 @@ def classify_observation(
         if explicit_actual_price_usable is not None
         else observed_price_available or intraday_bar_observation
     )
+    if capability_id == "intraday.bars" or intraday_bar_observation:
+        actual_price_usable = bool(
+            actual_price_usable and observed_price_available and facts_usable
+            and policy_satisfied and source_decision_usable is not False
+        )
     execution_grade_usable = bool(
         state == "live"
         and policy_satisfied
@@ -908,6 +952,7 @@ def annotate_selected_data(
             market=market,
             realtime_policy=realtime_policy,
             now=now,
+            capability_id=capability_id,
         )
         assessments[capability_id] = assessment
     return assessments

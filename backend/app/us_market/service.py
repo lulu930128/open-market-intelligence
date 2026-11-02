@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import json
 import logging
@@ -1843,21 +1844,22 @@ def repair_us_ohlc_history(
     }
 
 
-def _us_daily_volume_totals(db: Session, *, symbol: str) -> dict[date, int]:
-    rows = (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .filter(USDailyPrice.trade_volume.isnot(None))
-        .order_by(USDailyPrice.trade_date.desc(), USDailyPrice.id.desc())
-        .limit(90)
-        .all()
-    )
-    totals: dict[date, int] = {}
-    for row in rows:
-        if row.trade_volume is None or row.trade_volume <= 0:
-            continue
-        totals[row.trade_date] = max(totals.get(row.trade_date, 0), int(row.trade_volume))
-    return totals
+def _us_daily_volume_totals(db: Session, *, symbol: str, now: datetime | None = None) -> dict[date, Decimal]:
+    from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+    from app.us_market.daily_market_state import USInstrumentIdentityUnavailableError
+
+    with db.no_autoflush:
+        try:
+            read = USDailyOhlcvPlatform(db).read(symbol=symbol, bars=90, now=now)
+        except USInstrumentIdentityUnavailableError:
+            return {}
+    if not read.temporal_postcondition_satisfied:
+        return {}
+    return {
+        bar.end_at.astimezone(US_MARKET_TIMEZONE).date(): bar.volume.value
+        for bar in read.result.resolved.bars
+        if bar.volume is not None and bar.volume_status == "observed"
+    }
 
 
 def _persist_us_intraday_history(
@@ -3093,6 +3095,8 @@ def _truth_source_status(
         if health.get("selected_provider") is None
         else "unavailable"
     )
+    if outward_status == "current" and (observation or {}).get("trade_recency") == "delayed":
+        outward_status = "delayed"
     return {
         "provider": health.get("selected_provider") or "unresolved",
         "source": health.get("selected_source"),
@@ -3120,7 +3124,11 @@ def _truth_source_status(
         "current_session_satisfied": bool(series.get("current_session_satisfied")),
         "is_fallback": bool((observation or {}).get("fallback_used")),
         "has_usable_data": bool(health.get("facts_usable")),
-        "decision_usable": bool(health.get("research_usable")),
+        "decision_usable": bool(
+            health.get("research_usable")
+            and (observation or {}).get("research_usable")
+            and outward_status == "current"
+        ),
         "selection_reason": health.get("selection_reason"),
         "limitations": list(component.get("limitations") or []),
         "message": None,
@@ -3255,16 +3263,21 @@ def _market_truth_compat_intraday_payload(
             "freshness_status": current.get("freshness") or "unknown",
             "decision_usable": bool(current.get("research_usable")),
         }
+    quote_source_status = _truth_source_status(
+        component=snapshot["health"]["quote"],
+        market_phase=market_phase,
+        series=series,
+        observation=quote_observation,
+    )
+    quote_source_status["current_session_satisfied"] = bool(
+        quote_observation
+        and quote_observation.get("trade_date") == series.get("expected_trade_date")
+    )
     quote_snapshot = {
         "kind": "us_resolved_quote",
         "schema_version": "omi.market.us_truth_quote_compat.v1",
         "compatibility_schema_versions": ["omi.market.us_resolved_quote.v1"],
-        "status": _truth_source_status(
-            component=snapshot["health"]["quote"],
-            market_phase=market_phase,
-            series=series,
-            observation=quote_observation,
-        )["status"],
+        "status": quote_source_status["status"],
         "selected_provider": (quote_observation or {}).get("selected_provider"),
         "selected_source": (quote_observation or {}).get("selected_source"),
         "selected_session": (quote_observation or {}).get("session"),
@@ -3272,7 +3285,7 @@ def _market_truth_compat_intraday_payload(
         "fallback_used": bool((quote_observation or {}).get("fallback_used")),
         "selection_reason": (quote_observation or {}).get("selection_reason"),
         "facts_usable": bool((quote_observation or {}).get("display_usable")),
-        "research_usable": bool((quote_observation or {}).get("research_usable")),
+        "research_usable": quote_source_status["decision_usable"],
         "limitations": list(snapshot["health"]["quote"].get("limitations") or []),
         "candidates": [],
         "eligible_providers": [],
@@ -3289,7 +3302,16 @@ def _market_truth_compat_intraday_payload(
                 "state": "available",
                 "trade_state": "trade_observed",
                 "last_trade_price": quote_observation.get("price"),
-                "previous_close": provider_hint.get("price"),
+                "previous_close": reference_price,
+                "previous_close_trade_date": reference_trade_date,
+                "previous_close_source": reference_evidence.get("source"),
+                "previous_close_provider": reference_evidence.get("provider"),
+                "previous_close_price_basis": reference_evidence.get("price_basis"),
+                "previous_close_reason_code": headline_reference.get("reason_code") or "CHANGE_REFERENCE_UNAVAILABLE",
+                "provider_previous_close_hint": provider_hint.get("price"),
+                "provider_previous_close_hint_trade_date": provider_hint.get("trade_date"),
+                "provider_previous_close_hint_price_basis": provider_hint.get("price_basis"),
+                "provider_previous_close_hint_limitations": provider_hint.get("limitations", []),
                 "event_at": quote_observation.get("event_at"),
                 "fetched_at": quote_observation.get("fetched_at"),
             }
@@ -3297,7 +3319,7 @@ def _market_truth_compat_intraday_payload(
             else None
         ),
         "market_phase": market_phase,
-        "source_status": current_source_status,
+        "source_status": quote_source_status,
         "session_date_relation": build_us_session_date_relation(
             quote_date=(quote_observation or {}).get("trade_date"),
             completed_daily_date=reference_trade_date,

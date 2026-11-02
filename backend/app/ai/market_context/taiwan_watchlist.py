@@ -48,6 +48,7 @@ def _compact_watchlist_row(row: dict[str, Any]) -> dict[str, Any]:
         "time": row.get("time"),
         "close": row.get("close"),
         "volume": row.get("volume"),
+        "volume_unit": row.get("volume_unit"),
         "change": row.get("change"),
         "change_pct": row.get("change_pct"),
         "limit_status": row.get("limit_status"),

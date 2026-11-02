@@ -247,7 +247,7 @@ def execute_tool_stages(
     tw_refresh_capabilities = selected_v4_capabilities
     bounded_tw_intraday_command = (
         scope_type == "stock"
-        and query_plan.get("reader_profile") == "quote_only"
+        and query_plan.get("reader_profile") in {"quote_only", "capability_graph"}
         and "intraday.bars" in (selected_v4_capabilities or ())
     )
     if not query_plan.get("external_refresh_allowed", True) and bounded_tw_intraday_command:
@@ -256,6 +256,10 @@ def execute_tool_stages(
         scope_type == "stock"
         and refresh_before_answer_enabled(payload)
         and payload.allow_external_fetch
+        and policy.get("can_external_fetch") is True
+        and payload.tool_budget.get("max_calls", 1) > 0
+        and payload.tool_budget.get("max_external_fetches", 1) > 0
+        and payload.tool_budget.get("max_total_seconds", 1) > 0
         and query_plan.get("realtime_policy") != "cache_only"
         and current_freshness
         and (

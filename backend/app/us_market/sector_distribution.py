@@ -18,7 +18,7 @@ from app.us_market.classification import read_us_classification
 from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
 from app.us_market.daily_market_state import USInstrumentIdentityUnavailableError
 from app.us_market.full_market_eod import US_FULL_MARKET_EOD_LIFECYCLE
-from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day, is_us_daily_price_finalized
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day, is_us_daily_price_finalized, us_daily_revision_check_due
 
 
 US_DISTRIBUTION_MEMBER_LIMIT = 5
@@ -169,6 +169,7 @@ def build_us_sector_distribution(db: Session, *, now: datetime | None = None, co
         selected = set(classification["symbols"])
         resolved_pairs = USDailyOhlcvPlatform(db).read_market_pair(expected_date=expected, now=evaluated_at)
         rows = []
+        yahoo_receipt_at = None
         for symbol in classification["symbols"]:
             profile = profiles.get(symbol)
             row = {
@@ -197,6 +198,9 @@ def build_us_sector_distribution(db: Session, *, now: datetime | None = None, co
                     row["observed_price"] = True
                     row["price_status"] = "fresh"
                     row["price_lineage"] = [_public_lineage(latest)]
+                    if latest.lineage.provider == "yahoo_chart":
+                        received = latest.lineage.fetched_at
+                        yahoo_receipt_at = min(yahoo_receipt_at, received) if yahoo_receipt_at else received
                     if latest.volume is not None and latest.volume.value == 0:
                         row["direction"] = "no_trade"
                         row["reason"] = "PROVIDER_REPORTED_ZERO_SHARES"
@@ -254,6 +258,8 @@ def build_us_sector_distribution(db: Session, *, now: datetime | None = None, co
                     "comparison": "previous_trading_session_same_source_raw_price_return",
                     "taxonomy": "source_specific", "taxonomies": classification["coverage"]["taxonomies"], "effective_date": None,
                     "corporate_action_coverage": "unknown", "external_calls": 0,
+                    "daily_validation_policy": "historical_vendor_receipt.v1",
+                    **({"yahoo_daily_receipt_at": yahoo_receipt_at.isoformat()} if yahoo_receipt_at else {}),
                     "relative_strength_basis": "group_equal_weight_mean_minus_all_comparable_universe_equal_weight_mean",
                     "relative_strength_benchmark_count": counts.comparable, "turnover_status": "unavailable"},
         limitations=limits,
@@ -278,10 +284,20 @@ def read_us_sector_distribution(db: Session, *, now: datetime | None = None) -> 
     if payload is not None:
         snapshot = USSectorDistributionRead.model_validate(payload)
         if datetime.fromisoformat(snapshot.evaluated_at) <= now:
+            reasons = []
+            if snapshot.provenance.get("daily_validation_policy") != "historical_vendor_receipt.v1":
+                reasons.append("US_DAILY_SNAPSHOT_VALIDATION_UNVERIFIED")
+            yahoo_receipt_at = snapshot.provenance.get("yahoo_daily_receipt_at")
+            if yahoo_receipt_at and us_daily_revision_check_due(
+                fetched_at=datetime.fromisoformat(yahoo_receipt_at), now=now,
+            ):
+                reasons.append("US_DAILY_REVISION_CHECK_DUE")
             if snapshot.expected_trade_date != expected.isoformat():
+                reasons.append("SNAPSHOT_BEHIND_EXPECTED_SESSION")
+            if reasons:
                 return snapshot.model_copy(update={"freshness_status": "stale", "status": "partial",
                     "expected_trade_date": expected.isoformat(),
-                    "limitations": [*snapshot.limitations, "SNAPSHOT_BEHIND_EXPECTED_SESSION"]})
+                    "limitations": list(dict.fromkeys([*snapshot.limitations, *reasons]))})
             return snapshot
     return USSectorDistributionRead(status="unavailable", as_of=None, expected_trade_date=expected.isoformat(),
         reference_trade_date=previous_us_trading_day(expected, include_value=False).isoformat(),

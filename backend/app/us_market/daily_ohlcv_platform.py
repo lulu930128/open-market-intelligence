@@ -223,7 +223,7 @@ class USDailyOhlcvPlatform:
             if latest_date < expected_date
             else "future"
             if latest_date > expected_date
-            else "current"
+            else "current" if temporal_postcondition else "stale"
         )
         facts_usable = bool(result.resolved.health.facts_usable)
         decision_usable = bool(temporal_postcondition)
@@ -250,6 +250,10 @@ class USDailyOhlcvPlatform:
                 ),
                 "volume_applicability": identity.volume_applicability,
                 "identity_source": identity.identity_source,
+                "limitations": list(dict.fromkeys((
+                    *projection.get("limitations", ()), *result.limitations,
+                    "VENDOR_DAILY_NOT_OFFICIAL_CLOSE_PROOF",
+                ))),
             }
         )
         return USDailyPlatformResult(

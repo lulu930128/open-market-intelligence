@@ -107,6 +107,78 @@ def test_premarket_current_date_skips_but_completed_date_can_repair(env):
     assert len(env.dispatches) == 1
 
 
+@pytest.mark.parametrize("qualified", [True, False])
+def test_completed_date_uses_dated_owner_and_keeps_sparse_unknown_minutes(env, monkeypatch, qualified):
+    target = NOW.date()
+    after_close = NOW.replace(hour=16)
+    calls = []
+    def dated(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["from_time"].date() == kwargs["to_time"].date() == target
+        assert kwargs["requested_at"] == after_close and kwargs["interval"] == "1m"
+        return SimpleNamespace(bars=tuple(SimpleNamespace(start_at=NOW) for _ in range(214)),
+            bucket_coverage=tuple(SimpleNamespace(expected_by_trading_policy=True,
+                bucket_start=NOW, bucket_end=NOW + timedelta(minutes=1), status=SimpleNamespace(value=
+                    "observed_trade" if i < 214 else "verified_no_trade" if qualified else "missing_evidence")) for i in range(265)),
+            session_resolution=(SimpleNamespace(trade_date=target, market_semantics_usable=True,
+                coverage_status=SimpleNamespace(value="ready" if qualified else "partial")),),
+            identity=SimpleNamespace(series_revision="dated-canonical"))
+    monkeypatch.setattr(subject, "taiwan_presentation_session", lambda now: {"trade_date": target})
+    monkeypatch.setattr(subject, "TaiwanBarService", lambda db: SimpleNamespace(read_bars=dated,
+        read_current_session_bars=lambda **kw: pytest.fail("completed repair used current baseline")))
+    with env.factory() as db:
+        result = subject._reread(db, {"stock_id": "2330", "trade_date": str(target),
+            "mode": "completed_session_repair"}, after_close)
+    assert result["reread_ready"] is qualified
+    assert result["current_session_bar_count"] == 214  # No synthetic 51 bars.
+    assert result["target_expected_bucket_count"] == 265
+    assert result["target_covered_bucket_count"] == (265 if qualified else 214)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("outcome", ["stable", "progress", "provider_failure", "backoff"])
+def test_completed_successful_acquisition_without_progress_waits_for_original_repair(env, monkeypatch, outcome):
+    now = NOW.replace(hour=16)
+    env.clock[0] = now
+    reads = []
+    def reread(*args):
+        reads.append(1)
+        changed = outcome == "progress" and len(reads) >= 3
+        return dict(reread_ready=False, reread_trade_date=str(now.date()),
+            current_session_bar_count=215 if changed else 214,
+            target_covered_bucket_count=215 if changed else 214, target_expected_bucket_count=265,
+            snapshot_revision="changed-canonical" if changed else "unchanged-canonical")
+    monkeypatch.setattr(subject, "_reread", reread)
+    calls = []
+    def acquire(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(acquisition=SimpleNamespace(status="failed" if outcome == "provider_failure" else "completed",
+            external_calls=2, limitations=("PROVIDER_RETRY_AFTER_SECONDS:600",) if outcome == "backoff" else ()),
+            persistence=SimpleNamespace(attempted=True, committed=True, observations_written=0))
+    monkeypatch.setattr(subject, "refresh_taiwan_intraday_bars", acquire)
+    with env.factory() as db:
+        job, _ = subject.enqueue_intraday_materialization_demand(db, stock_id="2330", requested_at=now,
+            consumer="completed_session_repair", trade_date=str(now.date()), max_external_calls=6)
+        job_id = job.id
+    subject.run_consumer_demand(job_id)
+    with env.factory() as db:
+        job = db.get(JobRun, job_id)
+        assert job.status == ("error" if outcome in {"stable", "backoff"} else "queued")
+        result = json.loads(job.result_json)
+        if outcome == "stable":
+            assert result["reason_code"] == "COMPLETED_SESSION_COVERAGE_INCOMPLETE"
+            assert result["completed_no_progress"]
+        else:
+            assert not result.get("completed_no_progress")
+        assert result["attempt_count"] == 1
+        assert result["external_call_budget_used"] == 2
+        same, created = subject.enqueue_intraday_materialization_demand(db, stock_id="2330",
+            requested_at=now + timedelta(seconds=30), consumer="completed_session_repair",
+            trade_date=str(now.date()), max_external_calls=6)
+        assert same.id == job_id and not created
+    assert len(calls) == 1
+
+
 def test_same_job_three_heartbeat_attempts_and_cooldown(env, monkeypatch):
     reads = reread_stub(monkeypatch)
     acquired = []
@@ -172,14 +244,63 @@ def test_mcp_expired_queue_never_acquires(env, monkeypatch):
         assert db.get(JobRun, job_id).status == "error"
 
 
-def test_submit_failure_is_terminal_not_orphaned(env, monkeypatch):
+@pytest.mark.parametrize("failure, error_type, subphase", [
+    (RuntimeError("MARKET_MATERIALIZATION_QUEUE_FULL"), "RuntimeError", "queue_full"),
+    (RuntimeError("private failure C:/private/token=SECRET"), "RuntimeError", "submit"),
+    (ValueError("private invalid lane"), "ValueError", "submit"),
+    (OSError("private OS failure"), "Exception", "submit"),
+    (RuntimeError("MARKET_MATERIALIZATION_QUEUE_FULL token=SECRET"), "RuntimeError", "submit"),
+])
+def test_submit_failure_is_terminal_not_orphaned(env, monkeypatch, caplog, failure, error_type, subphase):
+    from app.ai.refresh_status import read_refresh_status
+    from app.ai.schemas import AiRefreshStatusRead
     def fail(*args, **kwargs):
-        raise RuntimeError("private failure")
+        raise failure
     monkeypatch.setattr(subject.jobs, "submit_job_task", fail)
+    # Existing canonical data makes public status partial even on a dispatch
+    # fault. That must not hide the execution failure or imply provider IO.
+    reread_stub(monkeypatch, count=12)
+    diagnostic = {"reason_code": "TW_INTRADAY_DEMAND_SUBMIT_FAILED", "stage": "dispatch",
+        "subphase": subphase, "error_type": error_type, "attempt_count": 0}
     with env.factory() as db:
         job, _ = enqueue(db)
         assert job.status == "error"
         assert job.error_message == "TW_INTRADAY_DEMAND_SUBMIT_FAILED"
+        result = json.loads(job.result_json)
+        assert result["status"] == "partial" and result["reread_ready"] is False
+        assert result["last_failure"] == diagnostic
+        assert result["attempt_count"] == result["external_call_count"] == result["external_call_budget_used"] == 0
+        assert result["provider_failure_count"] == result["bars_written_count"] == 0
+        db.execute(text("PRAGMA query_only=ON"))
+        public = read_refresh_status(db=db, job_id=job.id)
+        AiRefreshStatusRead.model_validate(public)
+        assert public["status"] == "partial"
+        assert public["error"]["code"] == "TW_INTRADAY_DEMAND_SUBMIT_FAILED"
+        assert public["error"]["diagnostic"] == public["materialization"]["last_failure"] == diagnostic
+        assert str(job.id) in caplog.text
+        serialized = json.dumps(public, default=str) + job.result_json + caplog.text
+        assert all(secret not in serialized for secret in ("SECRET", "C:/private", "private invalid", "private OS"))
+
+
+def test_submit_admission_closed_returns_unstarted_claim_without_consuming_budget(env, monkeypatch):
+    def closed(*args, **kwargs):
+        raise subject.jobs.JobAdmissionClosed("private owner fence")
+    monkeypatch.setattr(subject.jobs, "submit_job_task", closed)
+    with env.factory() as db:
+        job, _ = enqueue(db)
+        result = json.loads(job.result_json)
+        assert job.status == "queued" and subject.is_restart_handoff(job)
+        assert result["external_call_count"] == result["external_call_budget_used"] == result["attempt_count"] == 0
+        assert "last_failure" not in result and "reason_code" not in result
+        assert subject.materialization_request(job)["max_external_calls"] == 6
+
+
+def test_dispatch_diagnostic_projection_drops_unallowlisted_fields():
+    value = {"reason_code": "TW_INTRADAY_DEMAND_SUBMIT_FAILED", "stage": "dispatch",
+        "error_type": "private exception", "subphase": "private stage", "attempt_count": True,
+        "message": "SECRET", "path": "C:/private"}
+    assert subject.safe_demand_failure(value) == {"reason_code": value["reason_code"],
+        "stage": "dispatch", "error_type": None, "subphase": None, "attempt_count": None}
 
 
 def test_migration_upgrade_downgrade_preserve_legacy_rows(env):
@@ -501,6 +622,47 @@ def test_real_canonical_persistence_and_reread_keep_partial_truth(env, monkeypat
         assert result["reread_ready"] is False
         assert result["status"] == "partial"
         assert result["snapshot_revision"] == subject._reread(db, subject.consumer_request(job), NOW)["snapshot_revision"]
+
+
+@pytest.mark.parametrize("stock_id", ["2409", "3481"])
+@pytest.mark.parametrize("complete", [True, False])
+def test_explicit_non_tier_a_demand_converges_only_with_real_provider_minutes(env, monkeypatch, stock_id, complete):
+    from app.db.models import MarketIntradayBar, MarketIntradayBarLineage
+    from app.market.providers.tw_intraday_bars import IntradayProviderPayload, NStockIntradayAdapter
+    from app.market.tw_intraday_acquisition import TaiwanIntradayAcquisitionExecutor
+    calls = []
+    opening = NOW.replace(hour=9)
+    points = [{"交易日": NOW.strftime("%Y%m%d"), "交易時間": (opening + timedelta(minutes=i)).strftime("%H%M%S"),
+        "開盤價": "100", "最高價": "101", "最低價": "99", "收盤價": "100", "成交量": "1"}
+        for i in range(0 if complete else 1, 60)]
+    def reader(symbol, timeout):
+        calls.append(symbol)
+        return IntradayProviderPayload(raw_text=json.dumps({"data": [{"股票代號": symbol, "分K": points}]}),
+            status="available", url="https://fixture.invalid/nstock", status_code=200)
+    nstock = NStockIntradayAdapter(reader, clock=lambda: NOW)
+    monkeypatch.setattr(subject, "TaiwanIntradayAcquisitionExecutor", lambda **kw:
+        TaiwanIntradayAcquisitionExecutor(nstock=nstock, **kw))
+    with env.factory() as db:
+        db.add(StockMaster(stock_id=stock_id, stock_name=stock_id, market="TWSE", instrument_type="stock", is_active=True))
+        db.commit()
+        job, _ = subject.enqueue_consumer_demand(db, stock_id=stock_id, requested_at=NOW,
+            consumer="ai", max_external_calls=1)
+        job_id = job.id
+        assert not calls  # Admission/coverage reads do not fetch.
+    subject.run_consumer_demand(job_id)
+    assert calls == [stock_id]
+    with env.factory() as db:
+        job = db.get(JobRun, job_id)
+        result = json.loads(job.result_json)
+        assert job.status == ("success" if complete else "error")
+        assert result["reread_ready"] is complete
+        assert result["target_expected_bucket_count"] == 60
+        assert result["target_covered_bucket_count"] == len(points)
+        assert result["external_call_count"] == result["external_call_budget_used"] == 1
+        assert db.query(MarketIntradayBar).count() == db.query(MarketIntradayBarLineage).count() == len(points)
+        db.execute(text("PRAGMA query_only=ON"))
+        assert subject._reread(db, subject.consumer_request(job), NOW)["reread_ready"] is complete
+        assert calls == [stock_id]
 
 
 def test_http_429_retry_after_survives_canonical_adapter():

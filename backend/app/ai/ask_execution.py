@@ -94,6 +94,10 @@ def _market_data_params(
         can_external_fetch and realtime_policy != "cache_only"
     )
     plan = policy.get("query_plan", {}) if isinstance(policy, dict) else {}
+    from time import monotonic
+    # Server-owned deadline overrides any caller-supplied read budget.
+    deadline = policy.get("request_deadline_monotonic") if isinstance(policy, dict) else None
+    params["read_budget_seconds"] = max(0.0, deadline - monotonic()) if deadline is not None else 45.0
     if plan.get("reader_profile") == "capability_graph":
         params["requested_capabilities"] = list(dict.fromkeys([
             *(plan.get("selected_capabilities") or []), *(plan.get("optional_selected_capabilities") or []),
@@ -784,22 +788,23 @@ def _read_data_only(
 
     if scope_type in {"crypto_market", "crypto_asset"}:
         asset = _require_scope_id(payload, "crypto_asset") if scope_type == "crypto_asset" else None
-        return (
-            "omi.read_crypto_asset_context" if scope_type == "crypto_asset" else "omi.read_crypto_market_context"
-        ), agentic_tools.read_crypto_context(
-            db=db,
-            asset=asset,
-            tool_runs=tool_runs,
-            market_data_params=payload.market_data_params,
+        result = agentic_tools.read_crypto_context(
+            db=db, asset=asset, tool_runs=tool_runs,
+            market_data_params=_market_data_params(payload, policy=policy),
             context_limit=payload.context_limit,
         )
+        if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict):
+            policy["query_plan"]["read_execution"] = result.get("read_execution") or {}
+        return (
+            "omi.read_crypto_asset_context" if scope_type == "crypto_asset" else "omi.read_crypto_market_context"
+        ), result
 
     if scope_type == "resource_asset":
         symbol = _require_scope_id(payload, scope_type)
         return "omi.read_resource_asset_context", agentic_tools.read_resource_asset_context(
             db=db,
             symbol=symbol,
-            market_data_params=payload.market_data_params,
+            market_data_params=_market_data_params(payload, policy=policy),
         )
 
     if scope_type == "us_macro":

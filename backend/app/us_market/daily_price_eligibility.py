@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timezone
 
 from sqlalchemy import or_, func, cast, Numeric
 from decimal import Decimal, InvalidOperation
@@ -10,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
 from app.market_data.contracts import AuthorityClass, BarFinalization, InstrumentType
 from app.us_market.market_data.descriptors import US_DAILY_CANDIDATE_DESCRIPTORS
-from app.us_market.trading_calendar import is_us_historical_daily_receipt
+from app.us_market.trading_calendar import is_us_historical_daily_receipt, us_historical_daily_receipt_boundary
 
 
 US_DAILY_REGISTERED_PROVIDERS = tuple(
@@ -88,6 +89,8 @@ def us_daily_candidate_issue(
         trade_date=row.trade_date, fetched_at=raw.fetched_at,
     ):
         return USDailyEligibilityIssue("US_DAILY_VENDOR_REVISION_UNVERIFIED")
+    if row.currency != "USD":
+        return USDailyEligibilityIssue("US_DAILY_CURRENCY_MISMATCH")
     if instrument_type is InstrumentType.INDEX:
         valid_volume = (
             row.volume_status == "not_applicable"
@@ -114,6 +117,7 @@ def us_daily_sql_eligibility_filters(
 
     filters = (
         USDailyPrice.source_id.isnot(None),
+        USDailyPrice.currency == "USD",
         USDailyPrice.raw_result_id.isnot(None),
         RawFetchResult.id.isnot(None),
         SourceRegistry.id.isnot(None),
@@ -168,9 +172,18 @@ def us_daily_sql_eligibility_filters(
     )
 
 
+def us_daily_expected_receipt_filter(trade_date: date):
+    """SQL equivalent of Yahoo historical-receipt eligibility for one session."""
+    return or_(
+        USDailyPrice.provider != "yahoo_chart",
+        RawFetchResult.fetched_at >= us_historical_daily_receipt_boundary(trade_date).astimezone(timezone.utc),
+    )
+
+
 __all__ = [
     "US_DAILY_REGISTERED_PROVIDERS",
     "USDailyEligibilityIssue",
     "us_daily_candidate_issue",
     "us_daily_sql_eligibility_filters",
+    "us_daily_expected_receipt_filter",
 ]

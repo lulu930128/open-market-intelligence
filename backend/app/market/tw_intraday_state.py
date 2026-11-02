@@ -1269,10 +1269,18 @@ def _group_metrics(
         for state in classified_states
         if state.change_pct is not None
     ]
-    trade_values = [
-        value for state in classified_states
-        if (value := _int(state.estimated_trade_value)) is not None
+    # A persisted number alone does not establish an eligible estimate. In
+    # particular, older rows can retain a value with unavailable semantics.
+    estimated_members = [
+        state for state in classified_states
+        if state.trade_value_semantics in {
+            "estimated_actual_trade_price_x_cumulative_volume_lots",
+            "last_price_times_cumulative_volume_shares",
+        }
+        and (value := _int(state.estimated_trade_value)) is not None and value >= 0
     ]
+    trade_values = [_int(state.estimated_trade_value) for state in estimated_members]
+    trade_value_methods = {str(state.trade_value_semantics) for state in estimated_members}
     total_trade_value = sum(trade_values) if trade_values else None
     leader_trade_value = max(trade_values, default=0)
     five_minute = [
@@ -1385,15 +1393,20 @@ def _group_metrics(
         "estimated_trade_value": total_trade_value,
         "trade_value_method": (
             next(iter(trade_value_methods))
-            if len(trade_value_methods := {
-                str(state.trade_value_semantics)
-                for state in classified_states
-                if state.trade_value_semantics
-            }) == 1
+            if len(trade_value_methods) == 1
             else "mixed_member_estimates"
             if trade_value_methods
-            else "not_available"
+            else "unavailable"
         ),
+        "trade_value_coverage": {
+            "status": "unavailable" if not trade_values else
+                      "ready" if len(trade_values) == member_count else "partial",
+            "estimated_member_count": len(trade_values),
+            "unavailable_member_count": member_count - len(trade_values),
+            "member_count": member_count,
+            "scope": "eligible_member_estimates",
+            "official_total": False,
+        },
         "trade_value_unit": "TWD",
         "trade_value_is_estimate": True,
         "member_price_semantics_summary": {
@@ -1955,6 +1968,7 @@ def build_tw_intraday_group_snapshots(
                     "return_dispersion_pct",
                     "estimated_trade_value",
                     "trade_value_method",
+                    "trade_value_coverage",
                     "trade_value_unit",
                     "trade_value_is_estimate",
                     "member_price_semantics_summary",

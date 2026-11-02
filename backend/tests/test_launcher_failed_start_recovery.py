@@ -122,7 +122,6 @@ def test_retirement_consumes_once_preserves_failure_and_persisted_bytes(tmp_path
 
 
 RECOVERY_PS = START_SETUP + r'''
-Add-Type -Path (Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs') -ReferencedAssemblies @('System.Web.Extensions','System.Core')
 foreach ($name in @('Start-OmiBackendAfterFailedStart','Assert-OmiFailedStartProcessExclusion')) {
     $definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$false)
     . ([scriptblock]::Create($definition.Extent.Text))

@@ -204,6 +204,8 @@ class _EquityRotation:
         default_factory=lambda: time.monotonic() + _EQUITY_WINDOW_SECONDS
     )
     counts: dict[str, int] = field(default_factory=dict)
+    service_bounds: dict[str, int] = field(default_factory=dict)
+    unique_eligible_count: int = 0
 
 
 _EQUITY_ROTATION = _EquityRotation()
@@ -288,6 +290,10 @@ def _select_equity_batch(
     viewer_turn = capacity > 1 or not has_background or state.single_slot_turn % 2 == 0
     if viewer_turn:
         take("active_viewer")
+    if capacity > 1 and not sources["active_viewer"]:
+        # Keep configured probes independent of watchlist cardinality, even
+        # with no open detail panel. The other slot still advances background.
+        take("canary")
     if capacity == 1:
         state.single_slot_turn = (state.single_slot_turn + 1) % 2
     while len(selected) < capacity:
@@ -343,6 +349,19 @@ def _collect_rotating_equities(capability: str, *, now: datetime | None) -> dict
             )
             state.capacity = capacity
             state.counts = {source: len(values) for source, values in sources.items()}
+            state.unique_eligible_count = len({symbol for values in sources.values() for symbol in values})
+            background_cycle = len(_BACKGROUND_TURNS) + bool(sources.get("explicit"))
+            # Conservative admission bounds in successful selection windows,
+            # not a wall-clock freshness promise or provider success SLA.
+            factor = 2 if capacity == 1 and sources["active_viewer"] else 1
+            state.service_bounds = {
+                source: count * (
+                    factor if source == "active_viewer"
+                    or source == "canary" and capacity > 1 and not sources["active_viewer"]
+                    else background_cycle * factor
+                )
+                for source, count in state.counts.items() if count and capacity > 0
+            }
             state.consumed.clear()
             # Reserve both capabilities together at the fixed window boundary.
             # The second capability consumes its reservation, never extends it.
@@ -377,6 +396,22 @@ def _collect_rotating_equities(capability: str, *, now: datetime | None) -> dict
             "window_reserved_external_calls": state.reservations,
             "reserved_external_call_count": reservation,
             "budget_scope": "process_all_recurring_equity_jobs",
+            "admission_bound_windows": dict(state.service_bounds),
+            "admission_bound_basis": "stable_eligible_sources_successful_selection_windows",
+            "nominal_admission_bound_seconds": {
+                source: windows * _EQUITY_WINDOW_SECONDS
+                for source, windows in state.service_bounds.items()
+            },
+            "unique_eligible_count": state.unique_eligible_count,
+            "universe_sweep_capacity_floor_seconds": (
+                math.ceil(state.unique_eligible_count / state.capacity) * _EQUITY_WINDOW_SECONDS
+            ),
+            "freshness_guaranteed": False,
+            "service_limitations": [
+                "scheduler_delays_locks_and_expired_viewer_leases_can_extend_admission",
+                "admission_is_not_acquisition_success_or_fresh_provider_evidence",
+                "quote_and_intraday_share_targets_but_keep_independent_results",
+            ],
         }
         result = materialize_us_intraday_capability(
             capability,

@@ -40,12 +40,25 @@ def status(request: Request):
             result = control.unknown_status()
     except (OSError, ValueError):
         result = control.unknown_status()
-    disk = control.bundle_id()
+    try:
+        disk = control.bundle_id()
+    except OSError:
+        disk = None
     result["source"] = {"build_id_scope": "runtime_control_bundle_only",
                         "disk_build_id": disk,
                         "import_time_build_id": control.LOADED_CONTROL_BUNDLE_ID,
                         "disk_matches_import": disk == control.LOADED_CONTROL_BUNDLE_ID if disk else None,
-                        "loaded_release_identity": "UNATTESTED"}
+                        "loaded_release_identity": "UNATTESTED",
+                        "observation": "OBSERVED" if disk else "UNKNOWN",
+                        "adoption_authority": "launcher_restart_preflight"}
+    # This mixed bundle is diagnostic, not a lifecycle adoption classifier.
+    # In particular an application-only edit must not imply Apply Update.
+    if not disk:
+        restart = result.setdefault("restart", {})
+        blockers = list(restart.get("blockers") or [])
+        if "SOURCE_DIGEST_UNKNOWN" not in blockers:
+            blockers.append("SOURCE_DIGEST_UNKNOWN")
+        restart.update(available=False, reason="SOURCE_DIGEST_UNKNOWN", blockers=blockers)
     runtime = getattr(request.app.state, "runtime", None)
     observe_writers = getattr(runtime, "restart_diagnostics", None)
     result["serving_backend"] = {"runtime_started": bool(runtime and getattr(runtime, "started", False)),

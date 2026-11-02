@@ -24,7 +24,9 @@ from app.config import settings
 from app.market.calendar_status import build_kr_calendar_status
 from app.market.intraday_aggregation import aggregate_regular_session_ohlcv
 from app.market.session_events import events_for_observations
-from app.kr_market.trading_calendar import KR_MARKET_TIMEZONE
+from app.kr_market.trading_calendar import (
+    KR_MARKET_TIMEZONE, expected_kr_daily_price_date, previous_kr_trading_day,
+)
 from app.kr_market.sources import (
     KR_INDEX_CONFIG_BY_ID,
     normalize_kr_index_id,
@@ -334,6 +336,16 @@ def read_kr_stock_context(
             "tool_runs": tool_runs,
         }
     else:
+        # AI daily evidence is completed-session evidence. Bound both legacy
+        # rows and chart SQL before deduplication, aggregation and row limits.
+        daily_now = dependencies.now()
+        completed_cutoff = expected_kr_daily_price_date(now=daily_now)
+        requested_date = (market_data_params or {}).get("trade_date") or (market_data_params or {}).get("to_date")
+        if requested_date:
+            requested_cutoff = previous_kr_trading_day(date.fromisoformat(str(requested_date)), include_value=True)
+            if requested_cutoff > completed_cutoff:
+                raise ValueError("KR requested completed session is in the future")
+            completed_cutoff = requested_cutoff
         normalized_id = normalize_kr_symbol(symbol)
         if settings.kr_canonical_daily_enabled:
             from app.kr_market.identity import resolve_kr_instrument_identity, KRIdentityError
@@ -357,6 +369,7 @@ def read_kr_stock_context(
                 db=db,
                 symbol=normalized_id,
                 provider=None if provider == "auto" else provider,
+                to_date=completed_cutoff,
                 limit=10,
             )
         except Exception as exc:
@@ -367,7 +380,7 @@ def read_kr_stock_context(
             if settings.kr_canonical_daily_enabled:
                 from app.kr_market.daily_projection import read_chart
                 chart = read_chart(db, symbol=normalized_id, timeframe=timeframe, bars=bars,
-                                   now=dependencies.now(), to_date=date.fromisoformat(str(market_data_params["trade_date"])) if (market_data_params or {}).get("trade_date") else None)
+                                   now=daily_now, to_date=completed_cutoff)
             else:
                 chart = dependencies.kr_market_service.list_kr_ohlc_chart_data(
                     db=db,
@@ -377,6 +390,7 @@ def read_kr_stock_context(
                     ensure_history=False,
                     outputsize="compact",
                     provider=provider,
+                    to_date=completed_cutoff,
                 )
         except Exception as exc:
             if "kr_daily_price" not in missing:

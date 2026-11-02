@@ -1,0 +1,14 @@
+{
+  "provenance": {
+    "accepted_cancelled": "Anonymous HIST-SHORT shape from manual-order-test-v2/test_offline_v2.py:cancelled_history; raw zero quantities are fixture values, not a new broker read.",
+    "rejected": "Validation-20261029.md documents OrderNo=0000 / ErrCode=MAT0095 only. Remaining fields and blank ReportTime here are synthetic negative inputs, not a complete captured live row.",
+    "amendments": "Synthetic C/M variants based on static SDK 2.1.0 Order.py: C=UpdateQty, M=UpdatePrice. No amendment execution is qualified."
+  },
+  "rows": {
+    "accepted": {"OrderNo":"HIST-SHORT","StockID":"3481","Side":"S","Price":53.2,"Qty":1,"OrdLot":"0","OrdClass":"4","TimeInForceN":"R","TradeDate":"20261029","OrderFunc":"I","BeforeQty":0,"AfterQty":1,"ErrCode":"0","ClientOrderTime":"20261029122316","ReportTime":"122316"},
+    "cancelled": {"OrderNo":"HIST-SHORT","StockID":"3481","Side":"S","Price":53.2,"Qty":1,"OrdLot":"0","OrdClass":"4","TimeInForceN":"R","TradeDate":"20261029","OrderFunc":"D","BeforeQty":1,"AfterQty":0,"ErrCode":"0","ClientOrderTime":"20261029122321","ReportTime":"122321"},
+    "rejected": {"OrderNo":"0000","StockID":"TEST","Side":"S","Price":50,"Qty":1,"OrdLot":"0","OrdClass":"4","TimeInForceN":"R","TradeDate":"20261029","OrderFunc":"I","BeforeQty":0,"AfterQty":0,"ErrCode":"MAT0095","ClientOrderTime":"20261029100000","ReportTime":""},
+    "quantity_amendment": {"OrderNo":"HIST-SHORT","StockID":"3481","Side":"S","Price":53.2,"Qty":1,"OrdLot":"0","OrdClass":"4","TimeInForceN":"R","TradeDate":"20261029","OrderFunc":"C","BeforeQty":1,"AfterQty":0,"ErrCode":"0","ClientOrderTime":"20261029122320","ReportTime":"122320"},
+    "price_amendment": {"OrderNo":"HIST-SHORT","StockID":"3481","Side":"S","Price":53.3,"Qty":1,"OrdLot":"0","OrdClass":"4","TimeInForceN":"R","TradeDate":"20261029","OrderFunc":"M","BeforeQty":1,"AfterQty":1,"ErrCode":"0","ClientOrderTime":"20261029122320","ReportTime":"122320"}
+  }
+}

@@ -7,7 +7,7 @@ import logging
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.db.session import SessionLocal
 from app.db.models import JobRun
 from app.jobs import backfill_tasks, service as job_service
@@ -43,6 +43,7 @@ from app.jobs.taiwan_session_close_scheduler import (
     add_taiwan_session_close_jobs,
 )
 from app.jobs.taiwan_price_map_snapshot_scheduler import add_taiwan_price_map_snapshot_jobs
+from app.jobs.candidate_monitor import add_candidate_monitor_job
 from app.jobs.us_intraday_materializer_scheduler import (
     add_us_intraday_materializer_jobs,
     require_intraday_publisher_admission,
@@ -2512,14 +2513,19 @@ def _add_market_chip_daily_refresh_jobs(scheduler: Any) -> bool:
     return True
 
 
-def enqueue_market_eod_coverage_reconcile() -> None:
+def enqueue_market_eod_coverage_reconcile(*, markets: tuple[str, ...] | None = None) -> None:
     from app.market.daily_ohlcv_platform import qualify_taiwan_eod_universe
     from app.us_market.daily_rollout import (
         us_daily_full_market_acquisition_enabled,
     )
 
-    markets = [item.upper() for item in _split_csv(settings.scheduler_eod_coverage_markets)]
-    for market in markets:
+    configured_markets = dict.fromkeys(
+        item.upper() for item in _split_csv(settings.scheduler_eod_coverage_markets)
+    )
+    selected_markets = {item.upper() for item in markets} if markets is not None else None
+    for market in configured_markets:
+        if selected_markets is not None and market not in selected_markets:
+            continue
         if market not in {"TW", "US"}:
             logger.warning("Skipping unsupported EOD coverage scheduler market=%s.", market)
             continue
@@ -2573,7 +2579,11 @@ def enqueue_market_eod_coverage_reconcile() -> None:
                     if market == "US"
                     else 2
                 ),
-                error_backoff_seconds=settings.scheduler_eod_coverage_error_backoff_seconds,
+                error_backoff_seconds=(
+                    settings.scheduler_eod_coverage_error_backoff_seconds
+                    if market == "US"
+                    else settings.scheduler_eod_coverage_tw_error_backoff_seconds
+                ),
                 message="Queued by full-market EOD coverage scheduler.",
             )
             logger.info(
@@ -2594,17 +2604,37 @@ def enqueue_market_eod_coverage_reconcile() -> None:
 def _add_market_eod_coverage_reconcile_job(scheduler: Any) -> bool:
     if not settings.enable_eod_coverage_scheduler:
         return False
-    scheduler.add_job(
-        enqueue_market_eod_coverage_reconcile,
-        trigger="interval",
-        minutes=max(int(settings.scheduler_eod_coverage_interval_minutes), 5),
-        id="market_eod_coverage_reconcile",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-        next_run_time=datetime.now(_timezone()),
-    )
-    return True
+    markets = {item.upper() for item in _split_csv(settings.scheduler_eod_coverage_markets)}
+    if "TW" in markets:
+        from apscheduler.triggers.combining import OrTrigger
+        from apscheduler.triggers.cron import CronTrigger
+
+        trigger = OrTrigger([
+            CronTrigger(day_of_week="mon-fri", hour=15, minute="20,35,50", timezone="Asia/Taipei"),
+            CronTrigger(day_of_week="mon-fri", hour="16-23", minute="5,20,35,50", timezone="Asia/Taipei"),
+        ])
+        scheduler.add_job(
+            enqueue_market_eod_coverage_reconcile,
+            trigger=trigger,
+            kwargs={"markets": ("TW",)},
+            id="taiwan_eod_coverage_reconcile",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    if "US" in markets:
+        scheduler.add_job(
+            enqueue_market_eod_coverage_reconcile,
+            trigger="interval",
+            minutes=max(int(settings.scheduler_eod_coverage_interval_minutes), 5),
+            kwargs={"markets": ("US",)},
+            id="market_eod_coverage_reconcile",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            next_run_time=datetime.now(_timezone()),
+        )
+    return bool(markets & {"TW", "US"})
 
 
 def enqueue_us_priority_ohlc_reconcile(*, now: datetime | None = None) -> None:
@@ -2761,6 +2791,405 @@ def _add_us_index_data_repair_gate(scheduler: Any) -> bool:
     return True
 
 
+def _taiwan_swing_source_versions(basis, stock_ids):
+    """Bounded per-symbol tokens; no technical scan or provider IO."""
+    from hashlib import sha256
+    from sqlalchemy import select
+    from app.db.models import TaiwanPriceMapSnapshot
+    from app.market.price_map_snapshot_repository import read_input_revisions, read_price_map_external_revision
+    from app.market.technical_parameters import get_technical_analysis_parameters
+    from app.market.tw_swing_prefilter import PREFILTER_POLICY
+    with SessionLocal() as db:
+        generations = read_input_revisions(db, list(stock_ids))
+        headers = db.execute(select(TaiwanPriceMapSnapshot.stock_id, TaiwanPriceMapSnapshot.input_revision,
+            TaiwanPriceMapSnapshot.status, TaiwanPriceMapSnapshot.published_at).where(
+                TaiwanPriceMapSnapshot.stock_id.in_(stock_ids), TaiwanPriceMapSnapshot.timeframe == "daily",
+                TaiwanPriceMapSnapshot.basis_date == basis)).all()
+    snapshots = {row[0]: tuple(row[1:]) for row in headers}
+    common = (str(basis), get_technical_analysis_parameters().revision, read_price_map_external_revision(), PREFILTER_POLICY)
+    return {symbol: sha256(json.dumps((common, generations.get(symbol, 0), snapshots.get(symbol)),
+        default=str).encode()).hexdigest() for symbol in stock_ids}
+
+
+def _write_taiwan_swing_checkpoint(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _read_taiwan_swing_released(stock_ids, basis, cutoff):
+    from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
+    from app.market.tw_swing_screening import _daily_receipt
+    from app.market.trading_calendar import TAIWAN_TZ
+    from app.market_data.contracts import BarFinalization
+    with SessionLocal() as db:
+        result = TaiwanOfficialDailyBarRepository(db, available_at=cutoff).load_market_universe(
+            trade_date=basis, symbols=tuple(stock_ids), include_etf=False, max_rows=max(128, len(stock_ids) * 8))
+    qualified = set()
+    for bar in result.bars:
+        receipt = _daily_receipt(bar.lineage)[0]
+        if (bar.start_at.astimezone(TAIWAN_TZ).date() == basis
+                and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+                and bar.lineage.event_at is not None and bar.lineage.event_at <= cutoff
+                and receipt is not None and receipt <= cutoff):
+            qualified.add(bar.instrument.symbol)
+    reasons = {}
+    for symbol, reason in result.rejection_reasons:
+        reasons.setdefault(symbol, []).append(reason)
+    return qualified, reasons
+
+
+def _taiwan_swing_retryable(error):
+    from requests.exceptions import ConnectionError as HttpConnectionError, Timeout as HttpTimeout
+    from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeout
+    return (isinstance(error, (TimeoutError, ConnectionError, HttpConnectionError, HttpTimeout, PoolTimeout))
+            or isinstance(error, OperationalError) and any(
+                value in str(error.orig).lower() for value in ("database is locked", "database is busy")))
+
+
+def _taiwan_swing_pending(item):
+    if item["reason"] == "CURRENT_OFFICIAL_DAILY_NOT_QUALIFIED":
+        return True  # Readiness polling does not spend a detailed-research attempt.
+    return item.get("research_attempts", 0) < 2 and (
+        item.get("operation_pending", False) or item.get("retryable", False)
+        or item.get("source_change_pending", False)
+        or item["reason"] in {"UNFINISHED_BATCH", "TICK_TIME_BUDGET"})
+
+
+def _taiwan_swing_due(item, now):
+    return _taiwan_swing_pending(item) and (not item.get("next_check_at")
+        or datetime.fromisoformat(item["next_check_at"]) <= now)
+
+
+def _probe_taiwan_swing_versions(state, basis, now):
+    """One <=10-header/token read, rotating only already evaluated stable results.
+
+    Cursor and discovered due work are saved together by the existing claim.
+    A crash before that save merely repeats this bounded read; no work is lost.
+    """
+    ids, records = state["universe_stock_ids"], state["deferred"]
+    offset = state.get("version_probe_cursor", 0) % len(ids) if ids else 0
+    selected, examined = [], 0
+    while examined < min(len(ids), settings.taiwan_swing_research_batch_size) and len(selected) < 10:
+        symbol = ids[(offset + examined) % len(ids)]
+        item = records.get(symbol, {})
+        if (item.get("research_evaluated") and not _taiwan_swing_pending(item)
+                and item["reason"] in {"RESEARCH_EVALUATED", "NO_SETUP", "DATA_BLOCKED", "QUALITY_BLOCKED"}):
+            selected.append(symbol)
+        examined += 1
+    cursor = (offset + examined) % len(ids) if ids else 0
+    report = {"stock_ids": selected, "examined": examined, "changed": [], "daily_limit": []}
+    state["last_version_probe"] = report
+    if not selected:
+        state["version_probe_cursor"] = cursor
+        return
+    try:
+        versions = _taiwan_swing_source_versions(basis, selected)
+    except Exception as error:
+        report.update(error=type(error).__name__ + ":" + str(error)[:300], next_action="RETRY_BOUNDED_VERSION_PROBE")
+        logger.exception("Taiwan research version probe failed basis=%s", basis)
+        return  # Do not advance the probe cursor or block fresh-universe work.
+    for symbol in selected:
+        item, revision = records[symbol], versions[symbol]
+        item["probed_input_revision"] = revision
+        if revision == item.get("input_revision"):
+            continue
+        item.update(quality_status="unknown", eod_qualified=None)  # New version is not yet qualified.
+        if item["research_attempts"] >= 2:
+            item.update(version_recheck_reason="SOURCE_CHANGED_DAILY_LIMIT", source_change_pending=False,
+                        next_action="DAILY_RESEARCH_LIMIT_WAIT_NEXT_BASIS")
+            report["daily_limit"].append(symbol)
+        else:
+            item.update(source_change_pending=True, version_recheck_reason="SOURCE_VERSION_CHANGED",
+                        next_check_at=now.isoformat(), next_action="REEVALUATE_CHANGED_SOURCE")
+            report["changed"].append(symbol)
+    state["version_probe_cursor"] = cursor
+
+
+def _project_taiwan_swing_progress(state, now):
+    ids, records = state["universe_stock_ids"], state["deferred"]
+    values = [records.get(symbol, {}) for symbol in ids]
+    pending = [item for item in values if item and _taiwan_swing_pending(item)]
+    considered = len(set(state.get("checked_symbols", [])) & set(ids))
+    evaluated = sum(item.get("research_evaluated") is True for item in values)
+    qualified = sum(item.get("eod_qualified") is True for item in values)
+    scan_complete = state["cursor"] >= len(ids) and considered == len(ids)
+    quality = ("complete" if ids and all(item.get("quality_status") == "complete"
+        and item.get("eod_qualified") is True for item in values) else "partial" if any(
+        item.get("eod_qualified") is not None or item.get("research_evaluated")
+        or item.get("quality_status") == "partial" for item in values) else "unknown")
+    state["scan_status"] = "completed" if scan_complete else "in_progress"
+    state["quality_status"] = quality
+    state["progress"] = {"universe": len(ids), "claimed": state["cursor"], "considered": considered,
+        "official_eod_qualified": qualified,
+        "official_eod_unqualified": sum(item.get("eod_qualified") is False for item in values),
+        "official_eod_unknown": sum(item.get("eod_qualified") is None for item in values),
+        "detailed_research_evaluated": evaluated,
+        "research_status": "not_evaluated" if not evaluated else "evaluated" if evaluated == len(ids) else "sampled",
+        "pending_recheck": len(pending), "deferred_due": sum(_taiwan_swing_due(item, now) for item in pending),
+        "deferred_unknown": sum(item.get("quality_status", "unknown") == "unknown" for item in pending),
+        "quality_unknown": sum(item.get("quality_status", "unknown") == "unknown" for item in values),
+        "quality_status": quality, "sample_only": True}
+    # Workflow completion and evidence quality are independent. Stable results
+    # remain readable in deferred without becoming an eternal work queue.
+    state["status"] = "in_progress" if not scan_complete else "waiting_data" if pending else "completed"
+
+
+def run_taiwan_swing_research(*, now: datetime | None = None) -> dict:
+    """One released-day 50/100-symbol batch; original scheduler/checkpoint only."""
+    from bisect import bisect_right
+    from time import monotonic
+    from app.market.taiwan_rules import taiwan_daily_price_release_at
+    from app.market.trading_calendar import TAIWAN_TZ, has_taiwan_calendar_year, is_taiwan_trading_day, latest_completed_taiwan_session_date
+    from app.market.tw_universe import list_taiwan_stock_universe
+    from app.market.tw_swing_prefilter import SwingDiscoveryRequest, build_tw_swing_discovery_snapshot
+    from app.research.stock_nomination import discover_trade_proposals
+    from app.jobs.tw_technical_input_readiness import repair_taiwan_middle_gaps
+    from app.jobs.taiwan_price_map_snapshot_scheduler import produce_taiwan_price_map_snapshots
+
+    now = (now or datetime.now(TAIWAN_TZ)).astimezone(TAIWAN_TZ)
+    basis = now.date()
+    if not has_taiwan_calendar_year(basis.year) or not is_taiwan_trading_day(basis):
+        return {"status": "NO_SESSION", "basis_trade_date": str(basis), "reason": "NO_VERIFIED_TRADING_SESSION"}
+    if now < taiwan_daily_price_release_at(basis):
+        return {"status": "WAIT_RELEASE", "basis_trade_date": str(basis), "next_action": "WAIT_OFFICIAL_RELEASE"}
+    if latest_completed_taiwan_session_date(now) != basis:
+        return {"status": "WAIT_DATA", "basis_trade_date": str(basis), "reason": "LATEST_COMPLETED_SESSION_NOT_TODAY"}
+    directory = PROJECT_ROOT / "data" / "tw_swing_discovery_checkpoint"
+    path = directory / f"{basis}.json"
+    previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if previous and previous.get("version") == "tw.swing.rotation.v1":
+        state = previous
+    else:
+        with SessionLocal() as db:
+            stocks = list_taiwan_stock_universe(db, markets=("TWSE", "TPEX"))
+            universe = [stock.stock_id for stock in stocks]
+        older = sorted(p for p in directory.glob("????-??-??.json") if p.stem < str(basis))
+        rotation_after = None
+        if older:
+            old = json.loads(older[-1].read_text(encoding="utf-8"))
+            old_ids, old_cursor = old.get("universe_stock_ids", []), old.get("cursor", 0)
+            if old_ids and old_cursor:
+                rotation_after = old_ids[min(old_cursor, len(old_ids)) - 1]
+            old.update(status="ROLLED_OVER", next_basis=str(basis), next_action="REMAINING_SYMBOLS_ROTATE_ON_NEW_BASIS")
+            _write_taiwan_swing_checkpoint(older[-1], old)
+        offset = bisect_right(universe, rotation_after) if rotation_after else 0
+        universe = universe[offset:] + universe[:offset]
+        state = {"version": "tw.swing.rotation.v1", "basis_trade_date": str(basis),
+            "universe_stock_ids": universe, "cursor": 0, "recheck_cursor": 0,
+            "checked_symbols": [], "completed_symbols": [], "deferred": {}, "repair_attempts": {}, "errors": [],
+            "rotation_after": rotation_after, "status": "in_progress", "sample_only": True}
+        if previous:
+            state["legacy_checkpoint"] = previous
+    interval = settings.taiwan_swing_research_interval_minutes
+    if state.get("last_tick_at") and now < datetime.fromisoformat(state["last_tick_at"]).replace(second=0, microsecond=0) + timedelta(minutes=interval):
+        return {"status": "DEFER", "reason": "NEXT_SCHEDULER_WINDOW", "basis_trade_date": str(basis)}
+    size = settings.taiwan_swing_research_batch_size
+    ids, deferred = state["universe_stock_ids"], state["deferred"]
+    stable = {"RESEARCH_EVALUATED", "DATA_BLOCKED", "NO_SETUP", "QUALITY_BLOCKED"}
+    for symbol, item in deferred.items():
+        item.setdefault("research_evaluated", symbol in state["completed_symbols"] and item["reason"] in stable)
+        # Preserve readable R1 checkpoints without inventing EOD qualification
+        # from checked_symbols or treating every textual error as transient.
+        if "retryable" not in item:
+            item["retryable"] = item["reason"].startswith(("TimeoutError:", "ReadTimeout:", "ConnectTimeout:", "ConnectionError:"))
+        if _taiwan_swing_pending(item):
+            item.setdefault("next_check_at", now.isoformat())
+        else:
+            item["next_check_at"] = None
+    deadline = monotonic() + settings.taiwan_swing_research_time_budget_seconds
+    _probe_taiwan_swing_versions(state, basis, now)
+    offset = state["recheck_cursor"] % len(ids) if ids else 0
+    due = [s for s in ids[offset:] + ids[:offset] if s in deferred and _taiwan_swing_due(deferred[s], now)][:min(10, size)]
+    detail_due = {s for s in due if deferred[s].get("retryable") or deferred[s].get("operation_pending")
+                  or deferred[s].get("source_change_pending")
+                  or deferred[s]["reason"] in {"UNFINISHED_BATCH", "TICK_TIME_BUDGET"}}
+    if due:
+        state["recheck_cursor"] = (ids.index(due[-1]) + 1) % len(ids)
+    primary = state["cursor"] < len(ids)
+    fresh = ids[state["cursor"]:state["cursor"] + size - len(due)] if primary else []
+    state["cursor"] += len(fresh)
+    selected = due + fresh
+    next_check = (now.replace(second=0, microsecond=0) + timedelta(minutes=interval)).isoformat()
+    state["last_tick_at"] = now.isoformat()
+    state["last_batch"] = {"stock_ids": selected, "due_stock_ids": due, "new_stock_ids": fresh,
+                           "phase": "mixed" if due and fresh else "primary" if fresh else "due_recheck",
+                           "status": "claimed", "cutoff": now.isoformat(), "proposal_refs": []}
+    # Persist the reserved cursor and unfinished symbols BEFORE IO/research. A
+    # crash cannot silently reset to batch one or retry a claimed gap endlessly.
+    for symbol in selected:
+        deferred.setdefault(symbol, {"reason": "UNFINISHED_BATCH", "research_attempts": 0})
+        deferred[symbol].setdefault("claimed_cutoff", now.isoformat())
+        deferred[symbol].update(operation_pending=True, next_check_at=next_check)
+    save = lambda: _write_taiwan_swing_checkpoint(path, state)
+    _project_taiwan_swing_progress(state, now)
+    save()
+    budget = {"remaining_calls": settings.taiwan_swing_research_external_calls,
+              "deadline": deadline}
+    tick = {"status": "WAIT_DATA", "basis_trade_date": str(basis), "selected": selected,
+            "created": 0, "deduplicated": 0, "data_blocked": 0, "sample_only": True, "execution_ready": False}
+    try:
+        if not selected:
+            tick.update(status="DEFER", reason="DAILY_RESEARCH_LIMIT_OR_EMPTY_UNIVERSE")
+            state["next_action"] = "NEXT_BASIS_OR_REVIEW_REMAINING_LIMITS"
+            return tick
+        versions = _taiwan_swing_source_versions(basis, selected) if selected else {}
+        changed = [s for s in selected if s in fresh or s in due or deferred[s].get("input_revision") != versions[s]]
+        if not changed:
+            tick.update(status="DEFER", reason="SOURCE_UNCHANGED")
+            state["next_action"] = "WAIT_CHANGED_INPUT_OR_NEXT_BASIS"
+            return tick
+        qualified, reasons = _read_taiwan_swing_released(changed, basis, now)
+        ready = []
+        for symbol in changed:
+            if not deferred[symbol].get("source_change_pending"):
+                deferred[symbol]["input_revision"] = versions[symbol]
+            deferred[symbol].update(eod_qualified=symbol in qualified,
+                operation_pending=False, reason="UNFINISHED_BATCH" if symbol in qualified and symbol in detail_due else
+                "RESEARCH_SAMPLE_ONLY" if symbol in qualified else "CURRENT_OFFICIAL_DAILY_NOT_QUALIFIED",
+                reason_codes=reasons.get(symbol, []))
+            if symbol in qualified:
+                ready.append(symbol)
+        if not ready:
+            state["next_action"] = "WAIT_DATA_AND_ADVANCE_NEXT_BATCH"
+            return tick
+        tick["qualified"] = len(ready)
+        request = SwingDiscoveryRequest(as_of_trade_date=basis, requested_at=now, stock_ids=tuple(ready),
+            batch_size=size, max_batches=1, top_n=settings.taiwan_swing_research_detail_symbols)
+        with SessionLocal() as db:
+            cheap = build_tw_swing_discovery_snapshot(db, request=request, with_detail=False)
+        state["checkpoint"] = cheap.checkpoint.model_dump(mode="json")
+        # Gap candidates may lack enough bars to rank; do not starve them forever.
+        gaps = [row.stock_id for row in cheap.checkpoint.rows if any(r.value == "DAILY_HISTORY_GAP" for r in row.reason_codes)]
+        for row in cheap.checkpoint.rows:
+            if getattr(row, "status", "eligible") != "eligible":
+                deferred[row.stock_id]["quality_status"] = "partial"
+        cheap_rows = {row.stock_id: row for row in cheap.checkpoint.rows}
+        detail_candidates = [s for s in dict.fromkeys([*(s for s in ready if s in detail_due), *cheap.top_stock_ids, *gaps])
+                             if deferred[s]["research_attempts"] < 2]
+        # Genuine eligible inputs take the bounded detail slots first. Gaps still
+        # use the same repair/checkpoint path when slots remain or inputs change.
+        shortlist = sorted(detail_candidates, key=lambda s: (
+            getattr(cheap_rows[s], "status", "eligible") != "eligible",
+            not getattr(cheap_rows[s], "daily_usable", True),
+        ))[:settings.taiwan_swing_research_detail_symbols]
+        markets = {row.stock_id: row.market for row in cheap.checkpoint.rows}
+        tick["status"] = "partial"
+        for symbol in shortlist:
+            if monotonic() >= budget["deadline"]:
+                deferred[symbol]["reason"] = "TICK_TIME_BUDGET"
+                break
+            deferred[symbol]["research_attempts"] += 1
+            deferred[symbol].update(reason="UNFINISHED_BATCH", operation_pending=True, retryable=False)
+            save()
+            try:
+                with SessionLocal() as db:
+                    repair = repair_taiwan_middle_gaps(db, stock_id=symbol, market=markets[symbol], basis=basis,
+                        cutoff=datetime.now(TAIWAN_TZ), attempts=state["repair_attempts"], budget=budget, persist=save,
+                        clock=lambda: datetime.now(TAIWAN_TZ))
+                deferred[symbol]["repair"] = repair
+                if monotonic() >= budget["deadline"]:
+                    deferred[symbol]["reason"] = "TICK_TIME_BUDGET"
+                    continue
+                producer = produce_taiwan_price_map_snapshots(stock_ids=(symbol,), timeframes=("daily",),
+                    batch_size=1, time_budget_seconds=max(1, min(45, budget["deadline"] - monotonic())))
+                versions[symbol] = _taiwan_swing_source_versions(basis, (symbol,))[symbol]
+                # Both monthly repairs and publication precede the NEW knowledge
+                # cutoff. No old per-batch cutoff is silently rewritten/replayed.
+                cutoff = datetime.now(TAIWAN_TZ)
+                detail = request.model_copy(update={"stock_ids": (symbol,), "requested_at": cutoff, "top_n": 1})
+                with SessionLocal() as db:
+                    result = discover_trade_proposals(db, detail)
+                state["last_batch"].update(cutoff=cutoff.isoformat(), producer=producer)
+                for key in ("created", "deduplicated", "data_blocked"):
+                    tick[key] += result[key]
+                refs = [{"creation_id": r["proposal"]["proposal"]["creation_id"],
+                         "revision_id": r["proposal"]["proposal"]["revision_id"]}
+                        for r in result["candidates"] if r.get("proposal")]
+                state["last_batch"]["proposal_refs"].extend(refs)
+                codes = sorted({reason for row in result["candidates"] for reason in row.get("reason_codes", [])})
+                no_setup = not refs and (not result["candidates"] or bool(codes) and set(codes) <= {"NO_SETUP", "NO_QUALIFIED_DIRECTION_SETUP"})
+                quality = result.get("coverage", {}).get("quality_status")
+                if quality not in {"complete", "partial", "unknown"}:
+                    quality = "complete" if result.get("status") == "ready" else "partial" if result["data_blocked"] else "unknown"
+                if deferred[symbol].get("source_change_pending"):
+                    deferred[symbol]["version_recheck_reason"] = "SOURCE_VERSION_REEVALUATED"
+                deferred[symbol].update(reason="NO_SETUP" if no_setup else "DATA_BLOCKED" if result["data_blocked"] else "RESEARCH_EVALUATED",
+                    reason_codes=codes, research_evaluated=True, quality_status=quality,
+                    evaluated_at=cutoff.isoformat(), operation_pending=False, retryable=False, next_check_at=None,
+                    source_change_pending=False)
+            except Exception as error:
+                deferred[symbol]["reason"] = type(error).__name__ + ":" + str(error)[:300]
+                deferred[symbol].update(operation_pending=False, retryable=_taiwan_swing_retryable(error), quality_status="partial")
+                state["errors"].append({"stock_id": symbol, "reason": deferred[symbol]["reason"]})
+                logger.exception("Taiwan rolling research symbol failed symbol=%s", symbol)
+            if deferred[symbol]["research_attempts"] >= 2:
+                deferred[symbol]["next_action"] = "DAILY_RESEARCH_LIMIT_WAIT_NEXT_BASIS"
+            save()
+        # Record the version sampled for this attempt, not a later write that
+        # arrives after evaluation and must remain visible to the next probe.
+        for symbol in ready:
+            revision = versions[symbol]
+            if deferred[symbol]["reason"] == "TICK_TIME_BUDGET" and not deferred[symbol].get("source_change_pending"):
+                deferred[symbol].pop("input_revision", None)
+            elif not deferred[symbol].get("source_change_pending"):
+                deferred[symbol]["input_revision"] = revision
+        state["next_action"] = "NEXT_BATCH" if state["cursor"] < len(ids) else "RECHECK_CHANGED_DEFERRED_INPUT"
+    except Exception as error:
+        tick["status"] = "partial"
+        reason = type(error).__name__ + ":" + str(error)[:300]
+        state["errors"].append({"stock_ids": selected, "reason": reason})
+        for symbol in selected:
+            deferred[symbol].update(reason=reason, operation_pending=False, retryable=_taiwan_swing_retryable(error),
+                quality_status="partial", research_attempts=min(2, deferred[symbol]["research_attempts"] + 1))
+        state["next_action"] = "SKIP_FAILED_BATCH_CONTINUE_CURSOR"
+        logger.exception("Taiwan rolling research batch failed basis=%s", basis)
+    finally:
+        state["checked_symbols"] = list(dict.fromkeys([*state.get("checked_symbols", []), *selected]))
+        completed = [symbol for symbol in selected if deferred[symbol].get("research_evaluated")]
+        state["completed_symbols"] = list(dict.fromkeys([*state["completed_symbols"], *completed]))
+        state["errors"] = state["errors"][-200:]
+        state["last_batch"].update(status=tick["status"], created=tick["created"], deduplicated=tick["deduplicated"])
+        for symbol in selected:
+            item = deferred[symbol]
+            if item["reason"] == "TICK_TIME_BUDGET":
+                item["operation_pending"] = False
+            if item.get("source_change_pending") and item["research_attempts"] >= 2:
+                item.update(source_change_pending=False, version_recheck_reason="SOURCE_CHANGED_DAILY_LIMIT")
+            pending = _taiwan_swing_pending(item)
+            item["next_check_at"] = next_check if pending else None
+            item["next_action"] = ("RETRY_BOUNDED_OPERATION" if item.get("retryable") else "WAIT_DATA_OR_CONTINUE_UNFINISHED") if pending else (
+                "STABLE_RESULT_OR_NEXT_BASIS" if item.get("research_evaluated") else "REVIEW_UNKNOWN_OR_NEXT_BASIS")
+            if item.get("version_recheck_reason") == "SOURCE_CHANGED_DAILY_LIMIT":
+                item["next_action"] = "DAILY_RESEARCH_LIMIT_WAIT_NEXT_BASIS"
+        _project_taiwan_swing_progress(state, now)
+        tick["progress"] = state["progress"]
+        tick["workflow_status"] = state["status"]
+        tick["scan_status"], tick["quality_status"] = state["scan_status"], state["quality_status"]
+        if tick["status"] == "partial" and state["status"] == "completed" and state["quality_status"] == "complete":
+            tick["status"] = "completed"
+        state["last_batch"]["status"] = tick["status"]
+        state["last_result"] = tick
+        save()
+    return tick
+
+
+def _add_taiwan_swing_research_job(scheduler: Any) -> bool:
+    if not settings.enable_taiwan_swing_research_scheduler:
+        return False
+    from apscheduler.triggers.combining import OrTrigger
+    from apscheduler.triggers.cron import CronTrigger
+    interval = settings.taiwan_swing_research_interval_minutes
+    trigger = OrTrigger([
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=f"45-59/{interval}", timezone="Asia/Taipei"),
+        CronTrigger(day_of_week="mon-fri", hour="16-23", minute=f"{45 % interval}-59/{interval}", timezone="Asia/Taipei"),
+    ])
+    scheduler.add_job(run_taiwan_swing_research, trigger=trigger,
+        id="taiwan_swing_research", replace_existing=True, coalesce=True, max_instances=1)
+    return True
+
+
 def start_scheduler() -> Any | None:
     require_intraday_publisher_admission()
     if (
@@ -2779,6 +3208,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_taiwan_intraday_bar_scheduler
         and not settings.enable_taiwan_session_close_scheduler
         and not settings.enable_taiwan_price_map_snapshot_scheduler
+        and not settings.enable_taiwan_swing_research_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
@@ -2933,6 +3363,7 @@ def start_scheduler() -> Any | None:
         scheduler
     )
     add_taiwan_price_map_snapshot_jobs(scheduler)
+    _add_taiwan_swing_research_job(scheduler)
     taiwan_session_close_scheduler_enabled = add_taiwan_session_close_jobs(
         scheduler
     )
@@ -2963,6 +3394,7 @@ def start_scheduler() -> Any | None:
     taiwan_fundamental_refresh_enabled = add_taiwan_fundamental_refresh_jobs(
         scheduler
     )
+    add_candidate_monitor_job(scheduler)
     scheduler.start()
     logger.info(
         "Market chip daily scheduler enabled=%s primary=%s retry_delay=%sm.",
@@ -2998,7 +3430,8 @@ def start_scheduler() -> Any | None:
         settings.scheduler_us_index_data_repair_manual_attention_backoff_seconds,
     )
     logger.info(
-        "Full-market EOD coverage scheduler enabled=%s markets=%s interval=%sm.",
+        "Full-market EOD coverage scheduler enabled=%s markets=%s US interval=%sm; "
+        "TW weekdays 15:20 then every 15m through 23:50 Asia/Taipei.",
         market_eod_coverage_reconcile_enabled,
         settings.scheduler_eod_coverage_markets,
         max(int(settings.scheduler_eod_coverage_interval_minutes), 5),

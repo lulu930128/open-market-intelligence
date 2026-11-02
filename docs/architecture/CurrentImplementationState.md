@@ -24,6 +24,8 @@
 
 ## State matrix
 
+2026-10-28 台股免費盤中量值 checkpoint：Source `accepted`；Runtime `not_reverified`；Live `partial`（2330／0050／6488 的低量串行 Fugle HTTP 與 source public-ask continuation 已驗證，使用隔離 DB）；Product `pending`（正式 backend 尚未採用）。保留 quote／amount 獨立時間、估值與 official 邊界、既有 Job owner。完整差異、測試與受限實測見 [本輪證據](../exec-plans/active/tw-free-intraday-20261028/Progress.md)。不據此宣稱正式盤中穩定或全市場成交值已驗收。
+
 2026-10-15 owned Backend shutdown checkpoint：Source `partial`（固定 inherited pipe、
 identity／nonce／TTL binding、Runner durable no-respawn、Uvicorn cooperative lifespan／
 exact-exit transport 已實作；disposable 正常與負向矩陣 accepted）。Production execution `blocked`：
@@ -508,3 +510,25 @@ Architecture Governance v1 自 2026-08-27 起視為 frozen：新增未宣告 vio
 ## Update contract
 
 更新本頁時每列至少保存 surface、Source、Runtime、Live、Product、`last_verified_at`、evidence path 與 limitations。只引用 durable evidence／task lineage，不貼完整 runtime log、秘密、provider payload、固定 PID／port 或容易過期的 capability inventory。
+
+## 2026-10-29 Dedicated Execution Runtime Phase 0／1
+
+Source `accepted`（owner reconciliation、共用 pure reducer、獨立 execution journal/session source、fake-only 垂直切片與跨 process crash 回歸）；Runtime `not_reverified`，Live `pending`，Product `pending`。原生 SDK、正式 process/service adoption、broker session、live order/callback/reconciliation 均 `UNVERIFIED`；本輪沒有連券商或寫 OMI DB。
+
+M1 synthetic contract／M2A transaction owner 保留；IO 位於 adjacent `execution_runtime/`，原 constraints 不放寬。Phase 2–5 未做。完整 owner matrix 見 [Live Execution Runtime](LiveExecutionRuntime.md)，命令、測試數、rollback 與限制見 [Phase 1 驗收](../exec-plans/active/live-execution-plane-20261029/Phase1-Acceptance.md)。
+
+
+## 2026-10-29 — Execution Phase 2 source／fake 預審確認
+
+- 原 ExecutionRuntime／schema-v1 immutable Journal 同一 owner 下加入 typed Draft、USER_SPACE／AGENT_SPACE lineage、immutable Preview digest／revision／timestamp、Revise／Reject／exact Confirm 與一次 engine claim。
+- 正常 client 為 ExecutionApplication／headless parser，raw submit 關閉；local executable harness 僅 Fake SDK。Query／exact cancel 不重新確認；claim 後 UNKNOWN 不重送。沒有 production service 接線。
+- Strategy 仍由 Phase 3 負責可修改能力，review revision 與 strategy revision 分開；沒有 frozen strategy／SL/TP／UI／MCP。Native／Live／正式 runtime adoption／product 均 UNVERIFIED。
+- 此 checkpoint 的測試與限制以 [Phase2-Acceptance](../exec-plans/active/live-execution-plane-20261029/Phase2-Acceptance.md) 為準；Phase1 history P2 的 Source/Fake gate 是本次 user supplied acceptance，不宣稱另有獨立 Reviewer。
+
+## 2026-10-29 — Execution Phase 3 source／fake mutable strategy
+
+- Source／Fake `PASS`：原 ExecutionRuntime／schema-v1 Journal 保存 strategy ID、space/review lineage、revision、source snapshot、mutable SL／TP；pure strategy replay 與原 shared order reducer 分工，KgiSessionOwner 保持 dumb。
+- Fill-driven protection／target ownership／child reservation：60/100 stop 撤剩餘40並 exit60；late fill15 補 exit15；Entry remaining0、effective0、reserved0 且現有 evidence 相符才 CLOSED。後到 fill 可重新 reconciliation；UNKNOWN／cancelled／rejected child 不自動回收 reservation 或重送。
+- 既有 consent 可修改保護、減碼、退出；新 Entry／曝險須 Preview／Confirm，屬本輪暫定可演進規則。CASH long／LOCAL_SYNTHETIC／explicit source price observation 為目前策略 scope，沒有持股 allocation、native stop 或新 transport。
+- `last_verified_at=2026-10-29`；runtime fake suite 107 PASS、M1 72 PASS、M2A 95 PASS／1 baseline skip，三個 scoped checker 0 violations／0 debt，八個真 process crash windows 與兩個 fake demos PASS。正式 Runtime、Native Broker、Live、Product UI／MCP 皆 `UNVERIFIED`；未部署、restart、連券商或讀 credential。
+- 完整 scope、exact commands、quantity/crash receipts、source diff/hash 與 rollback：[Phase3-Acceptance](../exec-plans/active/live-execution-plane-20261029/Phase3-Acceptance.md)。上方 Phase 2 的 strategy NOT_STARTED 僅為歷史 checkpoint。

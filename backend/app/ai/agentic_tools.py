@@ -972,6 +972,12 @@ def run_tw_stock_tool_session(
                 (policy.get("query_plan") or {}).get("realtime_policy") or "prefer_live"
             )
     plan["budget"] = budget
+    from time import monotonic
+    deadline = policy.get("request_deadline_monotonic")
+    if deadline is not None:
+        budget["max_total_seconds"] = min(budget["max_total_seconds"], max(0.0, deadline - monotonic()))
+        if budget["max_total_seconds"] < 1:
+            budget.update(max_calls=0, max_external_fetches=0)
     runs, run_warnings = execute_tool_plan(
         db=db,
         plan=plan,

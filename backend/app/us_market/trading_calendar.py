@@ -11,9 +11,8 @@ US_SESSION_CLOSE_TIME = time(hour=16, minute=0)
 US_POST_MARKET_CLOSE_TIME = time(hour=20, minute=0)
 US_EARLY_CLOSE_TIME = time(hour=13, minute=0)
 US_EARLY_POST_MARKET_CLOSE_TIME = time(hour=17, minute=0)
-# Daily chart providers can still expose a mutating current-session candle at
-# the exact closing boundary. Keep the daily release target behind a small,
-# explicit settlement buffer so refresh/read paths only promote completed bars.
+# Earliest expected release, NOT proof of finalization or accuracy. Provider
+# maturity and subsequent revision checks are independent of this window.
 US_DAILY_PRICE_RELEASE_TIME = time(hour=16, minute=5)
 US_EARLY_DAILY_PRICE_RELEASE_TIME = time(hour=13, minute=5)
 
@@ -193,6 +192,7 @@ def is_us_daily_price_finalized(
     trade_date: date,
     fetched_at: datetime | None,
 ) -> bool:
+    """Legacy release-window predicate; does not prove vendor data accuracy."""
     if fetched_at is None:
         return False
 
@@ -219,6 +219,20 @@ def is_us_historical_daily_receipt(*, trade_date: date, fetched_at: datetime | N
         fetched_at is not None
         and is_us_trading_day(trade_date)
         and _as_new_york_datetime(fetched_at) >= us_historical_daily_receipt_boundary(trade_date)
+    )
+
+
+def us_daily_revision_check_due(*, fetched_at: datetime, now: datetime) -> bool:
+    """Revalidate the latest vendor daily once in the next active session.
+
+    Calendar sessions, not wall-clock TTL, keep weekends/holidays valid. A
+    successful receipt in that session satisfies the checkpoint; reads do no IO.
+    """
+    local_now = _as_new_york_datetime(now)
+    return (
+        is_us_trading_day(local_now.date())
+        and local_now.time() >= US_PRE_MARKET_OPEN_TIME
+        and _as_new_york_datetime(fetched_at).date() < local_now.date()
     )
 
 
@@ -293,6 +307,7 @@ __all__ = [
     "is_us_daily_price_finalized",
     "is_us_historical_daily_receipt",
     "us_historical_daily_receipt_boundary",
+    "us_daily_revision_check_due",
     "is_us_trading_day",
     "next_us_trading_day",
     "previous_us_trading_day",

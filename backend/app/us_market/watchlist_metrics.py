@@ -4,18 +4,20 @@ from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import USDailyPrice
-from app.us_market.trading_calendar import is_us_daily_price_finalized
+from app.market_data.contracts import BarObservation
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.daily_market_state import USInstrumentIdentityUnavailableError
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE
 
 
 def _valid_number(value) -> bool:
     return isinstance(value, (int, float)) and value == value
 
-def _close_value(row: USDailyPrice | None) -> float | None:
+def _close_value(row: BarObservation | None) -> float | None:
     if row is None:
         return None
 
-    return row.adjusted_close if row.adjusted_close is not None else row.close_price
+    return float(row.close_price)
 
 
 def _latest_distinct_us_daily_rows(
@@ -23,38 +25,16 @@ def _latest_distinct_us_daily_rows(
     *,
     symbol: str,
     limit: int = 2,
-) -> list[USDailyPrice]:
-    rows = (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .order_by(
-            USDailyPrice.trade_date.desc(),
-            USDailyPrice.fetched_at.desc(),
-            USDailyPrice.id.desc(),
-        )
-        .limit(max(limit * 4, limit))
-        .all()
-    )
-    selected_rows: list[USDailyPrice] = []
-    seen_dates: set[date] = set()
-
-    for row in rows:
-        if not is_us_daily_price_finalized(
-            trade_date=row.trade_date,
-            fetched_at=row.fetched_at,
-        ):
-            continue
-
-        if row.trade_date in seen_dates:
-            continue
-
-        selected_rows.append(row)
-        seen_dates.add(row.trade_date)
-
-        if len(selected_rows) >= limit:
-            break
-
-    return selected_rows
+    now: datetime | None = None,
+) -> list[BarObservation]:
+    with db.no_autoflush:
+        try:
+            read = USDailyOhlcvPlatform(db).read(symbol=symbol, bars=limit, now=now)
+        except USInstrumentIdentityUnavailableError:
+            return []
+    if not read.temporal_postcondition_satisfied:
+        return []
+    return list(reversed(read.result.resolved.bars))
 
 
 def _latest_us_daily_close_reference(
@@ -65,10 +45,11 @@ def _latest_us_daily_close_reference(
     on_date: date | None = None,
 ) -> dict | None:
     for row in _latest_distinct_us_daily_rows(db=db, symbol=symbol, limit=10):
-        if on_date is not None and row.trade_date != on_date:
+        trade_date = row.end_at.astimezone(US_MARKET_TIMEZONE).date()
+        if on_date is not None and trade_date != on_date:
             continue
 
-        if before_date is not None and row.trade_date >= before_date:
+        if before_date is not None and trade_date >= before_date:
             continue
 
         close = _close_value(row)
@@ -76,9 +57,10 @@ def _latest_us_daily_close_reference(
         if _valid_number(close):
             return {
                 "previous_close": float(close),
-                "previous_close_source": "us_daily_price",
-                "previous_close_trade_date": row.trade_date.isoformat(),
-                "previous_close_provider": row.provider,
+                "previous_close_source": row.lineage.source,
+                "previous_close_trade_date": trade_date.isoformat(),
+                "previous_close_provider": row.lineage.provider,
+                "price_basis": row.price_basis,
             }
 
     return None

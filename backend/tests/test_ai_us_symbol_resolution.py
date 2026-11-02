@@ -150,7 +150,7 @@ def engine():
     )
     Base.metadata.create_all(value)
     with Session(value) as db:
-        for symbol in ('AMD', 'SSO', 'BRK-B', 'BF-B', 'AI', 'NODATA', 'NOVENUE'):
+        for symbol in ('AMD', 'SSO', 'BRK-B', 'BF-B', 'AI', 'NODATA', 'NOVENUE', 'S', 'TSM', 'NVDA', 'AAPL'):
             db.add(USStockMaster(
                 symbol=symbol, security_name=symbol,
                 exchange=None if symbol == 'NOVENUE' else 'NYSE',

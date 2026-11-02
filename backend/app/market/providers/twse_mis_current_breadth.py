@@ -91,6 +91,7 @@ def _classify_message(
     message: dict[str, object],
     market: str,
     *, cached_state: dict | None = None,
+    observed_at: datetime | None = None,
 ) -> dict[str, object] | None:
     code = regular_stock_code(message.get("c"))
     if code is None:
@@ -116,8 +117,18 @@ def _classify_message(
         indicative_volume_lots=message.get("ps"),
         indicative_status=message.get("ts"),
         cached_state=cached_state,
+        nested_trade=message.get("trade"),
+        observed_at=observed_at or (
+            datetime.fromisoformat(str(message["_omi_received_at"]))
+            if message.get("_omi_received_at") else None
+        ),
     )
     price_state.pop("cache_update", None)
+    if cached_state is not None and price_state["price_source"] == "trade.z":
+        prior_at = cached_state.get("price_as_of")
+        if isinstance(prior_at, datetime) and prior_at > price_state["price_as_of"]:
+            # Snapshot order alone cannot prove execution order for nested trade.
+            return None
     latest_price = as_float(price_state.get("current_price"))
     direction: str | None = None
     if latest_price is not None and previous_close is not None:
@@ -273,9 +284,9 @@ def _fetch_messages(
             received_at = datetime.now(TAIPEI_TZ)
             evidence["receipt_at"] = received_at.isoformat()
             eligible = [message for message in batch_messages if str(message.get("c")) in batch]
-            rows = [row for message in eligible if (row := _classify_message(message, market))]
-            missing = [message for message in eligible
-                       if not ((z := as_float(message.get("z"))) is not None and isfinite(z) and z > 0)]
+            rows = [row for message in eligible if (row := _classify_message(message, market, observed_at=received_at))]
+            actual_codes = {str(row["code"]) for row in rows if row.get("has_actual_trade")}
+            missing = [message for message in eligible if str(message.get("c")) not in actual_codes]
             times = [at for message in eligible if (at := _snapshot_time(message)) is not None]
             event_delays.extend((received_at - at).total_seconds() for at in times)
             evidence["classification_seconds"] = monotonic() - fetch_finished
@@ -290,6 +301,10 @@ def _fetch_messages(
                             event_max=max(times).isoformat() if times else None)
         except Exception as exc:
             caller_deadline = isinstance(exc, AcquisitionDeadlineExceeded)
+            if caller_deadline:
+                # No second transport after a caller timeout, even if the
+                # retained worker happens to complete during finalization.
+                stop_reason = "transport_in_flight"
             failure = provider_http_failure(exc)
             is_timeout = (
                 caller_deadline
@@ -317,6 +332,7 @@ def _fetch_messages(
                 evidence["caller_wait_seconds"] = None
                 next_code = batch[0]
                 stop_reason = "transport_in_flight"
+                evidence["admission_detail_code"] = str(exc)
             elif status_code is not None:
                 TWSE_MIS_PROVIDER_GUARD.record_http_failure(
                     attempt,
@@ -437,15 +453,23 @@ def _build_payload(
     messages: list[dict[str, object]],
     failed_batches: int,
     *, prior_states: dict[str, dict] | None = None,
+    expected_trade_date: date | None = None,
 ) -> dict[str, object] | None:
     code_set = set(codes)
     prior_states = prior_states or {}
     # Pick the latest message per instrument before classification; receipt order
     # must not double count a symbol or make an older event replace a newer one.
     unique_messages = {}
+    rejected_session_count = 0
     for message in messages:
         code = str(message.get("c") or "")
         if code not in code_set:
+            continue
+        if expected_trade_date is not None and (
+            _snapshot_time(message) is None
+            or _snapshot_time(message).date() != expected_trade_date
+        ):
+            rejected_session_count += 1
             continue
         previous = unique_messages.get(code)
         if previous is None or (str(message.get("d")), str(message.get("t"))) >= (str(previous.get("d")), str(previous.get("t"))):
@@ -485,6 +509,8 @@ def _build_payload(
     session = next(iter(sessions)) if len(sessions) == 1 else "mixed"
     pending = session == "preopen" and classified == 0
     warnings: list[str] = []
+    if rejected_session_count:
+        warnings.append(f"TWSE_MIS_SESSION_ROWS_REJECTED:{rejected_session_count}")
     if directional_unavailable > 0:
         warnings.append(
             f"Some {market} MIS quotes did not expose a confirmed current-session actual trade."
@@ -497,6 +523,19 @@ def _build_payload(
         if row.get("estimated_trade_value") is not None
     ]
     trade_value = sum(trade_values) if trade_values else None
+    value_minutes = {
+        row["as_of"].replace(second=0, microsecond=0)
+        for row in rows if row.get("estimated_trade_value") is not None
+        and isinstance(row.get("as_of"), datetime)
+    }
+    if trade_values and (
+        len(value_minutes) != 1
+        or value_minutes != {max(event_times).replace(second=0, microsecond=0)}
+    ):
+        trade_value = None
+        warnings.append("TWSE_MIS_ESTIMATE_COMPONENT_MINUTE_MISMATCH")
+    elif trade_values:
+        warnings.append("TWSE_MIS_SAMPLE_TRADE_VALUE_ESTIMATE_NOT_OFFICIAL_MARKET_TURNOVER")
     indicative = [row for row in rows if row.get("indicative_match_available")]
     auction_advance = sum(
         as_float(row.get("indicative_match_price")) is not None
@@ -603,7 +642,11 @@ def _build_payload(
             if trade_value is not None
             else "unavailable"
         ),
-        "trade_value_confidence": "medium" if trade_value is not None else None,
+        "trade_value_confidence": (
+            "low" if len(trade_values) < universe or failed_batches else "medium"
+        ) if trade_value is not None else None,
+        "trade_value_sample_count": len(trade_values),
+        "trade_value_sample_status": "partial_estimate" if trade_value is not None else "missing",
         "source": (
             source_prefix
             if directional_unavailable == 0 and failed_batches == 0
@@ -713,9 +756,9 @@ def _rescue_missing_z(
         code = str(message.get("c") or "")
         if code not in selected:
             continue
-        row = _classify_message(message, market)  # Only new actual z; no inferred/cache price.
+        row = _classify_message(message, market)  # Only validated actual trade; no cache price.
         original = candidates[code]
-        if (row is None or row.get("trade_date") != today or row.get("price_source") != "z"
+        if (row is None or row.get("trade_date") != today or row.get("price_source") not in {"z", "trade.z"}
             or not row.get("has_actual_trade") or row["as_of"] < original["as_of"]
             or (as_int(row.get("cumulative_volume_lots")) or 0) < original["cumulative_volume_lots"]):
             continue
@@ -753,6 +796,7 @@ def _rescue_missing_z(
             + list(accepted.values()),
             int(payload.get("failed_batch_count", 0)) + int(payload.get("skipped_batch_count", 0)),
             prior_states=prior_states,
+            expected_trade_date=today,
         )
         if refreshed is not None:
             # Full acquisition diagnostics stay independent of the rescue pass.
@@ -926,7 +970,10 @@ def read_twse_mis_current_breadth(
             provider_io_started = True
             incomplete_batches = failed_batches + int(batch_diagnostics.get("skipped_batch_count", 0))
             build_started = monotonic()
-            payload = _build_payload(market, codes, messages, incomplete_batches, prior_states=prior_states)
+            payload = _build_payload(
+                market, codes, messages, incomplete_batches, prior_states=prior_states,
+                expected_trade_date=started_wall.date(),
+            )
             evidence["phase_seconds"]["payload_build"] = monotonic() - build_started
             if payload is None:
                 raise ValueError("TWSE MIS breadth returned no canonical candidate")

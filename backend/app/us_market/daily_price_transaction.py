@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import json
 from sqlalchemy import tuple_
 from app.utils.owner_checkpoint import OwnerOutcomeUnknown
 
 from sqlalchemy.orm import Session
 
-from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice
+from app.db.models import RawFetchResult, SourceRegistry, USDailyPrice, MarketDatasetCoverageCheckpoint
 from app.market_data.contracts import (
     BarFinalization,
     InstrumentType,
@@ -60,7 +61,8 @@ class USDailyPriceTransaction:
                 raw = (self._db.query(RawFetchResult).join(SourceRegistry)
                        .filter(SourceRegistry.source_name == receipt.source,
                                RawFetchResult.content_hash == receipt.content_hash,
-                               RawFetchResult.parser_version == receipt.parser_version).first())
+                               RawFetchResult.parser_version == receipt.parser_version,
+                               RawFetchResult.fetched_at == receipt.fetched_at.astimezone(timezone.utc)).first())
                 if raw is None:
                     return "unknown"
             by_key = {}
@@ -116,6 +118,7 @@ class USDailyPriceTransaction:
             .filter(RawFetchResult.source_id == source.id)
             .filter(RawFetchResult.content_hash == receipt.content_hash)
             .filter(RawFetchResult.parser_version == receipt.parser_version)
+            .filter(RawFetchResult.fetched_at == receipt.fetched_at.astimezone(timezone.utc))
             .first()
         )
         if existing is not None:
@@ -135,6 +138,38 @@ class USDailyPriceTransaction:
         self._db.add(raw)
         self._db.flush()
         return raw, True
+
+    def _invalidate_distribution(self, changed_dates: set, raw_ids: list[int]) -> None:
+        """Invalidate only dependent checkpoints, in the bar-write transaction.
+
+        No GET scan or new revision store. Both the selected date and its next
+        session can depend on a corrected row (as price or comparison close).
+        """
+        from app.market_data.eod_coverage import US_DATASET_ID, US_SCOPE_KEY
+        from app.us_market.trading_calendar import next_us_trading_day
+
+        dates = sorted(changed_dates | {next_us_trading_day(day) for day in changed_dates})
+        for offset in range(0, len(dates), 250):
+            rows = self._db.query(MarketDatasetCoverageCheckpoint).filter(
+                MarketDatasetCoverageCheckpoint.dataset_id == US_DATASET_ID,
+                MarketDatasetCoverageCheckpoint.scope_key == US_SCOPE_KEY,
+                MarketDatasetCoverageCheckpoint.expected_trade_date.in_(dates[offset:offset + 250]),
+            ).all()
+            for row in rows:
+                detail = json.loads(row.detail_json or "{}")
+                snapshot = detail.get("us_sector_distribution")
+                if not isinstance(snapshot, dict):
+                    continue
+                snapshot["freshness_status"] = "stale"
+                snapshot["status"] = "partial"
+                snapshot["limitations"] = list(dict.fromkeys([
+                    *snapshot.get("limitations", []), "US_DAILY_EVIDENCE_REVISED_REBUILD_REQUIRED",
+                ]))
+                snapshot.setdefault("provenance", {})["daily_revision_invalidation"] = {
+                    "raw_result_ids": raw_ids,
+                    "reason": "US_DAILY_EVIDENCE_REVISED_REBUILD_REQUIRED",
+                }
+                row.detail_json = json.dumps(detail, ensure_ascii=False)
 
     def persist_bar_acquisition(
         self,
@@ -156,6 +191,8 @@ class USDailyPriceTransaction:
         observations_inserted = 0
         observations_updated = 0
         observations_unchanged = 0
+        changed_dates: set = set()
+        changed_symbols: set[str] = set()
         if self._db.new or self._db.dirty or self._db.deleted:
             raise ValueError("US daily transaction requires a clean Session")
         commit_started = False
@@ -206,6 +243,13 @@ class USDailyPriceTransaction:
                     raise ValueError("canonical observation content hash mismatches receipt")
                 trade_date = observation.end_at.date()
                 row = existing.get((observation.lineage.provider, observation.instrument.symbol, trade_date))
+                if row is not None and row.fetched_at is not None:
+                    stored_at = row.fetched_at.replace(tzinfo=timezone.utc) if row.fetched_at.tzinfo is None else row.fetched_at
+                    if stored_at > observation.lineage.fetched_at:
+                        observations_unchanged += 1
+                        continue
+                    if stored_at == observation.lineage.fetched_at and row.raw_payload_hash != raw.content_hash:
+                        raise ValueError("US_DAILY_RECEIPT_TIME_CONFLICT")
                 volume_status = observation.volume_status
                 if volume_status is None:
                     raise ValueError("US daily canonical bar requires volume_status")
@@ -260,7 +304,14 @@ class USDailyPriceTransaction:
                     self._db.add(row)
                     observations_written += 1
                     observations_inserted += 1
+                    changed_dates.add(trade_date)
+                    changed_symbols.add(observation.instrument.symbol)
                 else:
+                    revised = any(not _same_value(getattr(row, name), incoming[name])
+                        for name in ("open_price", "high_price", "low_price", "close_price",
+                                     "trade_volume_decimal", "price_basis", "volume_status"))
+                    if revised or row.finalization == BarFinalization.CORRECTED.value:
+                        incoming["finalization"] = BarFinalization.CORRECTED.value
                     unchanged = all(
                         _same_value(getattr(row, name), value)
                         for name, value in incoming.items()
@@ -273,6 +324,10 @@ class USDailyPriceTransaction:
                     else:
                         observations_written += 1
                         observations_updated += 1
+                        changed_dates.add(trade_date)
+                        changed_symbols.add(observation.instrument.symbol)
+            if changed_dates:
+                self._invalidate_distribution(changed_dates, raw_ids)
             commit_started = True
             self._db.commit()
         except Exception as exc:
@@ -283,6 +338,10 @@ class USDailyPriceTransaction:
             if commit_started and grouped:
                 raise OwnerOutcomeUnknown("US_DAILY_COMMIT_OUTCOME_UNKNOWN_RECONCILE_BEFORE_RETRY") from exc
             raise
+        from app.us_market.intraday_read_model_cache import invalidate_us_intraday_read_cache
+
+        for symbol in changed_symbols:
+            invalidate_us_intraday_read_cache(symbol)
         return PersistenceSummary(
             attempted=True,
             committed=True,

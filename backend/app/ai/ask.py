@@ -390,6 +390,20 @@ def ask(
     )
     query_plan_payload = execution_plan.as_dict()
     policy["query_plan"] = query_plan_payload
+    policy["request_deadline_monotonic"] = request_started + policy["tool_budget"]["max_total_seconds"]
+    validated_fill_capabilities = None
+    if payload.continuation:
+        # Revalidate the existing canonical action binding before any quote IO.
+        # A continuation only authorizes its selected actions, never siblings.
+        if not payload.continuation.get("selected_action_ids"):
+            raise ValueError("Continuation requires selected_action_ids.")
+        validated_fill_capabilities = capability_contract.selected_fill_capabilities(
+            continuation=payload.continuation,
+            selection=query_plan_payload.get("selection") or {},
+            target=_resolution_target(resolution),
+            scope_type=scope_type,
+            market_data_params=payload.market_data_params,
+        )
     stock_read_context = None
     quote_acquisition_receipts = {}
     tool_stage_payload = payload
@@ -404,6 +418,7 @@ def ask(
                 *execution_plan.optional_selected_capabilities,
             )
             if capability.startswith("quote.")
+            and (validated_fill_capabilities is None or capability in validated_fill_capabilities)
             and (quote_resolution := capability_contract.capability_resolution_for(
                 scope_type="stock", capability_id=capability,
             )) is not None
@@ -416,12 +431,15 @@ def ask(
             and _refresh_before_answer_enabled(payload)
             and policy["tool_budget"]["max_calls"] > 0
             and policy["tool_budget"]["max_external_fetches"] > 0
+            and policy["tool_budget"]["max_total_seconds"] - (monotonic() - request_started) >= 1
         ):
             try:
                 acquired_quote = tools.acquire_taiwan_quote_evidence_projection(
                     db=db, stock_id=_require_scope_id(payload, "stock"),
                     policy=RealtimePolicy(execution_plan.realtime_policy),
                     requested_capabilities=quote_capabilities,
+                    timeout_seconds=int(policy["tool_budget"]["max_total_seconds"] - (monotonic() - request_started)),
+                    max_external_calls=1,
                 )
                 quote_acquisition_receipts = dict(
                     acquired_quote.get("provider_attempts_by_capability") or {}
@@ -459,6 +477,13 @@ def ask(
             question_intent=question_intent,
         ),
     )
+    remaining_seconds = max(0, int(policy["tool_budget"]["max_total_seconds"] - (monotonic() - request_started)))
+    remaining_budget = {**policy["tool_budget"], **tool_stage_payload.tool_budget,
+        "max_total_seconds": remaining_seconds}
+    if remaining_seconds == 0:
+        remaining_budget.update(max_calls=0, max_external_fetches=0)
+        warnings.append("OMI request deadline exhausted before market-cache commands.")
+    tool_stage_payload = tool_stage_payload.model_copy(update={"tool_budget": remaining_budget})
     tool_stage = ask_stages.execute_tool_stages(
         scope_type=scope_type,
         payload=tool_stage_payload,

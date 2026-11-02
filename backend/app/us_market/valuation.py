@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.market_data.contracts import Market
 from app.market_data.valuation import ValuationPriceEvidence
-from app.us_market.watchlist_metrics import _latest_distinct_us_daily_rows
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.us_market.daily_market_state import USInstrumentIdentityUnavailableError
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE
 
 
 def read_us_valuation_price(
@@ -18,29 +20,30 @@ def read_us_valuation_price(
     symbol: str,
     requested_at: datetime,
 ) -> ValuationPriceEvidence:
-    del requested_at
-    rows = _latest_distinct_us_daily_rows(db=db, symbol=symbol, limit=1)
-    row = rows[0] if rows else None
-    price = (
-        row.adjusted_close
-        if row is not None and row.adjusted_close is not None
-        else row.close_price
-        if row is not None
-        else None
-    )
+    with db.no_autoflush:
+        try:
+            read = USDailyOhlcvPlatform(db).read(symbol=symbol, bars=1, now=requested_at)
+        except USInstrumentIdentityUnavailableError:
+            return ValuationPriceEvidence(market=Market.US, symbol=symbol,
+                currency="USD", source_kind="missing", resolved_status="missing",
+                limitations=("US_INSTRUMENT_IDENTITY_UNAVAILABLE",))
+    resolved = read.result.resolved
+    row = resolved.bars[-1] if resolved.bars and read.temporal_postcondition_satisfied else None
+    price = row.close_price if row is not None else None
     return ValuationPriceEvidence(
         market=Market.US,
         symbol=symbol,
         price=Decimal(str(price)) if price is not None else None,
-        currency=row.currency if row is not None else "USD",
-        as_of=row.trade_date if row is not None else None,
-        provider=row.provider if row is not None else None,
-        source="us_daily_price" if row is not None else None,
-        source_kind="completed_daily_close_compatibility" if row is not None else "missing",
+        currency="USD",
+        as_of=row.end_at.astimezone(US_MARKET_TIMEZONE).date() if row is not None else None,
+        provider=row.lineage.provider if row is not None else None,
+        source=row.lineage.source if row is not None else None,
+        source_kind="canonical_completed_daily_close" if row is not None else "missing",
         facts_usable=price is not None,
         research_usable=price is not None,
-        resolved_status="selected" if price is not None else "missing",
-        limitations=("REGIONAL_DAILY_LINEAGE_NOT_YET_SHARED_CORE",) if row is not None else (),
+        resolved_status=resolved.health.status.value,
+        limitations=tuple(dict.fromkeys((*read.projection.get("limitations", ()),
+            "PRICE_BASIS_RAW", "CORPORATE_ACTION_POSITION_ALIGNMENT_UNVERIFIED"))),
     )
 
 

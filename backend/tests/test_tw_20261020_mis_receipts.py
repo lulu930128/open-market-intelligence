@@ -63,12 +63,13 @@ def test_early_live_tail_deadline_keeps_one_round_and_original_budget(clock, mon
     monkeypatch.setattr(provider, "bounded_fetch", fetch)
     evidence = {}
     rows, failed, attempts = provider._fetch_messages(codes, "TWSE", 20, diagnostics=evidence)
-    assert clock.seconds == pytest.approx(20)
+    assert clock.seconds == pytest.approx((timeout_batch - 1) * 1.5 + 4)
     assert (len(rows), failed, attempts) == ((timeout_batch - 1) * 100, 1, timeout_batch)
     assert evidence["skipped_batch_count"] == 11 - timeout_batch
-    assert evidence["scan_next_code"] == codes[(timeout_batch - 1) * 100]
+    # A full four-second batch allocation advances past the slow segment.
+    assert evidence["scan_next_code"] == (codes[timeout_batch * 100] if timeout_batch < 11 else codes[0])
     assert evidence["batches"][timeout_batch - 1]["timeout_origin"] == "acquisition_deadline"
     for batch in evidence["batches"][timeout_batch:]:
-        assert batch["error"] == "budget_exhausted"
+        assert batch["error"] == "transport_in_flight"
         assert not batch["attempted"] and batch["caller_wait_seconds"] is None
     assert len({code for call in calls for code in call}) == sum(map(len, calls))

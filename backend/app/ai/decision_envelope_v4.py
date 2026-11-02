@@ -1816,6 +1816,8 @@ def _brief_capability_summary(
                     "total_volume_contracts",
                     "cumulative_volume_lots",
                     "cumulative_volume_shares",
+                    "cumulative_trade_value",
+                    "cumulative_trade_value_evidence",
                     "lot_size",
                     "volume_scope",
                     "volume_source",
@@ -2862,6 +2864,7 @@ def _compact_to_required_core(
             "capability_catalog_version"
         ),
         "public_contract_digest": execution.get("public_contract_digest"),
+        **({"job": deepcopy(execution["job"])} if execution.get("job") else {}),
         "tool_runs": [
             {
                 key: deepcopy(run[key])
@@ -2876,6 +2879,7 @@ def _compact_to_required_core(
                     "duration_ms",
                     "error",
                     "retryable",
+                    "job",
                 )
                 if key in run
             }
@@ -3021,6 +3025,7 @@ def _compact_to_required_core(
         {"fill_plan": compact_fill_plan}
         if (
             compact_actions
+            or compact_fill_plan["jobs"]
             or compact_fill_plan["deferred_actions"]
             or compact_fill_plan["already_attempted_actions"]
         )
@@ -3565,6 +3570,8 @@ def _fit_budget(
             "capability_catalog_version": execution.get(
                 "capability_catalog_version"
             ),
+            **({"job": deepcopy(execution["job"])} if execution.get("job") else {}),
+            "tool_runs": deepcopy(_list(execution.get("tool_runs"))),
             "refresh_reconciliation": {
                 key: deepcopy(reconciliation[key])
                 for key in (
@@ -4020,7 +4027,7 @@ def build(
         for item in _list(selection.get("unmet_required_capabilities"))
         if isinstance(item, dict)
     ]
-    if canonical.get("ok") is not True or canonical.get("request_status") != "completed":
+    if not capability_contract.request_accepts_evidence(canonical):
         return _rejected_envelope(canonical, selection=selection)
     projected_data, unavailable = capability_contract.project_selected_data(
         response=projection_response,
@@ -4292,7 +4299,9 @@ def build(
         canonical["answer"] = answer
     canonical["transport_ok"] = True
     canonical["request_valid"] = True
-    canonical["execution_completed"] = True
+    canonical["execution_completed"] = (
+        canonical.get("request_status") == "completed" and not fill_plan.get("jobs")
+    )
     canonical["data_available"] = bool(quality.get("facts_ready"))
     canonical["quality_status"] = str(
         quality.get("status") or "blocked"

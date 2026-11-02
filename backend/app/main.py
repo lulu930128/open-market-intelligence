@@ -28,6 +28,8 @@ from app.routers import (
     portfolio,
     raw_results,
     reports,
+    research_trade_journal,
+    conditional_candidates,
     resource_market,
     settings as settings_router,
     sources,
@@ -147,6 +149,8 @@ app.include_router(kr_market.router, prefix="/api/kr-market", tags=["kr-market"]
 app.include_router(watchlists.router, prefix="/api/watchlists", tags=["watchlists"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
+app.include_router(research_trade_journal.router, prefix="/api/research/trade-proposals", tags=["research"])
+app.include_router(conditional_candidates.router, prefix="/api/research/conditional-candidates", tags=["research"])
 
 
 @app.get("/favicon.ico", include_in_schema=False)

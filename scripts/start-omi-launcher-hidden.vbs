@@ -25,4 +25,12 @@ If Not fso.FileExists(powershellPath) Then
 End If
 
 command = """" & powershellPath & """ -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File """ & launcherScript & """"
+If WScript.Arguments.Named.Exists("UpdateRequestId") Then
+    Dim requestId, uuidPattern
+    requestId = WScript.Arguments.Named.Item("UpdateRequestId")
+    Set uuidPattern = New RegExp
+    uuidPattern.Pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    If Not uuidPattern.Test(requestId) Then WScript.Quit 2
+    command = command & " -UpdateRequestId " & requestId
+End If
 shell.Run command, 0, False

@@ -12,8 +12,9 @@ from test_owned_lifecycle_convergence import CS_SETUP
 from test_runtime_launcher_recovery import _run_isolated_launcher
 
 
-START_SETUP = SETUP + r"""
-Add-Type -Path (Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs') -ReferencedAssemblies @('System.Web.Extensions','System.Core')
+START_SETUP = r"""
+Add-Type -Path @((Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs'), (Join-Path (Split-Path $ast.Extent.File) 'OmiRuntimeControl.cs')) -ReferencedAssemblies @('System.Web.Extensions','System.Core','System.Windows.Forms')
+""" + SETUP + r"""
 . (Join-Path (Split-Path $ast.Extent.File) 'omi-runtime-control.ps1')
 foreach ($name in @('Test-FrontendRecoveryAdmission', 'Start-OmiBackendAfterExactStop', 'Start-OmiBackendSuccessor', 'Invoke-BackendStartRequest', 'Invoke-OwnedBackendRestart', 'Start-Services', 'Start-Backend', 'Start-Frontend')) {
     $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$false)
@@ -61,6 +62,8 @@ function Test-TcpPortBindable {
     return $script:Bindable
 }
 function Get-OmiLifecycleSourceId { return $script:DiskSource }
+function Get-OmiBackendApplicationRelease { if ($script:ApplicationRelease) {return $script:ApplicationRelease}; return 'fixture-release' }
+function Get-OmiSchemaSourceRelease { return 'fixture-schema' }
 function Get-OmiOwnedBackendIdentity {
     if ($script:WrongIdentity) { return [pscustomobject]@{pid=999;created_at='wrong'} }
     return [pscustomobject]@{pid=$script:OwnedBackendSession.ChildPid;created_at=$script:OwnedBackendSession.ChildCreated}
@@ -296,8 +299,20 @@ try {
         'timeout' {$stopType.GetProperty('Reason').SetValue($stop,'STOP_TIMEOUT',$null)}
     }
     if ($session.CanStartAfterStop -ne ($fault -eq '')) { throw 'FALSE_RESTART_AUTHORITY' }
+    Set-Field 'schemaRequest' $stop.RequestId
+    if ($session.CanRecoverSchemaBeforeWorker($stop.RequestId) -ne ($fault -eq '')) {throw 'FALSE_NO_WORKER_AUTHORITY'}
     if ($fault -eq '') {
+        if ($session.CanRecoverSchemaBeforeWorker([Guid]::NewGuid().ToString('D')) -or
+            $session.CanRecoverSchemaBeforeWorker($null)) {throw 'WRONG_SCHEMA_REQUEST'}
+        foreach ($field in @('schemaWorkerAttempted','schemaStopPending','schemaFromFailedStart')) {
+            Set-Field $field $true
+            if ($session.CanRecoverSchemaBeforeWorker($stop.RequestId)) {throw 'DISPATCH_UNCERTAINTY_UNLOCKED'}
+            Set-Field $field $false
+        }
+        if (-not $session.CanRecoverSchemaBeforeWorker($stop.RequestId) -or $session.SchemaWorkerSettled -or
+            $session.SchemaWorkerNoChange) {throw 'READ_ONLY_PROOF_CHANGED_WORKER'}
         $session.DisposeAfterConfirmedStop()
+        if ($session.CanRecoverSchemaBeforeWorker($stop.RequestId)) {throw 'RETIRED_SCHEMA_PROOF'}
         if ($session.CanStartAfterStop -or -not [object]::ReferenceEquals($stop,$session.LastStop) -or
             -not [object]::ReferenceEquals($stop,$session.Stop($stop.RequestId))) { throw 'RETIRED_RECEIPT_LOST' }
     } else {

@@ -11,12 +11,21 @@ from app.us_market.intraday_acquisition import USIntradayAcquisitionExecutor
 from app.us_market.intraday_platform import USIntradayMarketPlatform
 from app.us_market.market_data.descriptors import YAHOO_INTRADAY_DESCRIPTOR, YAHOO_INTRADAY_RESOURCE_ID
 from app.us_market.schemas import USOhlcChartRead
+from app.us_market.trading_calendar import us_historical_daily_receipt_boundary
 from test_us_intraday_shared_core import _db, _seed_daily_previous_close, _yahoo_bars_payload
 
 
 DAY = date(2026, 10, 8)
 START = datetime(2026, 10, 8, 13, 30, tzinfo=timezone.utc)
 AFTER_HOURS = datetime(2026, 10, 9, 1, tzinfo=timezone.utc)  # NY 21:00
+
+
+def _seed_revalidated_daily_reference(db, *, trade_date, close_price):
+    _seed_daily_previous_close(db, trade_date=trade_date, close_price=close_price)
+    row = db.query(USDailyPrice).one()
+    row.fetched_at = us_historical_daily_receipt_boundary(trade_date).astimezone(timezone.utc)
+    db.get(RawFetchResult, row.raw_result_id).fetched_at = row.fetched_at
+    db.commit()
 
 
 def platform_fixture(db, counts, calls, now=AFTER_HOURS):
@@ -133,7 +142,7 @@ def test_provisional_daily_uses_canonical_regular_bars_and_finalized_daily_wins(
     now = START + timedelta(minutes=60)
     platform = platform_fixture(db, {"AAPL": 60}, [], now=now)
     platform.refresh_intraday_bars(symbol="AAPL", now=now, max_provider_calls=1)
-    _seed_daily_previous_close(db, trade_date=date(2026, 10, 7), close_price=198)
+    _seed_revalidated_daily_reference(db, trade_date=date(2026, 10, 7), close_price=198)
     with patch("app.us_market.daily_ohlcv_chart.USIntradayMarketPlatform", return_value=platform):
         chart = USOhlcChartRead.model_validate(read_us_daily_ohlcv_chart(db, symbol="AAPL", include_intraday_overlay=True, now=now))
     overlay = chart.intraday_overlay
@@ -159,11 +168,12 @@ def test_provisional_daily_uses_canonical_regular_bars_and_finalized_daily_wins(
     daily.trade_date = DAY
     daily.open_price, daily.high_price, daily.low_price, daily.close_price = 204, 206, 203, 205
     daily.event_at = START + timedelta(minutes=390)
-    daily.fetched_at = START + timedelta(minutes=450)
+    revalidated_at = us_historical_daily_receipt_boundary(DAY).astimezone(timezone.utc)
+    daily.fetched_at = revalidated_at
     db.get(RawFetchResult, daily.raw_result_id).fetched_at = daily.fetched_at
     db.commit()
     with patch("app.us_market.daily_ohlcv_chart.USIntradayMarketPlatform", side_effect=AssertionError("final daily must win without intraday IO")):
-        chart = read_us_daily_ohlcv_chart(db, symbol="AAPL", include_intraday_overlay=True, now=AFTER_HOURS)
+        chart = read_us_daily_ohlcv_chart(db, symbol="AAPL", include_intraday_overlay=True, now=revalidated_at)
     assert chart["intraday_overlay"] is None and chart["points"][-1]["close"] == 205
     db.close()
 
@@ -191,7 +201,7 @@ def test_ohlc_route_keeps_unfinalized_daily_out_of_points_and_is_read_only(monke
     now = START + timedelta(minutes=60)
     platform = platform_fixture(db, {"AAPL": 60}, [], now=now)
     platform.refresh_intraday_bars(symbol="AAPL", now=now, max_provider_calls=1)
-    _seed_daily_previous_close(db, trade_date=date(2026, 10, 7), close_price=198)
+    _seed_revalidated_daily_reference(db, trade_date=date(2026, 10, 7), close_price=198)
     previous = db.query(USDailyPrice).one()
     db.add(USDailyPrice(
         provider=previous.provider, symbol="AAPL", trade_date=DAY,

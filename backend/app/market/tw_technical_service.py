@@ -268,6 +268,7 @@ def _bar_points(series: TaiwanBarSeriesRead) -> list[dict[str, Any]]:
             "volume": (
                 float(bar.volume.value) if bar.volume is not None else None
             ),
+            "volume_unit": bar.volume.unit.value if bar.volume is not None else None,
             "trade_value": (
                 float(bar.turnover_value)
                 if bar.turnover_value is not None
@@ -610,7 +611,10 @@ class TaiwanTechnicalService:
                 parameters=resolved,
                 interval=bars.requested_interval,
             )
-            points = tuple(calculated)
+            points = tuple(
+                {**point, "volume_unit": decision_points[index]["volume_unit"]}
+                for index, point in enumerate(calculated)
+            )
             if partial_index is not None:
                 observation_calculated = calculate_canonical_indicator_points(
                     raw_points,

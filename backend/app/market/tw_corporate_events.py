@@ -166,6 +166,111 @@ def taiwan_corporate_event_revision() -> str:
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
+def _instrument_receipts(provider):
+    referenced = {item.get("lineage", {}).get("raw_receipt_id")
+                  for item in [*provider.get("entries", []), *provider.get("evidence_windows", [])]
+                  if isinstance(item, dict) and isinstance(item.get("lineage"), dict)}
+    return {raw.get("receipt_id"): raw for raw in provider.get("raw_receipts", [])
+            if isinstance(raw, dict) and raw.get("receipt_id") in referenced and isinstance(raw.get("raw_text"), str)
+            and sha256(raw["raw_text"].encode("utf-8")).hexdigest() == raw.get("content_hash")}
+
+
+def _qualified_instrument_item(item, receipts, *, venue, cutoff):
+    """The same receipt/PIT qualification for readers and derived revisions."""
+    from urllib.parse import urlparse
+    from app.market_data.contracts import AuthorityClass, SourceLineage
+    lineage = SourceLineage.model_validate(item.get("lineage"))
+    raw = receipts.get(lineage.raw_receipt_id)
+    domains = {"TWSE": {"www.twse.com.tw", "wwwc.twse.com.tw"}, "TPEX": {"www.tpex.org.tw"}}
+    if (not raw or lineage.authority is not AuthorityClass.EXCHANGE
+        or raw["content_hash"] != lineage.content_hash
+        or urlparse(raw.get("url", "")).hostname not in domains.get(venue, set())
+        or lineage.fetched_at is None or lineage.fetched_at > cutoff):
+        raise ValueError("unqualified event receipt")
+    first, last = _parse_date(item.get("start_date")), _parse_date(item.get("end_date"))
+    if first is None or last is None or not 0 <= (last - first).days <= 366:
+        raise ValueError("invalid event interval")
+    return {**item, "start_date": first, "end_date": last, "lineage": lineage}
+
+
+def _semantic_rows(rows):
+    # Receipt-derived IDs, duplicate observations and ordering are not new facts.
+    return sorted({json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) for row in rows})
+
+
+def taiwan_corporate_event_semantic_revision(*, cache_path: Path | None = None,
+                                          available_at: datetime | None = None) -> str:
+    """Current derived-structure dependency, not a replacement for receipt/PIT truth.
+
+    Validate referenced raw evidence before omitting receipt IDs/hashes/times.
+    Their corruption, authority loss or cutoff visibility still changes the
+    projection. Empty unreferenced receipts and refresh diagnostics cannot do so.
+    Full cache revision and all reader receipt/cutoff behavior remain available.
+    """
+    cutoff = (available_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    payload = read_taiwan_corporate_event_cache(path=cache_path)
+    providers = {}
+    for key, provider in (payload.get("providers") or {}).items():
+        if not isinstance(provider, dict):
+            providers[key] = {"invalid_provider": provider}
+            continue
+        entries = provider.get("entries") or []
+        windows = provider.get("evidence_windows") or []
+        coverage = {name: provider[name] for name in (
+            "coverage_start", "coverage_end", "coverage_years", "failed_years") if provider.get(name)}
+        instrument = key.endswith("_instrument_history")
+        if not entries and not windows and not coverage and (instrument or not provider.get("fetched_at")):
+            continue
+        projected = {name: provider.get(name) for name in (
+            "provider", "market", "source", "source_url", "archive", "authority", "official")}
+        projected.update(coverage)
+        if instrument:
+            receipts = _instrument_receipts(provider)
+            facts = []
+            for item in [*entries, *windows]:
+                if not isinstance(item, dict):
+                    facts.append({"invalid_item": item})
+                    continue
+                try:
+                    _qualified_instrument_item(item, receipts, venue=provider.get("market"), cutoff=cutoff)
+                    qualified = True
+                except (TypeError, ValueError):
+                    qualified = False
+                lineage = item.get("lineage")
+                # event_at and semantic lineage fields (provider/source/authority/
+                # contract/degradation) remain dependencies; transport receipt
+                # identity/time is represented by its actual qualification above.
+                semantic_lineage = {name: value for name, value in lineage.items() if name not in {
+                    "fetched_at", "received_at", "raw_receipt_id", "content_hash", "observation_id", "cache_hit"
+                }} if isinstance(lineage, dict) else lineage
+                semantic_item = {name: value for name, value in item.items()
+                                 if name not in {"lineage", "event_id", "window_id"}}
+                if (isinstance(semantic_item.get("event_types"), list)
+                        and all(isinstance(kind, str) for kind in semantic_item["event_types"])):
+                    semantic_item["event_types"] = sorted(set(semantic_item["event_types"]))
+                facts.append({**semantic_item,
+                              "kind": "window" if "window_id" in item else "event",
+                              "lineage": semantic_lineage, "qualified": qualified})
+            projected["evidence"] = _semantic_rows(facts)
+        else:
+            projected["entries"] = _semantic_rows(entries)
+            fetched = _parse_datetime(provider.get("fetched_at"))
+            projected["receipt_available"] = fetched is not None and fetched <= cutoff
+            if key in HISTORY_PROVIDER_KEYS:
+                # Existing Price Map corporate-action coverage requires current
+                # history status. Preserve that quality gate, not error wording,
+                # attempt counters or a healthy refresh's changing timestamp.
+                projected["history_status"] = _provider_cache_status(provider, now=cutoff, archive=True)["status"]
+                projected["partial_success"] = bool(provider.get("partial_success"))
+                projected["successful_windows"] = sorted(set(provider.get("successful_windows") or []))
+                projected["failure_scopes"] = _semantic_rows([
+                    {name: detail.get(name) for name in ("market", "window")}
+                    for detail in provider.get("last_failure_details") or []])
+        providers[key] = projected
+    return sha256(json.dumps({"version": "tw.corporate.semantic.v1", "providers": providers},
+        sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+
 def refresh_taiwan_instrument_event_history(
     *, instrument, start_date: date, end_date: date, timeout_seconds: int = 20,
     cache_path: Path | None = None,
@@ -214,29 +319,12 @@ def read_taiwan_instrument_event_evidence(*, instrument, available_at: datetime,
         if instrument.venue not in str(provider.get("market", "")).split(","):
             continue
         if key.endswith("_instrument_history"):
-            receipts = {}
-            for raw in provider.get("raw_receipts", []):
-                raw_text = raw.get("raw_text")
-                if isinstance(raw_text, str) and sha256(raw_text.encode("utf-8")).hexdigest() == raw.get("content_hash"):
-                    receipts[raw.get("receipt_id")] = raw
+            receipts = _instrument_receipts(provider)
             for item in [*provider.get("entries", []), *provider.get("evidence_windows", [])]:
                 if item.get("stock_id") != instrument.symbol:
                     continue
                 try:
-                    lineage = SourceLineage.model_validate(item.get("lineage"))
-                    raw = receipts.get(lineage.raw_receipt_id)
-                    from urllib.parse import urlparse
-                    domains = {"TWSE": {"www.twse.com.tw", "wwwc.twse.com.tw"},
-                               "TPEX": {"www.tpex.org.tw"}}
-                    if (not raw or lineage.authority is not AuthorityClass.EXCHANGE
-                        or raw["content_hash"] != lineage.content_hash
-                        or urlparse(raw.get("url", "")).hostname not in domains.get(instrument.venue, set())
-                        or lineage.fetched_at is None or lineage.fetched_at > cutoff):
-                        raise ValueError("unqualified event receipt")
-                    first, last = _parse_date(item.get("start_date")), _parse_date(item.get("end_date"))
-                    if first is None or last is None or not 0 <= (last - first).days <= 366:
-                        raise ValueError("invalid event interval")
-                    normalized = {**item, "start_date": first, "end_date": last, "lineage": lineage}
+                    normalized = _qualified_instrument_item(item, receipts, venue=instrument.venue, cutoff=cutoff)
                     (windows if "window_id" in item else events).append(normalized)
                 except (TypeError, ValueError):
                     limitations.append("INSTRUMENT_EVENT_EVIDENCE_INVALID")
@@ -820,6 +908,7 @@ def list_taiwan_corporate_events(
     sort_order: str = "asc",
     now: datetime | None = None,
     cache_path: Path | None = None,
+    history_only: bool = False,
 ) -> dict[str, Any]:
     local_now = _local_now(now)
     as_of = local_now.date()
@@ -864,7 +953,7 @@ def list_taiwan_corporate_events(
     results: list[dict[str, Any]] = []
     source_status: dict[str, dict[str, Any]] = {}
 
-    if end_filter < as_of:
+    if history_only or end_filter < as_of:
         provider_keys = HISTORY_PROVIDER_KEYS
     elif start_filter >= as_of:
         provider_keys = CURRENT_PROVIDER_KEYS
@@ -1079,8 +1168,8 @@ def get_taiwan_stock_event_history(
         ),
         1,
     )
-    date_to = local_now.date() - timedelta(days=1)
-    date_from = date(local_now.year - history_years + 1, 1, 1)
+    date_to = latest_completed_taiwan_session_date(local_now)
+    date_from = date(date_to.year - history_years + 1, 1, 1)
     normalized_limit = max(1, min(max_results, 200))
     listing = list_taiwan_corporate_events(
         stock_id=stock_id,
@@ -1091,6 +1180,7 @@ def get_taiwan_stock_event_history(
         sort_order="desc",
         now=local_now,
         cache_path=cache_path,
+        history_only=True,
     )
     results = list(listing["results"])
     status_rank = {"missing": 3, "degraded": 2, "stale": 1, "current": 0}

@@ -1,8 +1,8 @@
 ﻿from pathlib import Path
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -166,8 +166,8 @@ class Settings(BaseSettings):
     tw_corporate_event_reminder_days: int = 7
     tw_corporate_event_history_years: int = 5
     tw_corporate_event_history_refresh_days: int = 7
-    scheduler_tw_corporate_event_history_refresh_time: str = "07:35"
-    scheduler_tw_corporate_event_history_refresh_day_of_week: str = "sun"
+    scheduler_tw_corporate_event_history_refresh_time: str = "16:35"
+    scheduler_tw_corporate_event_history_refresh_day_of_week: str = "mon-fri"
     tw_corporate_event_cache_path: Path = (
         DEFAULT_DB_PATH.parent / "tw_corporate_events.json"
     )
@@ -225,6 +225,16 @@ class Settings(BaseSettings):
     )
     enable_taiwan_session_close_scheduler: bool = True
     enable_taiwan_price_map_snapshot_scheduler: bool = False
+    enable_taiwan_swing_research_scheduler: bool = True
+    taiwan_swing_research_batch_size: Annotated[Literal[50, 100], BeforeValidator(
+        lambda value: int(value) if isinstance(value, str) else value)] = 50
+    taiwan_swing_research_interval_minutes: Annotated[Literal[5, 10], BeforeValidator(
+        lambda value: int(value) if isinstance(value, str) else value)] = 5
+    taiwan_swing_research_detail_symbols: int = Field(default=2, ge=1, le=5)
+    taiwan_swing_research_external_calls: int = Field(default=2, ge=0, le=2)
+    taiwan_swing_research_time_budget_seconds: int = Field(default=60, ge=15, le=120)
+    taiwan_price_map_snapshot_stock_ids: str = ""
+    taiwan_price_map_snapshot_timeframes: str = "daily"
     scheduler_taiwan_session_close_max_symbols: int = Field(
         default=32,
         ge=1,
@@ -356,6 +366,7 @@ class Settings(BaseSettings):
     scheduler_eod_coverage_us_sleep_seconds: float = 1.0
     scheduler_eod_coverage_us_max_consecutive_errors: int = 5
     scheduler_eod_coverage_error_backoff_seconds: int = 1800
+    scheduler_eod_coverage_tw_error_backoff_seconds: int = Field(default=900, ge=900)
     enable_us_corporate_event_scheduler: bool = True
     scheduler_us_corporate_event_refresh_hours: int = 3
     us_corporate_event_http_timeout_seconds: int = 20

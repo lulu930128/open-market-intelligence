@@ -193,6 +193,8 @@ def reconcile_close_evidence(
 ) -> USCloseReconciliation:
     if primary.instrument != secondary.instrument:
         raise ValueError("close reconciliation instrument mismatch")
+    if primary.trade_date is None or secondary.trade_date is None:
+        raise ValueError("close reconciliation requires independently dated evidence")
     if primary.trade_date != secondary.trade_date:
         raise ValueError("close reconciliation trade-date mismatch")
     if (
@@ -218,6 +220,8 @@ def reconcile_close_evidence(
             USCloseComparisonSemantics.OFFICIAL_VS_REGULAR_INTERVAL,
             USCloseComparisonSemantics.OFFICIAL_VS_PROVIDER_HINT,
             USCloseComparisonSemantics.INTERVAL_VS_PROVIDER_HINT,
+            USCloseComparisonSemantics.DAILY_VS_REGULAR_INTERVAL,
+            USCloseComparisonSemantics.DAILY_VS_PROVIDER_HINT,
         }
         else USCloseReconciliationState.MISMATCHED
     )
@@ -246,10 +250,13 @@ def close_comparison_semantics(
     secondary: USCloseEvidence,
 ) -> USCloseComparisonSemantics:
     kinds = {primary.evidence_kind, secondary.evidence_kind}
-    official = {
-        USCloseEvidenceKind.COMPLETED_DAILY,
-        USCloseEvidenceKind.OFFICIAL_CLOSING_EVENT,
-    }
+    official = {USCloseEvidenceKind.OFFICIAL_CLOSING_EVENT}
+    if USCloseEvidenceKind.COMPLETED_DAILY in kinds:
+        if USCloseEvidenceKind.PROVIDER_PREVIOUS_CLOSE_HINT in kinds:
+            return USCloseComparisonSemantics.DAILY_VS_PROVIDER_HINT
+        if USCloseEvidenceKind.FINALIZED_REGULAR_INTERVAL_CLOSE in kinds:
+            return USCloseComparisonSemantics.DAILY_VS_REGULAR_INTERVAL
+        return USCloseComparisonSemantics.DAILY_VS_DAILY if len(kinds) == 1 else USCloseComparisonSemantics.SAME_SEMANTICS
     if kinds.issubset(official):
         return USCloseComparisonSemantics.OFFICIAL_VS_OFFICIAL
     if kinds & official and USCloseEvidenceKind.FINALIZED_REGULAR_INTERVAL_CLOSE in kinds:
@@ -273,6 +280,8 @@ def evaluate_provider_previous_close_hint(
 
     if evidence.evidence_kind is not USCloseEvidenceKind.PROVIDER_PREVIOUS_CLOSE_HINT:
         return USProviderHintEvaluation(False, False, False, "NOT_PROVIDER_HINT")
+    if evidence.trade_date is None:
+        return USProviderHintEvaluation(False, False, False, "HINT_DATE_UNVERIFIED")
     if evidence.trade_date != context.expected_trade_date:
         return USProviderHintEvaluation(False, False, False, "HINT_DATE_MISMATCH")
     if context.quote_trade_date <= context.expected_trade_date:
@@ -336,7 +345,7 @@ class USCloseResolutionPolicy:
         if evidence.evidence_kind is USCloseEvidenceKind.COMPLETED_DAILY:
             if (
                 evidence.release is USEvidenceRelease.RELEASED
-                and evidence.finalization is not BarFinalization.PROVISIONAL
+                and evidence.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
                 and evidence.research_usable
             ):
                 return USCloseCandidateEvaluation(
@@ -388,7 +397,7 @@ class USCloseResolutionPolicy:
                 evidence.session is MarketSession.CONTINUOUS
                 and evidence.interval_start_at is not None
                 and evidence.interval_end_at is not None
-                and evidence.finalization is not BarFinalization.PROVISIONAL
+                and evidence.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
                 and evidence.display_usable
             ):
                 return USCloseCandidateEvaluation(

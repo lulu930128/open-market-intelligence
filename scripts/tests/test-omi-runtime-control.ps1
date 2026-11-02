@@ -163,4 +163,38 @@ try {
     Assert ((Read $recovered $historicalId).local_approval.decision -eq 'denied') 'historical compatibility'
     Assert ((Get-ChildItem -LiteralPath $FixtureRoot -Filter '*.tmp').Count -eq 0) 'atomic leftovers'
 } finally {$recovered.Dispose()}
+# Capacity is an admission boundary, not permission to erase no-replay history.
+$pipeName='omi-capacity-'+(NewId)
+$capacityRoot=Join-Path $FixtureRoot 'capacity-fixture'
+$controller=[Omi.RuntimeControl.Controller]::new($capacityRoot,$hash,$pipeName)
+try {
+    $controller.Start();Fresh
+    $flags=[Reflection.BindingFlags]'NonPublic,Instance'
+    $save=$controller.GetType().GetMethod('Save',$flags)
+    $capacity=[int]$controller.GetType().GetField('Capacity','NonPublic,Static').GetRawConstantValue()
+    for ($i=0;$i -lt ($capacity-1);$i++) {
+        $row=[Omi.RuntimeControl.Receipt]::new()
+        $row.request_id=NewId;$row.owner_id=$controller.OwnerId;$row.state='blocked';$row.reason='OWNER_NOT_ATTESTED'
+        $null=$save.Invoke($controller,@($row))
+    }
+    $id=NewId
+    Assert ((Submit $id).state -eq 'accepted') 'last slot refused'
+    Assert ($controller.TakePending() -eq $id) 'last slot not queued'
+    Assert ($controller.BeginAuthenticatedOwnedRestart($id,$before)) 'last slot begin refused'
+    $controller.CompleteOwnedRestart($id,$null,$null,$null)
+    $saved=Read $controller $id
+    $preserved=[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $capacityRoot "$id.json")))
+    Fresh
+    $status=Request $controller '' $null $null 'Status'
+    Assert (-not $status.restart.available -and $status.restart.reason -eq 'RECEIPT_STORE_CAPACITY_REACHED') 'full store status'
+    Assert ($status.receipt_store.count -eq $capacity -and $status.receipt_store.state -eq 'FULL') 'capacity evidence'
+    $newId=NewId;$refused=Submit $newId
+    Assert ($refused.state -eq 'unknown' -and $refused.reason -eq 'RECEIPT_STORE_CAPACITY_REACHED' -and
+        $refused.next_action -eq 'Preserve_receipts_then_operator_review_retention_design_no_retry' -and
+        $refused.stop_outcome -eq 'NOT_ATTEMPTED') 'untyped full store refusal'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $capacityRoot "$newId.json"))) 'capacity minted receipt'
+    Assert ((Submit $id).updated_at -eq $saved.updated_at -and $null -eq $controller.TakePending()) 'capacity replay'
+    Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $capacityRoot "$id.json"))) -ceq $preserved) 'history rewritten'
+    Assert (@(Get-ChildItem -LiteralPath $capacityRoot -Filter '*.json').Count -eq $capacity) 'history deleted'
+} finally {$controller.Dispose()}
 'CONTROLLER_FIXTURE_PASS'

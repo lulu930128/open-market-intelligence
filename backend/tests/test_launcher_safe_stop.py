@@ -373,6 +373,10 @@ catch { if ($_.Exception.Message -ne 'EXPECTED') { throw } }
 def test_original_timer_publishes_status_and_polls_without_unrequested_dispatch(tmp_path, state):
     result = _run_isolated_launcher(tmp_path, SETUP + r"""
 . (Join-Path (Split-Path $ast.Extent.File) 'omi-runtime-control.ps1')
+# Timer routing only; source/owner admission has its own retained-identity tests.
+function Assert-OmiManualBackendStartOwner {}
+function Get-OmiBackendApplicationRelease {return 'fixture-release'}
+function Get-OmiSchemaSourceRelease {return 'fixture-schema'}
 function Get-OmiOwnedBackendIdentity { return [pscustomobject]@{pid=42; created_at='same-child'} }
 $script:OwnedBackendSession | Add-Member NoteProperty RestartBlocker ''
 $script:OwnedBackendSession | Add-Member NoteProperty StartupExitConfirmed ($state -eq 'startup-exited')

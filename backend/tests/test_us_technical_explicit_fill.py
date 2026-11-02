@@ -57,7 +57,9 @@ def seed(db, *, symbol="AMD", latest=EXPECTED, count=220):
     source = SourceRegistry(source_name=f"fixture.{symbol}", source_type="fixture", category="market_data", enabled=True)
     db.add(source)
     db.flush()
-    raw = RawFetchResult(source_id=source.id, fetched_at=NOW - timedelta(minutes=1), content_hash="a" * 64, raw_text="fixture", parser_version="yahoo.chart.v8")
+    # Historical receipt at the next exchange-date boundary; the previous
+    # minute is still a revisable same-day Yahoo observation.
+    raw = RawFetchResult(source_id=source.id, fetched_at=NOW, content_hash="a" * 64, raw_text="fixture", parser_version="yahoo.chart.v8")
     db.add(raw)
     db.flush()
     for i, day in enumerate(reversed(dates)):
@@ -65,7 +67,7 @@ def seed(db, *, symbol="AMD", latest=EXPECTED, count=220):
         db.add(USDailyPrice(
             provider="yahoo_chart", symbol=symbol, trade_date=day, open_price=close - .5,
             high_price=close + 1, low_price=close - 1, close_price=close, trade_volume=1_000_000 + i,
-            fetched_at=NOW - timedelta(minutes=1), source_id=source.id, raw_result_id=raw.id,
+            fetched_at=NOW, source_id=source.id, raw_result_id=raw.id,
             authority="vendor", raw_contract_version="yahoo.chart.v8",
             event_at=datetime.combine(day, us_session_close_time(day), tzinfo=US_MARKET_TIMEZONE),
             finalization="final", price_basis="raw", volume_unit="shares", volume_status="observed", raw_payload_hash=raw.content_hash,

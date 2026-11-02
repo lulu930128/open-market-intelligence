@@ -108,7 +108,7 @@ class TaiwanIntradayMarketCapabilityTests(unittest.TestCase):
         messages = [
             {
                 "c": code,
-                "d": "20260730",
+                "d": datetime.now(TAIWAN_TZ).strftime("%Y%m%d"),
                 "t": "10:00:00",
                 "y": "100",
                 "z": "101" if index % 2 == 0 else "99",

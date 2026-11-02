@@ -1125,3 +1125,158 @@ def test_official_refresh_http_entrypoint_does_not_expose_provider_selection() -
 
     assert tuple(parameters) == ("stock_id", "trade_date", "db")
     assert "provider" not in parameters
+
+def test_daily_pit_revisions_single_bulk_and_research_cutoff(db: Session) -> None:
+    """Later receipt/upsert must not erase a released day at an earlier cutoff."""
+    from datetime import timedelta, time
+    from app.db.models import MarketDailyPriceRevision, TaiwanPriceMapSnapshot
+    from app.market.trading_calendar import TAIWAN_TZ, is_taiwan_trading_day
+    from app.market.tw_bar_service import TaiwanBarService
+    from app.market.tw_swing_screening import (
+        SwingScreenRequest, SwingReason, read_tw_swing_evidence, screen_tw_swing_candidates,
+    )
+    from app.market_data.candidate_repository import DailyBarCandidateQuery
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    import importlib.util
+
+    # Exercise the additive migration on this isolated fixture, not production.
+    MarketDailyPriceRevision.__table__.drop(db.connection())
+    spec = importlib.util.spec_from_file_location("daily_revisions_migration", Path(__file__).parents[1]
+        / "alembic/versions/20261031_0096_taiwan_daily_revisions.py")
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    with Operations.context(MigrationContext.configure(db.connection())):
+        migration.upgrade()
+        spec = importlib.util.spec_from_file_location("price_map_migration", Path(__file__).parents[1]
+            / "alembic/versions/20260914_0087_tw_price_map_snapshots.py")
+        price_map_migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(price_map_migration)
+        price_map_migration.upgrade()
+    db.commit()
+
+    basis = date(2026, 10, 30)
+    early = datetime(2026, 10, 31, 19, 12, tzinfo=TAIWAN_TZ)
+    late = early.replace(minute=47)
+    cutoff = early.replace(minute=45)
+    instrument = InstrumentKey(market=Market.TW, symbol="3481", venue="TWSE",
+                               instrument_type=InstrumentType.STOCK)
+    db.add(StockMaster(stock_id="3481", stock_name="3481", market="TWSE",
+                       instrument_type="stock", is_active=True))
+    db.commit()
+
+    def acquire(resource, at, close="42.55"):
+        if resource == TWSE_DAILY_RESOURCE_ID:
+            payload = json.dumps([dict(Date="20261030", Code="3481", Name="3481",
+                OpeningPrice="43.4", HighestPrice="43.6", LowestPrice="41.5",
+                ClosingPrice=close, TradeVolume="133002981", TradeValue="5612381416",
+                Transaction="70239", Change="-3.45")])
+        else:
+            data = json.loads(_raw_payload("twse_mi_index_allbut0999_excerpt_20260827.json"))
+            data["date"] = "20261030"
+            table = next(table for table in data["tables"] if "證券代號" in table.get("fields", []))
+            values = {"證券代號": "3481", "證券名稱": "3481", "開盤價": "43.4",
+                      "最高價": "43.6", "最低價": "41.5", "收盤價": close,
+                      "成交股數": "133002981", "成交金額": "5612381416", "成交筆數": "70239"}
+            table["data"] = [[values.get(field, value) for field, value in zip(table["fields"], table["data"][0])]]
+            payload = json.dumps(data)
+        executor = TaiwanOfficialDailyAcquisitionExecutor(
+            fetchers={resource: lambda _route: FakeResponse(text=payload)},
+            clock=lambda: at, monotonic=lambda: 1.0)
+        platform = TaiwanOfficialDailyPlatform(
+            reader=TaiwanCompletedDailyCandidateReader(TaiwanOfficialDailyBarRepository(db)),
+            transaction=TaiwanOfficialDailyTransaction(db), acquisition=executor,
+            descriptors=tuple(d for d in TW_OFFICIAL_DAILY_DESCRIPTORS if d.resource_id == resource))
+        req = _refresh(symbol="3481", venue="TWSE", trade_date=basis).model_copy(update={"requested_at": at})
+        result = platform.refresh_instrument(req)
+        assert result.persistence.committed and result.persistence.receipts_written == 1
+        return result.persistence.raw_result_ids[0]
+
+    first = acquire(TWSE_DAILY_RESOURCE_ID, early)
+    source = db.query(SourceRegistry).filter_by(source_name=TWSE_DAILY_TRADING_SOURCE_NAME).one()
+    raw = db.get(RawFetchResult, first)
+    # Exactly 300 sessions, including basis; the history owner still detects real gaps.
+    days, day = [], basis - timedelta(days=1)
+    while len(days) < 299:
+        if is_taiwan_trading_day(day):
+            days.append(day)
+        day -= timedelta(days=1)
+    db.add_all([MarketDailyPrice(source_id=source.id, raw_result_id=first,
+        stock_id="3481", trade_date=d, open_price=43.4, high_price=43.6,
+        low_price=41.5, close_price=42.55, trade_volume=133002981,
+        trade_value=5612381416, transaction_count=70239) for d in days])
+    db.commit()
+    second = acquire(TWSE_RWD_DAILY_RESOURCE_ID, late)
+    repeated = acquire(TWSE_RWD_DAILY_RESOURCE_ID, late.replace(hour=20, minute=10))
+    frozen = [(r.id, r.raw_result_id, r.close_price) for r in db.query(MarketDailyPriceRevision).all()]
+    # Genuine same-source correction must retain the old values as well.
+    corrected = acquire(TWSE_RWD_DAILY_RESOURCE_ID, late.replace(hour=20, minute=20), "42.60")
+    assert all(db.get(MarketDailyPriceRevision, (i, r)).close_price == p for i, r, p in frozen)
+    assert db.query(MarketDailyPrice).filter_by(stock_id="3481", trade_date=basis).count() == 2
+
+    def read(at):
+        repo = TaiwanOfficialDailyBarRepository(db, available_at=at)
+        query = DailyBarCandidateQuery(instrument=instrument, start_date=basis, end_date=basis, max_rows=2)
+        single = repo.load_daily_bars(query)
+        winner = min(single.series, key=lambda s: (s.provider_priority, s.provider, s.source)).bars[-1]
+        bulk = repo.load_market_universe_history(trade_dates=(basis,), symbols=("3481",), max_rows=10)[basis]
+        assert len(bulk.bars) == 1
+        left, right = bulk.bars[0].model_dump(), winner.model_dump()
+        assert left == right, {k: (left[k], right[k]) for k in left if left[k] != right[k]}
+        bars = TaiwanBarService(db).read_bars(instrument_id="3481", interval="1d", limit=300,
+            to_time=datetime.combine(basis, time.max, TAIWAN_TZ), requested_at=at, include_partial=False)
+        assert bars.bars[-1].close_price == winner.close_price
+        assert bars.bars[-1].lineage.raw_receipt_id == winner.lineage.raw_receipt_id
+        latest = TaiwanOfficialDailyBarRepository(db, available_at=at)
+        latest.preload_latest_stock_daily((instrument,), end_date=basis)
+        assert latest.latest_candidate_start_date(instrument=instrument, end_date=basis, max_rows=1) == basis
+        assert min(latest.load_daily_bars(query).series,
+                   key=lambda s: (s.provider_priority, s.provider, s.source)).bars[-1] == winner
+        return winner, bars
+
+    for at, receipt, price in [(early.replace(second=30), first, "42.55"),
+                                (cutoff, first, "42.55"),
+                                (late.replace(minute=55), second, "42.55"),
+                                (late.replace(hour=20, minute=25), corrected, "42.6")]:
+        winner, bars = read(at)
+        assert winner.lineage.raw_receipt_id == f"raw_fetch_result:{receipt}"
+        assert str(winner.close_price) == price
+        if at.hour == 19:
+            assert bars.history.requested_coverage_satisfied
+
+    # Reopening a Session replays the same version; no in-memory history is needed.
+    db.expire_all()
+    assert read(cutoff)[0].lineage.raw_receipt_id == f"raw_fetch_result:{first}"
+    with Session(db.get_bind()) as reopened:
+        replay = TaiwanOfficialDailyBarRepository(reopened, available_at=cutoff).load_daily_bars(
+            DailyBarCandidateQuery(instrument=instrument, start_date=basis, end_date=basis, max_rows=2))
+        assert replay.series[0].bars[-1].lineage.raw_receipt_id == f"raw_fetch_result:{first}"
+    req = SwingScreenRequest(stock_ids=("3481",), as_of_trade_date=basis, requested_at=cutoff)
+    db.add(TaiwanPriceMapSnapshot(stock_id="3481", timeframe="daily", claim_token="old",
+        input_revision=-1, parameter_revision="old", corporate_revision="old", methodology_version="old",
+        status="ready", basis_date=basis, claimed_at=early, published_at=early, payload_json="{}"))
+    db.commit()
+    inputs = read_tw_swing_evidence(db, request=req)
+    assessment = screen_tw_swing_candidates(req, inputs).assessments[0]
+    assert SwingReason.DAILY_HISTORY_GAP not in assessment.reason_codes
+    assert SwingReason.SNAPSHOT_REVISION_STALE in assessment.reason_codes
+    gap = sorted(days)[100]
+    db.query(MarketDailyPrice).filter_by(stock_id="3481", trade_date=gap).delete()
+    db.commit()
+    inputs = read_tw_swing_evidence(db, request=req)
+    assert SwingReason.DAILY_HISTORY_GAP in screen_tw_swing_candidates(req, inputs).assessments[0].reason_codes
+    bulk = TaiwanOfficialDailyBarRepository(db, available_at=cutoff).load_market_universe_history(
+        trade_dates=(gap,), symbols=("3481",), max_rows=10)[gap]
+    assert not bulk.bars
+
+    # Simulate a pre-migration row whose identical receipt link was overwritten:
+    # no inferred old OHLC on a different hash/parser, and no future receipt used.
+    row = db.query(MarketDailyPrice).filter_by(stock_id="3481", trade_date=basis,
+                                             source_id=source.id).one()
+    clone = RawFetchResult(source_id=source.id, fetched_at=late, status_code=200,
+        content_hash=raw.content_hash, parser_version=raw.parser_version, raw_text=raw.raw_text)
+    db.add(clone); db.flush()
+    db.query(MarketDailyPriceRevision).filter_by(id=row.id).delete()
+    row.raw_result_id = clone.id
+    db.commit(); db.expire_all()
+    assert read(cutoff)[0].lineage.raw_receipt_id == f"raw_fetch_result:{first}"

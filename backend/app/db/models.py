@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Column,
     Date,
     DateTime,
     Float,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    Table,
     Time,
     UniqueConstraint,
     desc,
@@ -927,6 +929,24 @@ class MarketDailyPrice(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class MarketDailyPriceRevision(Base):
+    """Immutable acquired daily rows; current projection retains its original ID.
+
+    Reuse the canonical row shape, without its mutable-projection uniqueness or
+    defaults. The receipt is part of the identity, so PIT ORM reads cannot reuse
+    a later revision already present in the Session identity map.
+    """
+
+    __table__ = Table(
+        "market_daily_price_revision", Base.metadata,
+        *(Column(column.name, column.type,
+                 primary_key=column.name in {"id", "raw_result_id"},
+                 nullable=False if column.name in {"id", "raw_result_id"} else column.nullable)
+          for column in MarketDailyPrice.__table__.columns),
+        Index("ix_market_daily_revision_source_stock_date", "source_id", "stock_id", "trade_date"),
+    )
 
 
 class MarketDailyPriceLineage(Base):

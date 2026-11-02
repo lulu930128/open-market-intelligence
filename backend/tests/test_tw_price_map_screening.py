@@ -39,6 +39,16 @@ def sessions():
             intraday_migration = importlib.util.module_from_spec(intraday_spec)
             intraday_spec.loader.exec_module(intraday_migration)
             intraday_migration.upgrade()
+            source_path = path.with_name("20261101_0097_tw_snapshot_source_revision.py")
+            source_spec = importlib.util.spec_from_file_location("source_revision_migration", source_path)
+            source_migration = importlib.util.module_from_spec(source_spec)
+            source_spec.loader.exec_module(source_migration)
+            source_migration.upgrade()
+            semantic_path = path.with_name("20261101_0098_tw_daily_semantic_revision.py")
+            semantic_spec = importlib.util.spec_from_file_location("daily_semantic_migration", semantic_path)
+            semantic_migration = importlib.util.module_from_spec(semantic_spec)
+            semantic_spec.loader.exec_module(semantic_migration)
+            semantic_migration.upgrade()
     yield sessionmaker(bind=engine, expire_on_commit=False)
     engine.dispose()
 
@@ -332,3 +342,391 @@ def test_basis_cache_invalidates_corrections_even_when_close_unchanged(sessions)
         assert first is not None and first != second
         with patch("app.market.stock_price_map.read_price_map_external_revision", return_value="new-corporate-or-calendar"):
             assert _basis_cache_key(db, **kwargs) != second
+
+
+def test_daily_pilot_resumes_and_preserves_partial_empty_and_unselected(sessions):
+    from app.jobs.taiwan_price_map_snapshot_scheduler import produce_taiwan_price_map_snapshots
+
+    with sessions() as db:
+        seed(db, 5)
+        db.execute(update(StockMaster).where(StockMaster.stock_id == "2331").values(market="TPEX"))
+        db.commit()
+    calls = []
+
+    def build(**kwargs):
+        stock_id = kwargs["stock_id"]
+        calls.append((stock_id, kwargs["timeframe"]))
+        result = payload(stock_id=stock_id, zones=stock_id != "2332")
+        if stock_id == "2331":
+            result.update(status="partial", structure_input_usable=False, decision_usable=False,
+                corporate_action={"coverage_status": "partial"})
+        return result
+
+    kwargs = dict(session_factory=sessions, builder=build, clock=lambda: NOW,
+        batch_size=1, timeframes=("daily",), stock_ids=("2330", "2331", "2332"))
+    with patch("app.jobs.taiwan_price_map_snapshot_scheduler.read_price_map_external_revision", return_value="corp"):
+        reports = [produce_taiwan_price_map_snapshots(**kwargs) for _ in range(4)]
+    assert [r["attempted"] for r in reports] == [1, 1, 1, 0]
+    assert [r["publication_status_counts"] for r in reports] == [{"ready": 1}, {"partial": 1}, {"empty": 1}, {}]
+    assert calls == [("2330", "daily"), ("2331", "daily"), ("2332", "daily")]
+    assert reports[0]["scope_semantics"] == "bounded_pilot"
+    assert reports[0]["selected_stock_ids"] == ["2330", "2331", "2332"]
+    with sessions() as db:
+        rows = db.query(TaiwanPriceMapSnapshot).order_by(TaiwanPriceMapSnapshot.stock_id).all()
+        assert [(r.stock_id, r.timeframe, r.status, r.attempts) for r in rows] == [
+            ("2330", "daily", "ready", 1), ("2331", "daily", "partial", 1), ("2332", "daily", "empty", 1)]
+        assert all(r.basis_date == BASIS and r.published_at and r.parameter_revision == get_technical_analysis_parameters().revision
+            and r.corporate_revision == "corp" and r.input_revision > 0 for r in rows)
+        observation(db, "2330")
+        observation(db, "2332")
+        result = scan(db, {"universe": {"stock_ids": ["2330", "2331", "2332"]}})
+        assert result["coverage"] == {"requested_symbols": 3, "computed_symbols": 3,
+            "current_structure_symbols": 2, "eligible_symbols": 2, "matched_symbols": 1,
+            "no_match_symbols": 1, "complete": False, "excluded_reason_counts": {"SNAPSHOT_PARTIAL": 1}}
+        assert result["empty_result_is_valid"] is False
+        assert scan(db)["coverage"]["excluded_reason_counts"] == {"SNAPSHOT_NOT_COMPUTED": 2, "SNAPSHOT_PARTIAL": 1}
+
+
+@pytest.mark.parametrize("ids", [(), [], "2330", ("",), ("2330", " "), tuple(str(n) for n in range(11))])
+def test_invalid_pilot_selection_never_opens_session(ids):
+    from unittest.mock import Mock
+    from app.jobs.taiwan_price_map_snapshot_scheduler import produce_taiwan_price_map_snapshots
+    factory = Mock(side_effect=AssertionError("Invalid pilot must not access DB"))
+    with pytest.raises(ValueError):
+        produce_taiwan_price_map_snapshots(session_factory=factory, stock_ids=ids, timeframes=("daily",))
+    factory.assert_not_called()
+
+
+def test_pilot_unavailable_members_do_not_expand_to_other_stocks(sessions):
+    from app.jobs.taiwan_price_map_snapshot_scheduler import produce_taiwan_price_map_snapshots
+    with sessions() as db:
+        seed(db, 4)
+        db.execute(update(StockMaster).where(StockMaster.stock_id == "2331").values(is_active=False))
+        db.execute(update(StockMaster).where(StockMaster.stock_id == "2332").values(instrument_type="etf"))
+        db.commit()
+    with patch("app.jobs.taiwan_price_map_snapshot_scheduler.read_price_map_external_revision", return_value="corp"):
+        result = produce_taiwan_price_map_snapshots(session_factory=sessions,
+            builder=lambda **kw: payload(stock_id=kw["stock_id"]), clock=lambda: NOW,
+            timeframes=("daily",), stock_ids=("2330", "2331", "2332"))
+    assert result["published"] == 1
+    assert result["selected_stock_ids"] == ["2330"]
+    assert result["unavailable_stock_ids"] == ["2331", "2332"]
+
+
+def test_scheduler_binds_daily_pilot_without_changing_disabled_default(monkeypatch):
+    from unittest.mock import Mock
+    from app.jobs import taiwan_price_map_snapshot_scheduler as scheduler
+    mock = Mock()
+    monkeypatch.setattr(scheduler.settings, "enable_taiwan_price_map_snapshot_scheduler", False)
+    assert scheduler.add_taiwan_price_map_snapshot_jobs(mock) is False
+    mock.add_job.assert_not_called()
+    monkeypatch.setattr(scheduler.settings, "enable_taiwan_price_map_snapshot_scheduler", True)
+    monkeypatch.setattr(scheduler.settings, "taiwan_price_map_snapshot_stock_ids", "2330, 6147,6770")
+    monkeypatch.setattr(scheduler.settings, "taiwan_price_map_snapshot_timeframes", "daily")
+    assert scheduler.add_taiwan_price_map_snapshot_jobs(mock) is True
+    assert mock.add_job.call_args.kwargs["kwargs"] == {"stock_ids": ("2330", "6147", "6770"), "timeframes": ("daily",)}
+    assert mock.add_job.call_args.kwargs["max_instances"] == 1
+    monkeypatch.setattr(scheduler.settings, "taiwan_price_map_snapshot_stock_ids", "2330,,6770")
+    mock.reset_mock()
+    with pytest.raises(ValueError):
+        scheduler.add_taiwan_price_map_snapshot_jobs(mock)
+    mock.add_job.assert_not_called()
+
+
+def test_get_and_ask_read_published_pilot_without_writes(sessions):
+    from fastapi import Request
+    from app.ai.schemas import AiAskV4Request
+    from app.routers.ai import ask_omi
+    from app.routers.market import get_taiwan_price_map_screening
+
+    with sessions() as db:
+        seed(db, 3)
+        publish(db, "2330")
+        publish(db, "2331", zones=False)
+        observation(db, "2330")
+        observation(db, "2331")
+        db.execute(text("PRAGMA query_only=ON"))
+        statements = []
+
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(db.bind, "before_cursor_execute", capture)
+        try:
+            with patch("app.market.tw_price_map_screening.read_price_map_external_revision", return_value="corp"), \
+                    patch("app.market.tw_price_map_screening.datetime") as frozen, \
+                    patch("app.ai.tools._now", return_value=NOW), \
+                    patch("app.jobs.taiwan_historical_input_repair.admit_taiwan_historical_input_repair", side_effect=AssertionError("GET repair admission")), \
+                    patch("app.jobs.tw_technical_input_readiness.execute_taiwan_historical_input_step", side_effect=AssertionError("GET provider IO")), \
+                    patch("app.jobs.service.submit_job_task", side_effect=AssertionError("GET job submission")):
+                frozen.now.return_value = NOW
+                get_result = get_taiwan_price_map_screening(timeframe="daily", relation="near_zone",
+                    zone_side="any", lane="actual", near_pct=0.5, limit=1, offset=0,
+                    stock_ids=["2330", "2331", "2332"], db=db)
+                response = ask_omi(Request({"type": "http", "headers": [], "client": ("offline", 1)}),
+                    AiAskV4Request(question="Read cached daily Price Map pilot", mode="data_only", output="evidence_only",
+                        target={"type": "market", "market": "TW"}, allow_llm=False, allow_write=False,
+                        realtime_policy="cache_only",
+                        refresh_policy={"mode": "off", "before_answer": False},
+                        selection={"include": ["screening.price_map"], "parameters": {"screening.price_map": {
+                            "timeframe": "daily", "limit": 1, "universe": {"stock_ids": ["2330", "2331", "2332"]}}}}), db=db)
+        finally:
+            event.remove(db.bind, "before_cursor_execute", capture)
+        evidence = response["evidence"]["data"]["screening.price_map"]
+        assert response["contract_version"] == "omi.decision.v4"
+        assert evidence["coverage"] == get_result["coverage"]
+        assert evidence["coverage"]["computed_symbols"] == 2
+        assert evidence["coverage"]["excluded_reason_counts"] == {"SNAPSHOT_NOT_COMPUTED": 1}
+        assert str(evidence["expected_basis_date"]) == get_result["expected_basis_date"].isoformat()
+        assert evidence["rows"][0]["basis_revision"] == get_result["rows"][0]["basis_revision"]
+        assert evidence["empty_result_is_valid"] is False
+        assert all(not sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "REPLACE")) for sql in statements)
+
+
+def official_daily(db, *, basis=BASIS, receipt_at=None):
+    """Qualify existing fixture rows through the real canonical official reader."""
+    from app.db.models import RawFetchResult
+    from app.sources.defaults import TWSE_DAILY_TRADING_SOURCE_NAME
+    source = db.query(SourceRegistry).one()
+    source.source_name = TWSE_DAILY_TRADING_SOURCE_NAME
+    source.reliability_level = "official"
+    fetched_at = receipt_at or datetime.combine(basis, datetime.min.time(), tzinfo=TAIWAN_TZ).replace(hour=16)
+    raw = RawFetchResult(source_id=source.id, fetched_at=fetched_at.astimezone(timezone.utc), content_hash="daily-receipt",
+        parser_version="fixture.v1", status_code=200, raw_text="[]")
+    db.add(raw)
+    db.flush()
+    db.execute(update(MarketDailyPrice).values(raw_result_id=raw.id, trade_date=basis,
+        open_price=100, high_price=110, low_price=90, close_price=100,
+        official=True, release_status="official_final", finalization="final"))
+    db.commit()
+
+
+def test_completed_daily_weekend_positions_and_negative_quality(sessions):
+    weekend = datetime(2026, 9, 13, 10, tzinfo=TAIWAN_TZ)
+    with sessions() as db:
+        seed(db, 4)
+        official_daily(db)
+        db.execute(update(MarketDailyPrice).where(MarketDailyPrice.stock_id == "2331").values(close_price=108))
+        db.execute(update(MarketDailyPrice).where(MarketDailyPrice.stock_id == "2332").values(finalization="provisional"))
+        db.commit()
+        for symbol in ("2330", "2331", "2332"):
+            publish(db, symbol)
+        db.execute(update(TaiwanPriceMapSnapshot).values(published_at=weekend - timedelta(days=1)))
+        db.commit()
+        db.execute(text("PRAGMA query_only=ON"))
+        with patch("app.market.tw_price_map_screening.read_price_map_external_revision", return_value="corp"), \
+                patch("app.market.tw_price_map_screening.read_tw_price_map_observations", side_effect=AssertionError("No intraday fallback")):
+            result = build_tw_price_map_screening_snapshot(db, parameters={"lane": "completed_daily"}, generated_at=weekend)
+            inside = build_tw_price_map_screening_snapshot(db, parameters={"lane": "completed_daily", "relation": "within_zone"}, generated_at=weekend)
+        assert result["expected_basis_date"] == BASIS
+        assert result["status"] == "partial"
+        assert result["coverage"]["requested_symbols"] == 4
+        assert result["coverage"]["eligible_symbols"] == 2
+        assert result["coverage"]["matched_symbols"] == 1
+        assert result["coverage"]["no_match_symbols"] == 1
+        assert result["coverage"]["excluded_reason_counts"] == {"COMPLETED_DAILY_NOT_FINALIZED": 1, "SNAPSHOT_NOT_COMPUTED": 1}
+        assert inside["rows"][0]["relation"] == "within_zone"
+        assert inside["rows"][0]["reaction"] is None
+        obs = result["rows"][0]["observation"]
+        assert obs["trade_date"] == BASIS and obs["price_semantics"] == "official_finalized_daily_close"
+        assert obs["has_actual_trade"] is False and obs["lineage"]["raw_receipt_id"]
+        assert obs["finalization"] == "final" and obs["authority"] == "exchange"
+        assert result["intraday_research_usable"] is False and result["execution_grade_usable"] is False
+        assert result["empty_result_is_valid"] is False
+
+
+@pytest.mark.parametrize("relation", ["touching", "support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest"])
+def test_completed_daily_cannot_claim_intraday_reaction(relation):
+    from app.market.tw_price_map_screening import normalize_price_map_scan_parameters
+    with pytest.raises(ValueError, match="closing price position"):
+        normalize_price_map_scan_parameters({"lane": "completed_daily", "relation": relation})
+
+
+def test_completed_daily_holiday_and_http_ask_parity_are_read_only(sessions, monkeypatch):
+    from fastapi import Request
+    from app.ai.schemas import AiAskV4Request, AiAskRequest
+    from app.ai.query_plan import build_query_plan
+    from app.routers.ai import ask_omi
+    from app.routers.market import get_taiwan_price_map_screening
+    from app.market.trading_calendar import latest_completed_taiwan_session_date
+    holiday = datetime(2026, 9, 28, 16, tzinfo=TAIWAN_TZ)
+    basis = date(2026, 9, 24)  # 25 中秋、週末、28 教師節都不產生日線。
+    assert latest_completed_taiwan_session_date(holiday) == basis
+    with sessions() as db:
+        seed(db)
+        official_daily(db, basis=basis)
+        import sys
+        monkeypatch.setattr(sys.modules[__name__], "BASIS", basis)
+        monkeypatch.setattr(sys.modules[__name__], "NOW", holiday)
+        publish(db)
+        db.execute(update(TaiwanPriceMapSnapshot).values(published_at=holiday - timedelta(days=3)))
+        db.commit()
+        db.execute(text("PRAGMA query_only=ON"))
+        statements = []
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+        event.listen(db.bind, "before_cursor_execute", capture)
+        try:
+            with patch("app.market.tw_price_map_screening.read_price_map_external_revision", return_value="corp"), \
+                    patch("app.market.tw_price_map_screening.datetime") as frozen, patch("app.ai.tools._now", return_value=holiday):
+                frozen.now.return_value = holiday
+                http = get_taiwan_price_map_screening(timeframe="daily", relation="within_zone", zone_side="any",
+                    lane="completed_daily", near_pct=0.5, limit=1, offset=0, stock_ids=["2330"], db=db)
+                response = ask_omi(Request({"type": "http", "headers": [], "client": ("offline", 1)}),
+                    AiAskV4Request(question="盤後掃描收盤位於支撐價位帶的股票", mode="data_only", output="evidence_only",
+                        target={"type": "market", "market": "TW"}, allow_llm=False, allow_write=False,
+                        realtime_policy="cache_only", refresh_policy={"mode": "off", "before_answer": False},
+                        selection={"include": ["screening.price_map"], "parameters": {"screening.price_map": {
+                            "lane": "completed_daily", "relation": "within_zone", "universe": {"stock_ids": ["2330"]}}}}), db=db)
+                server_path = Path(__file__).parents[2] / "agents/omi_mcp_server/server.py"
+                spec = importlib.util.spec_from_file_location("price_map_mcp_parity", server_path)
+                server = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(server)
+                schema = server._load_public_contract_snapshot()["ask_input_schema"]
+                scanner_schema = schema["properties"]["selection"]["properties"]["parameters"]["properties"]["screening.price_map"]
+                assert "completed_daily" in scanner_schema["properties"]["lane"]["enum"]
+                def post(path, payload):
+                    assert path == "/api/ai/ask" and payload["allow_write"] is False and payload["allow_external_fetch"] is False
+                    return ask_omi(Request({"type": "http", "headers": [], "client": ("offline", 1)}),
+                        AiAskV4Request.model_validate(payload), db=db)
+                with patch.object(server, "_api_post", side_effect=post):
+                    mcp = server._call_tool("omi.ask", {"question": "盤後掃描哪些股票接近支撐", "mode": "data_only",
+                        "output": "evidence_only", "target": {"type": "market", "market": "TW"},
+                        "realtime_policy": "cache_only", "allow_external_fetch": False,
+                        "refresh_policy": {"mode": "off", "before_answer": False},
+                        "selection": {"include": ["screening.price_map"], "parameters": {"screening.price_map": {
+                            "lane": "completed_daily", "relation": "within_zone", "universe": {"stock_ids": ["2330"]}}}}})
+        finally:
+            event.remove(db.bind, "before_cursor_execute", capture)
+        evidence = response["evidence"]["data"]["screening.price_map"]
+        assert http["coverage"]["complete"] is True and evidence["coverage"] == http["coverage"]
+        assert http["expected_basis_date"] == basis and str(evidence["expected_basis_date"]) == basis.isoformat()
+        assert evidence["rows"][0]["current_price"] == http["rows"][0]["current_price"] == 100
+        assert evidence["rows"][0]["relation"] == "within_zone"
+        assert evidence["rows"][0]["observation"]["lineage"]["raw_receipt_id"] == http["rows"][0]["observation"]["lineage"]["raw_receipt_id"]
+        assert evidence["warnings"] == http["warnings"]
+        assert mcp["evidence"]["data"]["screening.price_map"] == evidence
+        assert all(not sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "REPLACE")) for sql in statements)
+    plan = build_query_plan(payload=AiAskRequest(question="盤後掃描哪些股票接近支撐", target={"type": "market", "market": "TW"}),
+        scope_type="market", question_intent="general", effective_mode="data_only", target_market="TW")
+    assert plan.selection["parameters"]["screening.price_map"]["lane"] == "completed_daily"
+
+
+def test_full_market_batches_skip_valid_headers_and_continue_after_integrity_failure(sessions):
+    from app.jobs import taiwan_price_map_snapshot_scheduler as producer
+    from sqlalchemy.exc import IntegrityError
+    with sessions() as db:
+        seed(db, 27)
+    calls = []
+    def build(**kw):
+        symbol = kw["stock_id"]
+        calls.append(symbol)
+        if symbol == "2330" and calls.count(symbol) == 1:
+            raise IntegrityError("fixture build", {}, Exception("fixture"))
+        return payload(stock_id=symbol)
+    with patch.object(producer, "read_price_map_external_revision", return_value="corp"), \
+            patch.object(producer, "claim_price_map_snapshot", wraps=claim_price_map_snapshot) as claim:
+        reports = [producer.produce_taiwan_price_map_snapshots(session_factory=sessions, builder=build,
+            clock=lambda: NOW, batch_size=12, timeframes=("daily",)) for _ in range(4)]
+        assert [r["attempted"] for r in reports] == [12, 12, 3, 0]
+        assert claim.call_count == 27  # Finished prefix never opens one claim transaction per symbol again.
+        assert reports[0]["failed"] == 1 and reports[0]["published"] == 11
+        assert reports[-1]["coverage_before"] == {"requested_items": 27, "status_counts": {"failed": 1, "ready": 26}}
+        assert reports[-1]["skipped_reason_counts"] == {"current_published": 26, "retry_not_due": 1}
+        retry = producer.produce_taiwan_price_map_snapshots(session_factory=sessions, builder=build,
+            clock=lambda: NOW + timedelta(seconds=61), batch_size=12, timeframes=("daily",))
+    assert retry["attempted"] == retry["published"] == 1
+    assert all(r["scope_semantics"] == "bounded_batch_not_full_market" for r in reports)
+    with sessions() as db:
+        rows = db.query(TaiwanPriceMapSnapshot).all()
+        assert len(rows) == 27 and all(r.status == "ready" for r in rows)
+        assert db.get(TaiwanPriceMapSnapshot, ("2330", "daily")).attempts == 2
+
+
+def test_producer_next_session_correction_and_external_version_republish(sessions):
+    from dataclasses import replace
+    from app.jobs import taiwan_price_map_snapshot_scheduler as producer
+    from app.market.trading_calendar import latest_completed_taiwan_session_date
+    now = datetime(2026, 9, 11, 16, tzinfo=TAIWAN_TZ)
+    corporate = "corp"
+    parameters = get_technical_analysis_parameters()
+    with sessions() as db:
+        seed(db)
+        official_daily(db)
+    def build(**kw):
+        value = payload(stock_id=kw["stock_id"])
+        value["parameter_contract"]["parameter_revision"] = kw["parameters"].revision
+        value["reference"]["trade_date"] = latest_completed_taiwan_session_date(kw["now"]).isoformat()
+        return value
+    def run():
+        return producer.produce_taiwan_price_map_snapshots(session_factory=sessions, builder=build,
+            clock=lambda: now, stock_ids=("2330",), timeframes=("daily",))
+    with patch.object(producer, "read_price_map_external_revision", side_effect=lambda: corporate), \
+            patch.object(producer, "get_technical_analysis_parameters", side_effect=lambda: parameters):
+        assert run()["published"] == 1
+        now += timedelta(days=2)
+        assert run()["attempted"] == 0  # Sunday remains Friday's completed session.
+        now += timedelta(days=1)
+        with sessions() as db:
+            official_daily(db, basis=now.date(), receipt_at=now)
+        assert run()["coverage_before"]["status_counts"] == {"stale": 1}
+        with sessions() as db:
+            row = db.get(TaiwanPriceMapSnapshot, ("2330", "daily"))
+            assert row.basis_date == date(2026, 9, 14)
+            previous = row.input_revision
+            db.execute(update(MarketDailyPrice).values(close_price=101))
+            db.commit()
+        assert run()["published"] == 1
+        corporate = "calendar-or-corporate-corrected"
+        assert run()["published"] == 1
+        parameters = replace(parameters, rsi_period=parameters.rsi_period + 1)
+        assert run()["published"] == 1
+        with sessions() as db:
+            db.execute(update(TaiwanPriceMapSnapshot).values(methodology_version="outdated-methodology"))
+            db.commit()
+        assert run()["published"] == 1
+        assert run()["attempted"] == 0
+    with sessions() as db:
+        row = db.get(TaiwanPriceMapSnapshot, ("2330", "daily"))
+        assert row.input_revision > previous and row.corporate_revision == corporate
+        assert row.parameter_revision == parameters.revision
+        with patch("app.market.tw_price_map_screening.read_price_map_external_revision", return_value=corporate), \
+                patch("app.market.tw_price_map_screening.get_technical_analysis_parameters", return_value=parameters):
+            result = build_tw_price_map_screening_snapshot(db, parameters={"lane": "completed_daily"}, generated_at=now)
+        assert result["expected_basis_date"] == now.date()
+        assert result["rows"][0]["basis_date"] == now.date() and result["rows"][0]["current_price"] == 101
+
+
+def test_source_health_updates_do_not_invalidate_geometry_but_source_semantics_do(sessions):
+    path = Path(__file__).parents[1] / "alembic/versions/20261101_0097_tw_snapshot_source_revision.py"
+    spec = importlib.util.spec_from_file_location("source_revision_regression", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    with sessions() as db:
+        seed(db)
+        with Operations.context(MigrationContext.configure(db.connection())):
+            migration.downgrade()
+        db.commit()
+        initial = read_input_revisions(db, ["2330"])["2330"]
+        db.execute(update(SourceRegistry).values(last_success_at=NOW))
+        db.commit()
+        assert read_input_revisions(db, ["2330"])["2330"] == initial + 2  # Reproduce 0087 OLD/NEW churn.
+        with Operations.context(MigrationContext.configure(db.connection())):
+            migration.upgrade()
+        db.commit()
+        publish(db)
+        stable = read_input_revisions(db, ["2330"])["2330"]
+        db.execute(update(SourceRegistry).values(last_success_at=NOW + timedelta(minutes=1), last_error_message="health only"))
+        db.commit()
+        assert read_input_revisions(db, ["2330"])["2330"] == stable
+        db.execute(update(SourceRegistry).values(priority=SourceRegistry.priority))
+        db.commit()
+        assert read_input_revisions(db, ["2330"])["2330"] == stable
+        db.execute(update(SourceRegistry).values(priority=SourceRegistry.priority + 1))
+        db.commit()
+        assert read_input_revisions(db, ["2330"])["2330"] > stable
+        stable = read_input_revisions(db, ["2330"])["2330"]
+        db.execute(update(SourceRegistry).values(reliability_level="official"))
+        db.commit()
+        assert read_input_revisions(db, ["2330"])["2330"] > stable
+        assert "SNAPSHOT_REVISION_STALE" in scan(db)["missing"]

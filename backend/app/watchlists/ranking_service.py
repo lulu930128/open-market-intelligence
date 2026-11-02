@@ -870,6 +870,7 @@ def _build_watchlist_ranking_rows(
                 "time": signal_result.get("time"),
                 "close": close,
                 "volume": signal_result.get("volume"),
+                "volume_unit": signal_result.get("volume_unit"),
                 "change": change,
                 "previous_close": previous_close,
                 "change_pct": change_pct,

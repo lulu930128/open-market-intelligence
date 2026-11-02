@@ -168,6 +168,21 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
                 )
 
 
+def exchange_calendar_semantic_revision(market: str, *, path: Path | None = None) -> str:
+    """Revision of verified calendar facts/identity, independent of refresh health.
+
+    Lookup/receipt/PIT behavior is unchanged. This projection owns no cache and
+    is only a dependency of derived structures.
+    """
+    from hashlib import sha256
+    entry = read_exchange_calendar_cache(path=path).get("markets", {}).get(market, {})
+    entry = entry if isinstance(entry, dict) else {}
+    facts = {name: entry.get(name) for name in ("provider", "source", "source_url")}
+    facts.update(verified_years=sorted({int(year) for year in entry.get("verified_years") or []
+                                     if str(year).isdigit()}), holidays=entry.get("holidays") or {})
+    return sha256(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def write_exchange_calendar_refresh(
     *,
     updates: Mapping[str, CalendarCacheUpdate],

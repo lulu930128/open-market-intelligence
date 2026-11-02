@@ -28,6 +28,7 @@ from app.market_data.contracts import (
 from app.market_data.integration_contracts import ProviderTimeframe
 from app.us_market.market_data.massive_symbols import massive_index_provider_symbol
 from app.us_market.trading_calendar import (
+    is_us_historical_daily_receipt,
     us_session_close_time,
 )
 from app.us_market.session_policy import us_session_for_timestamp
@@ -355,7 +356,8 @@ def canonical_yahoo_chart_payload(
             end_at = start_at + duration
         finalization = (
             BarFinalization.FINAL
-            if fetched_at.astimezone(US_EASTERN) >= end_at
+            if (is_us_historical_daily_receipt(trade_date=trade_date, fetched_at=fetched_at)
+                if interval == "1d" else fetched_at.astimezone(US_EASTERN) >= end_at)
             else BarFinalization.PROVISIONAL
         )
         open_price, high_price, low_price, close_price = ohlc

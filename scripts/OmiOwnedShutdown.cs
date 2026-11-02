@@ -491,6 +491,15 @@ namespace Omi.OwnedShutdown {
         HashSet<string> schemaRequests = new HashSet<string>();
         public bool SchemaWorkerSettled { get; private set; }
         public bool SchemaWorkerNoChange { get; private set; }
+        public bool CanRecoverSchemaBeforeWorker(string requestId) {
+            lock (stopGate) {
+                // Absence of an apply receipt is not evidence. Only this retained
+                // owner knows whether the one-shot worker dispatch was consumed.
+                return requestId != null && schemaRequest == requestId && !schemaStopPending &&
+                    !schemaWorkerAttempted && !schemaFromFailedStart && CanStartAfterStop &&
+                    LastStop.RequestId == requestId && !LastStop.Forced && !LastStop.ForcedExitConfirmed;
+            }
+        }
         public bool CanResumeAfterSchemaStopRefusal {
             get { lock (stopGate) {
                 StopEvidence retained;
@@ -583,7 +592,7 @@ namespace Omi.OwnedShutdown {
             }
         }
         public Task<bool> ApplyStoppedSchemaAsync(string requestId, string targetRelease, string sourceRelease,
-                string database, string schemaLock, string backup, string receipt) {
+                string database, string schemaLock, string receipt) {
             lock (stopGate) {
                 if (schemaWorkerAttempted || schemaRequest != requestId || !RetainedIdentityMatches())
                     throw new IOException("SCHEMA_ADMISSION_NOT_ATTESTED");
@@ -602,15 +611,22 @@ namespace Omi.OwnedShutdown {
                     var boot = new Dictionary<string,string> { {"action", "ApplyStopped"},
                         {"request_id", requestId}, {"nonce", Wire.Nonce()},
                         {"launcher_pid", identity["launcher_pid"]}, {"launcher_created", identity["launcher_created"]},
-                        {"database", database}, {"schema_lock", schemaLock}, {"backup", backup}, {"receipt", receipt} };
+                        {"database", database}, {"schema_lock", schemaLock}, {"receipt", receipt} };
                     boot["source_release"] = sourceRelease;
                     using (var worker = Wire.Start(FixedPython(repo), "-I -S -B " + Wire.Quote(entry) + " ApplyStopped", repo)) {
                         // No force kill/timeout abandonment: owner admission stays fenced
-                        // until this retained worker exits. Worker SQL/copy is bounded.
+                        // until this retained worker exits. Worker SQL is bounded.
                         string output;
                         try {
                             Wire.Send(worker.StandardInput, boot);
                             var challenge = Wire.Decode(worker.StandardOutput.ReadLine());
+                            string rejected;
+                            if (Wire.Same(boot, challenge, "request_id", "nonce") && challenge.TryGetValue("error_code", out rejected) &&
+                                (rejected == "FIXED_LAUNCHER_INVOCATION_REQUIRED" || rejected == "FIXED_LAUNCHER_SCRIPT_REQUIRED" ||
+                                 rejected == "FIXED_LAUNCHER_EXECUTABLE_REQUIRED" || rejected == "LAUNCHER_MUTEX_OWNER_UNVERIFIED" ||
+                                 rejected == "LAUNCHER_PROCESS_UNVERIFIED" || rejected == "LAUNCHER_IMAGE_UNVERIFIED" ||
+                                 rejected == "LAUNCHER_COMMAND_LINE_UNVERIFIED" || rejected == "OWNER_CHANNEL_MISMATCH"))
+                                throw new IOException(rejected);
                             if (!Wire.Same(boot, challenge, "request_id", "nonce") ||
                                 !challenge.ContainsKey("state") || challenge["state"] != "CHALLENGE" ||
                                 !challenge.ContainsKey("challenge") || challenge["challenge"].Length != 64)
@@ -631,9 +647,11 @@ namespace Omi.OwnedShutdown {
                         RequireRelease(repo, targetRelease);
                         lock (stopGate) {
                             bool bound = Wire.Same(boot, result, "request_id", "nonce");
-                            bool success = bound && worker.ExitCode == 0 && result["status"] == "SUCCEEDED";
-                            SchemaWorkerNoChange = bound && worker.ExitCode == 2 && result["status"] == "FAILED" &&
-                                result.ContainsKey("migration") && result["migration"] == "NOT_ATTEMPTED";
+                            bool success = bound && worker.ExitCode == 0 && result["status"] == "SUCCEEDED" &&
+                                result.ContainsKey("migration") && (result["migration"] == "COMMITTED" || result["migration"] == "NOT_NEEDED");
+                            SchemaWorkerNoChange = (success && result["migration"] == "NOT_NEEDED") ||
+                                (bound && worker.ExitCode == 2 && result["status"] == "FAILED" &&
+                                result.ContainsKey("migration") && result["migration"] == "NOT_ATTEMPTED");
                             SchemaWorkerSettled = success || SchemaWorkerNoChange;
                             return success;
                         }

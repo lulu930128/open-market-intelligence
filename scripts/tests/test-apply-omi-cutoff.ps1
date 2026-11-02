@@ -6,15 +6,19 @@ function Assert($value,$message){if(-not $value){throw $message}}
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $python=@(Get-Content -Encoding UTF8 (Join-Path $repo '.venv/pyvenv.cfg') | Where-Object {$_ -like 'executable = *'})[0].Substring(13)
 function Get-OmiScopedChildRole { param($Row,$Parent,$Identity)
-    if($Row.ProcessId -eq $script:fixtureChild.Id){return 'backend_app'}
+    if($Row.ProcessId -eq $script:fixtureChild.Id){if($case -in @('schema-worker-active','worker-exit-lost-result')){return 'schema_worker'};return 'backend_app'}
     return $null
 }
 $shell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-foreach($case in @('graceful','blocked','owner-mismatch','startup-failure','new-owner-unverified')){
+$recoveryId=[Guid]::NewGuid().ToString('D');$recoveryOwner=[Guid]::NewGuid().ToString('D')
+function Read-OmiUpdateOwnerStatus {throw 'OLD_STATUS_MUST_NOT_BE_REQUIRED'}
+function Read-OmiUpdateOwnerOperation {throw 'OLD_RECONCILIATION_MUST_NOT_BE_REQUIRED'}
+foreach($case in @('graceful','blocked','owner-mismatch','startup-failure','new-owner-unverified',
+    'legacy-schema-unknown','schema-worker-active','worker-exit-lost-result')){
     $root=Join-Path $OutputRoot $case
     $null=New-Item -ItemType Directory -Path (Join-Path $root ('logs\'+(Get-Date -Format 'yyyy-MM-dd'))) -Force
     $name='omi-update-cutoff-'+[guid]::NewGuid().ToString('N')
-    $mode=if($case -eq 'graceful'){'graceful'}else{'blocked'}
+    $mode=if($case -in @('graceful','legacy-schema-unknown','worker-exit-lost-result')){'graceful'}else{'blocked'}
     $fixtureOwner=Start-Process -FilePath $shell -ArgumentList ('-NoProfile -File "{0}" -Name {1} -Root "{2}" -Mode {3} -Python "{4}"' -f
         (Join-Path $PSScriptRoot 'update-owner-fixture.ps1'),$name,$root,$mode,$python) -WindowStyle Hidden -PassThru
     $null=$fixtureOwner.Handle
@@ -41,12 +45,15 @@ foreach($case in @('graceful','blocked','owner-mismatch','startup-failure','new-
                 if($case -eq 'startup-failure'){throw 'FIXTURE_STARTUP_FAILURE'}
             } -VerifySuccessor {
                 if($case -eq 'new-owner-unverified'){return $null}
-                return @{fixture='new-generation-and-ready'}
-            }
+                return @{fixture='new-generation-and-ready';backend_verified=$true}
+            } -RecoveryRequestId $recoveryId
         }catch{$errorText=$_.Exception.Message; if($case -eq 'graceful'){Write-Output $_.ScriptStackTrace}}
         Assert (-not $unrelated.HasExited) 'UNRELATED_PROCESS_KILLED'
         Assert (-not $foreign.HasExited) 'FOREIGN_DESCENDANT_KILLED'
-        if($case -eq 'owner-mismatch'){
+        if($case -eq 'schema-worker-active'){
+            Assert ($errorText -eq 'UPDATE_SCHEMA_WORKER_ACTIVE' -and $script:launches -eq 0) 'ACTIVE_WORKER_REFUSAL_LOST'
+            Assert (-not $fixtureOwner.HasExited -and -not $child.HasExited) 'ACTIVE_WORKER_KILLED'
+        }elseif($case -eq 'owner-mismatch'){
             Assert ($errorText -like '*GENERATION_MISMATCH*' -and $script:launches -eq 0) 'MISMATCH_ACCEPTED'
             Assert (-not $fixtureOwner.HasExited -and -not $child.HasExited) 'MISMATCH_KILLED'
         }elseif($case -eq 'startup-failure'){
@@ -59,7 +66,7 @@ foreach($case in @('graceful','blocked','owner-mismatch','startup-failure','new-
                 Assert ($result.status -eq 'UPDATE_BACKEND_READY') 'SUCCESS_PATH_NOT_REACHED'
                 Assert ($result.frontend_readiness -eq 'UNVERIFIED' -and $result.services_ready -ne 'VERIFIED') 'FALSE_FRONTEND_READY'
             }
-            if($case -eq 'graceful'){Assert ($result.stop_kind -eq 'GRACEFUL') 'GRACEFUL_LOST'}
+            if($case -in @('graceful','legacy-schema-unknown','worker-exit-lost-result')){Assert ($result.stop_kind -eq 'GRACEFUL') 'GRACEFUL_LOST'}
             else{Assert ($result.stop_kind -eq 'HARD_CUTOFF' -and $result.recovery_state -eq 'RECONCILIATION_REQUIRED') 'FORCE_FALSE_GRACEFUL'}
         }
         $files=@(Get-ChildItem -LiteralPath (Join-Path $root 'logs\updates') -Filter '*.json')
@@ -92,8 +99,20 @@ function Get-OmiUpdateOwner {
 }
 function Read-OmiUpdateOwnerStatus {
     $script:observations++
+    if ($script:verifierCase -eq 'stale-status' -and $script:observations -gt 1) {
+        return [pscustomobject]@{owner_id=$null;reason='OWNER_NOT_ATTESTED'}
+    }
     $pidValue=if($script:verifierCase -eq 'changed-after-ready' -and $script:observations -gt 1){444}else{333}
-    return [pscustomobject]@{owner_id='owner';loaded_lifecycle_source_id='lifecycle';application_release_id='application';
+    $update=$null
+    if ($script:verifierCase -in @('update-ready','migration-failed','migrating','wrong-update-id','stale-status')) {
+        $update=@{request_id=$recoveryId;phase='COMPLETE';status='succeeded';migration_outcome='COMMITTED';schema_revision_observed='20300101_0199'}
+        if ($script:verifierCase -eq 'migration-failed') {$update.phase='FAILED';$update.status='failed';$update.failed_phase='BACKUP';$update.failure_code='BACKUP_SOURCE_MISMATCH';$update.migration_outcome='NOT_ATTEMPTED'}
+        if ($script:verifierCase -in @('migrating','stale-status')) {$update.phase='SCHEMA_MAINTENANCE';$update.status='running';$update.migration_outcome='UNKNOWN'}
+        if ($script:verifierCase -eq 'wrong-update-id') {$update.request_id=[Guid]::NewGuid().ToString('D')}
+    }
+    return [pscustomobject]@{owner_id='owner';loaded_lifecycle_source_id='lifecycle';application_release_id='application';update_operation=$update;
+        restart=@{diagnostics=@{source=$(if($script:verifierCase -eq 'source-unknown'){'UNKNOWN'}else{'ATTESTED'});
+            target_release_id=$(if($script:verifierCase -eq 'disk-drift'){'changed'}else{'application'})}};
         backend=[pscustomobject]@{pid=$pidValue;created_at=$created.ToString('o');identity='PROCESS_IDENTITY';selected_host='127.0.0.1';selected_port=18400}}
 }
 function Invoke-RestMethod {
@@ -112,13 +131,26 @@ function Invoke-WebRequest {
     Assert ($Uri -ceq 'http://127.0.0.1:18400/api/system/readyz') 'WRONG_READYZ_ROUTE'
     return [pscustomobject]@{StatusCode=200}
 }
-foreach($case in @('ready','wrong-child','changed-after-ready','404')){
+foreach($case in @('ready','wrong-child','changed-after-ready','source-unknown','disk-drift','404')){
     $script:verifierCase=$case;$script:observations=0;$caught='';$result=$null
     try{$result=Wait-OmiUpdateSuccessor -Repo $repo -OldIdentity ([pscustomobject]@{Pid=111;Created=$created.AddSeconds(-5)}) -ExpectedLifecycle lifecycle -ExpectedApplication application -ObservationMilliseconds 100}
     catch{$caught=$_.Exception.Message}
     if($case -eq 'ready'){Assert ($null -ne $result -and $script:observations -eq 2) 'VERIFIER_SUCCESS_FAILED'}
     elseif($case -eq '404'){Assert ($caught -like '*UPDATE_VERIFIER_ROUTE_NOT_FOUND*') '404_SWALLOWED'}
-    else{Assert ($null -eq $result -and -not $caught) 'VERIFIER_FALSE_SUCCESS'}
+    else{Assert (($null -eq $result -or $result.backend_verified -ceq $false) -and -not $caught) 'VERIFIER_FALSE_SUCCESS'}
     "PASS verifier-$case"
+}
+foreach($case in @('update-ready','migration-failed','migrating','wrong-update-id','stale-status')) {
+    $script:verifierCase=$case;$script:observations=0;$script:httpCalls=0;$script:progressSeen=$false
+    $result=Wait-OmiUpdateSuccessor -Repo $repo -OldIdentity ([pscustomobject]@{Pid=111;Created=$created.AddSeconds(-5)}) `
+        -ExpectedLifecycle lifecycle -ExpectedApplication application -RequestId $recoveryId -ObservationMilliseconds $(if($case -eq 'stale-status'){700}else{100}) -OnProgress {param($progress);$script:progressSeen=$true}
+    if ($case -eq 'wrong-update-id') {Assert ($null -eq $result -and -not $script:progressSeen) 'WRONG_UPDATE_BORROWED'}
+    elseif ($case -eq 'update-ready') {Assert ($result.backend_verified -ceq $true -and $script:progressSeen) 'UPDATE_READY_NOT_VERIFIED'}
+    else {
+        Assert ($result.backend_verified -ceq $false -and $script:progressSeen -and $script:httpCalls -eq 0) 'MIGRATION_IS_NOT_READINESS'
+        if ($case -eq 'migration-failed') {Assert ($result.update_operation.failure_code -eq 'BACKUP_SOURCE_MISMATCH') 'MIGRATION_REASON_LOST'}
+        if ($case -eq 'stale-status') {Assert ($result.observation_error -eq 'UPDATE_OWNER_STATUS_NOT_CURRENT') 'STALE_STATUS_IS_NOT_SOURCE_DRIFT'}
+    }
+    "PASS phased-$case"
 }
 "Evidence: $OutputRoot"

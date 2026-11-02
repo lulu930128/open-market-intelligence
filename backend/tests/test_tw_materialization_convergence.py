@@ -60,9 +60,10 @@ def test_dated_route_uses_historical_reach_not_query_span():
 
 def test_completed_today_allows_current_date_source_but_never_previous_date():
     same_day = plan_data_acquisition_v2(requirement(NOW.date()), TW_INTRADAY_DESCRIPTORS)
-    assert [route.provider_key for route in same_day.routes] == ["nstock", YAHOO_INTRADAY_PROVIDER]
+    assert [route.provider_key for route in same_day.routes] == ["fugle_marketdata", "nstock"]
     previous = plan_data_acquisition_v2(requirement(date(2026, 9, 18)), TW_INTRADAY_DESCRIPTORS)
     assert "nstock" not in [route.provider_key for route in previous.routes]
+    assert "fugle_marketdata" not in [route.provider_key for route in previous.routes]
 
 
 def test_yahoo_http_receives_exact_target_window(monkeypatch):
@@ -163,11 +164,13 @@ def test_historical_reread_pins_date_and_real_receipt_cutoff(env, monkeypatch):
     def read(**kwargs):
         calls.append(kwargs)
         return SimpleNamespace(session_resolution=[SimpleNamespace(trade_date=date(2026,9,18),
-            coverage_status=SimpleNamespace(value="partial"))], bars=(), identity=SimpleNamespace(series_revision="a"*64))
+            market_semantics_usable=False, coverage_status=SimpleNamespace(value="partial"))],
+            bars=(), bucket_coverage=(), identity=SimpleNamespace(series_revision="a"*64))
     monkeypatch.setattr(demand, "TaiwanBarService", lambda db: SimpleNamespace(read_bars=read))
     with env.factory() as db:
         result = demand._reread(db, {"stock_id":"2330", "trade_date":"2026-09-18"}, NOW)
     assert result["reread_ready"] is False
+    assert result["target_covered_bucket_count"] == result["target_expected_bucket_count"] == 0
     assert calls[0]["from_time"].date() == date(2026,9,18)
     assert calls[0]["requested_at"] == NOW
 
@@ -336,7 +339,8 @@ def test_tw_continuation_binds_exact_date_and_interval():
     ("prefer_live", True, True, 1), ("cache_only", True, True, 0),
     ("prefer_live", False, True, 0), ("prefer_live", True, False, 0),
 ])
-def test_quote_only_read_allows_only_authorized_intraday_command(policy, allow_fetch, before_answer, expected):
+@pytest.mark.parametrize("reader_profile", ["quote_only", "capability_graph"])
+def test_quote_only_read_allows_only_authorized_intraday_command(policy, allow_fetch, before_answer, expected, reader_profile):
     from app.ai.ask_tool_stage import execute_tool_stages
     from app.ai.schemas import AiAskRequest
     calls = []
@@ -345,7 +349,7 @@ def test_quote_only_read_allows_only_authorized_intraday_command(policy, allow_f
         return {"tool_plan": {}, "tool_runs": [], "freshness": {"is_current": True}}
     execute_tool_stages(scope_type="stock", payload=AiAskRequest(question="2704 1分K", contract_version="omi.decision.v4",
         allow_external_fetch=allow_fetch, market_data_params={"trade_date": "2026-09-21"}),
-        resolution=None, policy={}, query_plan={"reader_profile": "quote_only",
+        resolution=None, policy={"can_external_fetch": True}, query_plan={"reader_profile": reader_profile,
             "external_refresh_allowed": False, "realtime_policy": policy,
             "selected_capabilities": ["target.identity", "intraday.bars", "data.freshness", "daily.ohlcv"]},
         freshness_result={"is_current": True},

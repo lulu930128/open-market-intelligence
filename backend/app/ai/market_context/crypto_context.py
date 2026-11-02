@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.ai.agentic_common import _json_ready, _list_rows
 from app.ai.evidence_passport import build_evidence_passport
+from app.ai.capability_resolution_registry import CapabilityReadNode
+from app.ai.read_execution import ReadExecution
 from app.ai.market_context.common import (
     append_source_ref_once as _append_source_ref_once,
     compact_market_context as _compact_market_context,
@@ -286,34 +288,46 @@ def read_crypto_context(
     missing: list[str] = []
     source_refs: list[dict[str, Any]] = []
 
-    tickers = dependencies.crypto_market_service.list_latest_crypto_tickers(
-        db,
+    # Legacy direct calls retain their original context. An explicit selection
+    # reads only its cached owners, under the shared request/SQLite deadline.
+    execution = ReadExecution(
+        db, tuple(CapabilityReadNode(name) for name in sorted(requested_capabilities)),
+        total_seconds=max(0.0, min(float((market_data_params or {}).get("read_budget_seconds", 45.0)), 45.0)),
+    ) if requested_capabilities and (market_data_params or {}).get("explicit_domain_selection") is not False else None
+
+    def read(capability_id, reader, *, default):
+        if execution is None:
+            return reader(db)
+        return execution.run(capability_id, reader, default=default)
+
+    tickers = read("quote.snapshot", lambda reader: dependencies.crypto_market_service.list_latest_crypto_tickers(
+        reader,
         provider=provider,
         symbols=requested_symbols,
         instrument_type=instrument_type,
-        limit=limit,
-    )
-    order_books = dependencies.crypto_market_service.list_latest_crypto_order_books(
-        db,
+        limit=_crypto_capability_limit(market_data_params, "quote.snapshot", default=limit),
+    ), default=[])
+    order_books = read("crypto.order_book", lambda reader: dependencies.crypto_market_service.list_latest_crypto_order_books(
+        reader,
         provider=provider,
         symbols=requested_symbols,
         instrument_type=instrument_type,
-        limit=limit,
-    )
-    ohlcv_rows = dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
-        db,
+        limit=_crypto_capability_limit(market_data_params, "crypto.order_book", default=limit),
+    ), default=[])
+    ohlcv_rows = read("legacy.ohlcv", lambda reader: dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
+        reader,
         provider=provider,
         symbols=requested_symbols,
         instrument_type=instrument_type or SPOT,
         interval=interval,
         limit=limit,
-    )
+    ), default=[])
     intraday_ohlcv_rows = ohlcv_rows if interval != "1d" else []
     daily_ohlcv_rows = ohlcv_rows if interval == "1d" else []
     if "intraday.bars" in requested_capabilities and not intraday_ohlcv_rows:
         intraday_ohlcv_rows = (
-            dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
-                db,
+            read("intraday.bars", lambda reader: dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
+                reader,
                 provider=provider,
                 symbols=requested_symbols,
                 instrument_type=instrument_type or SPOT,
@@ -323,12 +337,12 @@ def read_crypto_context(
                     "intraday.bars",
                     default=min(limit, 100),
                 ),
-            )
+            ), default=[])
         )
     if "daily.ohlcv" in requested_capabilities and not daily_ohlcv_rows:
         daily_ohlcv_rows = (
-            dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
-                db,
+            read("daily.ohlcv", lambda reader: dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
+                reader,
                 provider=provider,
                 symbols=requested_symbols,
                 instrument_type=instrument_type or SPOT,
@@ -338,87 +352,95 @@ def read_crypto_context(
                     "daily.ohlcv",
                     default=min(limit, 100),
                 ),
-            )
+            ), default=[])
         )
-    coverage = dependencies.crypto_market_service.list_crypto_ohlcv_coverage(
-        db,
+    coverage = read("legacy.coverage", lambda reader: dependencies.crypto_market_service.list_crypto_ohlcv_coverage(
+        reader,
         provider=provider,
         symbols=requested_symbols,
         instrument_type=instrument_type,
-    )
-    derivatives = dependencies.crypto_market_service.list_latest_crypto_derivatives(
-        db,
+    ), default=[])
+    derivatives = read("crypto.derivatives", lambda reader: dependencies.crypto_market_service.list_latest_crypto_derivatives(
+        reader,
         provider=provider,
         symbols=derivative_symbols or requested_symbols,
-        limit=limit,
-    )
-    market_caps = dependencies.crypto_market_service.list_latest_crypto_market_caps(db, vs_currency="usd", limit=100)
+        limit=_crypto_capability_limit(market_data_params, "crypto.derivatives", default=limit),
+    ), default=[])
+    market_caps = read("legacy.market_caps", lambda reader: dependencies.crypto_market_service.list_latest_crypto_market_caps(reader, vs_currency="usd", limit=100), default=[])
     if normalized_asset:
         market_caps = [
             row for row in market_caps if _crypto_market_cap_matches_asset(row, asset_definition)
         ]
-    spreads = dependencies.crypto_market_service.list_latest_crypto_spreads(
-        db,
+    spreads = read("legacy.spreads", lambda reader: dependencies.crypto_market_service.list_latest_crypto_spreads(
+        reader,
         base=normalized_asset,
         global_provider=provider,
         limit=limit,
-    )
-    ticker_history = dependencies.crypto_market_service.list_crypto_ticker_history(
-        db,
+    ), default=[])
+    ticker_history = read("legacy.ticker_history", lambda reader: dependencies.crypto_market_service.list_crypto_ticker_history(
+        reader,
         provider=provider,
         symbols=requested_symbols,
         instrument_type=instrument_type,
         limit=history_limit,
         ascending=False,
-    )
-    liquidity_history = dependencies.crypto_market_service.list_crypto_liquidity_history(
-        db,
+    ), default=[])
+    liquidity_history = read("legacy.liquidity_history", lambda reader: dependencies.crypto_market_service.list_crypto_liquidity_history(
+        reader,
         provider=provider,
         symbols=requested_symbols,
         instrument_type=instrument_type,
         limit=history_limit,
         ascending=False,
-    )
-    derivatives_history = dependencies.crypto_market_service.list_crypto_derivatives_history(
-        db,
+    ), default=[])
+    derivatives_history = read("legacy.derivatives_history", lambda reader: dependencies.crypto_market_service.list_crypto_derivatives_history(
+        reader,
         provider=provider,
         symbols=derivative_symbols or requested_symbols,
         instrument_type=PERPETUAL if derivative_symbols else instrument_type,
         limit=history_limit,
         ascending=False,
-    )
-    long_short_history = dependencies.crypto_market_service.list_crypto_long_short_ratio_history(
-        db,
+    ), default=[])
+    long_short_history = read("legacy.long_short_history", lambda reader: dependencies.crypto_market_service.list_crypto_long_short_ratio_history(
+        reader,
         provider=provider,
         symbols=derivative_symbols or requested_symbols,
         instrument_type=PERPETUAL if derivative_symbols else instrument_type,
         limit=history_limit,
         ascending=False,
-    )
-    liquidation_heatmap = dependencies.crypto_market_service.list_crypto_liquidation_heatmap_cells(
-        db,
+    ), default=[])
+    liquidation_heatmap = read("legacy.liquidation_heatmap", lambda reader: dependencies.crypto_market_service.list_crypto_liquidation_heatmap_cells(
+        reader,
         symbols=derivative_symbols or requested_symbols,
         instrument_type=PERPETUAL if derivative_symbols else instrument_type,
         limit=min(history_limit, 200),
         ascending=False,
-    )
+    ), default=[])
     provider_contract = dependencies.crypto_market_service.get_crypto_provider_contract()
-    source_health = dependencies.build_crypto_source_health(
-        db,
+    source_health = read("diagnostics.source_health", lambda reader: dependencies.build_crypto_source_health(
+        reader,
         provider=provider,
         base=normalized_asset,
         required_only=False,
         include_events=False,
         max_entries=min(max(limit, 20), 100),
-    )
+    ), default={})
 
-    if not tickers:
+    if execution is not None:
+        ohlcv_rows = [*intraday_ohlcv_rows, *daily_ohlcv_rows]
+    if execution is not None:
+        warnings.extend(
+            f"Crypto cached read {row['node']}: {row['status']} ({row['reason_code']})."
+            for row in execution.runs if row['status'] != 'completed'
+        )
+
+    if not tickers and (not requested_capabilities or "quote.snapshot" in requested_capabilities):
         missing.append("crypto_ticker")
-    if not order_books:
+    if not order_books and (not requested_capabilities or "crypto.order_book" in requested_capabilities):
         missing.append("crypto_order_book")
-    if not ohlcv_rows:
+    if not ohlcv_rows and (not requested_capabilities or requested_capabilities & {"intraday.bars", "daily.ohlcv"}):
         missing.append("crypto_ohlcv")
-    if normalized_asset and not market_caps and asset_definition and asset_definition.market_cap:
+    if not requested_capabilities and normalized_asset and not market_caps and asset_definition and asset_definition.market_cap:
         missing.append("crypto_market_cap")
 
     for entry in source_health.get("entries") or []:
@@ -873,4 +895,6 @@ def read_crypto_context(
         freshness=freshness_result,
         tool_runs=tool_runs,
     )
+    if execution is not None:
+        envelope["read_execution"] = execution.diagnostics()
     return envelope

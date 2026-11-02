@@ -582,7 +582,7 @@ def test_reconciliation_uses_instrument_specific_named_policy() -> None:
     assert reconciliation.absolute_difference == Decimal("0.005")
 
 
-def test_official_vs_interval_difference_is_divergence_not_mismatch() -> None:
+def test_vendor_daily_vs_interval_difference_is_divergence_not_official() -> None:
     primary = _close(price=Decimal("200"))
     secondary = _close(
         evidence_id="interval:AAPL:2026-08-31:v2",
@@ -598,7 +598,7 @@ def test_official_vs_interval_difference_is_divergence_not_mismatch() -> None:
 
     assert reconciliation.state is USCloseReconciliationState.DIVERGED
     assert reconciliation.comparison_semantics is (
-        USCloseComparisonSemantics.OFFICIAL_VS_REGULAR_INTERVAL
+        USCloseComparisonSemantics.DAILY_VS_REGULAR_INTERVAL
     )
 
 
@@ -613,7 +613,7 @@ def test_same_semantics_difference_remains_mismatch() -> None:
 
     assert reconciliation.state is USCloseReconciliationState.MISMATCHED
     assert reconciliation.comparison_semantics is (
-        USCloseComparisonSemantics.OFFICIAL_VS_OFFICIAL
+        USCloseComparisonSemantics.DAILY_VS_DAILY
     )
 
 

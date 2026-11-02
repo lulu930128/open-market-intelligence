@@ -93,7 +93,7 @@ if ($script:Calls.Count -ne $count) {throw 'EXTRA_START'}
     ("source-during-readiness", 1, 1), ("loaded-lifecycle", 0, 0),
     ("lifecycle-during-schema", 0, 0), ("wrong-pid", 0, 0),
     ("controller-replaced", 0, 0), ("no-exact-exit", 1, 0),
-    ("readiness-failed", 1, 1),
+    ("readiness-failed", 1, 1), ("unreadable-digest", 0, 0),
 ])
 def test_refusal_never_adopts_drift_or_starts_an_extra_successor(tmp_path, fault, stops, starts):
     scenario = setup_snapshot(
@@ -124,6 +124,7 @@ function New-OmiProductionOwnedBackend {
 }
 """,
         "loaded-lifecycle": "$script:DiskSource='different-launcher'\n",
+        "unreadable-digest": "function Get-OmiLifecycleSourceId {throw 'SOURCE_DIGEST_UNKNOWN'}\n",
         "lifecycle-during-schema": r"""
 $script:CheckSchema=(Get-Item Function:Assert-OmiSchemaCompatibility).ScriptBlock
 function Assert-OmiSchemaCompatibility {
@@ -148,6 +149,9 @@ if ('FAULT' -in @('schema-behind','schema-owner') -and
     $script:BeforeStopReason -ne 'RESTART_COMPATIBILITY_NOT_ATTESTED') {throw 'SCHEMA_GATE_LOST'}
 if ('FAULT' -eq 'source-during-schema' -and
     $script:BeforeStopReason -ne 'RESTART_SOURCE_CHANGED') {throw 'PIN_DRIFT_LOST'}
+if ('FAULT' -eq 'unreadable-digest' -and
+    ($script:BeforeStopReason -ne 'SOURCE_DIGEST_UNKNOWN' -or
+     $script:LastBackendRestart.State -ne 'unknown')) {throw 'UNKNOWN_DIGEST_LOST'}
 $attempts=$script:SpawnCount
 try {Invoke-OwnedBackendRestart -RequestId $id -RemoteRequest} catch {}
 if ($script:SpawnCount -ne $attempts -or
@@ -174,10 +178,11 @@ def test_successor_pin_stays_private_and_cutoff_keeps_original_owned_authority()
 
 
 @pytest.mark.parametrize("reason,next_action", [
-    ("SOURCE_ADOPTION_NOT_ATTESTED", "Explicit_Launcher_update_required"),
+    ("SOURCE_ADOPTION_NOT_ATTESTED", "Explicit_ApplyUpdate_required"),
     ("OWNER_NOT_ATTESTED", "Status_then_reconcile_retained_owner"),
     ("RESTART_COMPATIBILITY_NOT_ATTESTED", "CheckStart_then_explicit_SchemaUpgrade_or_approved_release"),
     ("RESTART_SOURCE_CHANGED", "CheckStart_then_explicit_SchemaUpgrade_or_approved_release"),
+    ("SOURCE_DIGEST_UNKNOWN", "Restore_source_readability_then_Status_no_automatic_retry"),
 ])
 def test_controller_records_pre_stop_refusal_without_claiming_stop_or_start(tmp_path, reason, next_action):
     # A private disposable receipt store; do not start a pipe or mint intent.
@@ -195,11 +200,12 @@ try {
     $type.GetField('active',$flags).SetValue($controller,$receipt.request_id)
     $controller.CompleteOwnedRestart($receipt.request_id,$null,$null,$null,'REASON',$false)
     $saved=$type.GetMethod('Read',$flags).Invoke($controller,@($receipt.request_id))
-    if ($saved.state -ne 'blocked' -or $saved.reason -ne 'REASON' -or
+    if ($saved.state -ne 'EXPECTED_STATE' -or $saved.reason -ne 'REASON' -or
         $saved.stop_outcome -ne 'NOT_ATTEMPTED' -or $saved.successor_outcome -ne 'NOT_ATTEMPTED' -or
         $saved.migration_outcome -ne 'NOT_ATTEMPTED' -or $saved.preflight_stage -ne 'BEFORE_STOP' -or
         $saved.next_action -ne 'NEXT_ACTION') {throw 'FALSE_LIFECYCLE_RECEIPT'}
 } finally {$controller.Dispose()}
 """.replace("STORE", str(tmp_path / "receipts").replace("'", "''"))
     scenario = scenario.replace("REASON", reason).replace("NEXT_ACTION", next_action)
+    scenario = scenario.replace("EXPECTED_STATE", "unknown" if reason == "SOURCE_DIGEST_UNKNOWN" else "blocked")
     assert not _run_isolated_launcher(tmp_path, scenario)["calls"]

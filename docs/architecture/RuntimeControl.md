@@ -1,5 +1,65 @@
 # OMI runtime control v1 — source contract
 
+## 手動終止 schema worker 與退出後觀察
+
+`scripts/omi-schema-worker-exit.ps1` 是一次性 operator 工具，不是另一個 manager，
+不自動啟停 Launcher、升級 DB 或重播 SchemaUpgrade。預設僅觀察；明確加 `-Execute`
+才會使用 Windows 正常權限終止指定 worker 的 retained process handle。
+
+```powershell
+.\scripts\omi-schema-worker-exit.ps1 -RequestId <原操作UUID> -OwnerId <原ownerUUID> `
+  -OwnerPid <LauncherPID> -OwnerBirth <UTC出生時間含小數秒> `
+  -WorkerPid <workerPID> -WorkerBirth <UTC出生時間含小數秒>
+# 經使用者明確授權後，才對同一組已核對身分加上 -Execute。
+.\scripts\omi-schema-worker-exit.ps1 -Fixture
+```
+
+工具沿用正式 Launcher Status、固定 repo／Python invocation，核對 PID、birth、parent、
+image、commandline、owner 與原 request。身分不符或 OS 拒權即停止，不提權、不殺 process tree。
+已退出的 PID 不再終止；僅缺席不冒稱 exact exit。強制終止後以 retained handle 確認退出，
+再走既有唯讀 `CheckStart` 讀回 current/head；revision 觀察不推定舊操作 committed／rollback，
+`migration_outcome` 保持 UNKNOWN。原 worker 的 OS handles 隨退出釋放，不手動刪 schema.lock；
+下一個正式 maintenance 仍須取得既有 writer lease。
+
+有副作用的操作觀察保存於既有 `logs/launcher/<日期>/schema-worker-exit-*.json`，明示
+`launcher_receipt=false`，不取代原 owner receipt 或授予 recovery admission。退出後用正式
+Launcher Status／ApplyUpdate inspection 確認無存活 worker，再使用原 ApplyUpdate 交接。
+此工具不提供 cooperative cancel；它是明確授權的手動強制退出及 readback 路徑。
+
+## 2026-10-30：完整換版採用目前磁碟 Source（Source）
+
+明確 `apply-omi-update.ps1` 換版與一般 Backend Restart 分開：換版不要求舊 Launcher
+支援新版本的 reconciliation／schema contract，也不將 retained application release
+當作新目標。Updater 擷取當前磁碟 lifecycle／application source，透過原 Exit event
+交接並確認原程序退出，然後以同一 ApplyUpdate request ID 啟動新 Launcher。
+`RecoveryRequestId` 僅保留舊事故關聯，不能重播原 SchemaUpgrade。
+
+原 schema worker 納入既有 process tree 觀察，worker 活著時不得 cutoff。舊 owner
+退出後仍須確認原 scoped children 全部退出；程序／權限觀察失敗直接回報，不改 ACL。
+worker exit 不推定其 transaction 成功：原 UNKNOWN receipt 保留，新 owner 使用實際
+DB revision、原 schema lock／writer lease、Alembic transaction 與 commit 後 head readback。
+新 owner 的正常 bootstrap 若因落後 DB 而失敗，完整換版才透過既有 retained failed-start
+maintenance 執行 upgrade 至動態 head，再走原 successor startup；普通啟動／Restart
+不因此取得隱性 migration 行為。沒有新增 manager、lock 或人工 approval。
+同一執行中的 ApplyUpdate intent 不再使用一般 failed-start recovery 的全機命令列
+清單作 admission；原 owner tree 交接、retained exact-exit、固定 endpoint 與上述 DB
+保護仍適用。其他 request／一般 recovery 保留原 process exclusion。Worker parent
+invocation 接受正式 `-UpdateRequestId <UUID>`，仍核對 Parent PID／creation 與 mutex owner。
+換版不強制執行完整 DB backup、restore-copy、全庫 hash／quick_check。DB 已在動態
+Alembic head 時不執行 migration；known-behind 才使用原 transaction 升級，未知 revision
+明確拒絕。Worker 回報 `COMMITTED` 或 `NOT_NEEDED / AT_HEAD`，不能將後者冒稱已執行升級。
+Migration SQL 保留有限 cooperative 預算；失敗保留 receipt，不自動重試。獨立 backup
+工具及歷史 backup／partial 保留，但不再綁為每次換版的必經步驟，也不宣稱完成全庫健康檢查。
+
+`Status.update_operation` 與既有 public ApplyUpdate receipt 分別呈現 source adoption、
+schema maintenance、Backend readiness；新 Launcher 已載入不等於 Backend ready。
+`phase/failed_phase/failure_code/error_type/migration_outcome/schema_revision_observed`
+保留實際失敗，逾時但 owner 仍執行維護時回 `UPDATE_IN_PROGRESS`，不重送操作。
+worker pending 時每兩秒發布同 owner 狀態，migration outcome 為 UNKNOWN；發布失敗
+不放棄 worker。Status 過期回 `UPDATE_OWNER_STATUS_NOT_CURRENT`，不得誤報 source drift。
+成功仍須原 owner READY、實際 HTTP ready、相符 Backend PID／birth／application release；
+Frontend readiness 獨立，不能用 Backend ready 宣稱全服務成功。
+
 ## 2026-10-26：操作／generation 恢復與 Backend 離線控制（Source）
 
 本節取代下方歷史 checkpoint 的「同 owner lifetime 只能一次 schema／failed-start recovery」限制。
@@ -13,7 +73,7 @@
 
 Schema operation 使用 CreateNew JSONL、終態 hash 及原 owner 記憶中的 worker 結果。
 純 preflight refusal 或 native STOP-not-sent／rearm 證據可重新檢查新 UUID。
-backup 等前置工作失敗時，必須同時有 retained worker exact exit、nonce-bound
+schema admission 等前置工作失敗時，必須同時有 retained worker exact exit、nonce-bound
 `FAILED / NOT_ATTEMPTED` reply、持久終態與未改寫 receipt，才能再進原 maintenance lane。
 新操作重新驗 DB/head/source、owner/process generation；不是清除布林後重跑。
 `COMMITTED` 必須有原 worker 成功 reply 才能繼續新 retained generation 的恢復。
@@ -23,7 +83,9 @@ ReadOperation 與 Plan 保持可用，要求 worker／DB／generation reconcilia
 普通 Restart 在消耗一次性 intent 後擷取當時磁碟 application release 作為 successor pin，
 不要求新版等於舊 session `ReleaseId`。舊 session 的 retained handles、PID／creation、
 loaded release 與 STOP protocol identity 保持不變；Runner 的私有 `target_release_id`
-只檢查新 target，不傳入舊 Backend 的 identity。Start-after-stop 仍使用原 session release。
+只檢查新 target，不傳入舊 Backend 的 identity。明確 Start-after-stop 在確認 retained stopped
+generation 後擷取當次磁碟 ApplicationRelease，經正式 CheckStart 才進原 retirement／factory；
+不再 pin 舊 session release。同 UUID／同 generation 的不明 factory 不可重播。
 Stop 前先驗 Launcher loaded lifecycle source／Controller／endpoint，再由固定唯讀
 `CheckStart` 檢查 configured SQLite metadata/head 與原 loaded DB binding、owner UUID、PID。
 不相容時保留舊程序，普通 Restart 不 migration。PREPARE 前後、exact stop 後、factory 與
@@ -31,9 +93,33 @@ readiness 均驗同一 target pin；source 中途變更不可重新取新 pin �
 原 180 秒 cutoff、owned exit 與 forced-stop reconciliation 保留。
 這是 hash-pinned restart，並未建立 immutable release store；不保證偵測檢查間改動後又還原的 source。
 Launcher lifecycle source 改動需另走明確 Launcher update；Backend Restart 不 hot reload owner。
+Lifecycle digest 包含 Launcher／native／runner／updater／bootstrap／maintenance helper／interpreter
+設定；application source 與 Alembic graph 分別由 application／schema digest 擁有。
+Schema source 由 CheckStart 前後擷取並 pin 到當次 operation，在 owner／factory／readiness
+邊界重驗；schema behind／binding 不合拒絕於 Stop 前，指向獨立 SchemaUpgrade，不自動 migration。
+
+`restart.available/reason/blockers` 重用 retained owner／endpoint／loaded lifecycle 檢查。
+Lifecycle drift 為 `SOURCE_ADOPTION_NOT_ATTESTED`，`update_action=ApplyUpdate`；digest
+無法讀取為 `SOURCE_DIGEST_UNKNOWN`／diagnostics source `UNKNOWN`，不回傳原始例外或路徑。
+`diagnostics.target_release_id` 是目前磁碟 target；頂層 application release 仍是 retained loaded
+session。Status 不執行 inspector；schema 未檢查為 `CHECK_REQUIRED_BEFORE_STOP`，已知 refusal
+只在同 session／target／schema digest 投影。available 是當時已知 gate 的 observation，非執行授權；
+每次動作仍重新 CheckStart。Backend HTTP 混合 bundle digest 僅供診斷，不能把 application drift
+推論成 lifecycle adoption failure；無法讀取時仍 fail-closed。
+
+Controller 的 receipt 上限不變。滿額 status 提供 `receipt_store.state=FULL`、count／capacity，
+新 mutation 為 `unknown / RECEIPT_STORE_CAPACITY_REACHED`，未 accepted、未持久化、未排入 queue，
+stop／migration／successor 皆 NOT_ATTEMPTED。原 UUID 的 receipt 仍先讀回且不重播。
+下一步是保留歷史後由 operator review retention 設計；重啟同 store 不會騰出容量，不自動刪除、
+提高上限或輪替。既有 Apply Update verifier 額外要求新 owner 的 source observation ATTESTED
+及相同 disk target；不以 restart.available 取代 readiness／generation 驗證。
+
+遠端 Apply Update 仍未曝光。若未來接線，需獨立的明確 intent、原 owner exact-stop／generation、
+single-flight／receipt、no-replay、一次 VBS 與 successor verifier 安全設計，不從 restart blocker
+自動開 shell 或 manager。本次僅 Source／fixture，正式 adoption 另行授權。
 明確 SchemaUpgrade 在 Stop 前要求 configured target 與已知 behind revision；之後仍走
-原 graceful stop → schema.lock／SQLiteWriterLease (`BEGIN IMMEDIATE`) → verified backup／
-restore-copy → Alembic transaction → successor。普通 Restart 不 migration，maintenance 不強停。
+原 graceful stop → schema.lock／SQLiteWriterLease (`BEGIN IMMEDIATE`) → Alembic transaction／
+head readback → successor。普通 Restart 不 migration，maintenance 不強停。
 
 ### 2026-10-26：OMI Search direct pipe 遠端 intent（Source）
 
@@ -57,9 +143,9 @@ mutation 的 request_id 是新 D-format UUID，expected_owner_id 必須等於 St
 | Status | 四基本欄位；request_id、expected_owner_id、token 可為空字串 | SID pipe 唯讀；Backend offline 可用 |
 | ReadOperation | 四基本欄位；request_id 為既有 UUID | 唯讀原 receipt；不重建執行權 |
 | RestartBackend | 四欄相容格式，或加 `confirmation=restart_backend` | retained running Backend；Stop 前 source／schema／binding；原 PREPARE、writer fence、180s deadline、Stop／Start |
-| StartBackend | 五欄，`confirmation=start_backend` | 原 stopped exact-exit generation；原 release pin／start gate |
+| StartBackend | 五欄，`confirmation=start_backend` | 原 stopped exact-exit generation；current disk release pin／CheckStart／start gate |
 | RecoverFailedStart | 五欄，`confirmation=recover_failed_start` | 原 failed-start receipt、retained handles、exact exits 與單次 retirement |
-| SchemaUpgrade | 五欄，`confirmation=upgrade_schema` | configured target、原 schema admission、備份、writer lease、transaction／rollback 與 successor gates |
+| SchemaUpgrade | 五欄，`confirmation=upgrade_schema` | configured target、原 schema admission、writer lease、transaction／rollback、head readback 與 successor gates |
 
 既有 OMI Search MCP `omi_restart_backend` 已在 tool 邊界要求 `confirmation=restart_backend`，
 既有四欄 pipe 省略 confirmation 只對 Restart 相容；Controller 將固定 action 正規化為同一
@@ -78,7 +164,7 @@ SchemaUpgrade 由 `Invoke-OmiConfiguredSchemaUpgrade` 呼叫固定私有 readonl
 `CheckStart --upgrade`。inspector 讀 Launcher checkout 的 configured database_url 與
 runtime_lock_dir/schema.lock，回傳經 canonical path／reparse／schema／binding 驗證的
 configured_target；不猜測路徑。原 owner 再驗 paths，呼叫 `Invoke-OwnedSchemaUpgrade` 一次，
-由現有 worker 重新驗 target、schema lock、SQLiteWriterLease、備份與 migration。
+由現有 worker 重新驗 target、schema lock、SQLiteWriterLease、migration 與 head。
 若 selector 缺失、target 不安全、DB revision／binding 不相容，收到
 `blocked / SCHEMA_CONFIGURED_TARGET_UNAVAILABLE`，migration／successor 仍為 NOT_ATTEMPTED。
 ReadOperation 提供 `next_action=Status_then_CheckStart_configured_target_diagnostics`；Status／
@@ -123,10 +209,9 @@ DB／lock target，只輸出白名單結果；source pin 包含 application、Al
 
 Backend exit 會釋放舊 lease，**不宣稱連續持有**。離線 worker 取得既有 ProcessFileLock
 `schema.lock`，並用 SQLiteWriterLease 在已初始化的 SQLAlchemy Connection 上取得
-`BEGIN IMMEDIATE`；取得前已完成的外部寫入會進入後續 backup。原 backup utility 以獨立
-readonly reader 複製／full integrity／schema snapshot／SHA-256，再驗獨立 restore-copy。
-restore-copy 永不覆蓋原 DB。Alembic `config.attributes["connection"]` 使用該 maintenance
-Connection，migration／head／integrity 檢查完成後才由 maintenance commit；SQL authorizer
+`BEGIN IMMEDIATE`；取得前已完成的外部寫入保留在原 DB。此流程不建立 DB 副本，
+也不執行全庫 hash／integrity 掃描。Alembic `config.attributes["connection"]` 使用該 maintenance
+Connection，migration／head 檢查完成後才由 maintenance commit，commit 後重新讀回 revision；SQL authorizer
 拒絕 migration 提早 COMMIT／ROLLBACK。其他 SQLite writers 在 reservation 持有期間被排除。
 
 外部 readers 可以存在；rollback journal reader 阻擋 commit 時明確失敗，不 retry。commit
@@ -141,7 +226,8 @@ operation 與 worker 分開 durable JSONL，exclusive create、sequence、reques
 - `UNKNOWN_RECONCILIATION_REQUIRED`：worker／transaction outcome 未知，保留原檔與 receipt。
 - `MIGRATED_START_UNVERIFIED`：commit 已知，但未實際呼叫 successor factory，例如 IPC reply lost。
 - `MIGRATED_START_FAILED`：commit 已知，已呼叫 successor factory，但 identity／release／readyz 未全部通過。
-- `SUCCEEDED`／`COMPLETE`：migration committed 且原 successor 的 PID／creation／release／readyz 全部驗證。
+- `START_UNVERIFIED_NO_DB_CHANGE`：worker 已驗證 at-head，沒有 migration，但 successor 尚未驗證。
+- `SUCCEEDED`／`COMPLETE`：migration committed 或已驗證 at-head，且原 successor 的 PID／creation／release／readyz 全部驗證。
 
 receipt 的唯讀觀察不授權 replay／start。stop／worker 可能已發生後失敗，保留 reconcile fence；
 純 preflight refusal 只消耗 schema request，恢復原日常 Restart admission。失敗不自動 restore、

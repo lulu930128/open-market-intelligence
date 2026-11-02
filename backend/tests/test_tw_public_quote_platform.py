@@ -578,9 +578,13 @@ def test_today_breadth_survives_two_older_provider_candidates(db: Session) -> No
     original = db.query(TaiwanStockQuoteSnapshot).one()
     values = {column.name: getattr(original, column.name)
               for column in TaiwanStockQuoteSnapshot.__table__.columns if column.name != "id"}
+    providers = set()
     for binding in TW_REALTIME_SOURCE_BINDINGS:
         if binding.descriptor.capability_id != TWSE_MIS_PUBLIC_QUOTE_DESCRIPTOR.capability_id or binding.descriptor.provider_key == "twse_mis":
             continue
+        if binding.descriptor.provider_key in providers:
+            continue
+        providers.add(binding.descriptor.provider_key)
         source = SourceRegistry(source_name=binding.source, source_type=binding.source_type,
                                 category="market_data", parser_type=binding.parser_version)
         db.add(source)

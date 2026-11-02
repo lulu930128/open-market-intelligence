@@ -869,7 +869,8 @@ def _infer_tw_price_map_screening_selection(payload: AiAskRequest, *, scope_type
     timeframe = "monthly" if any(term in question for term in ("月線", "monthly")) else "weekly" if any(term in question for term in ("週線", "weekly")) else "daily"
     parameters = {"relation": relation, "timeframe": timeframe,
                   "zone_side": "downside" if "支撐" in question and "壓力" not in question else "upside" if "壓力" in question and "支撐" not in question else "any",
-                  "lane": "indicative" if any(term in question for term in ("試撮", "試搓", "盤前", "indicative", "preopen")) else "actual"}
+                  "lane": "indicative" if any(term in question for term in ("試撮", "試搓", "盤前", "indicative", "preopen")) else
+                          "completed_daily" if any(term in question for term in ("盤後", "收盤", "completed daily", "completed-daily", "completed_daily")) else "actual"}
     limit_match = re.search(r"(?:前|top)[ ]*([0-9]{1,3})", question)
     if limit_match:
         parameters["limit"] = int(limit_match.group(1))
@@ -1251,6 +1252,9 @@ def build_query_plan(
         *selection.get("required", ()),
         *selection.get("optional", ()),
     }
+    readonly_tw_research = scope_type == "market" and target_market == "TW" and bool(selected_capability_set & {
+        "screening.swing", "screening.swing_discovery", "research.trade_setup", "research.trade_eligibility",
+    })
     if scope_type == "stock" and (
         payload.contract_version == "omi.decision.v4" or has_explicit_capability_selection
     ):
@@ -1702,7 +1706,7 @@ def build_query_plan(
         required_readers=(),
         excluded_readers=(),
         freshness_scope=(),
-        external_refresh_allowed=inferred_screening_selection is None,
+        external_refresh_allowed=inferred_screening_selection is None and not readonly_tw_research,
         requested_domains=requested_domains,
         excluded_domains=excluded_domains,
         matched_positive_terms=positive_terms,

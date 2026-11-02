@@ -18,6 +18,19 @@ def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+def snapshot_claim_skip_reason(row: TaiwanPriceMapSnapshot | None, *, input_revision: int,
+        parameter_revision: str, corporate_revision: str, basis_date: date, now: datetime) -> str | None:
+    same = row is not None and snapshot_matches(row, input_revision=input_revision,
+        parameter_revision=parameter_revision, corporate_revision=corporate_revision, basis_date=basis_date)
+    if same and row.status in {"ready", "empty", "partial"}:
+        return "current_published"
+    if row is not None and row.status == "building" and _aware(row.claimed_at) + timedelta(minutes=5) > now:
+        return "active_lease"
+    if same and row.retry_after is not None and _aware(row.retry_after) > now:
+        return "retry_not_due"
+    return None
+
+
 def claim_price_map_snapshot(db: Session, *, stock_id: str, timeframe: str, parameters: TechnicalAnalysisParameters, corporate_revision: str, basis_date: date, now: datetime) -> str | None:
     if now.tzinfo is None:
         raise ValueError("Snapshot claim requires an aware timestamp")
@@ -25,11 +38,8 @@ def claim_price_map_snapshot(db: Session, *, stock_id: str, timeframe: str, para
     revision = read_input_revisions(db, [stock_id]).get(stock_id, 0)
     row = db.get(TaiwanPriceMapSnapshot, (stock_id, timeframe))
     same = row is not None and snapshot_matches(row, input_revision=revision, parameter_revision=parameters.revision, corporate_revision=corporate_revision, basis_date=basis_date)
-    if same and row.status in {"ready", "empty", "partial"}:
-        return None
-    if row is not None and row.status == "building" and _aware(row.claimed_at) + timedelta(minutes=5) > now:
-        return None
-    if same and row.retry_after is not None and _aware(row.retry_after) > now:
+    if snapshot_claim_skip_reason(row, input_revision=revision, parameter_revision=parameters.revision,
+            corporate_revision=corporate_revision, basis_date=basis_date, now=now):
         return None
     token = uuid4().hex
     values = dict(

@@ -2,74 +2,49 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import { usTruthResponse } from "./fixtures/usMarketTruth";
 import usDistributionFixture from "./fixtures/usSectorDistribution.json";
 
-test.describe("G3 US EOD distribution", () => {
-  for (const [locale, title, emptyText] of [
-    ["zh-TW", "美股板塊與產業分布", "沒有同時具備分類"],
-    ["en-US", "US sectors & industries", "No sample has both classification"],
-    ["ja-JP", "米国セクター・業種分布", "分類と比較可能な確定日価格"],
+test.describe("US homepage without EOD distribution", () => {
+  for (const [locale, title] of [
+    ["zh-TW", "美股板塊與產業分布"],
+    ["en-US", "US sectors & industries"],
+    ["ja-JP", "米国セクター・業種分布"],
   ]) {
-    test(`${locale} sample sorting, expansion and responsive empty state`, async ({ page }, info) => {
+    test(`${locale} retains market tape and watchlist without sector reads`, async ({ page }) => {
       await page.addInitScript((language) => localStorage.setItem("omi:settings:language", language), locale);
+      await page.clock.install();
       await page.setViewportSize({ width: 390, height: 844 });
-      let empty = false;
-      await mockOmiApi(page, { apiResponder: ({ path }) => path.endsWith("/us-market/sectors") ? { body: empty
-        ? { ...usDistributionFixture, status: "unavailable", as_of: null, sectors: [], industries: [], hot_groups: [] }
-        : usDistributionFixture } : null });
-      await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
-      const panel = page.getByTestId("us-sector-distribution");
-      await expect(panel).toContainText(title);
-      await expect(panel).toContainText("2026-10-23");
-      await expect(panel).toContainText("2026-10-22");
-      await expect(panel).toContainText("GICS");
-      await expect(panel.locator("details").first()).toContainText("TECHNOLOGY");
-      await panel.locator("select").nth(1).selectOption("weak");
-      await expect(panel.locator("details").first()).toContainText("INDUSTRIALS");
-      await panel.locator("select").first().selectOption("industries");
-      await expect(panel).toContainText("AEROSPACE & DEFENSE");
-      await panel.locator("summary").first().click();
-      await expect(panel).toContainText("yahoo_chart.daily");
-      await panel.scrollIntoViewIfNeeded();
-      expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-      const screenshot = info.outputPath(`g3-${locale}-mobile.png`);
-      await panel.screenshot({ path: screenshot });
-      await info.attach(`g3-${locale}-mobile`, { path: screenshot, contentType: "image/png" });
-      empty = true;
-      await panel.getByRole("button").click();
-      await expect(panel).toContainText(emptyText);
+      const sectorRequests: string[] = [];
+      page.on("request", (request) => {
+        if (new URL(request.url()).pathname.endsWith("/us-market/sectors")) {
+          sectorRequests.push(request.url());
+        }
+      });
+      await mockOmiApi(page, {
+        usWatchlistTree: seededUsWatchlistTree(),
+        usWatchlistItems: seededUsWatchlistItems(),
+        usRankingRows: seededUsRankingRows(),
+      });
+      await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+      await expect(page.getByTestId("market-tape-us")).toBeVisible();
+      await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible();
+      await expect(page.getByTestId("us-sector-distribution")).toHaveCount(0);
+      await expect(page.getByText(title, { exact: false })).toHaveCount(0);
+
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.locator('[data-ranking-symbol="MSFT"]').click();
+      await expect(page).toHaveURL(/market=us.*symbol=MSFT/);
+      await expect(page.getByTestId("us-stock-kline-panel").getByRole("img")).toBeVisible();
+      await page.clock.fastForward(30_000);
+      await expect(page.getByTestId("us-sector-distribution")).toHaveCount(0);
+      expect(sectorRequests).toEqual([]);
+
       await page.goto("/?market=tw", { waitUntil: "domcontentloaded" });
-      await expect(panel).toHaveCount(0);
+      await expect(page.getByTestId("market-tape-tw")).toBeVisible();
+      await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+      await expect(page.getByTestId("market-tape-us")).toBeVisible();
+      await expect(page.getByTestId("us-sector-distribution")).toHaveCount(0);
+      expect(sectorRequests).toEqual([]);
     });
   }
-
-  test("manual read only, loading guard, error retry and departure", async ({ page }) => {
-    await page.clock.install();
-    let reads = 0;
-    let fail = true;
-    await mockOmiApi(page, { apiResponder: ({ path }) => {
-      if (!path.endsWith("/us-market/sectors")) return null;
-      reads += 1;
-      return fail ? { status: 503, body: { detail: "offline fixture" } }
-        : { body: usDistributionFixture, delayMs: 500 };
-    } });
-    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
-    const panel = page.getByTestId("us-sector-distribution");
-    await expect(panel.getByRole("alert")).toBeVisible();
-    const initialReads = reads;
-    await page.clock.fastForward(30_000);
-    expect(reads).toBe(initialReads);
-    fail = false;
-    await panel.getByRole("button").click();
-    await expect(panel.getByRole("button")).toBeDisabled();
-    await expect(panel).toContainText("TECHNOLOGY");
-    await expect(panel.getByRole("alert")).toHaveCount(0);
-    expect(reads).toBe(initialReads + 1);
-    await page.clock.fastForward(30_000);
-    expect(reads).toBe(initialReads + 1);
-    await page.goto("/?market=tw", { waitUntil: "domcontentloaded" });
-    await expect(panel).toHaveCount(0);
-    await page.clock.fastForward(30_000);
-    expect(reads).toBe(initialReads + 1);
-  });
 });
 
 // Shared G4 synthetic fixture: the same timing and payloads run against the

@@ -393,7 +393,7 @@ def backfill_twse_stock_day(
     source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
-    *, checkpoint=None, resume_state: dict | None = None,
+    *, checkpoint=None, resume_state: dict | None = None, timeout_seconds: float = 30,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
@@ -504,7 +504,7 @@ def backfill_twse_stock_day(
         totals_before = state.totals.copy()
 
         try:
-            response = http_get(url, headers=headers, timeout=30)
+            response = http_get(url, headers=headers, timeout=timeout_seconds)
             raw_text = response.text
             content_hash = sha256_text(raw_text)
             content_type = response.headers.get("content-type")
@@ -709,7 +709,7 @@ def backfill_tpex_trading_stock(
     source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
-    *, checkpoint=None, resume_state: dict | None = None,
+    *, checkpoint=None, resume_state: dict | None = None, timeout_seconds: float = 30,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
@@ -828,7 +828,7 @@ def backfill_tpex_trading_stock(
                     "response": "json",
                 },
                 headers=headers,
-                timeout=30,
+                timeout=timeout_seconds,
             )
             raw_text = response.text
             content_hash = sha256_text(raw_text)

@@ -1,4 +1,5 @@
-﻿param([ValidateSet(180)][int]$TimeoutSeconds = 180)
+﻿param([ValidateSet(180)][int]$TimeoutSeconds = 180, [switch]$InspectRecovery,
+    [string]$RecoveryRequestId)
 
 $ErrorActionPreference = 'Stop'
 
@@ -17,6 +18,10 @@ function Get-OmiScopedChildRole {
     $command=[string]$Row.CommandLine
     $repoPattern=[regex]::Escape($Identity.Repo)
     if($Parent.Role -eq 'launcher'){
+        if ([IO.Path]::GetFileName([string]$Row.ExecutablePath) -ieq 'python.exe' -and
+            $command -match ('(?i)\s"'+$repoPattern+'\\scripts\\omi-schema-maintenance\.py"\s+ApplyStopped\s*$')) {
+            return 'schema_worker'
+        }
         $shell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         if($Row.ExecutablePath -ine $shell -or
             $command -notmatch ('(?i)\s-File\s+"'+$repoPattern+'\\scripts\\run-service-logged\.ps1"(?:\s|$)') -or
@@ -54,7 +59,7 @@ function Get-OmiUpdateOwner {
     # The VBS's exact -File target, not a process name, port or substring match.
     $rows = @(Get-OmiCutoffSnapshot)
     $owners = @($rows | Where-Object {
-        $_.ExecutablePath -ieq $exe -and $_.CommandLine -match ('(?i)\s-File\s+"' + [regex]::Escape($entry) + '"\s*$')
+        $_.ExecutablePath -ieq $exe -and $_.CommandLine -match ('(?i)\s-File\s+"' + [regex]::Escape($entry) + '"(?:\s+-UpdateRequestId\s+[0-9a-f-]{36})?\s*$')
     })
     if ($owners.Count -ne 1) { throw 'UPDATE_EXACT_OWNER_NOT_ATTESTED' }
     $row = $owners[0]
@@ -86,6 +91,10 @@ function Get-OmiCutoffTree {
         if ($nodes.Count -gt 256) { throw 'UPDATE_TREE_LIMIT' }
         $parent = $nodes[$index]
         foreach ($row in @($Rows | Where-Object { $_.ParentProcessId -eq $parent.Pid })) {
+            if ($parent.Role -eq 'launcher' -and
+                ([string]::IsNullOrWhiteSpace($row.CommandLine) -or [string]::IsNullOrWhiteSpace($row.ExecutablePath))) {
+                throw 'UPDATE_CHILD_OBSERVATION_UNAVAILABLE'
+            }
             $role=Get-OmiScopedChildRole $row $parent $Identity
             if($null -eq $role){continue}
             if (-not $seen.Add([int]$row.ProcessId)) { throw 'UPDATE_TREE_CYCLE' }
@@ -115,6 +124,7 @@ function Stop-OmiCapturedTree {
     # termination targets. No taskkill /T expansion, PID reopen, retry or port kill.
     $nodes = @(Get-OmiCutoffTree -Identity $Identity -Rows @(Get-OmiCutoffSnapshot))
     foreach ($node in $nodes) {
+        if ($node.Role -eq 'schema_worker' -and -not $node.Process.HasExited) {throw 'UPDATE_SCHEMA_WORKER_ACTIVE'}
         if ($node.Process.Id -ne $node.Pid -or $node.Process.StartTime.ToUniversalTime() -ne $node.Created -or
             $node.Pid -eq $PID -or $node.Process.Handle -eq [IntPtr]::Zero) { throw 'UPDATE_TREE_GENERATION_MISMATCH' }
     }
@@ -147,26 +157,77 @@ function Write-OmiUpdateReceipt {
     $Receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
 }
 
+function Get-OmiUpdateFailureCode {
+    param([Exception]$Failure)
+    $code='UPDATE_OPERATION_FAILED'
+    for($depth=0;$null -ne $Failure -and $depth -lt 8;$depth++) {
+        if ($Failure -is [UnauthorizedAccessException]) {$code='UPDATE_OWNER_ACCESS_DENIED'}
+        elseif ($Failure -is [Threading.WaitHandleCannotBeOpenedException]) {$code='UPDATE_OWNER_EVENT_UNAVAILABLE'}
+        elseif ($Failure.Message -cmatch '^UPDATE_[A-Z_]+$') {$code=$Failure.Message}
+        $Failure=$Failure.InnerException
+    }
+    return $code
+}
+
+function Assert-OmiUpdateChildrenExited {
+    param($Identity)
+    $rows=@(Get-OmiCutoffSnapshot)
+    foreach ($node in $Identity.Nodes) {
+        if (-not $node.Process.HasExited) {throw 'UPDATE_TREE_EXIT_UNCONFIRMED'}
+        foreach ($row in @($rows | Where-Object {$_.ParentProcessId -eq $node.Pid -and $_.CreationDate.ToUniversalTime() -ge $node.Created})) {
+            if ([string]::IsNullOrWhiteSpace($row.CommandLine)) {throw 'UPDATE_CHILD_OBSERVATION_UNAVAILABLE'}
+            if ($null -ne (Get-OmiScopedChildRole $row $node $Identity)) {throw 'UPDATE_TREE_EXIT_UNCONFIRMED'}
+        }
+    }
+}
+
 function Read-OmiUpdateOwnerStatus {
     param([string]$PipeName, $Process)
     return ([Omi.RuntimeControl.Controller]::ReadOwnerStatus($PipeName,$Process) | ConvertFrom-Json)
 }
 
+function Get-OmiUpdateRecovery {
+    param([string]$Repo, $Identity, [string]$RequestId)
+    if ($RequestId) {$RequestId=[Guid]::ParseExact($RequestId,'D').ToString('D')}
+    # Observe the retained process tree, not an old-version capability or receipt
+    # projection. Worker absence is NOT a claim about its previous transaction.
+    $Identity.Nodes=@(Get-OmiCutoffTree -Identity $Identity -Rows @(Get-OmiCutoffSnapshot))
+    $workers=@($Identity.Nodes | Where-Object {$_.Role -eq 'schema_worker' -and -not $_.Process.HasExited})
+    return [pscustomobject]@{request_id=$RequestId;observed_at=[DateTime]::UtcNow.ToString('o');
+        owner_pid=$Identity.Pid;admission='HANDOFF_REQUIRED';reason='LATEST_SOURCE_UPDATE';
+        active_schema_workers=$workers.Count;worker_outcome='TRANSACTION_OUTCOME_UNVERIFIED';
+        next_action='ApplyUpdate_wait_for_original_processes_then_latest_source';observation_only=$true}
+}
+
 function Wait-OmiUpdateSuccessor {
-    param([string]$Repo, $OldIdentity, [string]$ExpectedLifecycle, [string]$ExpectedApplication, [int]$ObservationMilliseconds=110000)
+    param([string]$Repo, $OldIdentity, [string]$ExpectedLifecycle, [string]$ExpectedApplication,
+        [string]$RequestId, [scriptblock]$OnProgress, [int]$ObservationMilliseconds=600000)
     $sha=[Security.Cryptography.SHA256]::Create()
     try { $suffix=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Repo.ToLowerInvariant())))).Replace('-','').ToLowerInvariant().Substring(0,24) }
     finally { $sha.Dispose() }
     # Startup has its own finite observation budget; it never extends old-owner grace.
     $clock=[Diagnostics.Stopwatch]::StartNew()
     $lastError='NEW_OWNER_NOT_OBSERVED'
+    $adopted=$null
     while($clock.ElapsedMilliseconds -lt $ObservationMilliseconds){
         $next=$null
         try {
             $next=Get-OmiUpdateOwner -Repo $Repo
             if($next.Pid -eq $OldIdentity.Pid -or $next.Created -le $OldIdentity.Created){throw 'UPDATE_OLD_GENERATION'}
             $status=Read-OmiUpdateOwnerStatus "omi-runtime-$suffix" $next.Process
-            if($status.loaded_lifecycle_source_id -cne $ExpectedLifecycle -or $status.application_release_id -cne $ExpectedApplication){throw 'UPDATE_SOURCE_NOT_ADOPTED'}
+            if ($status.reason -ceq 'OWNER_NOT_ATTESTED') {throw 'UPDATE_OWNER_STATUS_NOT_CURRENT'}
+            if($status.loaded_lifecycle_source_id -cne $ExpectedLifecycle){throw 'UPDATE_SOURCE_NOT_ADOPTED'}
+            $operation=$status.update_operation
+            if ($RequestId -and ($null -eq $operation -or $operation.request_id -cne $RequestId)) {throw 'UPDATE_OPERATION_NOT_OBSERVED'}
+            $adopted=@{launcher_pid=$next.Pid;launcher_created=$next.Created.ToString('o');
+                loaded_lifecycle_source_id=$ExpectedLifecycle;application_release_id=$status.application_release_id;
+                backend_verified=$false;update_operation=$operation}
+            if ($null -ne $OnProgress) {& $OnProgress $adopted}
+            if ($null -ne $operation -and $operation.status -ceq 'failed') {return $adopted}
+            if ($null -ne $operation -and $operation.status -cne 'succeeded') {throw 'UPDATE_MAINTENANCE_IN_PROGRESS'}
+            if($status.application_release_id -cne $ExpectedApplication){throw 'UPDATE_SOURCE_NOT_ADOPTED'}
+            if($status.restart.diagnostics.source -cne 'ATTESTED' -or
+                $status.restart.diagnostics.target_release_id -cne $ExpectedApplication){throw 'UPDATE_SOURCE_NOT_ADOPTED'}
             if($status.backend.identity -cne 'PROCESS_IDENTITY' -or $status.backend.selected_host -cnotin @('127.0.0.1','::1')){throw 'UPDATE_BACKEND_UNATTESTED'}
             $hostName=if($status.backend.selected_host -eq '::1'){'[::1]'}else{'127.0.0.1'}
             $url='http://{0}:{1}/api/system/runtime-control/status' -f $hostName,[int]$status.backend.selected_port
@@ -180,12 +241,15 @@ function Wait-OmiUpdateSuccessor {
             $final=Read-OmiUpdateOwnerStatus "omi-runtime-$suffix" $next.Process
             if($ready.StatusCode -eq 200 -and -not $next.Process.HasExited -and $final.owner_id -ceq $status.owner_id -and
                 $final.backend.pid -eq $status.backend.pid -and $final.backend.created_at -ceq $status.backend.created_at -and
+                $final.restart.diagnostics.source -ceq 'ATTESTED' -and
+                $final.restart.diagnostics.target_release_id -ceq $ExpectedApplication -and
                 $final.loaded_lifecycle_source_id -ceq $ExpectedLifecycle -and $final.application_release_id -ceq $ExpectedApplication){
                 return @{launcher_pid=$next.Pid; launcher_created=$next.Created.ToString('o'); backend=$status.backend;
-                    loaded_lifecycle_source_id=$ExpectedLifecycle; application_release_id=$ExpectedApplication; http_readiness='VERIFIED'}
+                    loaded_lifecycle_source_id=$ExpectedLifecycle; application_release_id=$ExpectedApplication; http_readiness='VERIFIED';
+                    backend_verified=$true;update_operation=$operation}
             }
         } catch {
-            $lastError=$_.Exception.Message
+            $lastError=Get-OmiUpdateFailureCode -Failure $_.Exception
             # A wrong route is a contract error, not startup latency.
             if ($null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
                 throw 'UPDATE_VERIFIER_ROUTE_NOT_FOUND'
@@ -195,7 +259,8 @@ function Wait-OmiUpdateSuccessor {
         Start-Sleep -Milliseconds 500
     }
     Write-Warning "UPDATE_SUCCESSOR_UNVERIFIED: $lastError"
-    return $null
+    if ($null -ne $adopted) {$adopted.observation_error=$lastError}
+    return $adopted
 }
 
 function Read-OmiUpdateLog {
@@ -217,10 +282,13 @@ function Invoke-OmiApplyUpdate {
     param([string]$LogRoot, [scriptblock]$Launch, [int]$TimeoutSeconds = 180,
         [string]$MutexName = 'OpenMarketIntelligenceLauncher',
         [string]$ExitEventName = 'OpenMarketIntelligenceLauncherExit',
-        [scriptblock]$CaptureOwner, [scriptblock]$VerifySuccessor)
+        [scriptblock]$CaptureOwner, [scriptblock]$VerifySuccessor, [string]$RecoveryRequestId)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $receipt = [ordered]@{ request_id=[guid]::NewGuid().ToString('D'); action='ApplyUpdate';
         accepted_at=[DateTime]::UtcNow.ToString('o'); status='UNKNOWN'; old_owner_stop='UNCONFIRMED';
+        phase='CAPTURE_OWNER'; failed_phase=$null; failure_code=$null; error_type=$null;
+        prior_schema_request_id=$RecoveryRequestId; launcher_adoption='UNVERIFIED'; migration_outcome='NOT_ATTEMPTED';
+        schema_revision_observed=$null;next_action='Read_update_receipt';
         stop_kind=$null; cutoff_at=$null; graceful_deadline_seconds=$TimeoutSeconds; nodes=@();
         recovery_state='UNVERIFIED'; vbs_invocations=0; update_applied='UNVERIFIED'; services_ready='UNAVAILABLE';
         backend_readiness='UNVERIFIED'; frontend_readiness='UNVERIFIED'; error=$null }
@@ -241,6 +309,9 @@ function Invoke-OmiApplyUpdate {
         $receipt.owner_pid=$identity.Pid; $receipt.owner_created=$identity.Created.ToString('o')
         $receipt.owner_commandline=$identity.CommandLine
         $receipt.nodes=@($identity.Nodes|ForEach-Object{@{pid=$_.Pid;created_at=$_.Created.ToString('o');parent=$_.Parent;role=$_.Role}})
+        $receipt.schema_recovery=Get-OmiUpdateRecovery -Repo $identity.Repo -Identity $identity -RequestId $RecoveryRequestId
+        $receipt.phase='STOPPING_OLD_OWNER'
+        Write-OmiUpdateReceipt -LogRoot $LogRoot -Receipt $receipt
         $exitEvent = [Threading.EventWaitHandle]::OpenExisting($ExitEventName)
         $offsets=@{}; $today=(Get-Date).Date
         foreach ($day in @($today,$today.AddDays(1))) {
@@ -248,7 +319,7 @@ function Invoke-OmiApplyUpdate {
             $offsets[$path]=if(Test-Path -LiteralPath $path){(Get-Item -LiteralPath $path).Length}else{0L}
         }
         if (-not $exitEvent.Set()) { throw 'UPDATE_EXIT_SIGNAL_FAILED' }
-        Write-Host 'EXIT_REQUESTED; graceful deadline shared with exact-owner cutoff'
+        Write-Host 'EXIT_REQUESTED; waiting for original owner and schema worker exit'
         while (-not $ownsOwner -and $clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             try { $ownsOwner=$owner.WaitOne(0) }
             catch [Threading.AbandonedMutexException] { $ownsOwner=$true; $abandoned=$true }
@@ -279,24 +350,56 @@ function Invoke-OmiApplyUpdate {
             if(-not $ownsOwner){throw 'UPDATE_MUTEX_RELEASE_UNCONFIRMED'}
         }
         $receipt.status='OLD_OWNER_STOPPED'
+        Assert-OmiUpdateChildrenExited -Identity $identity
+        $receipt.phase='LOADING_LATEST_SOURCE'
         Write-OmiUpdateReceipt -LogRoot $LogRoot -Receipt $receipt
         $owner.ReleaseMutex(); $ownsOwner=$false
         $receipt.vbs_invocations=1
-        & $Launch
+        & $Launch $receipt.request_id
         $receipt.status='NEW_START_UNVERIFIED'
         if ($null -ne $VerifySuccessor) {
-            $successor = & $VerifySuccessor $identity
+            $successor = & $VerifySuccessor $identity $receipt.request_id {
+                param($observed)
+                $receipt.launcher_adoption='VERIFIED';$receipt.update_applied='LAUNCHER_VERIFIED'
+                if ($observed.update_operation) {
+                    $receipt.phase=$observed.update_operation.phase
+                    $receipt.migration_outcome=$observed.update_operation.migration_outcome
+                    $receipt.schema_revision_observed=$observed.update_operation.schema_revision_observed
+                }
+                Write-OmiUpdateReceipt -LogRoot $LogRoot -Receipt $receipt
+            }
             if ($null -ne $successor) {
-                $receipt.successor=$successor; $receipt.update_applied='LAUNCHER_AND_BACKEND_VERIFIED'
-                $receipt.backend_readiness='VERIFIED'; $receipt.services_ready='BACKEND_VERIFIED_FRONTEND_UNVERIFIED'
-                $receipt.status='UPDATE_BACKEND_READY'
+                $receipt.successor=$successor
+                $receipt.launcher_adoption='VERIFIED';$receipt.update_applied='LAUNCHER_VERIFIED'
+                if ($successor.update_operation) {
+                    $receipt.migration_outcome=$successor.update_operation.migration_outcome
+                    $receipt.schema_revision_observed=$successor.update_operation.schema_revision_observed
+                    $receipt.phase=$successor.update_operation.phase
+                    $receipt.failed_phase=$successor.update_operation.failed_phase
+                    $receipt.failure_code=$successor.update_operation.failure_code
+                    $receipt.error_type=$successor.update_operation.error_type
+                    $receipt.next_action=$successor.update_operation.next_action
+                }
+                if ($successor.backend_verified -cne $true) {
+                    $receipt.status=if ($successor.update_operation.status -ceq 'running') {'UPDATE_IN_PROGRESS'} else {'UPDATE_LAUNCHER_LOADED_BACKEND_UNAVAILABLE'}
+                    if ($successor.observation_error) {$receipt.failure_code=$successor.observation_error}
+                }
+                else {
+                    $receipt.update_applied='LAUNCHER_AND_BACKEND_VERIFIED';$receipt.phase='COMPLETE'
+                    $receipt.backend_readiness='VERIFIED'; $receipt.services_ready='BACKEND_VERIFIED_FRONTEND_UNVERIFIED'
+                    $receipt.status='UPDATE_BACKEND_READY';$receipt.next_action='Status'
+                }
             }
         }
         Write-OmiUpdateReceipt -LogRoot $LogRoot -Receipt $receipt
         return [pscustomobject]$receipt
     }
     catch {
-        $receipt.error=$_.Exception.Message
+        $receipt.error=Get-OmiUpdateFailureCode -Failure $_.Exception
+        $receipt.failed_phase=$receipt.phase;$receipt.phase='FAILED'
+        $receipt.failure_code=$receipt.error
+        $receipt.error_type=$_.Exception.GetType().Name
+        $receipt.next_action=if ($receipt.old_owner_stop -eq 'UNCONFIRMED') {'Resolve_original_owner_exit_then_ApplyUpdate'} else {'Read_new_Launcher_Status_and_update_phase'}
         $receipt.status=if($receipt.old_owner_stop -in @('CONFIRMED','FORCED_EXIT_CONFIRMED')){'UPDATE_START_UNAVAILABLE'}else{'UPDATE_STOP_UNCONFIRMED'}
         try { Write-OmiUpdateReceipt -LogRoot $LogRoot -Receipt $receipt } catch { }
         throw
@@ -325,21 +428,30 @@ if ($MyInvocation.InvocationName -ne '.') {
         Add-Type -Path @((Join-Path $PSScriptRoot 'OmiRuntimeControl.cs'), (Join-Path $PSScriptRoot 'OmiOwnedShutdown.cs')) -ReferencedAssemblies @('System.Web.Extensions','System.Core','System.Windows.Forms')
         . (Join-Path $PSScriptRoot 'omi-runtime-control.ps1')
         $script:RepoRoot=$repo
+        if ($InspectRecovery) {
+            $identity=Get-OmiUpdateOwner -Repo $repo
+            try {$result=Get-OmiUpdateRecovery -Repo $repo -Identity $identity -RequestId $RecoveryRequestId}
+            finally {foreach($node in $identity.Nodes){$node.Process.Dispose()}}
+            $result | ConvertTo-Json -Depth 4 -Compress
+            exit 0
+        }
         $expectedLifecycle=Get-OmiLifecycleSourceId
         $expectedApplication=[Omi.OwnedShutdown.ProductionSession]::ApplicationRelease($repo)
         $result = Invoke-OmiApplyUpdate -LogRoot (Join-Path $appData 'logs\launcher') `
+            -RecoveryRequestId $RecoveryRequestId `
             -TimeoutSeconds 180 -CaptureOwner { Get-OmiUpdateOwner -Repo $repo } -VerifySuccessor {
-                param($old)
-                Wait-OmiUpdateSuccessor -Repo $repo -OldIdentity $old -ExpectedLifecycle $expectedLifecycle -ExpectedApplication $expectedApplication
+                param($old,$requestId,$progress)
+                Wait-OmiUpdateSuccessor -Repo $repo -OldIdentity $old -ExpectedLifecycle $expectedLifecycle -ExpectedApplication $expectedApplication -RequestId $requestId -OnProgress $progress
             } -Launch {
-                Start-Process -FilePath $wscript -ArgumentList ('"{0}"' -f $vbs) -WindowStyle Hidden -ErrorAction Stop
+                param($requestId)
+                Start-Process -FilePath $wscript -ArgumentList ('"{0}" /UpdateRequestId:{1}' -f $vbs,$requestId) -WindowStyle Hidden -ErrorAction Stop
             }
         $result | ConvertTo-Json -Depth 8 -Compress
         if ($result.status -ne 'UPDATE_BACKEND_READY') { exit 2 }
         exit 0
     }
     catch {
-        [Console]::Error.WriteLine($_.Exception.Message)
+        [Console]::Error.WriteLine((Get-OmiUpdateFailureCode -Failure $_.Exception))
         if ($_.Exception.Message -like 'UPDATE_NO_OWNER*') { exit 3 }
         exit 2
     }

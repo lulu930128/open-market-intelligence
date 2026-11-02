@@ -413,3 +413,86 @@ def test_explicit_canary_overlap_preserves_primary_owner_and_probe(rig, monkeypa
     assert result["canary_probe_symbols"] == ["AMD"]
     assert result["eligible_counts"]["explicit"] == 1
     assert not any(result["deferred_counts"].values())
+
+
+def test_no_viewers_protects_canaries_and_drains_large_overlapping_watchlist(rig, monkeypatch):
+    for index in range(374):
+        rig.watch(f"W{index:03}")
+    rig.watch("AAPL", priority=999)
+    rig.watch("TSM", priority=999)
+    monkeypatch.setattr(settings, "scheduler_us_intraday_materializer_symbols", "AAPL,TSM")
+    first, bars = rig.cycle(0)
+    selection = first["selection"]
+    assert selection["symbols"] == ["AAPL", "W000"]
+    assert bars["selection"] == selection
+    assert selection["admission_bound_windows"]["canary"] == 2
+    assert selection["nominal_admission_bound_seconds"]["canary"] == 120
+    assert selection["universe_sweep_capacity_floor_seconds"] == 188 * 60
+    assert selection["freshness_guaranteed"] is False
+    sources = scheduler._equity_source_symbols(now=NOW)
+    state = scheduler._EquityRotation(not_before=0)
+    seen = set()
+    for _ in range(4 * 376):
+        symbols, _owners = scheduler._select_equity_batch(state, sources, 2)
+        assert symbols[0] in {"AAPL", "TSM"}
+        assert len(set(symbols)) == 2
+        seen.update(symbols)
+    assert set(sources["watchlist"]) <= seen
+    assert len(state.cursors) <= 4
+
+
+def test_real_viewer_heartbeat_expiry_reenters_canary_policy_without_quota_reset(rig, monkeypatch):
+    from app.us_market import active_equity_targets as leases
+
+    monkeypatch.setattr(leases, "_LEASES", {})
+    monkeypatch.setattr(leases, "_LEASES_LOCK", Lock())
+    monkeypatch.setattr(scheduler, "active_us_equity_viewer_symbols", leases.active_us_equity_viewer_symbols)
+    monkeypatch.setattr(settings, "scheduler_us_intraday_materializer_symbols", "AAPL,TSM")
+    rig.watch("NVDA")
+    for owner in ("panel-a", "panel-b"):
+        leases.claim_us_active_equity_viewer(symbol="AMD", owner_id=owner, now=NOW)
+    first = scheduler.collect_us_quote_snapshots(now=NOW)
+    assert first["selection"]["symbols"][0] == "AMD"
+    assert first["selection"]["eligible_counts"]["active_viewer"] == 1
+    leases.claim_us_active_equity_viewer(symbol="AMD", owner_id="panel-a", now=NOW + timedelta(seconds=30))
+    rig.clock[0] = 60
+    assert scheduler.collect_us_quote_snapshots(now=NOW + timedelta(seconds=60))["selection"]["symbols"][0] == "AMD"
+    rig.clock[0] = 119
+    assert scheduler.collect_us_quote_snapshots(now=NOW + timedelta(seconds=119))["status"] == "skipped"
+    rig.clock[0] = 120
+    expired = scheduler.collect_us_quote_snapshots(now=NOW + timedelta(seconds=120))["selection"]
+    assert expired["eligible_counts"]["active_viewer"] == 0
+    assert expired["symbols"][0] in {"AAPL", "TSM"}
+    assert expired["window_reserved_external_calls"] <= 4
+
+
+@pytest.mark.parametrize("failure", ["provider_exception", "stale_evidence"])
+def test_selection_deferral_is_distinct_from_acquisition_and_stale_postcondition(rig, monkeypatch, failure):
+    rig.viewers.append("AMD")
+    for symbol in ("NVDA", "TSM", "GOOGL"):
+        rig.watch(symbol)
+    original_refresh = rig.platform.refresh
+
+    def refresh(capability, kwargs):
+        if failure == "provider_exception":
+            raise RuntimeError("fixture provider unavailable")
+        result = original_refresh(capability, kwargs)
+        result.postcondition_satisfied = False
+        result.postcondition_reasons = ("FRESHNESS_POSTCONDITION_UNSATISFIED",)
+        return result
+
+    monkeypatch.setattr(rig.platform, "refresh", refresh)
+    result = rig.cycle(0)[0]
+    assert result["selection"]["deferred_counts"]["watchlist"] == 2
+    assert result["selection"]["window_reserved_external_calls"] == 4
+    assert len(result["results"]) == 2
+    assert result["status"] == "failed"
+    runtime = materializer.us_intraday_materializer_runtime_summary()["runs_by_lane"]["equity_active"]["quote.snapshot"]
+    assert runtime["selection"] == result["selection"]
+    if failure == "stale_evidence":
+        assert all(row["reason"] == "refresh_postcondition_unsatisfied" for row in result["results"])
+        assert all(row["postcondition_reasons"] == ["FRESHNESS_POSTCONDITION_UNSATISFIED"] for row in result["results"])
+        assert all(row["postcondition_reason_codes"] == ["FRESHNESS_POSTCONDITION_UNSATISFIED"] for row in runtime["symbol_runs"])
+    else:
+        assert all(row["reason"] == "pre_acquisition_exception" for row in result["results"])
+        assert all(row["failure_stage"] == "pre_acquisition_or_acquisition" for row in runtime["symbol_runs"])

@@ -1,7 +1,8 @@
 ﻿param(
     [ValidateSet("Run", "Activate", "Exit", "RestartServices", "RestartBackend", "Diagnose")]
     [string]$LauncherAction = "Run",
-    [ValidateRange(1, 65535)][int[]]$DiagnosticPorts = @(8400, 3000)
+    [ValidateRange(1, 65535)][int[]]$DiagnosticPorts = @(8400, 3000),
+    [string]$UpdateRequestId
 )
 
 $ErrorActionPreference = "Stop"
@@ -1678,6 +1679,13 @@ function Start-OmiBackendSuccessor {
 }
 
 function Assert-OmiFailedStartProcessExclusion {
+    param([string]$RequestId)
+    # A full update has already handed off the original owner/process tree.
+    # Its retained exact-exit, fixed endpoint and DB transaction/lock checks
+    # remain authoritative; unrelated machine command lines are not admission.
+    if ($RequestId -and $RequestId -ceq $script:UpdateRequestId -and
+        $null -ne $script:UpdateOperation -and $script:UpdateOperation.status -ceq 'running' -and
+        $script:UpdateOperation.request_id -ceq $RequestId) { return }
     # Read-only inventory; missing command lines/permissions are unknown, not empty.
     # Never open/adopt a discovered process handle or touch the Frontend tree.
     $rows = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%.exe' OR Name = 'uvicorn.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'cmd.exe'" -Property ProcessId,CommandLine -OperationTimeoutSec 3 -ErrorAction Stop)
@@ -1736,27 +1744,32 @@ function Write-OmiSchemaOperation {
 }
 
 function Get-OmiSchemaWorkerOutcome {
-    param([string]$Path, [string]$RequestId)
+    param([string]$Path, [string]$RequestId, [switch]$PassThru)
     # Diagnostic only: never grants Apply/start/replay authority.
     try {
         $info=[IO.FileInfo]::new($Path)
-        if (-not $info.Exists -or $info.Length -gt 262144) { return 'UNKNOWN' }
+        if (-not $info.Exists -or $info.Length -gt 262144) { if ($PassThru) {return $null}; return 'UNKNOWN' }
         $text=[IO.File]::ReadAllText($Path)
-        if (-not $text.EndsWith("`n")) { return 'UNKNOWN' }
+        if (-not $text.EndsWith("`n")) { if ($PassThru) {return $null}; return 'UNKNOWN' }
         $sequence=0; $last=$null
         foreach ($line in ($text.TrimEnd("`n") -split "`n")) {
             $row=$line | ConvertFrom-Json
             $sequence++
             if ($row.contract -cne 'omi.schema-apply.v1' -or $row.request_id -cne $RequestId -or
-                $row.sequence -ne $sequence -or $row.retry_allowed -isnot [bool] -or $row.retry_allowed) { return 'UNKNOWN' }
+                $row.sequence -ne $sequence -or $row.retry_allowed -isnot [bool] -or $row.retry_allowed) { if ($PassThru) {return $null}; return 'UNKNOWN' }
             $last=$row
         }
-        if ($last.migration -ceq 'COMMITTED' -and $last.phase -cin @('COMMITTED','FAILED')) { return 'COMMITTED' }
-        if ($last.phase -ceq 'FAILED' -and $last.migration -ceq 'NOT_ATTEMPTED') { return 'NOT_ATTEMPTED' }
-        if ($last.phase -ceq 'FAILED' -and $last.migration -ceq 'FAILED_TRANSACTION_REQUIRES_INSPECTION') {
-            return 'FAILED_TRANSACTION_REQUIRES_INSPECTION'
-        }
+        $outcome='UNKNOWN'
+        if ($last.migration -ceq 'COMMITTED' -and $last.phase -cin @('COMMITTED','FAILED')) { $outcome='COMMITTED' }
+        if ($last.migration -ceq 'NOT_NEEDED' -and $last.phase -ceq 'AT_HEAD' -and $last.status -ceq 'SUCCEEDED' -and
+            $last.after_revision -and $last.after_revision -ceq $last.before_revision -and
+            $last.after_revision -ceq $last.target_revision) { $outcome='NOT_NEEDED' }
+        if ($last.phase -ceq 'FAILED' -and $last.migration -ceq 'NOT_ATTEMPTED') { $outcome='NOT_ATTEMPTED' }
+        if ($last.phase -ceq 'FAILED' -and $last.migration -ceq 'FAILED_TRANSACTION_REQUIRES_INSPECTION') { $outcome='FAILED_TRANSACTION_REQUIRES_INSPECTION' }
+        if ($PassThru) { return @{outcome=$outcome;record=$last} }
+        return $outcome
     } catch { }
+    if ($PassThru) {return $null}
     return 'UNKNOWN'
 }
 
@@ -1792,7 +1805,7 @@ function Invoke-OwnedSchemaUpgrade {
         $receipt = Join-Path $directory ($RequestId + '.operation.jsonl')
         $record = [ordered]@{contract='omi.schema-operation.v1'; request_id=$RequestId;
             phase='INTENT'; status='UNKNOWN'; retry_allowed=$false; sequence=1;
-            migration_outcome='NOT_ATTEMPTED'; successor_outcome='NOT_ATTEMPTED';
+            migration_outcome='NOT_ATTEMPTED'; successor_outcome='NOT_ATTEMPTED'; worker_outcome='NOT_ATTEMPTED';
             frontend_interrupted=$false; admission=$null; stop=$null; after=$null;
             worker_receipt=(Join-Path $directory ($RequestId + '.apply.jsonl'))}
         Write-OmiSchemaOperation -Path $receipt -Record $record -Create
@@ -1808,6 +1821,11 @@ function Invoke-OwnedSchemaUpgrade {
         }
         $targetRelease = Get-OmiBackendApplicationRelease
         Assert-OmiSchemaCompatibility -ExpectedRelease $targetRelease -Upgrade -DatabasePath $DatabasePath -SchemaLockPath $SchemaLockPath
+        $observation=$script:RestartCompatibilityObservation
+        if ($null -ne $observation -and [object]::ReferenceEquals($observation.Session,$old) -and $observation.TargetRelease -ceq $targetRelease) {
+            $record.schema_revision_observed=$observation.SchemaRevision
+            $record.schema_revision_basis='CHECK_START'; $record.schema_revision_observed_at=$observation.ObservedAt
+        }
         $failedStart = [bool]$old.StartupFailure
         $schemaRelease = Get-OmiSchemaSourceRelease
         $record.admission = if ($failedStart) { 'FAILED_START_EXACT_EXIT' } else { 'RUNNING_GRACEFUL_STOP' }
@@ -1818,10 +1836,10 @@ function Invoke-OwnedSchemaUpgrade {
         Write-OmiSchemaOperation -Path $receipt -Record $record
         if ($failedStart) {
             if (-not $old.CanRecoverFailedStart) { throw 'SCHEMA_FAILED_START_NOT_ATTESTED' }
-            Assert-OmiFailedStartProcessExclusion
+            Assert-OmiFailedStartProcessExclusion -RequestId $RequestId
             $old.AdmitFailedStartSchemaMaintenance($RequestId, $targetRelease)
         } elseif ($old.CanStartAfterStop) {
-            Assert-OmiFailedStartProcessExclusion
+            Assert-OmiFailedStartProcessExclusion -RequestId $RequestId
             $old.AdmitStoppedSchemaMaintenance($RequestId,$targetRelease)
             $record.admission='RETAINED_GRACEFUL_EXIT'
         } else {
@@ -1847,7 +1865,9 @@ function Invoke-OwnedSchemaUpgrade {
                 $stop.BeforePid -ne $old.ChildPid -or $stop.BeforeCreated -cne $old.ChildCreated -or
                 -not $old.CanStartAfterStop) { throw 'SCHEMA_GRACEFUL_EXIT_REQUIRED' }
         }
+        $record.phase='POST_STOP_OWNER_CHECK'
         Assert-OmiManualBackendStartOwner
+        $record.phase='POST_STOP_RELEASE_CHECK'
         Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
         $record.phase='APPLY_STOPPED'; $record.sequence++
         $record.migration_outcome='UNKNOWN'
@@ -1857,16 +1877,52 @@ function Invoke-OwnedSchemaUpgrade {
             $script:SafeStopAttempted=$true
             $script:RestartReadyBackendSession=$null
             $script:BackendStopExpected=$true
+            $record.worker_outcome='UNCONFIRMED'
+            if ($null -ne $script:UpdateOperation -and $script:UpdateOperation.request_id -ceq $RequestId) {
+                $script:UpdateOperation.migration_outcome='UNKNOWN'
+                $script:UpdateOperation.schema_revision_observed=$record.schema_revision_observed
+            }
             $pending=$old.ApplyStoppedSchemaAsync($RequestId, $targetRelease, $schemaRelease, $DatabasePath, $SchemaLockPath,
-                (Join-Path $directory ($RequestId + '.backup.db')), $record.worker_receipt)
-            while (-not $pending.IsCompleted) { Start-Sleep -Milliseconds 25 }
+                $record.worker_receipt)
+            $statusClock=[Diagnostics.Stopwatch]::StartNew();$statusFailureLogged=$false
+            while (-not $pending.IsCompleted) {
+                if ($statusClock.ElapsedMilliseconds -ge 2000) {
+                    # Publish the retained owner while its worker runs. A status
+                    # failure must never abandon that worker or release its fence.
+                    try { Publish-OmiRuntimeControlStatus }
+                    catch {
+                        if (-not $statusFailureLogged) {
+                            try { Write-LauncherLog 'Schema maintenance status publish unavailable; retained worker still running.' 'WARN' } catch { }
+                            $statusFailureLogged=$true
+                        }
+                    }
+                    $statusClock.Restart()
+                }
+                Start-Sleep -Milliseconds 25
+            }
             $applied=$pending.GetAwaiter().GetResult()
         } finally {
-            $record.migration_outcome=Get-OmiSchemaWorkerOutcome -Path $record.worker_receipt -RequestId $RequestId
+            $worker=Get-OmiSchemaWorkerOutcome -Path $record.worker_receipt -RequestId $RequestId -PassThru
+            $record.migration_outcome=if ($null -eq $worker) {'UNKNOWN'} else {$worker.outcome}
+            $record.worker_outcome=if ($old.SchemaWorkerSettled) {'SETTLED'} else {'UNCONFIRMED'}
+            if ($null -ne $worker) {
+                $record.worker_phase=$worker.record.phase; $record.worker_failed_phase=$worker.record.failed_phase
+                $record.worker_failure_code=$worker.record.error_code; $record.worker_error_type=$worker.record.error_type
+                if ($record.migration_outcome -ceq 'COMMITTED') {
+                    $record.schema_revision_observed=$worker.record.after_revision; $record.schema_revision_basis='WORKER_COMMITTED'
+                } elseif ($record.migration_outcome -ceq 'NOT_NEEDED') {
+                    $record.schema_revision_observed=$worker.record.after_revision; $record.schema_revision_basis='WORKER_AT_HEAD'
+                } elseif ($worker.record.before_revision) {
+                    $record.schema_revision_observed=$worker.record.before_revision; $record.schema_revision_basis='WORKER_BEFORE'
+                }
+                if ($record.schema_revision_basis -in @('WORKER_BEFORE','WORKER_COMMITTED','WORKER_AT_HEAD')) {
+                    $record.schema_revision_observed_at=$worker.record.updated_at
+                }
+            }
         }
         # Receipt observation alone cannot authorize a successor after a lost
         # worker channel. Require the retained worker's validated terminal reply.
-        if (-not $applied -or $record.migration_outcome -cne 'COMMITTED') { throw 'SCHEMA_APPLY_UNCONFIRMED' }
+        if (-not $applied -or $record.migration_outcome -cnotin @('COMMITTED','NOT_NEEDED')) { throw 'SCHEMA_APPLY_UNCONFIRMED' }
         Assert-OmiManualBackendStartOwner
         Assert-OmiBackendApplicationRelease -ExpectedRelease $targetRelease
         $record.phase='STARTING_ONCE'; $record.sequence++
@@ -1874,7 +1930,7 @@ function Invoke-OwnedSchemaUpgrade {
         Write-OmiSchemaOperation -Path $receipt -Record $record
         $script:SchemaSuccessorPending=$true
         if ($failedStart) {
-            Assert-OmiFailedStartProcessExclusion
+            Assert-OmiFailedStartProcessExclusion -RequestId $RequestId
             Assert-OmiProductionBackendStartPreflight
             $script:FailedStartRecoveryAttempted=$true
             $script:RetiredBackendSessions.Add($old)
@@ -1907,11 +1963,13 @@ function Invoke-OwnedSchemaUpgrade {
                         else { 'MIGRATED_START_UNVERIFIED' }
                     }
                     'NOT_ATTEMPTED' { 'BLOCKED_NO_DB_CHANGE' }
+                    'NOT_NEEDED' { 'START_UNVERIFIED_NO_DB_CHANGE' }
                     default { 'UNKNOWN_RECONCILIATION_REQUIRED' }
                 }
-                $record.error_type=$_.Exception.GetType().Name
+                $record.error_type=[Omi.RuntimeControl.OperationDiagnostics]::ErrorType($_.Exception.GetType().Name)
+                $record.failure_code=[Omi.RuntimeControl.OperationDiagnostics]::FailureCode($_.Exception)
                 $record.next_action=if (-not $effectsPossible -or ($null -ne $old -and $old.SchemaWorkerSettled -and
-                    $record.migration_outcome -cin @('NOT_ATTEMPTED','COMMITTED'))) {
+                    $record.migration_outcome -cin @('NOT_ATTEMPTED','COMMITTED','NOT_NEEDED'))) {
                     'CheckStart_then_new_UUID_with_retained_generation'
                 } else {'ReadOperation_and_Plan_then_reconcile_worker_and_generation'}
                 Write-OmiSchemaOperation -Path $receipt -Record $record
@@ -1933,7 +1991,15 @@ function Invoke-OwnedSchemaUpgrade {
             $script:SchemaRecoveryFence=@{Path=$receipt;
                 TerminalHash=$(if ($terminalPersisted) {Get-OmiSchemaReceiptHash -Path $receipt} else {$null});
                 NoEffects=(-not $effectsPossible);WorkerSettled=($null -ne $old -and $old.SchemaWorkerSettled -and
-                    $record.migration_outcome -cin @('NOT_ATTEMPTED','COMMITTED'))}
+                    $record.migration_outcome -cin @('NOT_ATTEMPTED','COMMITTED','NOT_NEEDED'))}
+            try {
+                $script:LastRuntimeOperationDiagnostics=Get-OmiOperationDiagnostics -RequestId $RequestId
+                if ($record.phase -ceq 'FAILED') {
+                    $diagnostic=$script:LastRuntimeOperationDiagnostics
+                    Write-LauncherLog "SchemaUpgrade request=$RequestId failed_phase=$($diagnostic.failed_phase) failure_code=$($diagnostic.failure_code) error_type=$($diagnostic.error_type) worker=$($diagnostic.worker_outcome) migration=$($diagnostic.migration_outcome) successor=$($diagnostic.successor_outcome)" 'WARN'
+                }
+            }
+            catch { $script:LastRuntimeOperationDiagnostics=$null }
         }
         try {
             [System.Windows.Forms.Application]::DoEvents()
@@ -1963,7 +2029,7 @@ function Invoke-OmiConfiguredSchemaUpgrade {
         $database=Get-OmiIdentityPath -Path $target.configured_target.database_path
         $lock=Get-OmiIdentityPath -Path $target.configured_target.schema_lock_path
         if ([IO.Path]::GetFileName($lock) -cne 'schema.lock') { throw 'NO_CONFIGURED_TARGET' }
-    } catch { throw 'SCHEMA_CONFIGURED_TARGET_UNAVAILABLE' }
+    } catch { throw [InvalidOperationException]::new('SCHEMA_CONFIGURED_TARGET_UNAVAILABLE',$_.Exception) }
     Invoke-OwnedSchemaUpgrade -RequestId $RequestId -DatabasePath $database -SchemaLockPath $lock -RemoteRequest:$RemoteRequest
 }
 
@@ -1995,7 +2061,12 @@ function Invoke-BackendStartRequest {
         } else {
             if ($script:OwnedBackendRestartRequests.Contains($RequestId)) {throw 'BACKEND_START_NO_REPLAY'}
             $null=$script:OwnedBackendRestartRequests.Add($RequestId)
-            $release=$script:OwnedBackendSession.ReleaseId
+            Assert-OmiManualBackendStartOwner
+            if (-not $script:SafeStopAttempted -or -not $script:OwnedBackendSession.CanStartAfterStop -or
+                -not [object]::ReferenceEquals($script:BackendProcess, $script:OwnedBackendSession.RunnerProcess)) {
+                throw 'PREVIOUS_EXACT_STOP_NOT_ATTESTED'
+            }
+            $release=Get-OmiBackendApplicationRelease
             Assert-OmiSchemaCompatibility -ExpectedRelease $release
             $null = Start-OmiBackendAfterExactStop -ExpectedRelease $release
         }
@@ -2007,6 +2078,7 @@ function Invoke-BackendStartRequest {
         throw
     }
     finally {
+        $script:BackendStartSchemaPin = $null
         try {
             # Drain queued UI clicks while all entrypoints remain fenced, then
             # discard named events. Controller pending requests are never taken.
@@ -2117,10 +2189,10 @@ function Invoke-OwnedBackendRestart {
     }
     catch {
         if ($begun -and -not $stopDispatched) {
-            if ($_.Exception.Message -in @('RESTART_SOURCE_CHANGED', 'SOURCE_ADOPTION_NOT_ATTESTED')) {
+            if ($_.Exception.Message -in @('RESTART_SOURCE_CHANGED', 'SOURCE_ADOPTION_NOT_ATTESTED', 'SOURCE_DIGEST_UNKNOWN')) {
                 $blocker=$_.Exception.Message
             }
-            $script:LastBackendRestart.State='blocked'
+            $script:LastBackendRestart.State=if ($blocker -eq 'SOURCE_DIGEST_UNKNOWN') {'unknown'} else {'blocked'}
             $script:LastBackendRestart.Reason=$blocker
             $script:LastBackendRestart.PreflightStage='BEFORE_STOP'
         }
@@ -2129,6 +2201,7 @@ function Invoke-OwnedBackendRestart {
         throw
     }
     finally {
+        $script:BackendStartSchemaPin = $null
         try {
             if ($begun) {
                 if (-not [object]::ReferenceEquals($old, $script:OwnedBackendSession)) { $next = $script:OwnedBackendSession }
@@ -2276,6 +2349,72 @@ function Start-Frontend {
         -Arguments $frontendArguments `
         -WorkingDirectory $script:FrontendDir
     Write-LauncherLog "Frontend started pid=$($script:FrontendProcess.Id)."
+}
+
+function Invoke-OmiUpdateStartup {
+    param([Parameter(Mandatory=$true)][string]$RequestId)
+    $RequestId=[Guid]::ParseExact($RequestId,'D').ToString('D')
+    $script:UpdateOperation=[ordered]@{request_id=$RequestId;status='running';phase='SOURCE_ADOPTED';
+        failed_phase=$null;failure_code=$null;error_type=$null;target_release_id=$null;
+        migration_outcome='NOT_ATTEMPTED';schema_revision_observed=$null;schema_head=$null;backend_readiness='UNVERIFIED';
+        next_action='Wait_for_update_completion'}
+    try {
+        Initialize-ServiceEnvironment
+        if ($null -eq $script:RuntimeController) {throw 'CONTROLLER_UNAVAILABLE'}
+        $script:UpdateOperation.target_release_id=Get-OmiBackendApplicationRelease
+        Publish-OmiRuntimeControlStatus
+        $script:UpdateOperation.phase='STARTING_BACKEND'
+        try {Start-Backend}
+        catch {
+            # The normal owned bootstrap refuses an old DB before serving. Its
+            # retained failed-start generation is the existing maintenance owner;
+            # no new worker/DB manager or imported historical receipt is needed.
+            $owned=$script:OwnedBackendSession
+            if ($null -ne $owned -and $owned.StartupFailure) {$null=$owned.RefreshStartupExit()}
+            if ($null -eq $owned -or -not $owned.CanRecoverFailedStart) {throw}
+            $script:UpdateOperation.phase='SCHEMA_MAINTENANCE'
+            Publish-OmiRuntimeControlStatus
+            Invoke-OmiConfiguredSchemaUpgrade -RequestId $RequestId
+        }
+        $script:UpdateOperation.phase='VERIFYING_BACKEND'
+        $owned=$script:OwnedBackendSession
+        $pending=$owned.WaitForStartReadinessAsync(30000)
+        while (-not $pending.IsCompleted) {Start-Sleep -Milliseconds 25}
+        if (-not $pending.GetAwaiter().GetResult()) {throw 'BACKEND_START_READINESS_UNCONFIRMED'}
+        Assert-OmiManualBackendStartOwner
+        Assert-OmiSchemaCompatibility -ExpectedRelease $script:UpdateOperation.target_release_id
+        $identity=Get-OmiOwnedBackendIdentity
+        if ($null -eq $identity -or -not $owned.Alive -or $owned.Terminal -or
+            $owned.ReleaseId -cne $script:UpdateOperation.target_release_id -or
+            $identity.pid -ne $owned.ChildPid -or $identity.created_at -cne $owned.ChildCreated) {
+            throw 'BACKEND_START_IDENTITY_UNCONFIRMED'
+        }
+        $script:UpdateOperation.schema_revision_observed=$script:RestartCompatibilityObservation.SchemaRevision
+        $script:UpdateOperation.schema_head=$script:RestartCompatibilityObservation.SchemaHead
+        $script:UpdateOperation.migration_outcome='NOT_NEEDED'
+        $script:UpdateOperation.backend_readiness='VERIFIED'
+        $script:UpdateOperation.phase='COMPLETE';$script:UpdateOperation.status='succeeded'
+        $script:UpdateOperation.next_action='Status'
+        try {Start-Frontend} catch {Write-LauncherLog 'Update Backend ready; Frontend start unconfirmed.' 'WARN'}
+    } catch {
+        $script:UpdateOperation.failed_phase=$script:UpdateOperation.phase
+        $script:UpdateOperation.phase='FAILED';$script:UpdateOperation.status='failed'
+        $script:UpdateOperation.failure_code=[Omi.RuntimeControl.OperationDiagnostics]::FailureCode($_.Exception)
+        $script:UpdateOperation.error_type=[Omi.RuntimeControl.OperationDiagnostics]::ErrorType($_.Exception.GetType().Name)
+        $script:UpdateOperation.next_action='Read_update_receipt_and_Status_then_correct_failed_phase'
+    } finally {
+        $schema=$script:LastSchemaOperation
+        if ($null -ne $schema -and $schema.request_id -ceq $RequestId) {
+            $script:UpdateOperation.migration_outcome=$schema.migration_outcome
+            if ($schema.schema_revision_observed) {$script:UpdateOperation.schema_revision_observed=$schema.schema_revision_observed}
+            if ($schema.failed_phase) {$script:UpdateOperation.failed_phase=$schema.failed_phase}
+            if ($schema.worker_failure_code) {$script:UpdateOperation.failure_code=$schema.worker_failure_code}
+            elseif ($schema.failure_code) {$script:UpdateOperation.failure_code=$schema.failure_code}
+        }
+        $script:UpdateOperation.observed_at=[DateTime]::UtcNow.ToString('o')
+        Write-LauncherLog "ApplyUpdate request=$RequestId phase=$($script:UpdateOperation.phase) failed_phase=$($script:UpdateOperation.failed_phase) failure_code=$($script:UpdateOperation.failure_code) migration=$($script:UpdateOperation.migration_outcome) backend=$($script:UpdateOperation.backend_readiness)"
+        Publish-OmiRuntimeControlStatus
+    }
 }
 
 function Start-Services {
@@ -2975,6 +3114,9 @@ function Exit-Launcher {
     $script:IsShuttingDown = $true
     Write-LauncherLog "Exit requested. reason=$Reason"
     try {
+        # The single-flight guards above keep an active schema task in this
+        # owner. A terminal UNKNOWN result is retained history, not an exit veto;
+        # full update observes all original worker exits and reacquires DB locks.
         Stop-Services -Deadline $deadline
         $script:LauncherExitReady = $true
         [System.Windows.Forms.Application]::Exit()
@@ -3315,7 +3457,8 @@ $script:ActivationTimer.add_Tick({
 . (Join-Path $PSScriptRoot 'omi-runtime-control.ps1')
 . (Join-Path $PSScriptRoot 'apply-omi-update.ps1')
 Initialize-OmiRuntimeControl
-Start-Services
+if ($UpdateRequestId) {Invoke-OmiUpdateStartup -RequestId $UpdateRequestId}
+else {Start-Services}
 $script:Timer.Start()
 $script:ActivationTimer.Start()
 Write-LauncherLog "Tray recovery initialized. run_event=$($script:RunEventName) activation_event=$($script:ActivationEventName) exit_event=$($script:ExitEventName) restart_event=$($script:RestartEventName) taskbar_message=$($script:TaskbarListener.TaskbarCreatedMessage)"

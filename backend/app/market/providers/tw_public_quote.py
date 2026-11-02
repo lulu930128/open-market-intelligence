@@ -139,17 +139,16 @@ def quote_observation_from_twse_mis(
         raise ValueError("TWSE MIS canonical snapshot did not contain a quote")
     if snapshot.quote.trade_date is None or snapshot.quote.lineage.event_at is None:
         raise ValueError("TWSE MIS quote requires provider trade date and event time")
+    lineage = snapshot.quote.lineage.model_copy(update={
+        "source": TWSE_MIS_QUOTE_SOURCE_NAME,
+        "raw_contract_version": TWSE_MIS_QUOTE_PARSER_VERSION,
+        "received_at": received_at, "fetched_at": fetched_at, "content_hash": content_hash,
+    })
     return snapshot.quote.model_copy(
         update={
-            "lineage": snapshot.quote.lineage.model_copy(
-                update={
-                    "source": TWSE_MIS_QUOTE_SOURCE_NAME,
-                    "raw_contract_version": TWSE_MIS_QUOTE_PARSER_VERSION,
-                    "received_at": received_at,
-                    "fetched_at": fetched_at,
-                    "content_hash": content_hash,
-                }
-            )
+            "lineage": lineage,
+            "price_limits": (snapshot.quote.price_limits.model_copy(update={"lineage": lineage})
+                             if snapshot.quote.price_limits is not None else None),
         }
     )
 

@@ -155,3 +155,69 @@ if ($accepted -ne ADMITTED -or $session.LastStop -or -not $session.CanRecoverFai
         check = check.replace(key, "$true" if value else "$false")
     scenario = RECOVERY_CS.replace("FAULT", "").replace("EXPECTED", "$true").replace("CHECK", check)
     _run_isolated_launcher(tmp_path, scenario.replace("ROOT", str(tmp_path)).replace("JOURNAL", str(tmp_path / "journal")))
+
+
+@pytest.mark.parametrize("fault", ["none", "worker", "receipt", "generation", "request"])
+def test_post_stop_pre_worker_reconciliation_preserves_history(tmp_path, fault):
+    setup = SCHEMA_SETUP.split("$id=[Guid]::NewGuid()", 1)[0]
+    setup = setup.replace("$this.CanStartAfterStop=$true; $this.Terminal=$true; $this.Alive=$false",
+                          "$this.CanStartAfterStop=$true; $this.Terminal=$true; $this.Alive=$false\n$script:DiskSource='changed'")
+    scenario = setup + r'''
+$old | Add-Member ScriptMethod CanRecoverSchemaBeforeWorker {
+    param($request)
+    return 'FAULT' -ne 'worker' -and $request -ceq $id -and $this.CanStartAfterStop
+}
+$id=[Guid]::NewGuid().ToString('D')
+try {Invoke-OwnedSchemaUpgrade -RequestId $id -DatabasePath 'FIXTURE.db' -SchemaLockPath 'schema.lock'} catch {}
+$file=Join-Path 'STORE/schema-maintenance' ($id+'.operation.jsonl')
+$before=[IO.File]::ReadAllBytes($file)
+if ($script:LastSchemaOperation.failed_phase -ne 'POST_STOP_OWNER_CHECK' -or
+    $script:Calls.Contains('apply') -or $script:SpawnCount) {throw 'DID_NOT_REPRODUCE_PRE_WORKER_FAILURE'}
+if ('FAULT' -eq 'receipt') {[IO.File]::AppendAllText($file,'changed')}
+if ('FAULT' -eq 'generation') {$script:BackendProcess=[object]::new()}
+if ('FAULT' -eq 'request') {$script:LastSchemaOperation.request_id=[Guid]::NewGuid().ToString('D')}
+$allowed=$false
+try {Assert-OmiSchemaRecoveryAdmission;$allowed=$true}
+catch {if ($_.Exception.Message -ne 'SCHEMA_MAINTENANCE_RECONCILIATION_REQUIRED') {throw}}
+if ($allowed -ne ('FAULT' -eq 'none')) {throw 'WRONG_RECOVERY_ADMISSION'}
+$diagnostic=Get-OmiOperationDiagnostics -RequestId $id
+if ('FAULT' -eq 'none') {
+    if ($diagnostic.recovery_fence.admission -ne 'RECHECK_REQUIRED' -or
+        -not $diagnostic.recovery_fence.worker_not_dispatched -or
+        $diagnostic.recovery_fence.worker_settled -or $diagnostic.recovery_fence.no_effects -or
+        $diagnostic.recovery_fence.retained_generation -ne 'EXACT_EXIT') {throw 'FALSE_SETTLED_OR_NO_EFFECTS'}
+    if ([Convert]::ToBase64String($before) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))) {throw 'HISTORY_REWRITTEN'}
+    $latest=[Omi.RuntimeControl.OperationDiagnostics]::new();$latest.request_id=[Guid]::NewGuid().ToString('D')
+    $script:LastRuntimeOperationDiagnostics=$latest
+    $script:RuntimeController | Add-Member -Force ScriptMethod Publish {
+        param($json,$identity,$attested)
+        $snapshot=$json|ConvertFrom-Json
+        if ($snapshot.last_operation.request_id -cne $latest.request_id -or
+            $snapshot.schema_reconciliation.request_id -cne $id -or
+            -not $snapshot.schema_reconciliation.recovery_fence.worker_not_dispatched) {throw 'STATUS_RECONCILIATION_LOST_OR_REPLACED_LATEST'}
+        $script:StatusChecked=$true
+    }
+    $rt=[Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $ast.Extent.File) 'omi-runtime-control.ps1'),[ref]$null,[ref]$null)
+    $definition=$rt.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Publish-OmiRuntimeControlStatus'},$false)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    Publish-OmiRuntimeControlStatus
+    if (-not $script:StatusChecked) {throw 'STATUS_NOT_PUBLISHED'}
+    try {Invoke-OwnedSchemaUpgrade -RequestId $id -DatabasePath 'FIXTURE.db' -SchemaLockPath 'schema.lock';throw 'REPLAY'}
+    catch {if ($_.Exception.Message -ne 'SCHEMA_MAINTENANCE_NO_REPLAY') {throw}}
+    # A separately authorized fixture operation uses the existing stopped-owner
+    # maintenance path after source revalidation; it never repeats the old STOP.
+    function Publish-OmiRuntimeControlStatus {$script:Calls.Add('publish')}
+    $script:DiskSource=$script:LoadedLifecycleSourceId
+    $old | Add-Member -Force ScriptMethod AdmitStoppedSchemaMaintenance {
+        param($request,$release)
+        if (-not $this.CanRecoverSchemaBeforeWorker($id) -or $request -ceq $id) {throw 'NO_RETAINED_NO_WORKER_PROOF'}
+        $script:Calls.Add('stopped-admit')
+    }
+    Invoke-OwnedSchemaUpgrade -RequestId ([Guid]::NewGuid().ToString('D')) -DatabasePath 'FIXTURE.db' -SchemaLockPath 'schema.lock'
+    if ($script:SpawnCount -ne 1 -or $script:SchemaMaintenanceFailed -or
+        $script:LastSchemaOperation.status -ne 'SUCCEEDED' -or
+        @($script:Calls | Where-Object {$_ -eq 'graceful-stop'}).Count -ne 1 -or
+        [Convert]::ToBase64String($before) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))) {throw 'RECONCILED_FLOW_DID_NOT_RECOVER'}
+}
+'''
+    _run_isolated_launcher(tmp_path, scenario.replace("STORE", str(tmp_path)).replace("MODE", "normal").replace("FAULT", fault))

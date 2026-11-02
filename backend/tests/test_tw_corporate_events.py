@@ -773,6 +773,83 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
         self.assertTrue(all(date_to == date(2026, 9, 4) for _, _, date_to in calls))
         self.assertGreater(result["request_count"], 0)
 
+    def test_history_uses_completed_session_and_never_forecast_coverage(self) -> None:
+        import json
+        with _cache_path("history-completed-session-cutoff") as cache_path:
+            actual = self._event("twse_ex_dividend_history")
+            actual.update(start_date="2026-10-29", end_date="2026-10-29")
+            forecast = self._event("twse_ex_dividend")
+            forecast.update(start_date="2026-10-29", end_date="2026-10-29")
+            providers = {
+                key: {"fetched_at": "2026-10-29T00:00:00+00:00", "coverage_start": "2022-01-01",
+                    "coverage_end": "2026-10-29", "entries": [actual] if key == "twse_ex_dividend_history" else []}
+                for key in tw_corporate_events.HISTORY_PROVIDER_KEYS
+            }
+            providers["twse_ex_dividend"] = {"fetched_at": "2026-10-29T00:00:00+00:00",
+                "coverage_start": "2026-01-01", "coverage_end": "2026-12-31", "entries": [forecast]}
+            cache_path.write_text(json.dumps({"schema_version": 1, "providers": providers}), encoding="utf-8")
+            preimage = cache_path.read_bytes()
+            for hour, expected_ids in [(4, []), (6, [actual["event_id"]])]:
+                with self.subTest(utc_hour=hour):
+                    history = get_taiwan_stock_event_history("2330", market="TWSE",
+                        now=datetime(2026, 10, 29, hour, tzinfo=timezone.utc), cache_path=cache_path)
+                    self.assertEqual([row["event_id"] for row in history["results"]], expected_ids)
+                    self.assertEqual(history["coverage_end"], date(2026, 10, 29))
+            self.assertEqual(cache_path.read_bytes(), preimage)
+
+    def test_history_cutoff_keeps_prior_year_at_new_year_preopen(self) -> None:
+        with patch.object(tw_corporate_events, "list_taiwan_corporate_events", return_value={
+            "results": [], "sources": {}, "warning": None, "total_count": 0,
+        }) as listing:
+            get_taiwan_stock_event_history("2330", years=1, now=datetime(2027, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(listing.call_args.kwargs["date_to"], date(2026, 12, 31))
+        self.assertEqual(listing.call_args.kwargs["date_from"], date(2026, 1, 1))
+        self.assertIs(listing.call_args.kwargs["history_only"], True)
+
+    def test_history_delta_keeps_unpublished_provider_partial_and_old_years(self) -> None:
+        import json
+        calls = []
+        with _cache_path("history-authority-unpublished") as cache_path:
+            historical = self._event("twse_ex_dividend_history")
+            historical.update(start_date="2025-07-28", end_date="2025-07-28")
+            cache_path.write_text(json.dumps({"schema_version": 1, "providers": {
+                key: {"fetched_at": "2026-10-28T09:19:56+00:00", "coverage_start": "2022-01-01",
+                    "coverage_end": "2026-10-28", "coverage_years": [2022, 2023, 2024, 2025, 2026],
+                    "entries": [historical] if key == "twse_ex_dividend_history" else []}
+                for key in tw_corporate_events.HISTORY_PROVIDER_KEYS
+            }}), encoding="utf-8")
+
+            def fetch(provider_key, *, year, date_to, **kwargs):
+                calls.append((provider_key, year, date_to))
+                if provider_key == "tpex_ex_dividend_history":
+                    raise ValueError("Official completed-session publication unavailable")
+                return []  # Qualified successful empty result, not a failed response.
+
+            with patch.object(tw_corporate_events, "ProcessFileLock", _TestProcessLock):
+                result = backfill_taiwan_corporate_event_history(years=1, force=False,
+                    now=datetime(2026, 10, 30, tzinfo=timezone.utc), cache_path=cache_path, fetch_provider=fetch)
+            providers = tw_corporate_events.read_taiwan_corporate_event_cache(path=cache_path)["providers"]
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(year == 2026 and end == date(2026, 10, 29) for _, year, end in calls))
+            self.assertEqual(providers["twse_ex_dividend_history"]["coverage_end"], "2026-10-29")
+            self.assertEqual(providers["twse_ex_dividend_history"]["entries"][0]["start_date"], "2025-07-28")
+            self.assertEqual(providers["tpex_ex_dividend_history"]["coverage_end"], "2026-10-28")
+            self.assertEqual(result["results"]["tpex_ex_dividend_history"]["status"], "error")
+
+    def test_history_scheduler_defaults_to_weekday_completed_session_reconciliation(self) -> None:
+        from app.config import Settings
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+        with patch.object(scheduler.settings, "enable_tw_corporate_event_scheduler", True), \
+                patch.object(scheduler.settings, "scheduler_tw_corporate_event_history_refresh_time",
+                    Settings.model_fields["scheduler_tw_corporate_event_history_refresh_time"].default), \
+                patch.object(scheduler.settings, "scheduler_tw_corporate_event_history_refresh_day_of_week",
+                    Settings.model_fields["scheduler_tw_corporate_event_history_refresh_day_of_week"].default):
+            self.assertTrue(scheduler._add_taiwan_corporate_event_history_refresh_job(fake_scheduler))
+        kwargs = fake_scheduler.add_job.call_args.kwargs
+        self.assertEqual(kwargs["day_of_week"], "mon-fri")
+        self.assertEqual((kwargs["hour"], kwargs["minute"]), (16, 35))
+        self.assertEqual(kwargs["max_instances"], 1)
+
     def test_history_limit_returns_latest_events_after_descending_sort(self) -> None:
         with _cache_path("history-latest-first") as cache_path:
             events = []

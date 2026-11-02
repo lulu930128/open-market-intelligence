@@ -10,6 +10,7 @@
 - [Backend Architecture](BackendArchitecture.md)：dependency direction、ownership、transaction、health 與 migration 原則。
 - [Runtime Control](RuntimeControl.md)：launcher-owned 固定 runtime API、專用授權、durable receipt 與尚未解鎖的 restart gate。
 - [Execution Simulator Qualification](ExecutionSimulatorQualification.md)：獨立 SDK 檢查、LOCAL MOCK command boundary 與真實模擬環境封鎖條件。
+- [Dedicated Execution Runtime](LiveExecutionRuntime.md)：獨立 Journal／KGI session owner、typed 雙 Space 與 mutable strategy；native stdin／local pipe、正式唯讀 Session 與 detached process 已驗證，真實 Order/Deal callback、live order 與 native SL/TP protection 尚未驗收。
 - [OMI Decision Contract](OmiDecisionContract.md)：唯一 outward AI decision contract。
 - [Atlas Company News](AtlasCompanyNews.md)：OLA 個股新聞 Document 的唯讀 API 與 omi.ask 整合。
 - [Financial Date Semantics](FinancialDateSemantics.md)：財務期間與日期語意。

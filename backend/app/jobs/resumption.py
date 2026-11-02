@@ -20,6 +20,7 @@ from app.utils.owner_checkpoint import validate_owner_state
 # Exact admission policy; tests compare it with production route/submission reachability.
 # A newly added run_* function does NOT acquire replay authority.
 QUEUED_TASKS = frozenset({
+    ('app.jobs.taiwan_historical_input_repair', 'run_taiwan_historical_input_repair_job'),
     ('app.jobs.backfill_tasks', 'run_twse_daily_price_job'),
     ('app.jobs.backfill_tasks', 'run_tpex_daily_price_job'),
     ('app.jobs.backfill_tasks', 'run_market_daily_metrics_job'),

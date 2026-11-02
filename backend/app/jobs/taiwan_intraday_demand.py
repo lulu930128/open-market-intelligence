@@ -2,8 +2,9 @@
 
 SQLite admission is cross-connection safe. Dispatch/recovery still require one
 runtime owner (the application's existing interrupted-job startup policy).
-Viewer retries are command-driven: only a subsequent valid viewer heartbeat can
-dispatch a due retry. Reads never dispatch and an abandoned episode does no IO.
+Viewer acquisition retries require a subsequent valid viewer heartbeat. An
+unstarted capacity handoff can resume through the original command dispatcher
+within its unchanged deadline. Reads never dispatch or grant an IO budget.
 """
 
 from __future__ import annotations
@@ -36,12 +37,13 @@ INDEX_NAME = "uq_job_run_tw_intraday_active_demand"
 PREFIX = "tw-demand:"
 VERSION = "tw.intraday.demand.v1"
 RETRY_DELAYS = (15, 30)
+CAPACITY_RETRY_SECONDS = 15
 ORIGINS = {"viewer", "ai", "scheduler", "close_tail", "completed_session_repair", "completed_session", "operator", "front"}
 COMPLETED_BACKOFF_KEY = "tw-completed-materialization:backoff"
 RESTART_HANDOFF_KEY = "restart_unstarted_v1"
-FAILURE_STAGES = frozenset({"admission", "pre_reread", "acquisition", "persistence", "validation", "reread_resolve", "post_reread", "finalization"})
-FAILURE_TYPES = frozenset({"Exception", "TimeoutError", "ConnectionError", "JSONDecodeError", "ValueError", "TypeError", "KeyError", "RuntimeError", "OperationalError", "IntegrityError", "ValidationError"})
-FAILURE_REASONS = frozenset({"TW_INTRADAY_DEMAND_TIMEOUT", "TW_INTRADAY_DEMAND_ACQUISITION_FAILED", "CANONICAL_PERSISTENCE_REJECTED", "TW_INTRADAY_DEMAND_FAILED"})
+FAILURE_STAGES = frozenset({"admission", "dispatch", "pre_reread", "acquisition", "persistence", "validation", "reread_resolve", "post_reread", "finalization"})
+FAILURE_TYPES = frozenset({"Exception", "TimeoutError", "ConnectionError", "JSONDecodeError", "ValueError", "TypeError", "KeyError", "RuntimeError", "OperationalError", "IntegrityError", "ValidationError", "JobExecutionCapacityFull"})
+FAILURE_REASONS = frozenset({"TW_INTRADAY_DEMAND_SUBMIT_FAILED", "TW_INTRADAY_DEMAND_TIMEOUT", "TW_INTRADAY_DEMAND_ACQUISITION_FAILED", "CANONICAL_PERSISTENCE_REJECTED", "TW_INTRADAY_DEMAND_FAILED"})
 
 
 def safe_demand_failure(value: object) -> dict | None:
@@ -54,7 +56,7 @@ def safe_demand_failure(value: object) -> dict | None:
     return {
         "reason_code": value["reason_code"],
         "stage": allowed(value.get("stage"), FAILURE_STAGES),
-        "subphase": allowed(value.get("subphase"), {"parse", "provider_or_parse"}),
+        "subphase": allowed(value.get("subphase"), {"parse", "provider_or_parse", "queue_full", "submit"}),
         "error_type": allowed(value.get("error_type"), FAILURE_TYPES),
         "attempt_count": attempt if type(attempt) is int and 0 <= attempt <= 3 else None,
     }
@@ -95,23 +97,39 @@ def _valid_handoff_budget(request: dict, result: dict) -> bool:
     return True
 
 
-def _requeue_unstarted(db: Session, job: JobRun) -> None:
-    request = materialization_request(job)
-    if request is None or job.status != "running" or not _valid_handoff_budget(request, _decode(job.result_json)):
-        raise RuntimeError("TW_INTRADAY_UNSTARTED_CLAIM_CHANGED")
-    original = job.result_json
-    result = _decode(original)
-    result[RESTART_HANDOFF_KEY] = True
-    changed = db.execute(update(JobRun).where(
-        JobRun.id == job.id, JobRun.status == "running",
-        JobRun.request_json == job.request_json, JobRun.result_json == original,
-    ).values(status="queued", result_json=json.dumps(result), updated_at=_now(),
-             message="Unstarted attempt returned to original demand dispatcher."),
-        execution_options={"synchronize_session": False}).rowcount
-    db.commit()
-    if changed != 1:
-        raise RuntimeError("TW_INTRADAY_UNSTARTED_CLAIM_CHANGED")
-    db.refresh(job)
+def _requeue_unstarted(db: Session, job: JobRun, *,
+                       capacity_failure: jobs.JobExecutionCapacityFull | None = None) -> None:
+    for _ in range(5):
+        request = materialization_request(job)
+        if request is None or job.status != "running" or not _valid_handoff_budget(request, _decode(job.result_json)):
+            raise RuntimeError("TW_INTRADAY_UNSTARTED_CLAIM_CHANGED")
+        original = job.result_json
+        result = _decode(original)
+        result[RESTART_HANDOFF_KEY] = True
+        if capacity_failure is not None:
+            # Capacity refusal precedes callable submission. Preserve this
+            # episode, consumed quota and provider cooldown; only defer dispatch.
+            retry_at = _now() + timedelta(seconds=CAPACITY_RETRY_SECONDS)
+            for key in ("next_retry_at", "retry_not_before_at"):
+                if result.get(key):
+                    retry_at = max(retry_at, _aware(datetime.fromisoformat(result[key])))
+            result.update(next_retry_at=retry_at.isoformat(), reason_code="TW_INTRADAY_DEMAND_CAPACITY_WAIT")
+            result.pop("status", None)
+            _record_failure(result, reason="TW_INTRADAY_DEMAND_SUBMIT_FAILED",
+                stage="dispatch", subphase="queue_full", exc=capacity_failure)
+        changed = db.execute(update(JobRun).where(
+            JobRun.id == job.id, JobRun.status == "running",
+            JobRun.request_json == job.request_json, JobRun.result_json == original,
+        ).values(status="queued", result_json=json.dumps(result), updated_at=_now(),
+                 message="Unstarted attempt returned to original demand dispatcher."),
+            execution_options={"synchronize_session": False}).rowcount
+        db.commit()
+        db.refresh(job)
+        if changed == 1:
+            return
+        # A concurrent goal merge must not strand an unsubmitted running claim.
+        # Revalidate the same episode; never replace its request or budget.
+    raise RuntimeError("TW_INTRADAY_UNSTARTED_CLAIM_CHANGED")
 
 
 def requeue_unstarted_consumer_demand(job_id: int) -> None:
@@ -239,7 +257,8 @@ def _reuse_until(job: JobRun, request: dict) -> datetime:
 
 def _reread(db: Session, request: dict, now: datetime) -> dict:
     target = date.fromisoformat(request["trade_date"])
-    if target != taiwan_presentation_session(now)["trade_date"]:
+    completed = now >= datetime.combine(target, time(13, 30), tzinfo=TAIWAN_TZ)
+    if completed or target != taiwan_presentation_session(now)["trade_date"]:
         series = TaiwanBarService(db).read_bars(
             instrument_id=request["stock_id"], interval="1m",
             from_time=datetime.combine(target, time(9), tzinfo=TAIWAN_TZ),
@@ -248,10 +267,16 @@ def _reread(db: Session, request: dict, now: datetime) -> dict:
         )
         manifest = next((item for item in series.session_resolution if item.trade_date == target), None)
         count = sum(bar.start_at.astimezone(TAIWAN_TZ).date() == target for bar in series.bars)
-        ready = bool(manifest and count and manifest.coverage_status.value == "ready")
+        ready = bool(manifest and count and manifest.market_semantics_usable
+            and manifest.coverage_status.value == "ready")
+        buckets = tuple(item for item in series.bucket_coverage if item.expected_by_trading_policy
+            and item.bucket_start.astimezone(TAIWAN_TZ).date() == target)
         return {"reread_trade_date": target.isoformat(), "current_session_bar_count": count,
                 "reread_ready": ready, "snapshot_phase": "ready" if ready else "degraded",
                 "coverage_status": manifest.coverage_status.value if manifest else "missing",
+                "target_covered_bucket_count": sum(item.status.value in {"observed_trade", "verified_no_trade"} for item in buckets),
+                "target_expected_bucket_count": len(buckets),
+                "verified_no_trade_bucket_count": sum(item.status.value == "verified_no_trade" for item in buckets),
                 "snapshot_revision": series.identity.series_revision}
     series = TaiwanBarService(db).read_current_session_bars(
         instrument_id=request["stock_id"], interval="1m", requested_at=now,
@@ -293,9 +318,10 @@ def _reread(db: Session, request: dict, now: datetime) -> dict:
     }
 
 
-def _finish(db: Session, job: JobRun, result: dict, reason: str) -> None:
+def _finish(db: Session, job: JobRun, result: dict, reason: str, *, queued_only: bool = False) -> None:
     # Admission may strengthen a running goal. Compare the evaluated request at
     # the write boundary; a late goal must never inherit an older success.
+    statuses = ("queued",) if queued_only else ("queued", "running")
     for _ in range(5):
         expected_request = job.request_json
         result["reason_code"] = reason
@@ -303,7 +329,7 @@ def _finish(db: Session, job: JobRun, result: dict, reason: str) -> None:
         ready = bool(result.get("reread_ready"))
         result["status"] = "success" if ready else "partial" if result.get("current_session_bar_count", 0) else "failed"
         changed = db.execute(update(JobRun).where(
-            JobRun.id == job.id, JobRun.status.in_(("queued", "running")),
+            JobRun.id == job.id, JobRun.status.in_(statuses),
             JobRun.request_json == expected_request,
         ).values(status="success" if ready else "error", result_json=json.dumps(result),
                  error_message=None if ready else reason, ended_at=_now(), updated_at=_now(),
@@ -311,7 +337,7 @@ def _finish(db: Session, job: JobRun, result: dict, reason: str) -> None:
             execution_options={"synchronize_session": False}).rowcount
         db.commit()
         db.refresh(job)
-        if changed or job.status not in {"queued", "running"}:
+        if changed or job.status not in statuses:
             return
         request = materialization_request(job)
         if request is None:
@@ -330,6 +356,12 @@ def _dispatch(db: Session, job: JobRun, now: datetime) -> bool:
     # SQLite strips offsets: normalize before persistence, not after reread.
     now = _aware(now).astimezone(timezone.utc)
     result = _decode(job.result_json)
+    request = materialization_request(job)
+    if request is None:
+        return False
+    if now >= datetime.fromisoformat(request["expires_at"]):
+        _finish(db, job, result, "TW_INTRADAY_DEMAND_EXPIRED", queued_only=True)
+        return False
     next_retry = result.get("next_retry_at")
     if next_retry and now < datetime.fromisoformat(next_retry):
         return False
@@ -350,8 +382,19 @@ def _dispatch(db: Session, job: JobRun, now: datetime) -> bool:
                             else "market_background" if background else "market_interactive"))
     except jobs.JobAdmissionClosed:
         _requeue_unstarted(db, job)
-    except Exception:
-        _finish(db, job, result, "TW_INTRADAY_DEMAND_SUBMIT_FAILED")
+    except jobs.JobExecutionCapacityFull as exc:
+        _requeue_unstarted(db, job, capacity_failure=exc)
+        # A full lane must not consume the dispatch limit of independent lanes.
+        return False
+    except Exception as exc:
+        reason = "TW_INTRADAY_DEMAND_SUBMIT_FAILED"
+        # Only this exact JobService code identifies capacity rejection. Other
+        # RuntimeErrors retain their type without exposing arbitrary messages.
+        subphase = ("queue_full" if type(exc) is RuntimeError
+            and str(exc) == "MARKET_MATERIALIZATION_QUEUE_FULL" else "submit")
+        _record_failure(result, reason=reason, stage="dispatch", subphase=subphase, exc=exc)
+        jobs.logger.warning("Taiwan demand %s submit failed: %s", job.id, result["last_failure"])
+        _finish(db, job, result, reason)
     return True
 
 
@@ -463,7 +506,7 @@ def enqueue_intraday_materialization_demand(
             # The runtime owner finishes it; startup cleanup handles interruption.
             return existing, False
         if existing.status == "queued":
-            _finish(db, existing, _decode(existing.result_json), "TW_INTRADAY_DEMAND_EXPIRED")
+            _finish(db, existing, _decode(existing.result_json), "TW_INTRADAY_DEMAND_EXPIRED", queued_only=True)
     result = {
         "attempt_count": 0, "external_call_budget_used": 0,
         "external_call_count": 0, "bars_written_count": 0,
@@ -565,6 +608,8 @@ def run_consumer_demand(job_id: int) -> None:
         if result["reread_ready"]:
             _finish(db, job, result, "CANONICAL_CURRENT_SESSION_READY")
             return
+        before_coverage = {key: result.get(key) for key in (
+            "snapshot_revision", "target_covered_bucket_count", "target_expected_bucket_count")}
         if request["consumer"] in {"completed_session", "completed_session_repair"}:
             backoff = completed_lane_backoff(db)
             if backoff and now < backoff:
@@ -584,7 +629,9 @@ def run_consumer_demand(job_id: int) -> None:
             _finish(db, job, result, "TW_INTRADAY_DEMAND_EXPIRED")
             return
         deadline = monotonic() + duration
-        reason = "CURRENT_SESSION_BASELINE_NOT_READY"
+        completed = now >= datetime.combine(date.fromisoformat(request["trade_date"]), time(13, 30), tzinfo=TAIWAN_TZ)
+        reason = "COMPLETED_SESSION_COVERAGE_INCOMPLETE" if completed else "CURRENT_SESSION_BASELINE_NOT_READY"
+        acquisition_completed = False
         stage = "acquisition"
         try:
             acquired = refresh_taiwan_intraday_bars(
@@ -617,6 +664,8 @@ def run_consumer_demand(job_id: int) -> None:
                 and str(code).split(":", 1)[1].isdigit()
             ]
             acquisition = getattr(acquired, "acquisition", None)
+            acquisition_completed = (getattr(acquisition, "status", None) == "completed"
+                and acquired.persistence.committed is True)
             if (getattr(acquisition, "status", None) == "failed"
                     or "PROVIDER_REQUEST_OR_PARSE_FAILED" in getattr(acquisition, "limitations", ())):
                 result["provider_failure_count"] = result.get("provider_failure_count", 0) + 1
@@ -652,6 +701,19 @@ def run_consumer_demand(job_id: int) -> None:
         stage = "finalization"
         if result["reread_ready"]:
             _finish(db, job, result, "CANONICAL_CURRENT_SESSION_READY")
+            return
+        # A fixed completed day with an unchanged canonical revision/coverage
+        # cannot benefit from the same successful sparse acquisition 15s later.
+        # Keep it incomplete and let the original delayed repair/backoff owner
+        # reread/admit later; current-session heartbeat retry is unchanged.
+        if (completed and acquisition_completed and before_coverage["snapshot_revision"]
+                and type(before_coverage["target_covered_bucket_count"]) is int
+                and type(before_coverage["target_expected_bucket_count"]) is int
+                and before_coverage["target_expected_bucket_count"] > 0
+                and all(result.get(key) == value for key, value in before_coverage.items())
+                and reason == "COMPLETED_SESSION_COVERAGE_INCOMPLETE"):
+            result.update(completed_no_progress=True, next_action="WAIT_ORIGINAL_COMPLETED_SESSION_REPAIR")
+            _finish(db, job, result, reason)
             return
         attempt = result["attempt_count"]
         delay = RETRY_DELAYS[attempt - 1] if attempt <= len(RETRY_DELAYS) else None
@@ -699,7 +761,7 @@ def dispatch_due_materializations(db: Session, *, requested_at: datetime, limit:
         if request is None:
             continue
         if requested_at >= datetime.fromisoformat(request["expires_at"]):
-            _finish(db, job, _decode(job.result_json), "TW_INTRADAY_DEMAND_EXPIRED")
+            _finish(db, job, _decode(job.result_json), "TW_INTRADAY_DEMAND_EXPIRED", queued_only=True)
         elif is_restart_handoff(job) or request["consumer"] in {"scheduler", "close_tail", "completed_session_repair", "completed_session"}:
             dispatched += int(_dispatch(db, job, requested_at))
             if dispatched >= limit:

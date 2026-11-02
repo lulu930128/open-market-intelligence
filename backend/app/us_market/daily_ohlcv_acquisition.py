@@ -543,7 +543,13 @@ class USDailyOhlcvAcquisitionExecutor:
                         provider_timeframe=batch.provider_timeframe,
                     )
                 )
-                observations.extend(bars)
+                # Preserve the raw receipt, but do not publish provisional
+                # session candles into the completed-daily store.
+                observations.extend(bar for bar in bars if bar.finalization in {
+                    BarFinalization.FINAL, BarFinalization.CORRECTED,
+                })
+                if any(bar.finalization is BarFinalization.PROVISIONAL for bar in bars):
+                    limitations.append("US_DAILY_VENDOR_REVISION_UNVERIFIED")
                 limitations.extend(route.limitations)
                 limitations.extend(batch.limitations)
                 requirement_satisfied = _completed_daily_requirement_satisfied(

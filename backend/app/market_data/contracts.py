@@ -302,6 +302,20 @@ def _validate_positive_prices(values: dict[str, Decimal | None]) -> None:
             raise ValueError(f"{field_name} must be positive when present")
 
 
+class SessionPriceLimits(CanonicalModel):
+    """Published per-instrument session bounds; never inferred from last close."""
+    trade_date: date
+    lower: Decimal = Field(gt=0)
+    upper: Decimal = Field(gt=0)
+    lineage: SourceLineage
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.lower > self.upper:
+            raise ValueError("session price bounds are reversed")
+        return self
+
+
 class QuoteObservation(CanonicalModel):
     contract_version: str = "omi.market.quote.v1"
     instrument: InstrumentKey
@@ -326,6 +340,7 @@ class QuoteObservation(CanonicalModel):
     high_price: Decimal | None = None
     low_price: Decimal | None = None
     previous_close: Decimal | None = None
+    price_limits: SessionPriceLimits | None = None
 
     @field_validator("currency", mode="before")
     @classmethod

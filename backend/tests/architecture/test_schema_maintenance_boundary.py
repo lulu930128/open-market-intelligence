@@ -37,9 +37,11 @@ def test_maintenance_uses_lease_and_supplied_alembic_transaction():
     source = (ROOT / 'scripts/omi-schema-maintenance.py').read_text()
     apply = source.split('def apply_stopped(', 1)[1].split('\ndef apply_status', 1)[0]
     assert 'SQLiteWriterLease.acquire' in apply and 'ProcessFileLock(schema_lock_path)' in apply
-    assert apply.index('lease = SQLiteWriterLease.acquire') < apply.index('backup.backup_sqlite_database')
-    assert apply.index('restore_verified') < apply.index('run_database_migrations(connection=connection)')
+    assert apply.index('lease = SQLiteWriterLease.acquire') < apply.index('run_database_migrations(connection=connection)')
+    for forbidden in ('backup_sqlite_database', 'restore_verified', 'quick_check', '_sha256', 'BACKUP_VERIFIED'):
+        assert forbidden not in apply
     assert apply.index('run_database_migrations(connection=connection)') < apply.index('connection.commit()')
+    assert apply.index('connection.commit()') < apply.index('observed = MigrationContext.configure(connection).get_current_revision()')
     assert 'SQLITE_TRANSACTION' in apply and 'SQLITE_DENY' in apply
     env = (ROOT / 'backend/alembic/env.py').read_text()
     supplied = env.split('if supplied is not None:', 1)[1].split('connectable =', 1)[0]

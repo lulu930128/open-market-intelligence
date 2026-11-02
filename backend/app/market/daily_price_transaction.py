@@ -15,6 +15,7 @@ from sqlalchemy import inspect
 from app.db.models import (
     DataQualityCheck,
     MarketDailyPrice,
+    MarketDailyPriceRevision,
     MarketDailyPriceLineage,
     RawFetchResult,
     SourceRegistry,
@@ -255,6 +256,16 @@ class TaiwanOfficialDailyTransaction:
             )
         )
 
+    def _retain_daily_revision(self, row: MarketDailyPrice) -> None:
+        if row.raw_result_id is not None and self._db.get(
+            MarketDailyPriceRevision, (row.id, row.raw_result_id)
+        ) is None:
+            self._db.add(MarketDailyPriceRevision(**{
+                column.name: getattr(row, column.name)
+                for column in MarketDailyPrice.__table__.columns
+            }))
+            self._db.flush()
+
     def _upsert_bar(
         self,
         observation: BarObservation,
@@ -328,6 +339,9 @@ class TaiwanOfficialDailyTransaction:
             )
             self._db.add(row)
         else:
+            # Retain the actual old canonical values before changing its receipt
+            # or OHLC. A later acquisition must not rewrite historical knowledge.
+            self._retain_daily_revision(row)
             unchanged = (
                 (row.stock_name == incoming["stock_name"] or incoming["stock_name"] is None)
                 and row.trade_volume == volume
@@ -338,6 +352,10 @@ class TaiwanOfficialDailyTransaction:
                 and _decimal_equal(row.close_price, observation.close_price)
                 and row.transaction_count == observation.trade_count
                 and _decimal_equal(row.price_change, observation.price_change)
+                and all(getattr(row, key) == incoming[key] for key in (
+                    "canonical_market", "venue", "instrument_type", "authority", "finalization",
+                    "official", "release_status", "reconciliation_status", "derivation_kind", "aggregation_version",
+                ))
             )
             for key, value in incoming.items():
                 if key == "stock_name" and value is None:
@@ -353,6 +371,7 @@ class TaiwanOfficialDailyTransaction:
                 else None
             )
         self._db.flush()
+        self._retain_daily_revision(row)
         lineage = (
             self._db.query(MarketDailyPriceLineage)
             .filter(MarketDailyPriceLineage.daily_price_id == row.id)

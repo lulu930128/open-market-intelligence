@@ -1070,7 +1070,12 @@ def _iter_us_symbol_mentions(question: str) -> list[tuple[str, str, bool]]:
     for match in US_DOLLAR_SYMBOL_PATTERN.finditer(question):
         add(match.group(1), "question_dollar_symbol", True)
 
-    for match in US_PLAIN_SYMBOL_PATTERN.finditer(question):
+    # Index names are phrases, not constituent ticker tokens (S, P, DOW).
+    # Preserve offsets and explicit $/exchange mentions collected above.
+    plain_question = decision_core.US_MARKET_INDEX_PATTERN.sub(
+        lambda match: " " * len(match.group()), question,
+    )
+    for match in US_PLAIN_SYMBOL_PATTERN.finditer(plain_question):
         raw_symbol = match.group(1)
         # A requested timestamp field is not a ticker mention. Explicit $TIME
         # and exchange-qualified symbols are collected separately above.
@@ -1091,8 +1096,13 @@ def _resolve_us_stock_symbol_from_question(
 ) -> ScopeResolution | None:
     has_context = market == "us" or _question_has_us_symbol_context(question)
     candidates: list[tuple[ScopeResolution, bool]] = []
+    market_question = bool(decision_core.US_MARKET_INDEX_PATTERN.search(question)) or (
+        _contains_hint(question, MARKET_HINTS + ("廣度", "主要指數"))
+    )
 
     for symbol, source, explicit_marker in _iter_us_symbol_mentions(question):
+        if not explicit_marker and symbol in {"MISSING", "STALE", "DELAYED", "BREADTH", "MARKET"}:
+            continue
         is_known_index = us_instrument_type(symbol) == "index"
         if (
             not explicit_marker
@@ -1103,7 +1113,7 @@ def _resolve_us_stock_symbol_from_question(
             continue
 
         allow_unknown = explicit_marker or is_known_index or (
-            has_context and _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
+            has_context and not market_question and _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
         )
         resolution = _resolve_us_stock_symbol(
             db,
@@ -1125,7 +1135,7 @@ def _resolve_us_stock_symbol_from_question(
             if "-" in symbol and not re.fullmatch(r"[A-Z][A-Z0-9]*-[A-Z]", symbol):
                 continue
 
-        if explicit_marker or has_context or is_known_index:
+        if explicit_marker or has_context or is_known_index or resolution.assumption is None:
             candidates.append((resolution, explicit_marker))
 
     if not candidates:
@@ -2243,6 +2253,20 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
         if reconciled.clarification_required:
             return reconciled
 
+    # Market prose must retain its market before generic freshness/default-TW
+    # routing. Explicit and master-backed individual stock intent wins above.
+    question_market = _data_freshness_market_from_question(question)
+    index_market = bool(decision_core.US_MARKET_INDEX_PATTERN.search(question))
+    market_context = question_market or ("US" if index_market else None) or (
+        target_market or str(payload.market_data_params.get("market") or "")
+    ).upper()
+    if tw_entity_resolution is None and (
+        index_market or _contains_hint(question, MARKET_HINTS + ("廣度", "主要指數"))
+    ) and market_context in DEFAULT_MARKET_CONTEXTS:
+        return _default_market_context_resolution(
+            market_context, source="question_market", confidence="high",
+        )
+
     if (
         _contains_hint(question, FRESHNESS_HINTS)
         and decision_core.looks_like_analysis_request(question)
@@ -2375,9 +2399,9 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             "Question looks like a stock analysis request but no stock id or stock name was resolved.",
         )
 
-    if target_market:
+    if target_market or market_context in DEFAULT_MARKET_CONTEXTS:
         return _default_market_context_resolution(
-            target_market,
+            target_market or market_context,
             source="ambient_market_context",
             confidence="medium",
         )

@@ -79,6 +79,8 @@ def resolve_twse_mis_breadth_price_state(
     indicative_status: Any,
     cached_state: Mapping[str, Any] | None,
     last_trade_volume_lots: Any = None,
+    nested_trade: Any = None,
+    observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Resolve formal-trade and auction price semantics without IO or mutation."""
 
@@ -92,7 +94,9 @@ def resolve_twse_mis_breadth_price_state(
         trial_status=indicative_status,
         last_trade_price=parsed_last_trade,
         last_trade_volume_lots=_nonnegative_int(last_trade_volume_lots),
-        cumulative_volume_lots=parsed_volume,
+        cumulative_volume_lots=cumulative_volume_lots,
+        nested_trade=nested_trade,
+        observed_at=observed_at,
     )
     has_fresh_actual_trade = actual_trade["actual_trade_price_available"]
 
@@ -122,9 +126,9 @@ def resolve_twse_mis_breadth_price_state(
             cached_price_as_of = _aware_datetime(cached_state.get("price_as_of"))
 
     if has_fresh_actual_trade:
-        current_price = parsed_last_trade
-        price_as_of = snapshot_as_of
-        price_source = "z"
+        current_price = actual_trade["actual_trade_price"]
+        price_as_of = actual_trade["actual_trade_price_as_of"]
+        price_source = "trade.z" if actual_trade["actual_trade_price_source"] == "twse_mis_nested_trade_z" else "z"
         has_actual_trade = True
         cache_update = {
             "trade_date": trade_date,
