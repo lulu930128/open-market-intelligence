@@ -1,6 +1,33 @@
 # OMI 統一決策出口
 
 狀態：`omi.decision.v4` 是唯一 public request/response contract。
+V4 的 raw `result.data` 僅供 readiness／capability projection 唯讀；先完成選取與既有品質摘要，
+再隔離投影結果。未選取的完整歷史不為輸出重複複製。Metadata、selected evidence 與 provider
+acquisition contract 仍保持 caller isolation；HTTP／SSE／MCP 的值、限制與 budget 語意不變。
+技術分析的 raw price levels 與分析摘要共用 sufficiency gate；未通過時只保留行情／
+指標事實，不得由固定百分比補出 ATR、進場或停損價。US 技術摘要使用 selected canonical
+evidence 與已解析的 facts/decision usability，文字呈現不提升決策資格；自然語句突破問題
+選取目標市場既有能力，明確要求不支援的 capability 仍回 unsupported。
+
+TW 若已取得 selected 技術事實但原答案僅是 context_status_summary，也使用相同 factual composer 讀取 daily.completed 的 MA／RSI／MACD／ATR／KD／量能；不把 current_partial 當日線收盤，保留原始價格未還原權息限制。既有完整 TW 研究答案與 auction 答案不被這個 fallback 覆蓋。
+
+Technical capability 的 row limit 不再遞迴裁切品質原因、警告、公司行動、來源或各週期資格。
+TW AI projection 沿用 Market workspace 的精確 day-state 分組，保留所有語意群組、總筆數、
+日期上下界及非日期限制；日期邊界不宣稱連續。quality_projection 指明 canonical technical
+series 明細入口，後續讀取須匹配 instrument／interval／history range 並核對 revision。
+完整 canonical input_quality 與 workspace full projection 不變；summary 也保留每個 timeframe
+的 decision_usable、input_quality 與 corporate_action。若必要品質資訊仍超過 byte budget，
+沿用明確拒絕回應，不可截掉原因後宣稱 required_payload_preserved。
+
+Selected freshness 的 availability 與 freshness 分開：只有 stale 的既存 observation 不可
+因 readiness blocked 被重新標成 missing。保留 owner 的 selected event time，stale／delayed
+與 decision gate 仍由原 canonical status pipeline 判斷，不因有時間戳而升格。
+
+US market distribution payload 升為 v2：尚未物化快照的 counts 為 null，與已計算的
+零值區分。HTTP、MCP 與前端同步接受此限制；v4 envelope 不變。舊 v1 checkpoint 僅由
+原 reader 接受，在記憶體投影為 v2；producer 下次物化後消除該 checkpoint 的相容需求。
+Frontend 在此次部署過渡期可讀 v1/v2，下一次 consumer migration 可移除 v1 接受分支。
+
 `omi.decision.v3` 與 `omi.ai.ask.v2` 只保留在 backend 私有 builder 與測試
 seam，不再由 HTTP、SSE、MCP 或 OpenAPI 接受/宣告。
 
@@ -23,6 +50,17 @@ US 指定歷史日期的 `quote.snapshot` 與 `intraday.bars` 可同時選取：
 US historical intraday 的 `fill_state` 由 capability contract 依 canonical coverage、completed-session eligibility 與 resolution registry 建立。Fill partition 與 refresh reconciliation 共用此滿足條件；`latest_completed_session` 不代表分鐘資料完整。Quality projection 保留 historical fill requirement，且不得抬高來源的 `decision_usable=false`。Historical continuation 保留並綁定 trade_date、session_scope 與 interval；cache-only 可展示補洞動作，但不執行 provider I/O。完整歷史資料可 satisfied，同時仍維持非即時與非交易決策證據。
 
 TW Base-1m 亦由 market owner 判定 completed-session repair eligibility，透過同一 capability manifest／fill plan 提供指定日期的有界補資料。`series_coverage` 保留 canonical 缺口與 snapshot 狀態；TW continuation 綁定 trade_date 與 intraday_interval。Quote-only reader 的禁止外部 IO 不阻止明示授權的 intraday materialization command，但 command 不擴張至其他資料域；cache-only 不 dispatch。`require_live` 不能用 completed-session repair 滿足，稀疏分鐘資料不得因 acquisition 成功改標完整。
+
+台股指數的 `technical.indicators` 與個股共用 capability／v4 projection。Index context
+直接投影 TaiwanChartService 同一 bundle 的 technical 結果，沿用 calculation window、
+參數、warmup、input quality、revision 與 lineage，不另算 RSI／MACD。Completed cut
+由 Technical owner 的 decision_bar_count 決定；當日日線及形成中的週／月線分列
+current_partial，維持 decision_usable=false。指數價格單位是 index_points；缺值仍為 null。
+明確的指數技術指標／日 K 問句依使用者詢問展開 selection，不將一般指數概況的
+market.breadth 預設要求混入；明示廣度與 caller selection 仍維持原要求。
+共用 response budget 的 technical point 摘要仍保留 completed／partial 標籤、
+decision denial、price／volume applicability、observation revision 與限制；
+不能只留下形成中數字而刪除其不可用於決策的資格。
 
 ## 架構原則
 

@@ -11,6 +11,7 @@ from app.ai.market_context.common import append_source_ref_once as _append_sourc
 from app.ai.market_context.taiwan_bar_projection import (
     project_taiwan_bar_series,
     project_taiwan_chart_bundle,
+    project_taiwan_index_indicators,
 )
 from app.ai.market_context.taiwan_projection import (
     _build_tw_index_compact_evidence,
@@ -63,6 +64,7 @@ def read_tw_index_context(
         "Taiwan index context uses market index evidence, not stock_master or individual stock daily tables.",
     ]
     charts: dict[str, Any] = {}
+    chart_bundles: dict[str, Any] = {}
     technical_reports: dict[str, Any] = {}
     chart_bars = _bounded_int_param(
         market_data_params,
@@ -90,6 +92,7 @@ def read_tw_index_context(
             continue
 
         chart = project_taiwan_chart_bundle(bundle)
+        chart_bundles[timeframe] = bundle
         serialized = _serialized_chart(chart)
         charts[timeframe] = serialized
         points = list(bundle.technical.points)
@@ -261,6 +264,9 @@ def read_tw_index_context(
             "market_chip": market_chip,
             "contributions": contributions,
             "technical_reports": technical_reports,
+            "technical_indicators": project_taiwan_index_indicators(
+                chart_bundles, index_id=normalized_index_id,
+            ),
             "analysis": technical_analysis,
             "compact": _build_tw_index_compact_evidence(
                 index_id=normalized_index_id,

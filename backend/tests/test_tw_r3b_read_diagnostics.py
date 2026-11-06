@@ -117,7 +117,7 @@ def test_public_v4_basic_diagnostics_keep_numeric_fields_and_quality(db, depende
     from app.ai.schemas import AiAskRequest
     from app.ai.capability_resolution_registry import TW_STOCK_READ_NODES
     from app.db.models import StockMaster
-    assert TW_STOCK_READ_NODES['technical_evidence'].timeout_seconds == 15
+    assert TW_STOCK_READ_NODES['technical_evidence'].timeout_seconds > 0
     StockMaster.__table__.create(db.get_bind())
     db.add(StockMaster(stock_id='2328', stock_name='fixture', market='TWSE', instrument_type='stock'))
     db.commit()

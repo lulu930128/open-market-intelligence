@@ -15,6 +15,7 @@ from app.db.models import (
     ShareholdingDistributionWeekly,
 )
 from app.market.trading_calendar import (
+    TAIWAN_SESSION_CLOSE_TIME,
     TAIWAN_TZ,
     latest_released_trading_day,
     previous_taiwan_trading_day,
@@ -22,6 +23,16 @@ from app.market.trading_calendar import (
 
 
 TAIWAN_DAILY_PRICE_RELEASE_TIME = time(hour=15, minute=15)
+# First verified free RWD regular-only receipt: 2026-11-03 14:30 Asia/Taipei.
+# This opens an acquisition opportunity, never official-final qualification.
+TAIWAN_DAILY_REGULAR_RESEARCH_TIME = time(hour=14, minute=30)
+TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE = "regular_research"
+TAIWAN_DAILY_REGULAR_SCOPE = "official_regular_session"
+TAIWAN_DAILY_REGULAR_LIMITATIONS = (
+    "TW_DAILY_REGULAR_SESSION_RESEARCH_ONLY",
+    "OFFICIAL_FINAL_PENDING",
+    "REGULAR_VOLUME_EXCLUDES_ODD_LOT_AND_AFTER_HOURS",
+)
 TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME = time(hour=20, minute=0)
 TAIWAN_MARGIN_TRADE_RELEASE_TIME = time(hour=21, minute=0)
 TAIWAN_BROKER_BRANCH_RELEASE_TIME = time(hour=16, minute=0)
@@ -107,9 +118,10 @@ def expected_daily_price_date(
     *,
     include_today: bool | None = None,
     now: datetime | None = None,
+    allow_early_regular: bool = False,
 ) -> date:
     return latest_released_trading_day(
-        release_time=TAIWAN_DAILY_PRICE_RELEASE_TIME,
+        release_time=TAIWAN_DAILY_REGULAR_RESEARCH_TIME if allow_early_regular else TAIWAN_DAILY_PRICE_RELEASE_TIME,
         include_today=include_today,
         now=now,
     )
@@ -123,6 +135,20 @@ def taiwan_daily_price_release_at(trade_date: date) -> datetime:
         TAIWAN_DAILY_PRICE_RELEASE_TIME,
         tzinfo=TAIWAN_TZ,
     )
+
+
+def taiwan_published_breadth_observation_at(trade_date: date) -> datetime:
+    """Open aggregate observation after close, without asserting publication."""
+    return datetime.combine(trade_date, TAIWAN_SESSION_CLOSE_TIME, tzinfo=TAIWAN_TZ)
+
+
+def taiwan_daily_regular_research_at(trade_date: date) -> datetime:
+    return datetime.combine(trade_date, TAIWAN_DAILY_REGULAR_RESEARCH_TIME, tzinfo=TAIWAN_TZ)
+
+
+def expected_daily_research_date(*, now: datetime | None = None) -> date:
+    """Latest possible regular snapshot date; actual receipt qualification is required."""
+    return expected_daily_price_date(now=now, allow_early_regular=True)
 
 
 def expected_institutional_trade_date(

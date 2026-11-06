@@ -87,7 +87,9 @@ def test_acquisition_persistence_cache_read_and_temporal_gates(db):
     raw = db.query(RawFetchResult).one()
     raw.fetched_at = datetime(2026, 8, 27, 7, 0)
     db.commit()
-    assert read_taiwan_official_breadth(db, venue="TWSE", trade_date=DAY, requested_at=NOW).resolved.breadth is None
+    # Published breadth has its own receipt qualification after 13:30; daily
+    # OHLCV still requires 15:15. The receipt's date/source/schema already passed.
+    assert read_taiwan_official_breadth(db, venue="TWSE", trade_date=DAY, requested_at=NOW).resolved.breadth is not None
 
 
 def test_bad_aggregate_does_not_fabricate_totals_or_discard_daily_bar(db):

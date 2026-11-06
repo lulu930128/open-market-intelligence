@@ -40,6 +40,7 @@ from app.market_data.integration_contracts import (
     FreshnessRequirement,
     MarketDataResultV1,
     PersistenceSummary,
+    QualityRequirement,
     RefreshRequirementV1,
     RequestBounds,
 )
@@ -159,6 +160,12 @@ def build_taiwan_official_index_read_requirement(
         session=MarketSession.CLOSED,
         requested_at=requested_at,
         freshness=FreshnessRequirement(max_age_seconds=2_678_400),
+        # Official close/change remain factual when market totals are absent.
+        # Resolver retains PARTIAL and research_usable=False for that dataset.
+        quality=QualityRequirement(
+            allow_partial=True,
+            required_fields=("close_value", "price_change"),
+        ),
         bounds=RequestBounds(
             max_provider_attempts=0,
             max_external_calls=0,
@@ -251,6 +258,7 @@ class TaiwanOfficialIndexPlatform:
                 index_id=index_id,
                 trade_date=trade_date,
                 routes=plan.routes,
+                timeout_seconds=requirement.timeout_seconds,
             )
             if acquisition.receipts or acquisition.observations:
                 persistence = self._transaction.persist_index_acquisition(
@@ -418,8 +426,8 @@ def refresh_taiwan_official_index(
         to_date=trade_date,
         requested_at=effective_requested_at,
         purpose=DataPurpose.REPAIR,
-        max_provider_attempts=1,
-        max_external_calls=1,
+        max_provider_attempts=2,
+        max_external_calls=2,
         timeout_seconds=30,
         max_symbols=1,
         max_range_days=1,

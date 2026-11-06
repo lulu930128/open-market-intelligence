@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import contextmanager, ExitStack
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 import json
@@ -8,6 +9,7 @@ import logging
 from os import getpid
 from threading import Lock, get_ident
 from time import monotonic
+from types import SimpleNamespace
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -314,17 +316,53 @@ def market_index_summary_needs_reconciliation(
         ):
             return True
 
+        # Official price confirmation does not complete missing index totals.
+        data_core = item.get("data_core")
+        official_index = data_core.get("official_index") if isinstance(data_core, dict) else None
+        if isinstance(official_index, dict) and official_index.get("status") == "partial":
+            return True
+
         breadth = item.get("breadth")
         breadth_status = _breadth_status_contract(item)
-        if (
-            not isinstance(breadth, dict)
-            or _breadth_trade_date(breadth) != local_now.date()
-            or breadth_status.get("status") != "ready"
-            or breadth_status.get("scope") != "full_market"
-        ):
+        if not isinstance(breadth, dict) or _breadth_trade_date(breadth) != local_now.date():
+            return True
+        # Published totals have a distinct official scope and can remain partial
+        # for research (for example, no constituent trade value). Reacquisition
+        # cannot turn that scope into full_market. Consume receipt completeness
+        # without changing directional coverage or decision usability.
+        if (breadth.get("price_semantics") == "exchange_published_stock_breadth"
+                or breadth.get("published_limits") is not None):
+            if not _published_breadth_reconciled(breadth, market=str(config["market"])):
+                return True
+            continue
+        if breadth_status.get("status") != "ready" or breadth_status.get("scope") != "full_market":
             return True
 
     return False
+
+
+def _published_breadth_reconciled(breadth: dict, *, market: str) -> bool:
+    from app.market_data.contracts import PublishedBreadthLimits
+
+    if not (
+        breadth.get("market") == market
+        and breadth.get("official") is True
+        and breadth.get("provisional") is not True
+        and breadth.get("is_provisional") is not True
+        and breadth.get("finalization") == "official_final"
+        and breadth.get("market_session") == "closed"
+        and breadth.get("price_semantics") == "exchange_published_stock_breadth"
+        and breadth.get("observation_coverage_status") == "complete"
+        and isinstance(breadth.get("raw_result_id"), str)
+        and breadth["raw_result_id"].strip()
+    ):
+        return False
+    try:
+        limits = PublishedBreadthLimits.model_validate(breadth.get("published_limits"))
+    except (TypeError, ValueError):
+        return False
+    return (limits.universe_count > 0 and limits.scope == breadth.get("scope")
+            and limits.universe_count == breadth.get("total_count"))
 
 
 def _stale_market_index_ids(
@@ -524,6 +562,14 @@ def _market_breadth_universe_definition(
 def _breadth_status_contract(index_payload: dict) -> dict:
     market = str(index_payload.get("market") or "unknown")
     breadth = index_payload.get("breadth")
+    lanes = index_payload.get("breadth_lanes") or {}
+    if lanes.get("status") == "pending":
+        return {
+            "slot": "market_breadth", "status": "pending", "scope": None,
+            "source": None, "trade_date": lanes.get("trade_date"),
+            "decision_usable": False, "reason": "OFFICIAL_AGGREGATE_PENDING",
+            "warnings": list((lanes.get("official_daily") or {}).get("limitations") or []),
+        }
     if not isinstance(breadth, dict):
         return {
             "slot": "market_breadth",
@@ -4796,10 +4842,16 @@ def _shared_current_market_summary(
         )
         breadth_lanes = read_taiwan_breadth_lanes(db, venue=venue, requested_at=now)
         breadth["latest_completed_auctions"] = completed_auctions
+        breadth_lanes["current_registered"] = breadth
         if breadth.get("status") == "missing":
             breadth_payload = None
         else:
             breadth_payload = breadth
+        if breadth_lanes["selected_lane"] == "official_daily":
+            breadth_payload = (
+                breadth_lanes["official_daily"]
+                if breadth_lanes["status"] == "selected" else None
+            )
         close = _as_float(current.get("close"))
         change = _as_float(current.get("change"))
         previous_close = _as_float(current.get("previous_close"))
@@ -5119,6 +5171,77 @@ def refresh_current_market_breadth_snapshots(db: Session) -> dict:
     )
 
 
+@contextmanager
+def current_market_summary_phase(db: Session, phase: str):
+    """Record only the current scheduler invocation's local diagnostic clock."""
+    trace = db.info.get("tw_summary_phase_timing")
+    if not isinstance(trace, dict):
+        yield
+        return
+    previous = trace.get("phase")
+    trace["phase"] = phase
+    started = monotonic()
+    status = "success"
+    try:
+        yield
+    except BaseException:
+        status = "error"
+        trace["status"] = "error"
+        trace.setdefault("failed_phase", phase)
+        raise
+    finally:
+        row = trace["phases"].setdefault(phase, {"wall_ms": 0.0, "calls": 0, "status": "success"})
+        row["wall_ms"] = round(row["wall_ms"] + (monotonic() - started) * 1000, 3)
+        row["calls"] += 1
+        if status == "error":
+            row["status"] = status
+        trace["phase"] = previous
+
+
+def _timed_current_acquisition(db: Session, port, method: str, phase: str):
+    if not isinstance(db.info.get("tw_summary_phase_timing"), dict):
+        return port
+
+    def acquire(*args, **kwargs):
+        with current_market_summary_phase(db, phase):
+            acquired = getattr(port, method)(*args, **kwargs)
+            counts = db.info["tw_summary_phase_timing"]["counts"].setdefault(
+                phase, {"receipts": 0, "observations": 0, "external_calls": 0, "statuses": {}})
+            counts["receipts"] += len(acquired.receipts)
+            counts["observations"] += len(acquired.observations)
+            if acquired.summary.external_calls is None or counts["external_calls"] is None:
+                counts["external_calls"] = None
+            else:
+                counts["external_calls"] += acquired.summary.external_calls
+            status = acquired.summary.status.value
+            counts["statuses"][status] = counts["statuses"].get(status, 0) + 1
+            return acquired
+
+    return SimpleNamespace(**{method: acquire})
+
+
+class _SummaryPersistencePort:
+    """The existing summary mutex protects only the original owner's callback."""
+
+    def __init__(self, db: Session):
+        from app.market.tw_current_market_transaction import TaiwanCurrentMarketTransaction
+        self._db = db
+        self._owner = TaiwanCurrentMarketTransaction(db)
+
+    def _persist(self, method, requirement, acquisition):
+        with ExitStack() as stack:
+            with current_market_summary_phase(self._db, "summary_mutex_wait"):
+                stack.enter_context(_SUMMARY_REFRESH_LOCK)
+            with current_market_summary_phase(self._db, "canonical_persistence_callback"):
+                return getattr(self._owner, method)(requirement, acquisition)
+
+    def persist_market_index_acquisition(self, requirement, acquisition):
+        return self._persist("persist_market_index_acquisition", requirement, acquisition)
+
+    def persist_market_breadth_acquisition(self, requirement, acquisition):
+        return self._persist("persist_market_breadth_acquisition", requirement, acquisition)
+
+
 def _refresh_current_market_summary(
     db: Session,
     *,
@@ -5126,65 +5249,71 @@ def _refresh_current_market_summary(
     refresh_breadth: bool,
     refresh_daily_stats: bool,
 ) -> dict:
-    with _SUMMARY_REFRESH_LOCK:
-        from app.market.tw_current_market_operations import (
-            build_current_market_executors,
-        )
-        from app.market.tw_current_market_platform import (
-            refresh_taiwan_current_breadth,
-            refresh_taiwan_current_index,
-        )
+    from app.market.tw_current_market_operations import (
+        build_current_market_executors,
+    )
+    from app.market.tw_current_market_platform import (
+        refresh_taiwan_current_breadth,
+        refresh_taiwan_current_index,
+    )
 
-        now = datetime.now(TAIPEI_TZ)
-        index_acquisition, breadth_acquisition = (
-            build_current_market_executors(
-                db,
-                clock=lambda: datetime.now(TAIPEI_TZ),
-            )
+    transaction_port = _SummaryPersistencePort(db)
+    now = datetime.now(TAIPEI_TZ)
+    with current_market_summary_phase(db, "executor_build"):
+        index_acquisition, breadth_acquisition = build_current_market_executors(
+            db,
+            clock=lambda: datetime.now(TAIPEI_TZ),
         )
-        refresh_limitations: list[str] = []
-        for config in INDEX_CONFIGS:
-            if refresh_indices:
+    refresh_limitations: list[str] = []
+    for config in INDEX_CONFIGS:
+        if refresh_indices:
+            with current_market_summary_phase(db, f"index_refresh_{config['index_id']}"):
                 index_result = refresh_taiwan_current_index(
                     db,
                     index_id=str(config["index_id"]),
                     requested_at=now,
-                    acquisition=index_acquisition,
+                    acquisition=_timed_current_acquisition(db, index_acquisition,
+                        "acquire_market_index_observations", f"index_acquisition_{config['index_id']}"),
                     require_trade_value=True,
+                    transaction_port=transaction_port,
                     completion_clock=lambda: datetime.now(TAIPEI_TZ),
                 )
-                refresh_limitations.extend(index_result.limitations)
-            if refresh_breadth:
+            refresh_limitations.extend(index_result.limitations)
+        if refresh_breadth:
+            with current_market_summary_phase(db, f"breadth_refresh_{config['market']}"):
                 breadth_result = refresh_taiwan_current_breadth(
                     db,
                     venue=str(config["market"]),
+                    transaction_port=transaction_port,
                     requested_at=now,
-                    acquisition=breadth_acquisition,
+                    acquisition=_timed_current_acquisition(db, breadth_acquisition,
+                        "acquire_market_breadth_observations", f"breadth_acquisition_{config['market']}"),
                 )
-                refresh_limitations.extend(breadth_result.limitations)
+            refresh_limitations.extend(breadth_result.limitations)
+    with current_market_summary_phase(db, "current_summary_reread"):
         payload = _shared_current_market_summary(db, requested_at=datetime.now(TAIPEI_TZ))
-        payload["acquisition_policy"] = "prefer_live"
-        payload["cache_status"] = (
-            "canonical_refresh"
-            if refresh_indices and refresh_breadth
-            else "canonical_index_refresh"
-            if refresh_indices
-            else "canonical_breadth_refresh"
+    payload["acquisition_policy"] = "prefer_live"
+    payload["cache_status"] = (
+        "canonical_refresh"
+        if refresh_indices and refresh_breadth
+        else "canonical_index_refresh"
+        if refresh_indices
+        else "canonical_breadth_refresh"
+    )
+    payload["warnings"] = list(
+        dict.fromkeys(
+            [
+                *payload.get("warnings", []),
+                *refresh_limitations,
+                *(
+                    ["DAILY_STATS_REFRESH_REQUIRES_DEDICATED_ROUTE"]
+                    if refresh_daily_stats
+                    else []
+                ),
+            ]
         )
-        payload["warnings"] = list(
-            dict.fromkeys(
-                [
-                    *payload.get("warnings", []),
-                    *refresh_limitations,
-                    *(
-                        ["DAILY_STATS_REFRESH_REQUIRES_DEDICATED_ROUTE"]
-                        if refresh_daily_stats
-                        else []
-                    ),
-                ]
-            )
-        )
-        return payload
+    )
+    return payload
 
 
 def refresh_market_index_daily_stats(

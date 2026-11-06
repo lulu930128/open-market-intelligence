@@ -35,6 +35,7 @@ from app.market.official_index_transaction import TaiwanOfficialIndexTransaction
 from app.market.providers.tw_official_index import (
     TPEX_INDEX_RESOURCE_ID,
     TWSE_INDEX_RESOURCE_ID,
+    TWSE_RWD_INDEX_RESOURCE_ID,
     TW_INDEX_DATASET_ID,
     TW_OFFICIAL_INDEX_DESCRIPTORS,
     parse_tpex_official_index_payload,
@@ -130,7 +131,10 @@ def _platform(
         ),
         transaction=TaiwanOfficialIndexTransaction(db),
         acquisition=TaiwanOfficialIndexAcquisitionExecutor(
-            fetchers={resource_id: fetch},
+            fetchers={
+                TWSE_RWD_INDEX_RESOURCE_ID: lambda _route: FakeResponse(text='{"stat":"fixture unavailable"}'),
+                resource_id: fetch,
+            },
             clock=lambda: datetime(2026, 8, 25, 10, 30, tzinfo=timezone.utc),
             monotonic=lambda: 10.0,
         ),

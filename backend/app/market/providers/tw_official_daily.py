@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
@@ -38,7 +38,15 @@ from app.market.tw_issued_shares import (
     OfficialIssuedSharesRecord,
     parse_tpex_issued_shares_payload,
 )
+from app.market.taiwan_rules import (
+    TAIWAN_DAILY_REGULAR_LIMITATIONS,
+    TAIWAN_DAILY_REGULAR_SCOPE,
+    taiwan_daily_price_release_at,
+    taiwan_daily_regular_research_at,
+)
 from app.sources.defaults import (
+    TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME,
+    TPEX_DATED_DAILY_QUOTES_SOURCE_NAME,
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TPEX_MARKET_HIGHLIGHT_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -55,11 +63,15 @@ TW_BREADTH_DATASET_ID = "tw.market_breadth.daily"
 TWSE_DAILY_RESOURCE_ID = "STOCK_DAY_ALL"
 TWSE_RWD_DAILY_RESOURCE_ID = "MI_INDEX_ALLBUT0999"
 TPEX_DAILY_RESOURCE_ID = "tpex_mainboard_quotes"
+TPEX_DAILY_CLOSE_RESOURCE_ID = "tpex_mainboard_daily_close_quotes"
+TPEX_DATED_DAILY_RESOURCE_ID = "tpex_dated_daily_quotes"
 TPEX_HIGHLIGHT_RESOURCE_ID = "tpex_after_trading_highlight"
 TPEX_HIGHLIGHT_PARSER_VERSION = "tpex_published_breadth.v1"
 TWSE_DAILY_PARSER_VERSION = "twse_stock_day_all.v2"
-TWSE_RWD_DAILY_PARSER_VERSION = "twse_mi_index_allbut0999.v1"
+TWSE_RWD_DAILY_PARSER_VERSION = "twse_mi_index_allbut0999.v2"
 TPEX_DAILY_PARSER_VERSION = "tpex_mainboard_quotes.v2"
+TPEX_DAILY_CLOSE_PARSER_VERSION = "tpex_mainboard_daily_close_quotes.v1"
+TPEX_DATED_DAILY_PARSER_VERSION = "tpex_dated_daily_quotes.v1"
 _EMPTY_VALUES = {"", "-", "--", "nan", "null", "none"}
 
 
@@ -76,6 +88,7 @@ class OfficialDailyRecord(CanonicalModel):
     trade_value: int | None = Field(default=None, ge=0)
     transaction_count: int | None = Field(default=None, ge=0)
     price_change: Decimal | None = None
+    trading_scope: Literal["regular_session"] | None = None
 
     @model_validator(mode="after")
     def _validate_ohlc(self) -> OfficialDailyRecord:
@@ -183,10 +196,27 @@ TPEX_OFFICIAL_DAILY_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     limitations=("OFFICIAL_COMPLETED_SESSION_ONLY",),
 )
 
+# Verified against the official Swagger and byte-preserved 2026-11-02 response.
+# Same OHLC/share fields, broader securities scope and different daily totals:
+# keep independent source/receipt identity rather than rewriting mainboard_quotes.
+TPEX_DAILY_CLOSE_DESCRIPTOR = TPEX_OFFICIAL_DAILY_DESCRIPTOR.model_copy(update={
+    "resource_id": TPEX_DAILY_CLOSE_RESOURCE_ID,
+    "priority": 20,
+})
+
+# The dated website can publish today's OHLCV before the two OpenAPI snapshots.
+# Keep a distinct receipt identity and the existing per-invocation call budget.
+TPEX_DATED_DAILY_DESCRIPTOR = TPEX_OFFICIAL_DAILY_DESCRIPTOR.model_copy(update={
+    "resource_id": TPEX_DATED_DAILY_RESOURCE_ID,
+    "priority": 30,
+})
+
 TW_OFFICIAL_DAILY_DESCRIPTORS = (
     TWSE_RWD_OFFICIAL_DAILY_DESCRIPTOR,
     TWSE_OFFICIAL_DAILY_DESCRIPTOR,
     TPEX_OFFICIAL_DAILY_DESCRIPTOR,
+    TPEX_DAILY_CLOSE_DESCRIPTOR,
+    TPEX_DATED_DAILY_DESCRIPTOR,
 )
 
 TWSE_OFFICIAL_BREADTH_DESCRIPTOR = ProviderCapabilityDescriptorV2(
@@ -470,6 +500,14 @@ def parse_twse_rwd_official_daily_payload(
         raise ValueError("TWSE RWD official daily payload status is not OK")
     payload_date = _date(payload.get("date"))
     fields, rows = _twse_rwd_daily_table(payload)
+    # Scope belongs to this exact OHLCV table, not another table's market totals.
+    regular_only = any(
+        isinstance(table, dict)
+        and table.get("fields") == fields
+        and "本統計資訊僅含一般交易，不含零股、盤後定價、鉅額、拍賣、標購。"
+        in (table.get("notes") or [])
+        for table in payload.get("tables", [])
+    )
     field_index = {name: index for index, name in enumerate(fields)}
     issues: Counter[str] = Counter()
     rejected_rows: list[OfficialDailyRejectedRow] = []
@@ -519,7 +557,7 @@ def parse_twse_rwd_official_daily_payload(
             issues["DUPLICATE_SYMBOL_DATE"] += 1
             continue
         seen.add(key)
-        records.append(record)
+        records.append(record.model_copy(update={"trading_scope": "regular_session"}) if regular_only else record)
     if target_symbols is not None:
         missing_targets = target_symbols - {record.symbol for record in records}
         if missing_targets:
@@ -544,6 +582,23 @@ def _first_tpex_table(payload: dict[str, Any]) -> list[Any]:
     if isinstance(data, list):
         return data
     raise ValueError("TPEx official daily payload has no data table")
+
+
+def parse_tpex_dated_daily_payload(
+    raw_text: str, *, target_symbols: frozenset[str] | None = None,
+) -> OfficialDailyParseResult:
+    """Qualify the dated website's table before the existing OHLCV conversion."""
+    payload = json.loads(_repair_text(raw_text).lstrip("\ufeff").strip())
+    if not isinstance(payload, dict) or str(payload.get("stat", "")).lower() != "ok":
+        raise ValueError("TPEx dated daily payload status is not OK")
+    tables = payload.get("tables", [])
+    expected_fields = ["代號", "名稱", "收盤", "漲跌", "開盤", "最高", "最低", "均價", "成交股數", "成交金額(元)", "成交筆數"]
+    table = tables[0] if tables and isinstance(tables[0], dict) else {}
+    payload_date = _date(payload.get("date"))
+    if (table.get("fields", [])[:11] != expected_fields or payload_date is None
+            or _date(table.get("date")) != payload_date or not isinstance(table.get("data"), list)):
+        raise ValueError("TPEx dated daily schema/date mismatch")
+    return parse_tpex_official_daily_payload(raw_text, target_symbols=target_symbols)
 
 
 def parse_tpex_official_daily_payload(
@@ -646,6 +701,14 @@ def official_daily_record_to_bar(
         raise ValueError("official daily fetched_at must be timezone-aware")
     start_at = datetime.combine(record.trade_date, time(9), tzinfo=TAIWAN_TZ)
     end_at = datetime.combine(record.trade_date, time(13, 30), tzinfo=TAIWAN_TZ)
+    early = fetched_at < taiwan_daily_price_release_at(record.trade_date)
+    regular_research = (
+        early and source == TWSE_RWD_DAILY_TRADING_SOURCE_NAME
+        and provider == twse.RWD_PROVIDER and record.trading_scope == "regular_session"
+        and fetched_at >= taiwan_daily_regular_research_at(record.trade_date)
+        and record.trade_volume > 0 and record.trade_value is not None
+        and record.transaction_count is not None and record.transaction_count > 0
+    )
     return BarObservation(
         instrument=instrument,
         lineage=SourceLineage(
@@ -675,11 +738,21 @@ def official_daily_record_to_bar(
         turnover_currency=("TWD" if record.trade_value is not None else None),
         trade_count=record.transaction_count,
         price_change=record.price_change,
-        finalization=BarFinalization.FINAL,
+        # FINAL describes the completed regular bucket; release qualification
+        # below remains research-only until a new post-release acquisition.
+        finalization=BarFinalization.FINAL if not early or regular_research else BarFinalization.PROVISIONAL,
+        derivation_kind=TAIWAN_DAILY_REGULAR_SCOPE if record.trading_scope == "regular_session" else None,
+        limitations=TAIWAN_DAILY_REGULAR_LIMITATIONS if regular_research else (
+            TAIWAN_DAILY_REGULAR_LIMITATIONS[-1:] if record.trading_scope == "regular_session" else ()
+        ),
     )
 
 
 def source_name_for_resource(resource_id: str) -> str:
+    if resource_id == TPEX_DATED_DAILY_RESOURCE_ID:
+        return TPEX_DATED_DAILY_QUOTES_SOURCE_NAME
+    if resource_id == TPEX_DAILY_CLOSE_RESOURCE_ID:
+        return TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME
     if resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
         return TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
     if resource_id == TWSE_DAILY_RESOURCE_ID:
@@ -692,6 +765,10 @@ def source_name_for_resource(resource_id: str) -> str:
 
 
 def parser_version_for_resource(resource_id: str) -> str:
+    if resource_id == TPEX_DATED_DAILY_RESOURCE_ID:
+        return TPEX_DATED_DAILY_PARSER_VERSION
+    if resource_id == TPEX_DAILY_CLOSE_RESOURCE_ID:
+        return TPEX_DAILY_CLOSE_PARSER_VERSION
     if resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
         return TPEX_HIGHLIGHT_PARSER_VERSION
     if resource_id == TWSE_DAILY_RESOURCE_ID:
@@ -704,6 +781,10 @@ def parser_version_for_resource(resource_id: str) -> str:
 
 
 def endpoint_for_resource(resource_id: str) -> str:
+    if resource_id == TPEX_DATED_DAILY_RESOURCE_ID:
+        return tpex.DATED_DAILY_QUOTES_URL
+    if resource_id == TPEX_DAILY_CLOSE_RESOURCE_ID:
+        return tpex.DAILY_CLOSE_QUOTES_URL
     if resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
         return tpex.MARKET_HIGHLIGHT_URL
     if resource_id == TWSE_DAILY_RESOURCE_ID:
@@ -722,6 +803,12 @@ __all__ = [
     "OfficialDailyRecord",
     "OfficialIssuedSharesRecord",
     "TPEX_DAILY_PARSER_VERSION",
+    "TPEX_DATED_DAILY_RESOURCE_ID",
+    "TPEX_DATED_DAILY_PARSER_VERSION",
+    "TPEX_DATED_DAILY_DESCRIPTOR",
+    "TPEX_DAILY_CLOSE_RESOURCE_ID",
+    "TPEX_DAILY_CLOSE_PARSER_VERSION",
+    "TPEX_DAILY_CLOSE_DESCRIPTOR",
     "TPEX_DAILY_RESOURCE_ID",
     "TPEX_OFFICIAL_DAILY_DESCRIPTOR",
     "TPEX_OFFICIAL_BREADTH_DESCRIPTOR",
@@ -740,6 +827,7 @@ __all__ = [
     "endpoint_for_resource",
     "official_daily_record_to_bar",
     "parse_tpex_official_daily_payload",
+    "parse_tpex_dated_daily_payload",
     "parse_tpex_issued_shares_payload",
     "parse_twse_rwd_official_daily_payload",
     "parse_twse_official_daily_payload",

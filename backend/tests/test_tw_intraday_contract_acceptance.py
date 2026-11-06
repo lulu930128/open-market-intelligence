@@ -302,7 +302,9 @@ class TaiwanIntradayContractAcceptanceTests(unittest.TestCase):
 
     def test_case_08_intraday_technical_levels_use_resolved_price(self) -> None:
         levels = _technical_price_levels(
-            technical_reports={},
+            technical_reports={"daily": {"data": {"daily_indicator": {
+                "atr": {"atr14": 20.0},
+            }}}},
             latest_daily=SimpleNamespace(
                 trade_date=date(2026, 7, 29),
                 close_price=1515.0,
@@ -339,6 +341,12 @@ class TaiwanIntradayContractAcceptanceTests(unittest.TestCase):
                             "close": 250.0,
                             "trade_value": 123_000_000,
                             "source": "official_index_summary",
+                            "current_data_core": {"index": {
+                                "provider": "tpex",
+                                "source": "official_index_summary",
+                                "raw_result_id": "synthetic:tpex:index:20260730",
+                                "as_of": "2026-07-30T10:48:45+08:00",
+                            }},
                             "official_flag": True,
                             "trade_value_is_estimate": False,
                             "breadth": None,

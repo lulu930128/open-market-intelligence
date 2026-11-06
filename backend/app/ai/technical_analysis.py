@@ -711,6 +711,23 @@ def apply_technical_sufficiency_gate(
     return result
 
 
+def apply_technical_price_level_gate(
+    levels: dict[str, Any], *, sufficiency: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep observed prices, but never promote unqualified levels to answers."""
+    if not levels or sufficiency.get("decision_usable") is True:
+        return levels
+    return {
+        **levels,
+        "entry": {}, "risk": {}, "resistance": {}, "context": {}, "summary": [],
+        "validation": {
+            "status": "unavailable", "decision_ready": False,
+            "has_actionable_entry": False, "has_risk_guardrail": False,
+            "reason_codes": list(sufficiency.get("reason_codes") or ["TECHNICAL_EVIDENCE_NOT_USABLE"]),
+        },
+    }
+
+
 def _first_value(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if row.get(key) is not None:
@@ -1046,7 +1063,20 @@ def _technical_price_levels(
     atr14 = daily_values.get("atr14")
     upper20 = daily_values.get("donchian_upper20")
     lower20 = daily_values.get("donchian_lower20")
-    atr_buffer = atr14 if atr14 is not None and atr14 > 0 else latest_price * 0.03
+    if atr14 is None or atr14 <= 0:
+        return apply_technical_price_level_gate(
+            {
+                "kind": "technical_price_levels", "version": "price_levels_v1",
+                "latest_price": _round_price(latest_price),
+                "as_of": current_price_time or daily_basis_date,
+                "price_basis_date": price_basis_date,
+                "daily_basis_date": daily_basis_date,
+                "daily_basis_price": _round_price(daily_basis_price),
+                "levels": {"latest": _round_price(latest_price), **daily_values},
+            },
+            sufficiency={"decision_usable": False, "reason_codes": ["ATR_UNAVAILABLE"]},
+        )
+    atr_buffer = atr14
     atr_pct = round((atr_buffer / latest_price) * 100, 2) if latest_price else None
     daily_score = _report_score(daily_report)
     weekly_report = technical_reports.get("weekly") if isinstance(technical_reports, dict) else {}

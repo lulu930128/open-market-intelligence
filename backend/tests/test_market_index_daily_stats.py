@@ -1484,10 +1484,21 @@ class MarketIndexDailyStatTests(unittest.TestCase):
             },
         ]
 
-        with patch.object(
-            twse_mis_current_breadth,
-            "_fetch_messages",
-            return_value=(messages, 0, 6),
+        received_at = datetime(2026, 7, 9, 9, 5, tzinfo=twse_mis_current_breadth.TAIPEI_TZ)
+        for message in messages:
+            message["_omi_received_at"] = received_at.isoformat()
+
+        class ClockMeta(type):
+            def __instancecheck__(cls, value):
+                return isinstance(value, datetime)
+
+        class Clock(datetime, metaclass=ClockMeta):
+            @classmethod
+            def now(cls, tz=None):
+                return received_at.astimezone(tz) if tz else received_at.replace(tzinfo=None)
+
+        with patch.object(twse_mis_current_breadth, "datetime", Clock), patch.object(
+            twse_mis_current_breadth, "_fetch_messages", return_value=(messages, 0, 6),
         ):
             result = twse_mis_current_breadth.read_twse_mis_current_breadth(
                 "TWSE",

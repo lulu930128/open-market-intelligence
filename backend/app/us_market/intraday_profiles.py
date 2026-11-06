@@ -27,6 +27,7 @@ class USIntradayOperationProfile:
     purpose: DataPurpose = DataPurpose.BACKGROUND_COLLECTOR
     consumer_stale_after_seconds: int = 300
     producer_refresh_due_seconds: int = 180
+    completed_minute_freshness: bool = False
 
     def __post_init__(self) -> None:
         if not self.profile_id.strip():
@@ -51,6 +52,7 @@ US_RECURRING_INTRADAY_PROFILE = USIntradayOperationProfile(
     acquisition_history_days=1,
     consumer_stale_after_seconds=180,
     producer_refresh_due_seconds=45,
+    completed_minute_freshness=True,
 )
 US_BOOTSTRAP_INTRADAY_PROFILE = USIntradayOperationProfile(
     profile_id="bootstrap_latest_available",

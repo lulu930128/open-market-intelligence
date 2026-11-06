@@ -50,7 +50,7 @@ def _deduplicate_request_read(read):
             return read(self, *args, **kwargs)
         bound = call_signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
-        key = (id(self._db.get_bind()), tuple(
+        key = (id(self._db), tuple(
             (name, value.identity.series_revision if name == "_current_session_base_snapshot" and value is not None else value)
             for name, value in bound.arguments.items() if name != "self"
         ))
@@ -296,6 +296,11 @@ def _qualified_formal_close_component(
 
     if instrument.instrument_type not in {InstrumentType.STOCK, InstrumentType.ETF}:
         return None
+    formal_close_at = datetime.combine(
+        trade_date, TAIWAN_SESSION_CLOSE_TIME, tzinfo=TAIWAN_TZ,
+    )
+    if requested_at < formal_close_at:
+        return None
     try:
         result = read_taiwan_session_close(
             db,
@@ -307,11 +312,6 @@ def _qualified_formal_close_component(
         return None
     quote = result.resolved.quote
     event_at = quote.lineage.event_at if quote is not None else None
-    formal_close_at = datetime.combine(
-        trade_date,
-        TAIWAN_SESSION_CLOSE_TIME,
-        tzinfo=TAIWAN_TZ,
-    )
     if (
         projection.get("available") is not True
         or quote is None
@@ -1112,6 +1112,7 @@ class TaiwanBarService:
         include_partial: bool = True,
         requested_at: datetime | None = None,
         _session_scope: TaiwanBarSessionScope = TaiwanBarSessionScope.HISTORY,
+        allow_early_regular: bool = False,
         _current_session_base_snapshot: TaiwanBarSeriesRead | None = None,
     ) -> TaiwanBarSeriesRead:
         requested_interval = normalize_taiwan_bar_interval(interval)
@@ -1127,6 +1128,7 @@ class TaiwanBarService:
                 limit=limit,
                 include_partial=include_partial,
                 requested_at=requested_at,
+                allow_early_regular=allow_early_regular,
             )
         if requested_interval not in TAIWAN_INTRADAY_INTERVALS:
             raise ValueError("unsupported Taiwan Bar interval")
@@ -1462,6 +1464,9 @@ class TaiwanBarService:
                 start_date=requirement.request.start_at.astimezone(TAIWAN_TZ).date(),
                 end_date=requirement.request.end_at.astimezone(TAIWAN_TZ).date(),
                 resolved_bars=base_bars,
+                # Preserve the exact candidate bound for the one-shot handoff.
+                # A successful candidate read is complete: overflow raises.
+                max_rows=requirement.bounds.max_rows,
             )
         base_bars, day_states = repository.complete_no_trade_bars(
             resolved_bars=base_bars, day_states=day_states,
@@ -1484,6 +1489,7 @@ class TaiwanBarService:
         limit: int,
         include_partial: bool,
         requested_at: datetime | None,
+        allow_early_regular: bool = False,
     ) -> TaiwanBarSeriesRead:
         now = _aware_taipei(requested_at or datetime.now(TAIWAN_TZ))
         requested_to = _aware_taipei(to_time or now)
@@ -1491,6 +1497,7 @@ class TaiwanBarService:
         repository = TaiwanOfficialDailyBarRepository(
             self._db,
             available_at=now,
+            allow_early_regular=(include_partial or allow_early_regular) and requested_interval == "1d",
         )
         base_row_limit = min(
             5000,
@@ -1539,6 +1546,7 @@ class TaiwanBarService:
             requested_at=now,
             max_rows=base_row_limit,
             minimum_authority=AuthorityClass.DERIVED,
+            purpose=DataPurpose.RESEARCH if (include_partial or allow_early_regular) and requested_interval == "1d" else DataPurpose.VIEWER,
         )
         result, completed_bars, day_states, metadata = self._completed_daily_inputs(repository, requirement)
         base_bars = list(completed_bars)
@@ -1566,16 +1574,26 @@ class TaiwanBarService:
                         if state.get("official") is not None
                         else item.lineage.authority is AuthorityClass.EXCHANGE
                     ),
-                    release_status=TaiwanReleaseStatus(
-                        state.get("release_status") or "released"
-                    ),
+                    release_status=(TaiwanReleaseStatus.PENDING_RELEASE
+                        if state.get("release_status") == "regular_research"
+                        else TaiwanReleaseStatus(state.get("release_status") or "released")),
                     reconciliation_status=TaiwanReconciliationStatus(
                         state.get("reconciliation_status") or "pending"
                     ),
                     persisted=item.lineage.materialization_version != "tw.daily.zero_trade_carry.v1",
                     source_interval="1d",
                     technical_eligible=(
+                        state.get("release_status") != "regular_research"
+                        and
                         state.get("reconciliation_status") != "mismatched"
+                        and item.start_at.astimezone(TAIWAN_TZ).date() not in conflicted_dates
+                    ),
+                    research_eligible=(
+                        state.get("release_status") == "regular_research"
+                        and "OFFICIAL_FINAL_PENDING" in item.limitations
+                        and item.finalization is BarFinalization.FINAL
+                        and item.lineage.authority is AuthorityClass.EXCHANGE
+                        and state.get("reconciliation_status") != "mismatched"
                         and item.start_at.astimezone(TAIWAN_TZ).date() not in conflicted_dates
                     ),
                 )

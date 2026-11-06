@@ -455,6 +455,20 @@ def ensure_stock_financial_metrics_history(
                     state.totals['cached_count'] += 1
                     bundle = json.loads(raw_result.raw_text or "{}")
                 else:
+                    bundle = {}
+
+                income_row = _row_map_from_html(
+                    raw_text=bundle.get("income", {}).get("raw_text") or "",
+                    stock_id=stock_id,
+                )
+                balance_row = _row_map_from_html(
+                    raw_text=bundle.get("balance", {}).get("raw_text") or "",
+                    stock_id=stock_id,
+                )
+                # A batch receipt may predate this company's filing. An explicit
+                # bounded repair can revalidate an incomplete cached period once;
+                # retain the old receipt and never fetch from the read path.
+                if raw_result is None or income_row is None or balance_row is None:
                     income_text, income_status, income_content_type, income_url = _fetch_statement_html(
                         session=session,
                         statement="04",
@@ -482,15 +496,8 @@ def ensure_stock_financial_metrics_history(
                         status_code=max(income_status, balance_status),
                         content_type=income_content_type or balance_content_type,
                     )
-
-                income_row = _row_map_from_html(
-                    raw_text=bundle.get("income", {}).get("raw_text") or "",
-                    stock_id=stock_id,
-                )
-                balance_row = _row_map_from_html(
-                    raw_text=bundle.get("balance", {}).get("raw_text") or "",
-                    stock_id=stock_id,
-                )
+                    income_row = _row_map_from_html(raw_text=income_text, stock_id=stock_id)
+                    balance_row = _row_map_from_html(raw_text=balance_text, stock_id=stock_id)
 
                 if income_row is None:
                     saved_raw_id = raw_result.id if raw_result is not None else None

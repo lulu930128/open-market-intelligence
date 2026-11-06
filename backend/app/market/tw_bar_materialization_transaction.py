@@ -21,6 +21,7 @@ from app.market.tw_bar_contracts import (
     TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+    TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT,
     TPEX_DERIVED_DAILY_KIND,
     TPEX_DERIVED_DAILY_SOURCE,
     TPEX_DERIVED_DAILY_PROVIDER,
@@ -37,6 +38,7 @@ from app.market.tw_current_market_capabilities import (
     current_source_binding,
 )
 from app.market.tw_instrument import resolve_taiwan_instrument
+from app.market.tw_current_market_repository import read_qualified_index_opening
 from app.market_data.contracts import BarObservation, InstrumentType, Market
 from app.market_data.integration_contracts import PersistenceSummary, RawFetchReceiptV1
 
@@ -45,7 +47,40 @@ class TaiwanBarMaterializationTransaction:
     def __init__(self, db: Session) -> None:
         self._db = db
 
-    def _validate(self, candidate: TaiwanMaterializedBarCandidate) -> SourceRegistry:
+    def _stored_equal(self, stored: object, incoming: object) -> bool:
+        # SQLite's DateTime binder preserves the supplied wall-clock fields but
+        # drops tzinfo. Match those persisted bytes; do not shift legacy local
+        # bar/event clocks or the explicitly UTC receipt clocks.
+        if (
+            isinstance(stored, datetime)
+            and isinstance(incoming, datetime)
+            and self._db.get_bind().dialect.name == "sqlite"
+        ):
+            return stored.replace(tzinfo=None) == incoming.replace(tzinfo=None)
+        return stored == incoming
+
+    def _load_raw_metadata(
+        self, candidates: tuple[TaiwanMaterializedBarCandidate, ...],
+    ) -> dict[int, tuple[int, str | None, str | None]]:
+        # Deduplicate only the SELECT binds. Each candidate's original component
+        # sequence is still validated at its original point in _upsert.
+        ids = tuple(dict.fromkeys(raw_id for candidate in candidates
+            for raw_id in candidate.component_raw_result_ids))
+        metadata = {}
+        for offset in range(0, len(ids), 400):
+            rows = (
+                self._db.query(RawFetchResult.id, RawFetchResult.source_id,
+                    RawFetchResult.parser_version, RawFetchResult.content_hash)
+                .filter(RawFetchResult.id.in_(ids[offset:offset + 400]))
+                .all()
+            )
+            metadata.update({row.id: (row.source_id, row.parser_version, row.content_hash) for row in rows})
+        return metadata
+
+    def _validate(
+        self, candidate: TaiwanMaterializedBarCandidate,
+        raw_metadata: dict[int, tuple[int, str | None, str | None]],
+    ) -> SourceRegistry:
         observation = candidate.observation
         if (
             observation.instrument.market is not Market.TW
@@ -66,42 +101,57 @@ class TaiwanBarMaterializationTransaction:
             raise ValueError("unsupported current-index materialization source")
         if observation.lineage.authority is not binding.descriptor.authority:
             raise ValueError("materialized bar authority mismatch")
-        if observation.lineage.raw_contract_version != TAIWAN_INDEX_MINUTE_RAW_CONTRACT:
+        opening_id = candidate.opening_raw_result_id
+        expected_contract = (TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT
+            if opening_id is not None else TAIWAN_INDEX_MINUTE_RAW_CONTRACT)
+        if observation.lineage.raw_contract_version != expected_contract:
             raise ValueError("materialized bar contract mismatch")
         source = self._db.get(SourceRegistry, candidate.source_id)
         if source is None or source.source_name != observation.lineage.source:
             raise ValueError("materialized bar source registry mismatch")
-        raw_rows = (
-            self._db.query(RawFetchResult)
-            .filter(RawFetchResult.id.in_(candidate.component_raw_result_ids))
-            .all()
-        )
+        raw_rows = {raw_id: raw_metadata[raw_id]
+            for raw_id in candidate.component_raw_result_ids if raw_id in raw_metadata}
         if not candidate.component_raw_result_ids or len(raw_rows) != len(
             candidate.component_raw_result_ids
         ):
             raise ValueError("materialized bar component evidence missing")
+        if opening_id is not None:
+            raw = self._db.get(RawFetchResult, opening_id)
+            opening = read_qualified_index_opening(self._db, raw=raw,
+                provider=observation.lineage.provider, index_id=observation.instrument.symbol,
+                trade_date=observation.start_at.date()) if raw is not None else None
+            if (candidate.component_raw_result_ids[0] != opening_id or opening is None
+                    or opening.value != observation.open_price
+                    or not observation.start_at <= opening.lineage.event_at < observation.end_at
+                    or opening.lineage.fetched_at > observation.lineage.fetched_at):
+                raise ValueError("materialized bar opening evidence mismatch")
         if any(
-            raw.source_id != source.id
-            or raw.parser_version != binding.parser_version
-            or not raw.content_hash
-            for raw in raw_rows
+            source_id != source.id
+            or parser_version != binding.parser_version
+            or not content_hash
+            for raw_id, (source_id, parser_version, content_hash) in raw_rows.items()
+            if raw_id != opening_id
         ):
             raise ValueError("materialized bar component lineage mismatch")
         if set(candidate.component_content_hashes) != {
-            str(raw.content_hash) for raw in raw_rows
+            str(content_hash) for _, _, content_hash in raw_rows.values()
         }:
             raise ValueError("materialized bar component digest mismatch")
         return source
 
-    def _upsert(self, candidate: TaiwanMaterializedBarCandidate) -> bool:
+    def _upsert(
+        self,
+        candidate: TaiwanMaterializedBarCandidate,
+        lineages_by_bar_id: dict[int, MarketIntradayBarLineage],
+        source: SourceRegistry,
+    ) -> bool:
         observation = candidate.observation
-        source = self._validate(candidate)
         existing = (
             self._db.query(MarketIntradayBar)
-            .filter(MarketIntradayBar.source_id == source.id)
-            .filter(MarketIntradayBar.canonical_market == Market.TW.value)
-            .filter(MarketIntradayBar.venue == observation.instrument.venue)
-            .filter(MarketIntradayBar.instrument_type == InstrumentType.INDEX.value)
+            # The legacy provider key remains a DB constraint, including rows
+            # that predate canonical identity. Promote that same row and its
+            # lineage instead of inserting a competing source-scoped candidate.
+            .filter(MarketIntradayBar.provider == observation.lineage.provider)
             .filter(MarketIntradayBar.stock_id == observation.instrument.symbol)
             .filter(MarketIntradayBar.interval == "1m")
             .filter(MarketIntradayBar.bar_time == observation.start_at)
@@ -133,49 +183,86 @@ class TaiwanBarMaterializationTransaction:
             self._db.add(existing)
             self._db.flush()
         else:
-            unchanged = all(getattr(existing, key) == value for key, value in incoming.items())
-            for key, value in incoming.items():
-                setattr(existing, key, value)
-            existing.updated_at = utc_now()
-        lineage = (
-            self._db.query(MarketIntradayBarLineage)
-            .filter(MarketIntradayBarLineage.bar_id == existing.id)
-            .first()
+            unchanged = all(
+                self._stored_equal(getattr(existing, key), value)
+                for key, value in incoming.items()
+            )
+            if not unchanged:
+                for key, value in incoming.items():
+                    setattr(existing, key, value)
+                existing.updated_at = utc_now()
+        # With production autoflush=False, a query cannot see the lineage added
+        # for an earlier candidate sharing this provider key in the same batch.
+        lineage = lineages_by_bar_id.get(existing.id)
+        if lineage is None:
+            lineage = (
+                self._db.query(MarketIntradayBarLineage)
+                .filter(MarketIntradayBarLineage.bar_id == existing.id)
+                .first()
+            )
+        lineage_incoming = {
+            "source_id": source.id,
+            "raw_result_id": None,
+            "provider": observation.lineage.provider,
+            "source": observation.lineage.source,
+            "authority": observation.lineage.authority.value,
+            "raw_contract_version": observation.lineage.raw_contract_version,
+            "event_at": observation.lineage.event_at,
+            "received_at": (
+                observation.lineage.received_at or observation.lineage.event_at
+            ).astimezone(timezone.utc),
+            "fetched_at": (
+                observation.lineage.fetched_at or observation.lineage.event_at
+            ).astimezone(timezone.utc),
+            "finalization": observation.finalization.value,
+            "source_interval": "event",
+            "calculation_version": TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
+            "component_raw_result_ids_json": json.dumps(
+                candidate.component_raw_result_ids, separators=(",", ":"),
+            ),
+        }
+        lineage_unchanged = lineage is not None and all(
+            self._stored_equal(getattr(lineage, key), value)
+            for key, value in lineage_incoming.items()
         )
         if lineage is None:
             lineage = MarketIntradayBarLineage(bar_id=existing.id)
             self._db.add(lineage)
-        lineage.source_id = source.id
-        lineage.raw_result_id = None
-        lineage.provider = observation.lineage.provider
-        lineage.source = observation.lineage.source
-        lineage.authority = observation.lineage.authority.value
-        lineage.raw_contract_version = TAIWAN_INDEX_MINUTE_RAW_CONTRACT
-        lineage.event_at = observation.lineage.event_at
-        lineage.received_at = (
-            observation.lineage.received_at or observation.lineage.event_at
-        ).astimezone(timezone.utc)
-        lineage.fetched_at = (
-            observation.lineage.fetched_at or observation.lineage.event_at
-        ).astimezone(timezone.utc)
-        lineage.finalization = observation.finalization.value
-        lineage.source_interval = "event"
-        lineage.calculation_version = TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION
-        lineage.component_raw_result_ids_json = json.dumps(
-            candidate.component_raw_result_ids,
-            separators=(",", ":"),
-        )
-        lineage.updated_at = utc_now()
-        return unchanged
+        lineages_by_bar_id[existing.id] = lineage
+        if not lineage_unchanged:
+            for key, value in lineage_incoming.items():
+                setattr(lineage, key, value)
+            lineage.updated_at = utc_now()
+        return unchanged and lineage_unchanged
 
     def persist_materialized_bars(
         self,
         candidates: tuple[TaiwanMaterializedBarCandidate, ...],
     ) -> PersistenceSummary:
         written = unchanged = 0
+        coalesced = 0
+        lineages_by_bar_id: dict[int, MarketIntradayBarLineage] = {}
         try:
-            for candidate in candidates:
-                if self._upsert(candidate):
+            raw_metadata = self._load_raw_metadata(candidates)
+            # The existing legacy unique key cannot retain two sources of one
+            # provider/minute. Preserve its existing final-in-batch result,
+            # while avoiding transient A -> B rewrites on every scheduler pass.
+            # This is write coalescing, not a new Resolver selection policy.
+            keys = [(c.observation.lineage.provider, c.observation.instrument.symbol,
+                     c.observation.interval, c.observation.start_at) for c in candidates]
+            sources_by_key = {}
+            last_by_key = {}
+            for index, (key, candidate) in enumerate(zip(keys, candidates)):
+                sources_by_key.setdefault(key, set()).add((candidate.source_id, candidate.observation.lineage.source))
+                last_by_key[key] = index
+            for index, (key, candidate) in enumerate(zip(keys, candidates)):
+                # Validate even overwritten evidence; invalid earlier candidates
+                # still roll back the whole transaction, as before.
+                source = self._validate(candidate, raw_metadata)
+                if len(sources_by_key[key]) > 1 and last_by_key[key] != index:
+                    coalesced += 1
+                    continue
+                if self._upsert(candidate, lineages_by_bar_id, source):
                     unchanged += 1
                 else:
                     written += 1
@@ -190,7 +277,7 @@ class TaiwanBarMaterializationTransaction:
             observations_written=written,
             observations_unchanged=unchanged,
             raw_result_ids=(),
-            limitations=(),
+            limitations=((f"TW_INDEX_LEGACY_STORAGE_KEY_COALESCED:{coalesced}",) if coalesced else ()),
         )
 
     def _daily_source(self) -> SourceRegistry:

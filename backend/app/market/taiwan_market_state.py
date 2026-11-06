@@ -1015,19 +1015,56 @@ def _current_trade_value_lineage_usable(component: dict[str, Any]) -> bool:
                 == selected.replace(second=0, microsecond=0))
 
 
+def _can_retain_current_volume_state(state: dict[str, Any], *, requested_at: datetime) -> bool:
+    """Retention is only for the current Taiwan trading date after open."""
+    local_now = requested_at.astimezone(TAIWAN_TZ)
+    return (_as_trade_date(state.get("trade_date")) == local_now.date()
+            and taiwan_market_session_phase(local_now) in {
+                "regular", "closing_auction", "close_resolution", "post_close",
+            })
+
+
+def _stale_qualified_volume_state(state: dict[str, Any], *, latest: dict[str, Any]) -> dict[str, Any]:
+    """Retain one intact endpoint; never add a newer component to an old total."""
+    retained = deepcopy(state)
+    retained.update(
+        trade_value_freshness="stale",
+        latest_trade_value_attempt={key: deepcopy(latest.get(key)) for key in (
+            "as_of", "trade_date", "current_cumulative_trade_value",
+            "available_cumulative_trade_value", "included_markets", "missing_markets",
+            "trade_value_complete", "trade_value_components", "markets",
+        )},
+        previous_minute_cumulative_trade_value=None, one_minute_trade_value_change=None,
+    )
+    reason = "Latest TWSE+TPEX minute is incomplete; retaining the original qualified snapshot as stale evidence."
+    retained["warnings"] = list(dict.fromkeys([*retained.get("warnings", []), reason]))
+    for key in ("previous_minute_cumulative_trade_value", "one_minute_trade_value_change"):
+        retained.setdefault("field_status", {})[key] = {"status": "missing", "reason": reason}
+    retained.setdefault("field_status", {})["current_cumulative_trade_value"] = {
+        "status": "stale", "source": state.get("current_value_source") or "taiwan_market_minute_state",
+        "reason": reason,
+    }
+    return retained
+
+
 def compose_taiwan_market_volume_state(
     volume_state: dict[str, Any], *, breadth: dict[str, Any] | None,
     current_components: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
     """Read-only composition of canonical values and comparable baselines."""
     output = deepcopy(volume_state)
-    if current_components:
+    has_current_selection = current_components is not None
+    if has_current_selection:
         output["current_cumulative_trade_value"] = None
+        output.pop("trade_value_freshness", None)
+        output.pop("latest_trade_value_attempt", None)
+        output["warnings"] = [warning for warning in output.get("warnings") or []
+            if not warning.startswith("Latest TWSE+TPEX minute is incomplete;")]
     current = _as_int(output.get("current_cumulative_trade_value"))
     if current is not None and current < 0:
         current = None
     if current is None:
-        markets = current_components or (breadth or {}).get("markets") or {}
+        markets = current_components if has_current_selection else (breadth or {}).get("markets") or {}
         components = []
         for market in ("TWSE", "TPEX"):
             item = markets.get(market) if isinstance(markets, dict) else None
@@ -1088,8 +1125,8 @@ def compose_taiwan_market_volume_state(
         )
         authorities = {_component_trade_value_authority(item) for item in components}
         authority = next(iter(authorities)) if len(authorities) == 1 else "mixed" if authorities else "unavailable"
-        selection_source = "canonical_market_trade_value" if current_components else "canonical_market_breadth"
-        if current_components:
+        selection_source = "canonical_market_trade_value" if has_current_selection else "canonical_market_breadth"
+        if has_current_selection:
             selected_at = max((item["as_of"] for item in components if item["as_of"]), default=None)
             selected_identity = {item["market"]: _volume_comparison_identity(item) for item in components}
             same_selection = (selected_at == output.get("as_of")
@@ -1135,6 +1172,24 @@ def compose_taiwan_market_volume_state(
             "source": selection_source if components else None,
             "reason": None if qualified else "TWSE and TPEX values require matching date, minute, scope, semantics, explicit authority and canonical lineage.",
         }
+        if has_current_selection and not qualified:
+            # Only retain an already-qualified same-day endpoint with the same
+            # comparison identity. Older official/estimated history is not a
+            # fallback for a newly selected vendor amount role.
+            prior_value = _as_int(volume_state.get("current_cumulative_trade_value"))
+            prior_date = _as_trade_date(volume_state.get("trade_date"))
+            generated = _as_taiwan_datetime(volume_state.get("generated_at"))
+            prior_components = volume_state.get("markets") or []
+            prior_identity = {item["market"]: _volume_comparison_identity(item) for item in prior_components}
+            prior_qualified = _combined_trade_value_qualification(prior_components)["decision_usable"]
+            if (prior_value is not None and prior_value >= 0
+                and volume_state.get("trade_value_complete") is True and prior_qualified
+                and generated and _can_retain_current_volume_state(volume_state, requested_at=generated)
+                and dates == {prior_date}
+                and set(prior_identity) == SUPPORTED_MARKETS
+                and all(_volume_comparison_identity(item) == prior_identity.get(item["market"])
+                        for item in components)):
+                return _qualify_volume_comparisons(_stale_qualified_volume_state(volume_state, latest=output))
     return _qualify_volume_comparisons(output)
 
 
@@ -1151,6 +1206,9 @@ def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
     }
     output["comparison_identity"] = comparison_identity
     qualification = _combined_trade_value_qualification(output.get("markets") or [])
+    if output.get("trade_value_freshness") == "stale":
+        qualification["decision_usable"] = False
+        qualification["reason_codes"].append("CURRENT_VALUE_STALE")
     if current is None:
         qualification.update(status="best_effort", decision_usable=False)
         qualification["reason_codes"].append("CURRENT_VALUE_UNAVAILABLE")
@@ -1158,7 +1216,7 @@ def _qualify_volume_comparisons(output: dict[str, Any]) -> dict[str, Any]:
     for item in output.get("markets") or []:
         item["trade_value_qualification"] = _trade_value_qualification(item)
     if current is not None and not qualification["decision_usable"]:
-        output["trade_value_status"] = "best_effort"
+        output["trade_value_status"] = "stale" if output.get("trade_value_freshness") == "stale" else "best_effort"
     for days in (5, 20):
         key = f"same_time_baseline_{days}d"
         baseline = output.setdefault(key, {})
@@ -1249,6 +1307,17 @@ def read_taiwan_market_volume_state(
         if item.get("trade_value") is not None:
             components[venue] = item
     if not components:
+        if (persisted.get("current_cumulative_trade_value") is not None
+            and persisted.get("trade_value_authority_status") == "vendor_reported"):
+            if not _can_retain_current_volume_state(persisted, requested_at=now):
+                # An empty explicit selection means no current amount evidence.
+                # Do not return yesterday's cumulative value under current keys.
+                return compose_taiwan_market_volume_state(persisted, breadth=None, current_components={})
+            return _qualify_volume_comparisons(_stale_qualified_volume_state(persisted, latest={
+                "trade_date": now.astimezone(TAIWAN_TZ).date().isoformat(),
+                "trade_value_complete": False, "included_markets": [],
+                "missing_markets": sorted(SUPPORTED_MARKETS),
+            }))
         return persisted
     return compose_taiwan_market_volume_state(persisted, breadth=None, current_components=components)
 
@@ -1336,9 +1405,16 @@ def _read_taiwan_market_minute_volume_state(
     complete_current = [
         minute_at
         for minute_at, rows_by_market in current_groups.items()
-        if SUPPORTED_MARKETS.issubset(rows_by_market)
+        if (_combined_trade_value(rows_by_market) is not None
+            and _trade_value_authority_status(rows_by_market) == "vendor_reported"
+            and _combined_trade_value_qualification([
+                _row_trade_value_evidence(row) for row in rows_by_market.values()
+            ])["decision_usable"])
     ]
-    selected_minute = max(current_groups)
+    latest_minute = max(current_groups)
+    selected_minute = latest_minute
+    if _combined_trade_value(current_groups[latest_minute]) is None and complete_current:
+        selected_minute = max(complete_current)
     selected_rows = current_groups[selected_minute]
     current_value = _combined_trade_value(selected_rows)
     available_markets = [
@@ -1644,7 +1720,7 @@ def _read_taiwan_market_minute_volume_state(
             ),
         },
     }
-    return _qualify_volume_comparisons({
+    output = {
         "kind": "taiwan_market_volume_state",
         "generated_at": generated_at.isoformat(),
         "as_of": selected_minute.isoformat(),
@@ -1656,7 +1732,11 @@ def _read_taiwan_market_minute_volume_state(
         "comparison_minute": selected_minute.strftime("%H:%M"),
         "calculation_basis": "TWSE+TPEX cumulative trade value compared with prior sessions at the same minute and component scope",
         "current_cumulative_trade_value": current_value,
+        "current_value_source": "taiwan_market_minute_state",
         "official_cumulative_trade_value": official_current_value,
+        "vendor_reported_cumulative_trade_value": (
+            current_value if trade_value_authority_status == "vendor_reported" else None
+        ),
         "estimated_cumulative_trade_value": estimated_current_value,
         "current_trade_value_semantics": (
             "best_available_combined_includes_estimate"
@@ -1725,7 +1805,22 @@ def _read_taiwan_market_minute_volume_state(
         "limitations": [
             "Up/down-side trade-value split requires full-market per-stock realtime state and is not inferred here."
         ],
-    })
+    }
+    if selected_minute != latest_minute:
+        latest_rows = current_groups[latest_minute]
+        output = _stale_qualified_volume_state(output, latest={
+            "as_of": latest_minute.isoformat(), "trade_date": latest_trade_date.isoformat(),
+            "current_cumulative_trade_value": None, "trade_value_complete": False,
+            "included_markets": [market for market, row in latest_rows.items() if _has_usable_trade_value(row)],
+            "missing_markets": [market for market in ("TWSE", "TPEX")
+                                if market not in latest_rows or not _has_usable_trade_value(latest_rows[market])],
+            "markets": [{**_row_trade_value_evidence(row), "market": market,
+                         "as_of": _row_minute_at(row).isoformat(),
+                         "cumulative_trade_value": row.cumulative_trade_value,
+                         "component_raw_result_ids": json.loads(row.component_raw_result_ids_json or "[]")}
+                        for market, row in latest_rows.items()],
+        })
+    return _qualify_volume_comparisons(output)
 
 
 __all__ = [

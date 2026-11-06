@@ -190,16 +190,35 @@ def test_transaction_independently_rejects_pre_release_receipt(seeded, monkeypat
 
 
 def test_published_receipt_does_not_require_price_rows(seeded):
+    from app.market.providers.tw_official_daily import TPEX_DAILY_CLOSE_RESOURCE_ID, TPEX_DATED_DAILY_RESOURCE_ID
+    calls = []
+    def failed_daily(route):
+        calls.append(route.resource_id)
+        return FakeResponse(text="unavailable", status_code=503)
+    def published(route):
+        calls.append(route.resource_id)
+        return FakeResponse(text=RAW.decode("utf-8"))
     executor = TaiwanOfficialDailyAcquisitionExecutor(
         fetchers={
-            TPEX_DAILY_RESOURCE_ID: lambda _: FakeResponse(text="unavailable", status_code=503),
-            TPEX_HIGHLIGHT_RESOURCE_ID: lambda _: FakeResponse(text=RAW.decode("utf-8")),
+            TPEX_DAILY_RESOURCE_ID: failed_daily,
+            TPEX_DAILY_CLOSE_RESOURCE_ID: failed_daily,
+            TPEX_DATED_DAILY_RESOURCE_ID: failed_daily,
+            TPEX_HIGHLIGHT_RESOURCE_ID: published,
         },
         clock=lambda: NOW, monotonic=lambda: 10.0,
     )
     result = refresh_taiwan_official_daily_venue(seeded, venue="TPEX", trade_date=DAY,
-        requested_at=NOW, acquisition=executor)
+        requested_at=NOW, acquisition=executor, route_state={})
     assert result["parse_status"] == "error"  # the daily-price postcondition still failed
+    assert result["external_call_count"] == 2
+    assert seeded.query(TaiwanPublishedBreadthSnapshot).count() == 0
+    # Three daily resources precede the independent companion. Each continuation
+    # keeps the same two-call bound and resumes the remaining routes.
+    result = refresh_taiwan_official_daily_venue(seeded, venue="TPEX", trade_date=DAY,
+        requested_at=NOW, acquisition=executor, route_state=result["route_continuation"])
+    assert result["external_call_count"] == 2 and result["parsed_count"] == 0
+    assert "ELIGIBLE_DAILY_TARGETS_MISSING" in result["limitations"]
+    assert calls == [TPEX_DAILY_RESOURCE_ID, TPEX_DAILY_CLOSE_RESOURCE_ID, TPEX_DATED_DAILY_RESOURCE_ID, TPEX_HIGHLIGHT_RESOURCE_ID]
     assert seeded.query(MarketDailyPrice).count() == 0
     assert seeded.query(TaiwanPublishedBreadthSnapshot).one().error_code is None
     resolved = read_taiwan_official_breadth(seeded, venue="TPEX", trade_date=DAY,

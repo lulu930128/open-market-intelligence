@@ -73,7 +73,9 @@ def _json_default(value: Any) -> str:
     raise TypeError(f"Unsupported research value: {type(value).__name__}")
 
 
-def _compact_canonical_limitations(quality: dict[str, Any]) -> dict[str, Any]:
+def _compact_canonical_limitations(
+    quality: dict[str, Any], *, details_projection: str = "full",
+) -> dict[str, Any]:
     """Summarize the Bar owner's dated blocker tokens, never arbitrary prose.
 
     Unknown/malformed tokens remain verbatim. Group counts are occurrences,
@@ -114,21 +116,32 @@ def _compact_canonical_limitations(quality: dict[str, Any]) -> dict[str, Any]:
             "total_count": len(limitations), "grouped_count": len(limitations) - len(retained),
             "retained_count": len(retained), "groups": list(groups.values()),
             "date_bounds_are_continuous": False,
-            "details_projection": "full", "details_field": "canonical_limitations",
+            "details_projection": details_projection, "details_field": "canonical_limitations",
         },
     }
 
 
-def _compact_quality(quality: dict[str, Any]) -> dict[str, Any]:
+def project_technical_input_quality(
+    quality: dict[str, Any], *, details_projection: str = "full",
+) -> dict[str, Any]:
     """Group daily semantics without carrying repeated raw receipt lineage.
 
     All non-provenance fields participate in the group key, including blockers,
     limitations and price-basis axes. Detailed dated states remain in full mode.
     """
-    quality = _compact_canonical_limitations(quality)
+    quality = _compact_canonical_limitations(quality, details_projection=details_projection)
     if "day_states" not in quality:
         return quality
     states = quality["day_states"]
+    blocker_rows = quality.get("day_state_blockers", [])
+    if any(
+        not isinstance(rows, list)
+        or any(not isinstance(item, dict) or not item.get("trade_date") for item in rows)
+        for rows in (states, blocker_rows)
+    ):
+        # Preserve malformed/unknown evidence verbatim; do not invent empty
+        # coverage or silently discard rows during a transport optimization.
+        return quality
     groups: dict[str, dict[str, Any]] = {}
     counts: Counter[str] = Counter()
     for state in states:
@@ -147,7 +160,7 @@ def _compact_quality(quality: dict[str, Any]) -> dict[str, Any]:
         group["last_trade_date"] = max(group["last_trade_date"], day)
         counts[str(state.get("state"))] += 1
     blockers: dict[str, dict[str, Any]] = {}
-    for entry in quality.get("day_state_blockers", []):
+    for entry in blocker_rows:
         semantic = {key: value for key, value in entry.items() if key != "trade_date"}
         key = json.dumps(semantic, sort_keys=True, ensure_ascii=False, default=_json_default)
         day = str(entry["trade_date"])
@@ -159,8 +172,10 @@ def _compact_quality(quality: dict[str, Any]) -> dict[str, Any]:
         group["last_trade_date"] = max(group["last_trade_date"], day)
     return {
         **{key: value for key, value in quality.items() if key not in {"day_states", "day_state_blockers"}},
-        "day_state_summary": {"count": len(states), "state_counts": dict(counts), "groups": list(groups.values())},
-        "day_state_blocker_summary": {"count": len(quality.get("day_state_blockers", [])), "groups": list(blockers.values())},
+        "day_state_summary": {"count": len(states), "state_counts": dict(counts), "groups": list(groups.values()),
+                              "date_bounds_are_continuous": False, "details_projection": details_projection},
+        "day_state_blocker_summary": {"count": len(quality.get("day_state_blockers", [])), "groups": list(blockers.values()),
+                                      "date_bounds_are_continuous": False, "details_projection": details_projection},
     }
 
 
@@ -173,7 +188,7 @@ def project_tw_workspace_research(full: dict[str, Any]) -> dict[str, Any]:
     def compact(quality: dict[str, Any]) -> dict[str, Any]:
         identity = id(quality)
         if identity not in qualities:
-            qualities[identity] = _compact_quality(quality)
+            qualities[identity] = project_technical_input_quality(quality)
         return qualities[identity]
 
     if isinstance(data.get("input_quality"), dict):

@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.us_market.errors import USMarketDataFetchError
@@ -193,12 +194,13 @@ class USShortVolumeRecord:
     symbol: str
     trade_date: date
     market_center: str
-    short_volume: int | None
-    short_exempt_volume: int | None
-    total_volume: int | None
+    short_volume: Decimal | None
+    short_exempt_volume: Decimal | None
+    total_volume: Decimal | None
     short_ratio: float | None
     source_url: str | None
     raw_payload_hash: str | None
+    source_symbol: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1062,22 +1064,55 @@ def parse_finra_short_volume(
     payload_hash = _payload_hash(text)
     records: list[USShortVolumeRecord] = []
 
-    for row in _iter_pipe_rows(text):
-        symbol = normalize_us_symbol(row.get("Symbol"))
-        row_date = _parse_compact_date(row.get("Date")) or trade_date
-        if not symbol or row_date is None:
-            continue
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")), delimiter="|")
+    required = {"Date", "Symbol", "ShortVolume", "ShortExemptVolume", "TotalVolume", "Market"}
+    if set(reader.fieldnames or ()) != required:
+        raise USMarketDataFetchError("FINRA short-volume file has an invalid header.")
+    trailer_count = None
+    seen: set[tuple[str, date, str]] = set()
 
-        short_volume = _parse_int(row.get("ShortVolume"))
-        total_volume = _parse_int(row.get("TotalVolume"))
-        if short_volume is None or total_volume is None:
-            continue
+    def quantity(value: Any, *, field: str, line: int) -> Decimal:
+        try:
+            parsed = Decimal(str(value).strip())
+        except InvalidOperation as exc:
+            raise USMarketDataFetchError(f"FINRA invalid {field} at line {line}.") from exc
+        if not parsed.is_finite() or parsed < 0 or parsed.as_tuple().exponent < -6:
+            raise USMarketDataFetchError(f"FINRA invalid precision or range for {field} at line {line}.")
+        # SQLite NUMERIC uses a numeric storage class. Reject quantities that
+        # cannot round-trip through its floating representation at six places.
+        if parsed >= Decimal("1e18") or Decimal(format(float(parsed), ".6f")) != parsed:
+            raise USMarketDataFetchError(f"FINRA unsupported storage precision for {field} at line {line}.")
+        return parsed
 
-        short_ratio = (
-            short_volume / total_volume
-            if short_volume is not None and total_volume not in (None, 0)
-            else None
-        )
+    for line, row in enumerate(reader, start=2):
+        # FINRA's final line is the declared record count, not a security.
+        if not row.get("Symbol") and all(row.get(key) is None for key in required - {"Date"}):
+            value = str(row.get("Date") or "").strip()
+            if value.isdigit() and trailer_count is None:
+                trailer_count = int(value)
+                continue
+        if trailer_count is not None:
+            raise USMarketDataFetchError(f"FINRA unexpected data after trailer at line {line}.")
+        # CQS suffixes are case-sensitive: TpC (preferred) and TPC (common)
+        # are different securities. Preserve the provider identity verbatim.
+        raw_symbol = str(row.get("Symbol") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.$/\-]{0,31}", raw_symbol) or None in row:
+            raise USMarketDataFetchError(f"FINRA invalid symbol or columns at line {line}.")
+        # Provider slash suffixes identify share classes/warrants, not FX quotes.
+        symbol = raw_symbol.replace("/", ".")
+        row_date = _parse_compact_date(row.get("Date"))
+        if row_date is None or (trade_date is not None and row_date != trade_date):
+            raise USMarketDataFetchError(f"FINRA trade date mismatch at line {line}.")
+        short_volume = quantity(row.get("ShortVolume"), field="ShortVolume", line=line)
+        short_exempt_volume = quantity(row.get("ShortExemptVolume"), field="ShortExemptVolume", line=line)
+        total_volume = quantity(row.get("TotalVolume"), field="TotalVolume", line=line)
+        if short_volume > total_volume or short_exempt_volume > total_volume:
+            raise USMarketDataFetchError(f"FINRA short volume exceeds total at line {line}.")
+        short_ratio = float(short_volume / total_volume) if total_volume else None
+        key = (symbol, row_date, _clean_text(row.get("Market")) or "")
+        if key in seen:
+            raise USMarketDataFetchError(f"FINRA duplicate symbol/date/market at line {line}.")
+        seen.add(key)
 
         records.append(
             USShortVolumeRecord(
@@ -1086,14 +1121,21 @@ def parse_finra_short_volume(
                 trade_date=row_date,
                 market_center=_clean_text(row.get("Market")) or "",
                 short_volume=short_volume,
-                short_exempt_volume=_parse_int(row.get("ShortExemptVolume")),
+                short_exempt_volume=short_exempt_volume,
                 total_volume=total_volume,
                 short_ratio=short_ratio,
                 source_url=source_url,
                 raw_payload_hash=payload_hash,
+                source_symbol=raw_symbol,
             )
         )
 
+    if trade_date is not None and trailer_count is None:
+        raise USMarketDataFetchError("FINRA dated refresh requires the complete file trailer.")
+    if trailer_count is not None and trailer_count != len(records):
+        raise USMarketDataFetchError("FINRA record count does not match the file trailer.")
+    if not records:
+        raise USMarketDataFetchError("FINRA short-volume file contains no valid records.")
     return sorted(records, key=lambda record: (record.symbol, record.trade_date, record.market_center))
 
 

@@ -183,10 +183,33 @@ class EvidenceTarget(str, Enum):
     LATEST_AVAILABLE = "latest_available"
 
 
+class CompletedBarSessionWindow(CanonicalModel):
+    """Session boundaries supplied by the market owner, never inferred here."""
+
+    start_at: datetime
+    end_at: datetime
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> CompletedBarSessionWindow:
+        if any(t.tzinfo is None or t.utcoffset() is None for t in (self.start_at, self.end_at)):
+            raise ValueError("completed-bar session boundaries must be timezone-aware")
+        if self.end_at <= self.start_at:
+            raise ValueError("completed-bar session window must be ordered")
+        return self
+
+
+class CompletedBarFreshness(CanonicalModel):
+    provider_keys: tuple[str, ...] = Field(min_length=1, max_length=8)
+    interval: str = Field(min_length=1, max_length=16)
+    interval_seconds: int = Field(ge=1, le=86400)
+    session_windows: tuple[CompletedBarSessionWindow, ...] = Field(max_length=16)
+
+
 class FreshnessRequirement(CanonicalModel):
     max_age_seconds: int = Field(ge=1, le=2_678_400)
     basis: FreshnessBasis = FreshnessBasis.WALL_CLOCK
     evidence_target: EvidenceTarget = EvidenceTarget.CURRENT
+    completed_bar: CompletedBarFreshness | None = None
 
 
 class QualityRequirement(CanonicalModel):
@@ -231,6 +254,12 @@ class DataRequirementV2(CanonicalModel):
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> DataRequirementV2:
+        if self.freshness.completed_bar is not None:
+            if (not isinstance(self.request, BarCapabilityRequest)
+                    or self.request.interval != self.freshness.completed_bar.interval
+                    or self.freshness.basis is not FreshnessBasis.EVENT_TIME
+                    or self.freshness.evidence_target is not EvidenceTarget.CURRENT):
+                raise ValueError("completed-bar freshness requires current event-time bars")
         if isinstance(self.target, InstrumentTarget) and isinstance(
             self.request, DatasetCapabilityRequest
         ):
@@ -600,6 +629,8 @@ __all__ = [
     "BarCoverageRequirement",
     "BarSeriesResolutionMode",
     "CapabilityRequest",
+    "CompletedBarFreshness",
+    "CompletedBarSessionWindow",
     "DataRequirementV2",
     "DatasetCapabilityRequest",
     "DatasetTarget",

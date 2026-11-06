@@ -221,6 +221,7 @@ def _daily_indicator(
     stock_id: str,
     parameters: TechnicalAnalysisParameters | None = None,
     to_date: date | None = None,
+    requested_at: datetime | None = None,
 ) -> dict[str, Any] | None:
     technical_parameters = parameters or get_technical_analysis_parameters()
     return calculate_active_latest_daily_indicator(
@@ -228,6 +229,7 @@ def _daily_indicator(
         stock_id=stock_id,
         to_date=to_date,
         parameters=technical_parameters,
+        **({"requested_at": requested_at, "allow_early_regular": True} if requested_at is not None else {}),
     )
 
 
@@ -377,6 +379,9 @@ def _daily_context(
     stock_id: str,
     parameters: TechnicalAnalysisParameters | None = None,
     to_date: date | None = None,
+    requested_at: datetime | None = None,
+    *,
+    include_indicator: bool = True,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
     latest_indicator = _daily_indicator(
@@ -384,7 +389,8 @@ def _daily_context(
         stock_id=stock_id,
         parameters=technical_parameters,
         to_date=to_date,
-    )
+        **({"requested_at": requested_at} if requested_at is not None else {}),
+    ) if include_indicator else None
     if to_date is None:
         latest_institutional = market_service.get_latest_stock_institutional_trade(
             db,
@@ -938,6 +944,9 @@ def _build_indicator_report(
         stock_id=stock_id,
         parameters=technical_parameters,
         to_date=to_date,
+        # The completed period indicator was already supplied by the caller.
+        # This report only consumes institutional and margin context below.
+        include_indicator=False,
     )
     latest_institutional = daily["institutional"]
     institutional_net = (
@@ -1826,6 +1835,7 @@ def _build_daily_report(
     include_intraday: bool = False,
     parameters: TechnicalAnalysisParameters | None = None,
     to_date: date | None = None,
+    requested_at: datetime | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
     rows: list[dict[str, Any]] = []
@@ -1837,6 +1847,7 @@ def _build_daily_report(
         stock_id=stock_id,
         parameters=technical_parameters,
         to_date=to_date,
+        **({"requested_at": requested_at} if requested_at is not None else {}),
     )
     indicator = daily["indicator"]
 
@@ -2439,6 +2450,7 @@ def build_stock_technical_report(
     intraday_override: dict[str, Any] | None = None,
     to_date: date | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
+    requested_at: datetime | None = None,
 ) -> dict[str, Any]:
     normalized_timeframe = timeframe.strip().lower()
     normalized_stock_id = stock_id.strip()
@@ -2468,6 +2480,7 @@ def build_stock_technical_report(
                 include_intraday=include_intraday,
                 parameters=technical_parameters,
                 to_date=to_date,
+                **({"requested_at": requested_at} if requested_at is not None else {}),
             )
         )
 

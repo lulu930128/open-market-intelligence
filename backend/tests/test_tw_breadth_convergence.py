@@ -146,15 +146,16 @@ def test_completed_breadth_legacy_entry_cannot_fetch_or_estimate_limits():
         engine.dispose()
 
 
-def test_official_shadow_lane_never_replaces_different_scope():
+def test_completed_official_lane_stays_pending_without_published_receipt():
     from app.market.tw_current_market_platform import read_taiwan_breadth_lanes
     db, engine = _db()
     try:
         with patch("app.market.official_breadth_platform.read_taiwan_official_breadth", side_effect=AssertionError("not needed intraday")):
             assert read_taiwan_breadth_lanes(db, venue="TWSE", requested_at=NOW)["status"] == "not_applicable"
         lane = read_taiwan_breadth_lanes(db, venue="TWSE", requested_at=NOW.replace(hour=18))
-        assert lane["selected_lane"] == "current_registered"
-        assert lane["reason"] == "DISTINCT_UNIVERSE_SCOPES"
+        assert lane["selected_lane"] == "official_daily"
+        assert lane["status"] == "pending"
+        assert lane["reason"] == "OFFICIAL_AGGREGATE_PENDING"
         assert lane["official_daily"]["status"] == "missing"
     finally:
         db.close()

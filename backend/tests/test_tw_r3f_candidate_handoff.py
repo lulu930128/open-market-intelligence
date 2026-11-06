@@ -66,7 +66,7 @@ def observe(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize('interval,expected', [('1d',2), ('1w',1), ('1mo',1)])
+@pytest.mark.parametrize('interval,expected', [('1d',1), ('1w',1), ('1mo',1)])
 def test_exact_candidate_read_count_and_full_query_evidence(db, monkeypatch, tmp_path, interval, expected):
     from app.config import settings
     monkeypatch.setattr(settings, 'tw_corporate_event_cache_path', tmp_path/'absent.json')
@@ -88,7 +88,7 @@ def test_exact_candidate_read_count_and_full_query_evidence(db, monkeypatch, tmp
         rows_examined=stored.rows_examined, rows_accepted=stored.rows_accepted,
         rejections=len(stored.rejections), output_sha256=sha256(output.model_dump_json().encode()).hexdigest(),
         identity=output.identity.model_dump(mode='json'))))
-    assert [c[3].max_rows for c in calls] == ([1800,5000] if interval == '1d' else [5000])
+    assert [c[3].max_rows for c in calls] == ([1800] if interval == '1d' else [5000])
     assert len(calls) == expected
 
 
@@ -162,11 +162,11 @@ def test_full_history_retains_all_candidates_and_exact_output(db, monkeypatch, t
     kwargs = request(interval)
     kwargs.pop('from_time')  # real latest-N discovery, not a reduced test window
     actual = compare_legacy(TaiwanBarService(db), kwargs)
-    assert [c[4].rows_accepted for c in calls] == ([size]*4 if interval == '1d' else [size]*3)
-    assert [c[3].max_rows for c in calls] == ([1800,5000,1800,5000] if interval == '1d' else [5000]*3)
+    assert [c[4].rows_accepted for c in calls] == [size]*3
+    assert [c[3].max_rows for c in calls] == ([1800,5000,1800] if interval == '1d' else [5000]*3)
     assert actual.bars
     print(json.dumps(dict(history_size=size, interval=interval, candidate_counts=[c[4].rows_accepted for c in calls],
-        old_loads=2, new_loads=2 if interval=='1d' else 1, four_identity_payload_bytes_equal=True,
+        old_loads=2, new_loads=1, four_identity_payload_bytes_equal=True,
         identity=actual.identity.model_dump(mode='json'))))
 
 

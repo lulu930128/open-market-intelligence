@@ -452,7 +452,10 @@ class TaiwanMarketDashboardTests(unittest.TestCase):
                 now=datetime(2026, 8, 14, 10, 0, tzinfo=TAIWAN_TZ),
             )
 
-        summary_read.assert_called_once_with(self.db)
+        summary_read.assert_called_once_with(
+            self.db, requested_at=datetime(2026, 8, 14, 10, 0, tzinfo=TAIWAN_TZ),
+            allow_universe_fallback=True,
+        )
         parsed = TaiwanMarketDashboardRead.model_validate(payload)
         self.assertEqual(parsed.headline_index_field, "resolved_indices")
         self.assertEqual(parsed.headline_breadth_field, "resolved_breadth")

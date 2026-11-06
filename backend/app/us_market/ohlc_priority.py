@@ -340,7 +340,9 @@ def reconcile_us_priority_ohlc(
         "continuation_remaining_count": max(remaining - rotated_checked, 0),
         "continuation_required": bool(
             repair and rotated_checked > 0 and remaining > rotated_checked
-            and not errors and not unresolved and satisfied_count == checked_count
+            # Known per-symbol gaps do not block the unscanned suffix. Unknown
+            # provider consumption must retain its reservation and stop instead.
+            and not unknown_usage
         ),
         "unresolved_sample": unresolved[:20],
         "error_count": len(errors),

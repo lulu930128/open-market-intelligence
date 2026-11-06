@@ -134,6 +134,18 @@ class AiTechnicalAnalysisTests(unittest.TestCase):
         self.assertIn("swing", summary["score_model"]["horizon_factor_scores"])
         self.assertGreater(summary["selected_score"], 0)
 
+    def test_missing_atr_does_not_invent_volatility_or_trading_levels(self) -> None:
+        for close in (12, 127.35, 2240):
+            levels = technical_analysis._technical_price_levels(
+                technical_reports={}, latest_daily={"close_price": close},
+            )
+            self.assertEqual(levels["latest_price"], close)
+            self.assertIsNone(levels["levels"]["atr14"])
+            self.assertEqual(levels["entry"], {})
+            self.assertEqual(levels["risk"], {})
+            self.assertFalse(levels["validation"]["decision_ready"])
+            self.assertIn("ATR_UNAVAILABLE", levels["validation"]["reason_codes"])
+
     def test_technical_price_levels_builds_entry_and_risk_contract(self) -> None:
         levels = technical_analysis._technical_price_levels(
             technical_reports={

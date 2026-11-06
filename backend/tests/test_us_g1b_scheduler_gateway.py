@@ -3,14 +3,18 @@
 from datetime import datetime, timezone
 import json
 import math
+import sqlite3
 from threading import Lock
 
 import pytest
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.db.models import Base, MarketIntradayBar, RawFetchResult
+from app.db.session import SessionLocal
 from app.jobs import us_intraday_materializer_scheduler as scheduler
 from app.market_data.contracts import EvidenceFreshness
 from app.market_data.gateway import MarketDataGateway, PostAcquisitionError
@@ -137,6 +141,15 @@ def test_tw_gateway_labels_real_failure_boundary_without_changing_accounting(sta
     assert caught.value.stage == stage
     assert isinstance(caught.value.__cause__, ValueError)
     assert caught.value.acquisition.external_calls == 1
+    diagnostic = caught.value.diagnostics()
+    assert diagnostic["stage"] == stage
+    assert diagnostic["persistence_committed"] is (
+        None if stage == "persistence" else stage == "reread_resolve")
+    assert diagnostic["provider"] == "twse_openapi"
+    assert diagnostic["receipt_count"] == diagnostic["observation_count"] == 1
+    assert diagnostic["receipt_fetched_at"] and diagnostic["requested_at"]
+    assert diagnostic["causes"][0]["type"] == "ValueError"
+    assert "secret" not in json.dumps(diagnostic).lower()
     assert acquisition.calls == 1
     assert transaction.rolled_back is (stage == "persistence")
     assert reader.calls == 1  # Failed reread also cannot produce new evidence.
@@ -220,7 +233,16 @@ def test_us_gateway_to_materializer_keeps_stage_calls_rollback_next_symbol_and_l
         assert diagnostic["post_acquisition_stage"] == stage
         assert diagnostic["error_type"] == "ValueError"
         assert diagnostic["external_calls"] == 1
-        assert "persisted" not in diagnostic
+        assert diagnostic.get("persisted") is (None if stage == "persistence" else True)
+        detail = result["results"][0]["post_acquisition_diagnostics"]
+        assert detail["stage"] == stage and detail["symbol"] == "^DJI"
+        assert detail["provider"] == YAHOO_INTRADAY_DESCRIPTOR.provider_key
+        assert detail["resource_id"] == YAHOO_INTRADAY_RESOURCE_ID
+        assert detail["receipt_count"] == 1 and detail["observation_count"] > 0
+        assert detail["persistence_committed"] is (None if stage == "persistence" else True)
+        assert detail["causes"][0]["frames"][-1]["function"] == {
+            "persistence": "fail_insert", "validation": "validation", "reread_resolve": "reread"}[stage]
+        assert "secret" not in json.dumps(detail).lower()
         assert SECRET not in caplog.text
         assert "secret" not in json.dumps(summary).lower()
         assert f"stage={stage}" in caplog.text
@@ -250,3 +272,125 @@ def test_stage_projection_is_allowlisted_and_legacy_callers_remain_valid(stage):
         assert diagnostic.get("post_acquisition_stage") == (
             expected if reason == "post_acquisition_exception" else None)
         assert "secret" not in json.dumps(diagnostic).lower()
+
+
+@pytest.mark.parametrize("failure", ["schema", "snapshot", "reread"])
+def test_real_sqlite_failure_reaches_materializer_with_dbapi_diagnostics(
+    failure, tmp_path, monkeypatch, caplog,
+):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'diagnostics.db'}", poolclass=NullPool)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+        connection.exec_driver_sql("CREATE TABLE unrelated (value INTEGER)")
+    Base.metadata.create_all(engine)
+    fetches, conflicts, rollbacks = [], [], []
+
+    def fetch(_route, _requirement):
+        fetches.append(True)
+        payload = _yahoo_payload(NOW, age_seconds=30)
+        payload["chart"]["result"][0]["meta"]["symbol"] = "^DJI"
+        return payload, "https://fixture.invalid/?token=secret"
+
+    @event.listens_for(engine, "before_cursor_execute", retval=True)
+    def missing_table(conn, cursor, statement, parameters, context, executemany):
+        if failure == "schema" and statement.startswith("INSERT INTO market_intraday_bar "):
+            statement = statement.replace("INSERT INTO market_intraday_bar ", "INSERT INTO missing_r03_table ", 1)
+        return statement, parameters
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def snapshot_conflict(conn, cursor, statement, parameters, context, executemany):
+        if failure == "snapshot" and statement.startswith("SELECT ") and "FROM source_registry" in statement:
+            # The borrowed physical read is pinned. An unrelated writer
+            # invalidates it; the owner must fail without replaying caller work.
+            with engine.begin() as other:
+                other.exec_driver_sql("INSERT INTO unrelated VALUES (1)")
+            conflicts.append(True)
+
+    def session_factory():
+        db = SessionLocal(bind=engine)
+        assert db.autoflush is False
+        if failure == "snapshot":
+            # Keep the real 517 diagnostic fixture in the existing caller
+            # physical-read branch. Fresh writer admission now uses IMMEDIATE.
+            event.listen(db, "after_begin", lambda _s, _t, conn: conn.exec_driver_sql("BEGIN"))
+        rollback = db.rollback
+
+        def record_rollback():
+            rollbacks.append(True)
+            return rollback()
+
+        monkeypatch.setattr(db, "rollback", record_rollback)
+        return db
+
+    def platform_factory(db):
+        platform = USIntradayMarketPlatform(
+            db, acquisition=USIntradayAcquisitionExecutor(
+                fetchers={YAHOO_INTRADAY_RESOURCE_ID: fetch}, clock=lambda: NOW),
+            bar_descriptors=(YAHOO_INTRADAY_DESCRIPTOR,),
+            quote_cache_invalidator=lambda _symbol: None,
+        )
+        read = platform._bar_reader.read_bar_candidates
+
+        def reread(requirement):
+            if failure == "reread" and fetches:
+                db.connection().exec_driver_sql("SELECT * FROM missing_r03_table WHERE value = ?", (SECRET,))
+            return read(requirement)
+
+        monkeypatch.setattr(platform._bar_reader, "read_bar_candidates", reread)
+        return platform
+
+    try:
+        result = materializer.materialize_us_intraday_capability(
+            "intraday.bars", configured_symbols="^DJI", max_symbols=1,
+            lane_id="index_current", instrument_type="index", max_external_calls=1,
+            max_provider_calls=1, now=NOW, run_lock=Lock(),
+            session_factory=session_factory, platform_factory=platform_factory,
+        )
+        assert fetches == [True] and rollbacks
+        assert len(conflicts) == (1 if failure == "snapshot" else 0)
+        assert result["failed_count"] == 1
+        assert result["external_call_count"] == result["observed_external_call_count"] == 1
+        detail = result["results"][0]["post_acquisition_diagnostics"]
+        assert detail["stage"] == ("reread_resolve" if failure == "reread" else "persistence")
+        assert detail["persistence_committed"] is (True if failure == "reread" else None)
+        assert bool(detail["raw_result_ids"]) is (failure == "reread")
+        cause = detail["causes"][0]
+        assert cause["type"] == "OperationalError" and cause["module"] == "sqlalchemy.exc"
+        assert cause["dbapi"] == {
+            "origin": "orig", "type": "OperationalError", "module": "sqlite3",
+            "sqlite_errorcode": 517 if failure == "snapshot" else 1,
+            "sqlite_errorname": "SQLITE_BUSY_SNAPSHOT" if failure == "snapshot" else "SQLITE_ERROR",
+            "message": "database is locked" if failure == "snapshot" else "no such table: missing_r03_table",
+        }
+        if failure != "reread":
+            assert any(frame["file"] == "intraday_transaction.py" for frame in cause["app_frames"])
+        assert all(set(frame) == {"file", "function", "line"} for frame in cause["app_frames"])
+        assert all("/" not in frame["file"] and "\\" not in frame["file"] for frame in cause["app_frames"])
+        diagnostic_text = json.dumps(detail)
+        for forbidden in ("secret", "[SQL:", "[parameters:", "INSERT INTO", "SELECT *", '"chart"'):
+            assert forbidden not in diagnostic_text and forbidden not in caplog.text
+        assert '"sqlite_errorcode":' in caplog.text
+        with SessionLocal(bind=engine) as check:
+            assert check.query(MarketIntradayBar).count() == (1 if failure == "reread" else 0)
+            assert check.query(RawFetchResult).count() == (1 if failure == "reread" else 0)
+    finally:
+        engine.dispose()
+
+
+def test_dbapi_orig_diagnostics_remain_bounded_when_cause_is_different_or_cyclic():
+    original = sqlite3.OperationalError("x" * 1000 + "\ntrailing")
+    wrapper = OperationalError("SELECT secret", {"secret": SECRET}, original)
+    unrelated = ValueError(SECRET)
+    wrapper.__cause__ = unrelated
+    unrelated.__cause__ = wrapper
+    error = PostAcquisitionError(SECRET, acquisition=AcquisitionSummary(
+        attempted=True, status=AcquisitionStatus.COMPLETED, external_calls=1))
+    error.__cause__ = wrapper
+    detail = error.diagnostics()
+    assert len(detail["causes"]) == 2  # Cycle does not duplicate exceptions.
+    dbapi = detail["causes"][0]["dbapi"]
+    assert dbapi["origin"] == "orig" and dbapi["module"] == "sqlite3"
+    assert dbapi["sqlite_errorcode"] is None and dbapi["sqlite_errorname"] is None
+    assert len(dbapi["message"]) <= 240
+    assert "message" not in detail["causes"][1] and "dbapi" not in detail["causes"][1]
+    assert "secret" not in json.dumps(detail)

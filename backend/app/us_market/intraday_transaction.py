@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import tuple_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -13,6 +14,7 @@ from app.db.models import (
     MarketIntradayBarLineage,
     RawFetchResult,
     SourceRegistry,
+    USIntradayObservationState,
     USQuoteSnapshot,
     utc_now,
 )
@@ -251,6 +253,14 @@ class USIntradayBarTransaction:
         self._raw = _USRawReceiptTransaction(db, capability="intraday.bars")
 
     def persist_bar_acquisition(self, requirement: DataRequirementV2, acquisition: BarAcquisitionResult) -> PersistenceSummary:
+        # Recovery can replay only the immutable acquisition. Pending caller
+        # work must not be rolled back and silently omitted from a success.
+        retry_snapshot = not (self._db.new or self._db.dirty or self._db.deleted)
+        return self._persist_bar_acquisition_attempt(requirement, acquisition, retry_snapshot=retry_snapshot)
+
+    def _persist_bar_acquisition_attempt(
+        self, requirement: DataRequirementV2, acquisition: BarAcquisitionResult, *, retry_snapshot: bool,
+    ) -> PersistenceSummary:
         if not isinstance(requirement.target, InstrumentTarget) or not isinstance(requirement.request, BarCapabilityRequest) or requirement.request.capability_id != "intraday.bars":
             raise ValueError("US intraday transaction capability mismatch")
         if not acquisition.summary.attempted:
@@ -258,7 +268,20 @@ class USIntradayBarTransaction:
         stored: dict[tuple[str, str], tuple[SourceRegistry, RawFetchResult, RawFetchReceiptV1]] = {}
         raw_ids: list[int] = []
         receipts_written = written = unchanged = 0
+        commit_started = False
+        owns_physical_transaction = False
+        connection = None
         try:
+            # Reserve the writer before receipt/precedence reads. A deferred
+            # read-to-write upgrade can fail immediately with SQLITE_BUSY even
+            # when the configured busy timeout would allow admission to wait.
+            # Acquisition has already finished; the reservation spans only this
+            # persistence callback (including no-op validation). Do not restart
+            # an existing caller transaction or discard its pending ORM work.
+            connection = self._db.connection()
+            if connection.dialect.name == "sqlite" and not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                owns_physical_transaction = True
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
                 if key in stored:
@@ -316,6 +339,8 @@ class USIntradayBarTransaction:
                 )
                 for bar, _source, _raw, receipt, _parser, _incoming in prepared
             )
+            if len(set(storage_keys)) != len(storage_keys):
+                raise ValueError("duplicate canonical observation identity")
             existing_rows = (
                 self._db.query(MarketIntradayBar)
                 .filter(
@@ -326,6 +351,7 @@ class USIntradayBarTransaction:
                         MarketIntradayBar.bar_time,
                     ).in_(storage_keys)
                 )
+                .populate_existing()
                 .all()
                 if storage_keys
                 else []
@@ -339,6 +365,27 @@ class USIntradayBarTransaction:
                 ): row
                 for row in existing_rows
             }
+            # Read stored provenance before any bar mutation. Keep both lookups
+            # batched; refresh identity-map instances from the pinned snapshot.
+            stored_lineages = (
+                self._db.query(MarketIntradayBarLineage, RawFetchResult.content_hash)
+                .outerjoin(RawFetchResult, RawFetchResult.id == MarketIntradayBarLineage.raw_result_id)
+                .filter(MarketIntradayBarLineage.bar_id.in_([row.id for row in existing_rows]))
+                .populate_existing()
+                .all()
+                if existing_rows else []
+            )
+            lineages_by_bar_id = {lineage.bar_id: lineage for lineage, _hash in stored_lineages}
+            hashes_by_bar_id = {lineage.bar_id: content_hash for lineage, content_hash in stored_lineages}
+            states_by_bar_id = {}
+            existing_ids = [row.id for row in existing_rows]
+            for offset in range(0, len(existing_ids), 500):
+                states = (
+                    self._db.query(USIntradayObservationState)
+                    .filter(USIntradayObservationState.bar_id.in_(existing_ids[offset:offset + 500]))
+                    .populate_existing().all()
+                )
+                states_by_bar_id.update((state.bar_id, state) for state in states)
             row_records = []
             for bar, source, raw, receipt, parser, incoming in prepared:
                 storage_key = (
@@ -348,6 +395,24 @@ class USIntradayBarTransaction:
                     _utc(bar.start_at),
                 )
                 row = rows_by_key.get(storage_key)
+                lineage = lineages_by_bar_id.get(row.id) if row is not None else None
+                observed_at = None
+                observed_hash = None
+                if lineage is not None and lineage.provider == receipt.provider:
+                    observed_at = _stored_utc(lineage.fetched_at)
+                    observed_hash = hashes_by_bar_id[row.id]
+                state = states_by_bar_id.get(row.id) if row is not None else None
+                if state is not None and (observed_at is None or _stored_utc(state.observed_fetched_at) >= observed_at):
+                    observed_at = _stored_utc(state.observed_fetched_at)
+                    observed_hash = state.observed_content_hash
+                receipt_at = _utc(receipt.fetched_at)
+                if observed_at is not None:
+                    if observed_at > receipt_at:
+                        unchanged += 1
+                        continue
+                    if observed_at == receipt_at and observed_hash != receipt.content_hash:
+                        raise ValueError("US_INTRADAY_RECEIPT_TIME_CONFLICT")
+                advance_observation = observed_at is None or receipt_at > observed_at
                 is_unchanged = row is not None and _bar_row_matches(row, incoming)
                 if row is None:
                     row = MarketIntradayBar(**incoming)
@@ -358,50 +423,15 @@ class USIntradayBarTransaction:
                         setattr(row, key, value)
                     row.updated_at = utc_now()
                 row_records.append(
-                    (bar, source, raw, receipt, parser, row, is_unchanged)
+                    (bar, source, raw, receipt, parser, row, is_unchanged, advance_observation)
                 )
 
-            # Allocate IDs for all new rows in one flush, then read every
-            # existing lineage in one bounded query.  The prior per-bar lookup
-            # issued two SQL statements per observation and made recurring
-            # 600-bar materialization monopolize the local runtime.
+            # Allocate IDs for all new rows in one flush. Existing lineage was
+            # read above, before any OHLCV or provenance mutation.
             if row_records:
                 self._db.flush()
-            lineages_by_bar_id = {
-                lineage.bar_id: lineage
-                for lineage in (
-                    self._db.query(MarketIntradayBarLineage)
-                    .filter(
-                        MarketIntradayBarLineage.bar_id.in_(
-                            [
-                                row.id
-                                for (
-                                    _bar,
-                                    _source,
-                                    _raw,
-                                    _receipt,
-                                    _parser,
-                                    row,
-                                    _unchanged,
-                                ) in row_records
-                            ]
-                        )
-                    )
-                    .all()
-                    if row_records
-                    else []
-                )
-            }
-            for bar, source, raw, receipt, parser, row, is_unchanged in row_records:
+            for bar, source, raw, receipt, parser, row, is_unchanged, advance_observation in row_records:
                 lineage = lineages_by_bar_id.get(row.id)
-                if (
-                    is_unchanged and lineage is not None
-                    and _stored_utc(lineage.fetched_at) > _utc(receipt.fetched_at)
-                ):
-                    # A late identical-price receipt cannot roll back newer
-                    # finalization evidence or repoint its provenance.
-                    unchanged += 1
-                    continue
                 lineage_compatible = bool(
                     lineage is not None
                     and lineage.provider == receipt.provider
@@ -415,6 +445,16 @@ class USIntradayBarTransaction:
                         or lineage.raw_contract_version.startswith(f"{parser}+")
                     )
                 )
+                if advance_observation or not (is_unchanged and lineage_compatible):
+                    state = states_by_bar_id.get(row.id)
+                    if state is None:
+                        state = USIntradayObservationState(bar_id=row.id)
+                        self._db.add(state)
+                        states_by_bar_id[row.id] = state
+                    # Raw deduplication may retain an older fetched_at. This is
+                    # the actual validated receipt time, never the raw row time.
+                    state.observed_fetched_at = _utc(receipt.fetched_at)
+                    state.observed_content_hash = receipt.content_hash
                 if is_unchanged and lineage_compatible:
                     # An unchanged observation keeps its original immutable
                     # receipt lineage. Repointing every historical minute to
@@ -446,9 +486,27 @@ class USIntradayBarTransaction:
                 lineage.component_raw_result_ids_json = None
                 lineage.updated_at = utc_now()
                 written += int(not is_unchanged or not lineage_compatible)
+            # Complete DML before entering commit, so a known snapshot upgrade
+            # failure can be rolled back and retried without guessing whether
+            # commit started. No commit-phase error is eligible for recovery.
+            self._db.flush()
+            commit_started = True
             self._db.commit()
-        except Exception:
+        except Exception as exc:
             self._db.rollback()
+            if (
+                retry_snapshot and owns_physical_transaction and not commit_started
+                and connection is not None and connection.dialect.name == "sqlite"
+                and isinstance(exc, OperationalError)
+                and getattr(exc.orig, "sqlite_errorcode", None) == 517  # SQLITE_BUSY_SNAPSHOT
+            ):
+                # Rollback succeeded, this owner started the physical tx with
+                # no caller pending work, and commit was never entered. A
+                # borrowed tx can contain already-flushed caller DML even if
+                # the Session's new/dirty/deleted collections are now empty.
+                # Reuse only acquired input; rebuild all ORM reads/counters.
+                # This does not perform acquisition or retry an unknown commit.
+                return self._persist_bar_acquisition_attempt(requirement, acquisition, retry_snapshot=False)
             raise
         if written:
             # Invalidate at the commit boundary, before Gateway reread/projection.

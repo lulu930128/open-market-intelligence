@@ -72,7 +72,9 @@ def _project_index_component(
     resolved_index = index_result.resolved.market_index
     if (
         index_result.resolved.health.status
-        in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK}
+        in {ResolvedEvidenceStatus.SELECTED, ResolvedEvidenceStatus.FALLBACK,
+            ResolvedEvidenceStatus.PARTIAL}
+        and index_result.resolved.health.facts_usable
         and resolved_index is not None
     ):
         close_value = _number(resolved_index.close_value)

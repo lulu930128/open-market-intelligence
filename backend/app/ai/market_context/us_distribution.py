@@ -59,10 +59,10 @@ def merge_us_distribution_context(result: dict, snapshot: USSectorDistributionRe
         value = dict(payload)
         limit = max(0, int((limits or {}).get(capability, US_GROUP_LIMIT)))
         projection = {}
-        value["schema_version"] = f"us.{capability}.v1"
+        value["schema_version"] = f"us.{capability}.v2"
         value["kind"] = "us_eod_market_distribution"
-        value["facts_usable"] = snapshot.counts.comparable > 0
-        value["coverage_status"] = "partial" if snapshot.counts.comparable else "missing"
+        value["facts_usable"] = snapshot.counts is not None and snapshot.counts.comparable > 0
+        value["coverage_status"] = "partial" if value["facts_usable"] else "missing"
         value["ranking_scope"] = "canonical_completed_session_universe"
         value["warnings"] = payload["limitations"]
         value["session_semantics"] = "latest_completed_session"

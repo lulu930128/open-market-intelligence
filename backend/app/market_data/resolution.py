@@ -48,6 +48,7 @@ from app.market_data.integration_contracts import (
 )
 from app.market_data.policies import RealtimePolicy, parse_realtime_policy
 from app.market_data.quality_policy import (
+    completed_bar_is_current,
     QualityEvaluation,
     QualityReasonCode,
     combine_quality_evaluations,
@@ -143,6 +144,7 @@ def _effective_freshness(
     now: datetime,
     max_age: timedelta,
     completed_session: bool,
+    completed_current: bool | None = None,
 ) -> tuple[EvidenceFreshness, str | None]:
     if observed_at is not None and observed_at > now + FUTURE_TOLERANCE:
         return EvidenceFreshness.UNKNOWN, "FUTURE_TIMESTAMP"
@@ -150,7 +152,7 @@ def _effective_freshness(
         not completed_session
         and observed_at is not None
         and freshness in {EvidenceFreshness.LIVE, EvidenceFreshness.FRESH}
-        and now - observed_at > max_age
+        and (completed_current is False or (completed_current is None and now - observed_at > max_age))
     ):
         return EvidenceFreshness.STALE, None
     return freshness, None
@@ -199,6 +201,10 @@ def _evaluate(
         observed_at=observed_at,
         now=now,
         max_age=max_age,
+        completed_current=(completed_bar_is_current(
+            requirement.freshness, provider=observation.lineage.provider,
+            observed_at=observed_at, now=now,
+        ) if requirement is not None else None),
         completed_session=(
             policy is RealtimePolicy.COMPLETED_SESSION
             or (
@@ -678,6 +684,7 @@ def _bar_candidate_summaries(
             policy=policy,
             now=now,
             max_age=max_age,
+            requirement=requirement,
         )
         eligible = evaluated.eligible
         reason_code = evaluated.reason_code
@@ -1114,9 +1121,9 @@ def resolve_bar_series(
         policy=parsed_policy,
         now=now,
         max_age=max_age,
-        # Each bar was already evaluated above so the series can carry one
-        # combined quality result without evaluating the latest bar twice.
-        requirement=None,
+        # Precomputed combined quality is retained; the requirement still owns
+        # the latest observation's effective freshness at the actual cutoff.
+        requirement=requirement,
         coverage_rank=coverage_rank,
     )
     bars = series_by_identity.get(id(selected), ()) if selected is not None else ()

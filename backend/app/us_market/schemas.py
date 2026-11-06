@@ -138,6 +138,9 @@ class USProvisionalDailyOverlayRead(BaseModel):
     contract_version: Literal["omi.us.provisional_daily.v1"] = "omi.us.provisional_daily.v1"
     trade_date: date
     point: USOhlcPointRead
+    display_timeframe: Literal["daily", "weekly", "monthly"] = "daily"
+    display_point: USOhlcPointRead | None = None
+    display_missing_trade_dates: list[date] = Field(default_factory=list)
     finalization: Literal["provisional"] = "provisional"
     authority: Literal["derived"] = "derived"
     release_status: Literal["pending_release", "unavailable"]
@@ -757,9 +760,9 @@ class USShortVolumeDailyRead(BaseModel):
     trade_date: date
     market_center: str
 
-    short_volume: int | None = None
-    short_exempt_volume: int | None = None
-    total_volume: int | None = None
+    short_volume: float | None = None
+    short_exempt_volume: float | None = None
+    total_volume: float | None = None
     short_ratio: float | None = None
 
     source_url: str | None = None
@@ -803,6 +806,7 @@ class USResourceRefreshResultRead(BaseModel):
     inserted_count: int
     updated_count: int
     message: str
+    reconciled_symbol_count: int = 0
 
 
 class USSourceHealthEntryRead(BaseModel):

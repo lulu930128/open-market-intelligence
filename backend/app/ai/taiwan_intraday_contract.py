@@ -218,7 +218,11 @@ def resolve_taiwan_current_price(
         "kind": "resolved_current_price", "version": CURRENT_PRICE_CONTRACT_VERSION,
         "confidence": "high" if decision["decision_usable"] else "none",
         "is_estimate": False,
-        "is_current_session": bool(decision["decision_usable"] and decision["trade_date"] == _iso(current_session_date)),
+        # Session identity is independent of freshness and decision eligibility.
+        # A stale trade from today remains today's observation; its value and
+        # execution gates above remain closed.
+        "is_current_session": bool(decision["trade_date"] is not None
+                                   and decision["trade_date"] == _iso(current_session_date)),
         "fallback_reason": None if decision["decision_usable"] else decision["reason"],
         "decision_price": decision,
         "research_price": {

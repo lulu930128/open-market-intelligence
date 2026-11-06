@@ -258,7 +258,7 @@ def test_dated_canonical_limitations_are_bounded_without_losing_reasons(timefram
 
 
 def test_limitation_grouping_retains_unknown_malformed_and_noncontiguous_semantics():
-    from app.market.tw_workspace_research import _compact_quality
+    from app.market.tw_workspace_research import project_technical_input_quality
     retained = ["future restriction", "TW_DAILY_DAY_STATE:2026-02-30:UNKNOWN:RISK",
                 "TW_DAILY_DAY_STATE:20260101:UNKNOWN:RISK", "OTHER:2026-01-01:UNKNOWN:RISK",
                 "TW_DAILY_DAY_STATE:2026-01-01::RISK", "TW_DAILY_DAY_STATE:2026-01-01:UNKNOWN:", None]
@@ -270,7 +270,7 @@ def test_limitation_grouping_retains_unknown_malformed_and_noncontiguous_semanti
         "TW_DAILY_DAY_STATE:2026-01-02:UNKNOWN:DIFFERENT_RISK",
     ], "future_axis": {"state": None, "limitations": ["keep"]}}
     before = deepcopy(quality)
-    compact = _compact_quality(quality)  # Also works if the producer omits day_states.
+    compact = project_technical_input_quality(quality)  # Also works if the producer omits day_states.
     assert quality == before
     assert compact["canonical_limitations"] == retained
     assert compact["decision_usable"] is None and compact["future_axis"] == quality["future_axis"]
@@ -279,7 +279,7 @@ def test_limitation_grouping_retains_unknown_malformed_and_noncontiguous_semanti
     assert summary["groups"][0] == {"state": "UNKNOWN", "reason": "RISK:with_suffix", "count": 3,
                                      "first_trade_date": "2026-01-01", "last_trade_date": "2026-01-03"}
     assert len(summary["groups"]) == 3
-    assert _compact_quality({"canonical_limitations": retained}) == {"canonical_limitations": retained}
+    assert project_technical_input_quality({"canonical_limitations": retained}) == {"canonical_limitations": retained}
 
 
 def test_distinct_limitation_reasons_still_fail_closed_over_budget():

@@ -6,6 +6,8 @@
 
 TW 指標選單取 Backend capability、interval applicability 與實際 renderer mapping 的交集。Template 只控制顯示。VWAP / OBV 使用 Backend 值；缺值保持缺值，VWAP 不適用於日、週、月線，OBV 的負值與零都是有效值。
 
+技術證據的 current daily 讀取由既有 presentation session 判斷：completed daily 已涵蓋該 session 時不重讀 forming series；缺當日證據時仍讀取，不能把無資料當完成。有限長度序列以最新 bar 時點識別新增觀測，不以總筆數增加判斷。盤中指標只能使用 TaiwanTechnicalService 的 typed current_partial，保留 observation revision、volume applicability 與 decision_usable=false，不能拿前一根 completed 指標冒充盤中值。
+
 ## Price Map v4
 
 Daily continuity 使用 `market.tw_daily_day_state` 的 instrument × trade_date canonical

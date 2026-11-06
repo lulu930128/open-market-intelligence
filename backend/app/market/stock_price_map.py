@@ -1040,6 +1040,7 @@ def build_tw_stock_price_map(
             include_volume_pace=False,
             parameters=resolved_parameters,
             **({"to_date": as_of_date} if as_of_date is not None else {}),
+            **({"requested_at": local_now} if structure_timeframe == "daily" else {}),
         )
         evidence = {}
         evidence_error = None
@@ -1050,6 +1051,9 @@ def build_tw_stock_price_map(
                     market=str(next_plan.get("market") or "") or None,
                     years=10,
                     max_results=200,
+                    event_types={"ex_dividend"},
+                    date_from=_dict(next_plan.get("history")).get("first_trade_date"),
+                    date_to=as_of_date or next_plan.get("as_of_trade_date"),
                     now=local_now,
                 )
                 evidence_builder = build_tw_stock_price_map_evidence if structure_timeframe == "daily" else build_tw_stock_period_price_map_evidence
@@ -1059,6 +1063,7 @@ def build_tw_stock_price_map(
                     corporate_event_history=corporate_history,
                     to_date=date.fromisoformat(str(next_plan["as_of_trade_date"])[:10]) if next_plan.get("as_of_trade_date") else None,
                     parameters=resolved_parameters,
+                    **({"requested_at": local_now} if structure_timeframe == "daily" else {}),
                     **({"timeframe": structure_timeframe} if structure_timeframe != "daily" else {}),
                 )
             except Exception as exc:  # truthful partial projection; read path stays cache-only
@@ -1108,12 +1113,12 @@ def build_tw_stock_price_map(
         corporate_complete=corporate_complete,
     )
     structure_input_usable = bool(
-        next_plan.get("readiness", {}).get("decision_usable")
+        next_plan.get("readiness", {}).get("research_usable", next_plan.get("readiness", {}).get("decision_usable"))
         and reference is not None
         and corporate_complete
-        and _dict(evidence.get("indicators")).get("decision_usable") is True
+        and _dict(evidence.get("indicators")).get("research_usable", _dict(evidence.get("indicators")).get("decision_usable")) is True
     )
-    decision_usable = structure_input_usable and bool(levels)
+    decision_usable = structure_input_usable and bool(levels) and next_plan.get("official_final", True)
     if status == "ready" and not decision_usable:
         status = "partial"
         missing.append("technical_input_not_usable")
@@ -1197,6 +1202,8 @@ def build_tw_stock_price_map(
             "price": reference,
             "trade_date": next_plan.get("as_of_trade_date"),
             "finalization": "completed_session" if reference is not None else "missing",
+            "release_status": next_plan.get("release_status", "released"),
+            "official_final": next_plan.get("official_final", True),
             "authority": "resolved_canonical",
             "source_capability": "tw.daily.ohlcv",
             "freshness_status": _dict(next_plan.get("freshness")).get("status") or "missing",

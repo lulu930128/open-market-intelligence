@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -16,10 +16,14 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.daily_price_repository import (
+    TaiwanOfficialDailyBarRepository,
     taiwan_official_daily_release_qualified_filter,
 )
 from app.market.taiwan_rules import (
     expected_daily_price_date,
+    expected_daily_research_date,
+    TAIWAN_DAILY_REGULAR_LIMITATIONS,
+    TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE,
     taiwan_daily_price_release_at,
 )
 from app.market.trading_calendar import TAIWAN_TZ
@@ -27,6 +31,7 @@ from app.market_data.contracts import DatasetHealth
 from app.market_data.registry import DATASET_REGISTRY, evaluate_dataset_health
 from app.market_data.eod_coverage import TW_DATASET_ID, TW_SCOPE_KEY
 from app.sources.defaults import (
+    TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME,
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
     TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
@@ -61,22 +66,22 @@ def _canonical_daily_filter():
         ),
         and_(
             func.upper(StockMaster.market) == "TPEX",
-            SourceRegistry.source_name == TPEX_DAILY_QUOTES_SOURCE_NAME,
+            SourceRegistry.source_name.in_((TPEX_DAILY_QUOTES_SOURCE_NAME, TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME)),
         ),
     )
 
 
-def _base_query(db: Session):
+def _base_query(db: Session, price=MarketDailyPrice):
     return (
-        db.query(MarketDailyPrice)
-        .join(RawFetchResult, RawFetchResult.id == MarketDailyPrice.raw_result_id)
-        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
-        .join(StockMaster, StockMaster.stock_id == MarketDailyPrice.stock_id)
+        db.query(price)
+        .join(RawFetchResult, RawFetchResult.id == price.raw_result_id)
+        .join(SourceRegistry, SourceRegistry.id == price.source_id)
+        .join(StockMaster, StockMaster.stock_id == price.stock_id)
         .filter(_canonical_daily_filter())
-        .filter(MarketDailyPrice.open_price.isnot(None))
-        .filter(MarketDailyPrice.high_price.isnot(None))
-        .filter(MarketDailyPrice.low_price.isnot(None))
-        .filter(MarketDailyPrice.close_price.isnot(None))
+        .filter(price.open_price.isnot(None))
+        .filter(price.high_price.isnot(None))
+        .filter(price.low_price.isnot(None))
+        .filter(price.close_price.isnot(None))
     )
 
 
@@ -85,23 +90,24 @@ def _release_qualified_query(
     *,
     expected_date: date,
     available_at: datetime,
+    allow_early_regular: bool = False,
+    price=MarketDailyPrice,
 ):
     """Return rows eligible for completed-session freshness.
 
-    Future dates are excluded, and every row must have a raw receipt obtained
-    after that row's own 15:15 Asia/Taipei release boundary. The SQL predicate
-    is owned by the canonical daily repository so freshness and daily reads
-    share the same eligibility policy.
+    Future dates are excluded. Official-final remains receipt-qualified at
+    15:15; explicit research reads can also select the canonical regular-only
+    revision. Both policies use the repository's SQL qualification.
     """
 
     available_at_storage = available_at.astimezone(timezone.utc).replace(
         tzinfo=None
     )
     return (
-        _base_query(db)
-        .filter(MarketDailyPrice.trade_date <= expected_date)
+        _base_query(db, price)
+        .filter(price.trade_date <= expected_date)
         .filter(RawFetchResult.fetched_at <= available_at_storage)
-        .filter(taiwan_official_daily_release_qualified_filter())
+        .filter(taiwan_official_daily_release_qualified_filter(price, allow_early_regular=allow_early_regular))
     )
 
 
@@ -158,6 +164,7 @@ def read_taiwan_daily_freshness(
     venue: str | None = None,
     checked_at: datetime | None = None,
     expected_date: date | None = None,
+    allow_early_regular: bool = False,
 ) -> TaiwanDailyFreshnessEvidence:
     """Read canonical daily storage state without provider I/O or mutation."""
 
@@ -166,7 +173,7 @@ def read_taiwan_daily_freshness(
     normalized_venue = str(venue or "").strip().upper() or None
     if normalized_venue not in {None, "TWSE", "TPEX"}:
         raise ValueError("Taiwan daily freshness venue must be TWSE or TPEX")
-    resolved_expected = expected_date or expected_daily_price_date(now=now)
+    resolved_expected = expected_date or (expected_daily_research_date if allow_early_regular else expected_daily_price_date)(now=now)
     storage_query = _base_query(db)
     if normalized_venue is not None:
         storage_query = storage_query.filter(
@@ -180,24 +187,31 @@ def read_taiwan_daily_freshness(
         func.max(MarketDailyPrice.trade_date),
         func.count(MarketDailyPrice.id),
     ).one()
+    price = TaiwanOfficialDailyBarRepository(db, available_at=now)._price_rows(
+        symbols=(normalized_stock_id,) if normalized_stock_id else None, end_date=resolved_expected,
+    )
     query = _release_qualified_query(
         db,
         expected_date=resolved_expected,
         available_at=now,
+        allow_early_regular=allow_early_regular,
+        price=price,
     )
     if normalized_venue is not None:
         query = query.filter(func.upper(StockMaster.market) == normalized_venue)
     if normalized_stock_id is not None:
-        query = query.filter(MarketDailyPrice.stock_id == normalized_stock_id)
-    latest_date, row_count, latest_updated_at = query.with_entities(
-        func.max(MarketDailyPrice.trade_date),
-        func.count(func.distinct(MarketDailyPrice.trade_date)),
-        func.max(MarketDailyPrice.updated_at),
+        query = query.filter(price.stock_id == normalized_stock_id)
+    latest_date, row_count, latest_updated_at, early_count = query.with_entities(
+        func.max(price.trade_date),
+        func.count(func.distinct(price.trade_date)),
+        func.max(price.updated_at),
+        func.sum(case((price.release_status == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE, 1), else_=0)),
     ).one()
-    limitations: tuple[str, ...] = ()
-    partial = False
+    limitations: tuple[str, ...] = TAIWAN_DAILY_REGULAR_LIMITATIONS if early_count else ()
+    partial = bool(early_count) and normalized_stock_id is None
     if (
         normalized_stock_id is None
+        and not early_count
         and normalized_venue is None
         and resolved_expected is not None
     ):
@@ -239,6 +253,7 @@ def read_taiwan_daily_freshness_batch(
     stock_ids: list[str],
     checked_at: datetime | None = None,
     expected_date: date | None = None,
+    allow_early_regular: bool = False,
 ) -> dict[str, TaiwanDailyFreshnessEvidence]:
     """Read latest canonical dates for a bounded stock set in one query."""
 
@@ -248,7 +263,7 @@ def read_taiwan_daily_freshness_batch(
     if not normalized:
         return {}
     now = checked_at or datetime.now(TAIWAN_TZ)
-    resolved_expected = expected_date or expected_daily_price_date(now=now)
+    resolved_expected = expected_date or (expected_daily_research_date if allow_early_regular else expected_daily_price_date)(now=now)
     storage_rows = (
         _base_query(db)
         .filter(MarketDailyPrice.stock_id.in_(normalized))
@@ -264,31 +279,38 @@ def read_taiwan_daily_freshness_batch(
         str(stock_id): (latest_date, int(row_count or 0))
         for stock_id, latest_date, row_count in storage_rows
     }
+    price = TaiwanOfficialDailyBarRepository(db, available_at=now)._price_rows(
+        symbols=tuple(normalized), end_date=resolved_expected,
+    )
     rows = (
         _release_qualified_query(
             db,
             expected_date=resolved_expected,
             available_at=now,
+            allow_early_regular=allow_early_regular,
+            price=price,
         )
-        .filter(MarketDailyPrice.stock_id.in_(normalized))
+        .filter(price.stock_id.in_(normalized))
         .with_entities(
-            MarketDailyPrice.stock_id,
-            func.max(MarketDailyPrice.trade_date),
-            func.count(func.distinct(MarketDailyPrice.trade_date)),
-            func.max(MarketDailyPrice.updated_at),
+            price.stock_id,
+            func.max(price.trade_date),
+            func.count(func.distinct(price.trade_date)),
+            func.max(price.updated_at),
+            func.sum(case((price.release_status == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE, 1), else_=0)),
         )
-        .group_by(MarketDailyPrice.stock_id)
+        .group_by(price.stock_id)
         .all()
     )
     stored = {
-        str(stock_id): (latest_date, int(row_count or 0), latest_updated_at)
-        for stock_id, latest_date, row_count, latest_updated_at in rows
+        str(stock_id): (latest_date, int(row_count or 0), latest_updated_at, early_count)
+        for stock_id, latest_date, row_count, latest_updated_at, early_count in rows
     }
     return {
         stock_id: TaiwanDailyFreshnessEvidence(
             stock_id=stock_id,
             latest_date=stored.get(stock_id, (None, 0, None))[0],
             row_count=stored.get(stock_id, (None, 0, None))[1],
+            limitations=TAIWAN_DAILY_REGULAR_LIMITATIONS if stored.get(stock_id, (None, 0, None, 0))[3] else (),
             latest_updated_at=stored.get(stock_id, (None, 0, None))[2],
             storage_latest_date=storage.get(stock_id, (None, 0))[0],
             storage_row_count=storage.get(stock_id, (None, 0))[1],

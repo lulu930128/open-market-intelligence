@@ -109,6 +109,7 @@ class CoverageComputation:
     qualification_reasons: dict[str, tuple[str, ...]] = field(default_factory=dict)
     provider_diagnostics: tuple[dict[str, Any], ...] = ()
     published_breadth: dict[str, bool] = field(default_factory=dict)
+    etf_coverage: CoverageComputation | None = None
 
     @property
     def missing_published_venues(self) -> frozenset[str]:
@@ -117,7 +118,27 @@ class CoverageComputation:
 
     @property
     def postcondition_met(self) -> bool:
-        return self.status == "healthy" and not self.missing_published_venues
+        ordinary_complete = self.status == "healthy" or (
+            not self.members and self.etf_coverage is not None and self.etf_coverage.universe_count > 0)
+        etf_complete = self.etf_coverage is None or self.etf_coverage.current_count == self.etf_coverage.universe_count
+        return ordinary_complete and etf_complete and not self.missing_published_venues
+
+    @property
+    def collection_members(self) -> tuple[UniverseMember, ...]:
+        return self.members + (self.etf_coverage.members if self.etf_coverage is not None else ())
+
+    def etf_detail(self) -> dict[str, Any] | None:
+        etf = self.etf_coverage
+        if etf is None:
+            return None
+        return {**etf.detail(), "scope_kind": "active_etf_universe", "scope_key": etf.scope_key,
+            "universe_source": etf.universe_source, "universe_hash": etf.universe_hash,
+            "expected_trade_date": etf.expected_trade_date.isoformat(),
+            "latest_data_date": etf.latest_data_date.isoformat() if etf.latest_data_date else None,
+            "universe_count": etf.universe_count, "current_count": etf.current_count,
+            "partial_count": etf.partial_count, "stale_count": etf.stale_count, "missing_count": etf.missing_count,
+            "status": etf.status if etf.members else "not_applicable",
+            "postcondition_met": etf.current_count == etf.universe_count}
 
     @property
     def universe_count(self) -> int:
@@ -238,6 +259,8 @@ class CoverageComputation:
         )
         return {
             "coverage_ratio": self.current_count / denominator,
+            **({"etf_coverage": self.etf_detail(), "collection_postcondition_met": self.postcondition_met}
+               if self.etf_coverage is not None else {}),
             "provider_diagnostics": list(self.provider_diagnostics),
             "observed_ratio": (self.current_count + self.partial_count) / denominator,
             "venue_breakdown": venue_breakdown,
@@ -305,10 +328,13 @@ def expected_eod_trade_date(
     *,
     now: datetime | None = None,
     us_port: USFullMarketEodPort | None = None,
+    include_early_regular: bool = False,
 ) -> date:
     normalized = normalize_coverage_market(market)
     eod_lifecycle_contract(normalized)
     if normalized == "TW":
+        if include_early_regular:
+            return expected_daily_price_date(now=now, allow_early_regular=True)
         return expected_daily_price_date(now=now)
     if us_port is None:
         raise ValueError("US EOD expected state requires an injected market-owned port")
@@ -328,6 +354,10 @@ def taiwan_bulk_eod_refresh_window(
     latest_expected = expected_daily_price_date(now=local_now)
     if not is_taiwan_trading_day(expected_trade_date):
         return False, None, "requested_date_is_not_trading_session"
+    if (expected_trade_date == local_now.date()
+        and expected_trade_date == expected_daily_price_date(now=local_now, allow_early_regular=True)
+        and local_now < datetime.combine(expected_trade_date, TAIWAN_DAILY_PRICE_RELEASE_TIME, tzinfo=TAIWAN_TZ)):
+        return True, None, "early_regular_research_opportunity"
     release_at = datetime.combine(
         local_now.date(),
         TAIWAN_DAILY_PRICE_RELEASE_TIME,
@@ -452,11 +482,25 @@ def compute_eod_coverage(
     qualification_reasons: dict[str, tuple[str, ...]] = {}
     provider_diagnostics = ()
     published_breadth = {}
-    if symbols and normalized == "TW":
+    etf_coverage = None
+    if normalized == "TW":
         if taiwan_daily_qualifier is None:
             raise ValueError("TW EOD coverage requires an injected canonical Daily qualification port")
         qualification = taiwan_daily_qualifier(db, trade_date=expected,
             **({"include_published": True} if include_published else {}))
+        etf_scope = qualification.get("etf_scope")
+        if etf_scope is not None:
+            etf_members = tuple(UniverseMember(**item) for item in etf_scope["members"])
+            etf_latest = etf_scope["latest_by_symbol"]
+            etf_current, etf_partial, etf_stale, etf_missing = _classify_symbols(
+                members=etf_members, latest_by_symbol=etf_latest,
+                usable_expected_symbols=set(etf_scope["qualified_symbols"]), expected_trade_date=expected)
+            etf_coverage = CoverageComputation(market="TW", dataset_id=TW_DATASET_ID,
+                scope_key="twse_tpex_active_etfs", universe_source="stock_master.active.TWSE_TPEX.etf",
+                expected_trade_date=expected, latest_data_date=max(etf_latest.values(), default=None),
+                universe_hash=_universe_hash(etf_members), members=etf_members,
+                current_symbols=etf_current, partial_symbols=etf_partial, stale_symbols=etf_stale, missing_symbols=etf_missing,
+                qualification_reasons={s: tuple(r) for s,r in etf_scope["rejection_reasons"].items()})
         published_breadth = qualification.get("published_breadth", {})
         provider_diagnostics = tuple(qualification.get("provider_diagnostics", ()))
         usable_expected_symbols = set(qualification["qualified_symbols"]) & set(symbols)
@@ -498,6 +542,7 @@ def compute_eod_coverage(
         qualification_reasons=qualification_reasons,
         provider_diagnostics=provider_diagnostics,
         published_breadth=published_breadth,
+        etf_coverage=etf_coverage,
         partial_symbols=partial,
         stale_symbols=stale,
         missing_symbols=missing,
@@ -539,7 +584,9 @@ def _lifecycle_result(
         "dataset_lifecycle": evaluation.lifecycle.model_dump(mode="json"),
         "dataset_health": evaluation.health.model_dump(mode="json"),
         **({"published_breadth": computation.published_breadth,
-            "missing_published_venues": sorted(computation.missing_published_venues)}
+            "missing_published_venues": sorted(computation.missing_published_venues),
+            **({"etf_coverage": computation.etf_detail(), "collection_postcondition_met": computation.postcondition_met}
+               if computation.etf_coverage is not None else {})}
            if computation.market == "TW" else {}),
     }
 
@@ -606,8 +653,12 @@ def persist_eod_coverage(
             and snapshot.get("coverage", {}).get("universe_hash") == computation.universe_hash
             and all(previous_detail.get(key) == value for key, value in coverage_detail.items())):
         detail["us_sector_distribution"] = snapshot
-    for key in ("repair", "last_error", "last_provider_failure"):
+    for key in ("repair", "last_error", "last_provider_failure", "venue_route_states"):
         if key in previous_detail:
+            if key == "venue_route_states" and computation.market == "TW" and (
+                    (previous_detail.get("etf_coverage") or {}).get("universe_hash")
+                    != (computation.etf_detail() or {}).get("universe_hash")):
+                continue  # New collection membership must start a fresh bounded route round.
             detail[key] = previous_detail[key]
     if detail_extra:
         detail.update(detail_extra)
@@ -619,6 +670,8 @@ def persist_eod_coverage(
     row.stale_count = computation.stale_count
     row.missing_count = computation.missing_count
     row.status = computation.status
+    if computation.market == "TW" and row.repair_status == "complete" and not computation.postcondition_met:
+        row.repair_status = "pending"
     row.detail_json = _encode_detail(detail)
     row.checked_at = utc_now()
     row.updated_at = utc_now()
@@ -753,6 +806,7 @@ def should_enqueue_eod_reconcile(
     now: datetime | None = None,
     us_port: USFullMarketEodPort | None = None,
     taiwan_daily_qualifier: TaiwanDailyQualifier | None = None,
+    retry_at_callback: Callable[[datetime], None] | None = None,
 ) -> bool:
     normalized = normalize_coverage_market(market)
     decision_now = now or utc_now()
@@ -797,8 +851,10 @@ def should_enqueue_eod_reconcile(
             now=decision_now,
         )
     ):
+        if retry_at_callback is not None:
+            retry_at_callback(next_retry_at)
         return False
-    return row.status != "healthy" or not computation.postcondition_met
+    return row.status != computation.status or not computation.postcondition_met
 
 
 def _update_repair_state(
@@ -842,9 +898,11 @@ def _update_repair_state(
 
 def _tw_unresolved_venues(computation: CoverageComputation) -> set[str]:
     unresolved = set(computation.unresolved_symbols)
+    if computation.etf_coverage is not None:
+        unresolved.update(computation.etf_coverage.unresolved_symbols)
     return {
         member.venue
-        for member in computation.members
+        for member in computation.collection_members
         if member.symbol in unresolved
     }
 
@@ -853,7 +911,7 @@ def _tw_venue_coverage(
     computation: CoverageComputation,
     venue: str,
 ) -> dict[str, Any]:
-    return dict(
+    ordinary = dict(
         computation.detail().get("venue_breakdown", {}).get(
             venue,
             {
@@ -867,6 +925,15 @@ def _tw_venue_coverage(
             },
         )
     )
+    if computation.etf_coverage is None:
+        return ordinary
+    etf = computation.etf_coverage.detail()["venue_breakdown"].get(venue, {})
+    if not etf.get("universe_count"):
+        return ordinary
+    combined = {key: int(ordinary[key]) + int(etf.get(key, 0)) for key in (
+        "universe_count", "current_count", "partial_count", "stale_count", "missing_count")}
+    return {**combined, "coverage_ratio": combined["current_count"] / max(combined["universe_count"], 1),
+            "scope": "daily_collection_stock_and_etf", "ordinary_stock": ordinary, "etf": etf}
 
 
 def _iso_trade_dates(values: Any) -> list[str]:
@@ -913,21 +980,27 @@ def _repair_tw_eod(
     )
     unresolved_venues = _tw_unresolved_venues(computation)
     priority_set = set(priority_symbols()) if priority_symbols else set()
-    priority_venues = {member.venue for member in computation.members if member.symbol in priority_set}
+    priority_venues = {member.venue for member in computation.collection_members if member.symbol in priority_set}
     source_by_venue = tuple(sorted(source_by_venue, key=lambda item: item[0] not in priority_venues))
     targets = [
         item for item in source_by_venue if item[0] in unresolved_venues | computation.missing_published_venues
-    ][:max_calls]
+    ]
     # Keep the existing venue cursor fair across bounded jobs. Otherwise one
     # failing venue's fallback can consume every call on every retry forever.
     cursor_index = next((index for index, item in enumerate(targets)
                          if item[0] == row.cursor_symbol), None)
     if cursor_index is not None:
         targets = targets[cursor_index + 1:] + targets[:cursor_index + 1]
+    # Rotate the full unresolved order before admission. A one-call request
+    # must not hide the other venue from the cursor and starve it forever.
+    targets = targets[:max_calls]
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     calls_used = 0
     attempted_count = 0
+    # Opaque market-owner continuation, bound by this checkpoint's date/universe.
+    # Shared scheduling owns call admission/venue fairness, never route priority.
+    route_states = dict(_decode_detail(row.detail_json).get("venue_route_states") or {})
     _update_repair_state(
         db,
         row,
@@ -961,7 +1034,9 @@ def _repair_tw_eod(
                     trade_date=computation.expected_trade_date,
                 )
             else:
-                reserved_calls = min(2, remaining_calls)
+                # Give each remaining venue a primary/continuation opportunity
+                # before this venue spends the shared budget on its fallback.
+                reserved_calls = max(1, remaining_calls - (len(targets) - index))
                 calls_used += reserved_calls  # Unknown/exception usage stays charged.
                 result = venue_refresher(
                     db=db,
@@ -971,11 +1046,14 @@ def _repair_tw_eod(
                     refresh_published=refresh_published,
                     timeout_seconds=min(30, remaining_seconds),
                     max_external_calls=reserved_calls,
+                    route_state=route_states.get(venue, {}),
                 )
                 actual_calls = result.get("external_call_count")
                 if type(actual_calls) is not int or not 0 <= actual_calls <= reserved_calls:
                     raise ValueError("TW_EOD_PROVIDER_USAGE_UNKNOWN")
                 calls_used -= reserved_calls - actual_calls
+                if isinstance(result.get("route_continuation"), dict):
+                    route_states[venue] = result["route_continuation"]
             refreshed_attempt = compute_eod_coverage(
                 db,
                 market="TW",
@@ -988,10 +1066,11 @@ def _repair_tw_eod(
                 result.get("replaced_trade_dates")
             )
             expected_trade_date = computation.expected_trade_date.isoformat()
-            transport_ok = (
-                result.get("fetch_status") == "success"
-                and result.get("parse_status") == "success"
-            )
+            transport_ok = result.get("fetch_status") == "success"
+            qualified = transport_ok and result.get("parse_status") == "success"
+            research_ready = qualified and int(result.get("research_ready_count") or 0) > 0
+            publication_pending = (venue_refresher is not None
+                and result.get("publication_pending") is True and result.get("external_call_count") == 0)
             venue_advanced = int(after_coverage["current_count"]) > int(
                 before_coverage["current_count"]
             )
@@ -1001,11 +1080,21 @@ def _repair_tw_eod(
                 == int(after_coverage["universe_count"])
             )
             published_postcondition_met = venue not in refreshed_attempt.missing_published_venues
-            dataset_success = transport_ok and (
+            dataset_success = qualified and (
                 venue_advanced or venue_postcondition_met
             ) and published_postcondition_met
-            if not transport_ok:
+            if publication_pending:
+                dataset_status = "publication_pending"
+            elif not transport_ok:
                 dataset_status = "transport_error"
+            elif not qualified:
+                dataset_status = (
+                    "stale_payload"
+                    if "OFFICIAL_PAYLOAD_PREDATES_EXPECTED_DATE" in (result.get("limitations") or [])
+                    else "payload_qualification_failed"
+                )
+            elif research_ready:
+                dataset_status = "regular_research_only"
             elif venue_postcondition_met:
                 dataset_status = "current"
             elif venue_advanced:
@@ -1028,6 +1117,8 @@ def _repair_tw_eod(
                 "parsed_count": result.get("parsed_count"),
                 "data_quality_status": result.get("data_quality_status"),
                 "raw_result_id": result.get("raw_result_id"),
+                "raw_result_ids": result.get("raw_result_ids") or [],
+                "route_continuation": result.get("route_continuation"),
                 "fetched_at": _iso_temporal(result.get("fetched_at")),
                 "is_duplicate": result.get("is_duplicate"),
                 "observed_trade_dates": observed_trade_dates,
@@ -1037,6 +1128,8 @@ def _repair_tw_eod(
                     else None
                 ),
                 "dataset_status": dataset_status,
+                "research_ready_count": result.get("research_ready_count", 0),
+                "release_status": result.get("release_status"),
                 "dataset_advanced": venue_advanced,
                 "venue_postcondition_met": venue_postcondition_met,
                 "published_postcondition_met": published_postcondition_met,
@@ -1050,19 +1143,20 @@ def _repair_tw_eod(
             _update_repair_state(
                 db,
                 row,
-                repair_status="running" if transport_ok else "partial",
+                repair_status="running" if qualified else "partial",
                 repair_provider="twse+tpex",
                 job_id=job_id,
                 cursor_symbol=venue,
                 attempted_delta=1,
                 succeeded_delta=1 if dataset_success else 0,
-                failed_delta=0 if dataset_success else 1,
+                failed_delta=0 if dataset_success or research_ready or publication_pending else 1,
                 consecutive_error_count=(
-                    0 if dataset_success else row.consecutive_error_count + 1
+                    0 if dataset_success or research_ready or publication_pending else row.consecutive_error_count + 1
                 ),
                 mark_success=dataset_success,
+                detail_update={"venue_route_states": route_states},
             )
-            if not transport_ok:
+            if not qualified and not publication_pending:
                 errors.append({"venue": venue, "message": result.get("error_message") or result.get("message")})
         except Exception as exc:
             db.rollback()
@@ -1136,7 +1230,6 @@ def _repair_tw_eod(
             1
             for item in results
             if item.get("fetch_status") == "success"
-            and item.get("parse_status") == "success"
         ),
         "unchanged_count": sum(
             1
@@ -1492,7 +1585,7 @@ def reconcile_eod_coverage(
             job_id=job_id,
             progress_callback=progress_callback,
             error_backoff_seconds=error_backoff_seconds,
-            max_calls=min(bounds.max_calls, bounds.max_symbols),
+            max_calls=bounded_max_symbols,
             deadline=started_at + bounded_runtime_seconds,
             venue_refresher=taiwan_venue_refresher,
             taiwan_daily_qualifier=taiwan_daily_qualifier,

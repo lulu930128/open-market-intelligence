@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1773,6 +1774,123 @@ def build_intraday_evidence_gap_answer(
         "data_limits": [description],
     }
     answer["text"] = consumer_text(answer, response_preferences=response_preferences)
+    return answer
+
+
+def build_selected_technical_consumer_answer(
+    *, target: dict[str, Any], projected_data: dict[str, Any],
+    quality: dict[str, Any], response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Describe selected canonical facts without upgrading research usability."""
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+
+    def label(zh: str, en: str, ja: str) -> str:
+        return en if english else ja if japanese else zh
+
+    def number(value: Any) -> str | None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return f"{value:,.4f}".rstrip("0").rstrip(".")
+        return None
+
+    summary: list[str] = []
+    limits: list[str] = []
+    sources: list[str] = []
+    capability_quality = quality.get("capabilities") or {}
+    reason_labels = {
+        "CORPORATE_ACTION_COVERAGE_INCOMPLETE": label(
+            "公司行動覆蓋尚未確認；原始價格指標僅供觀察，不能據此確立交易條件。",
+            "Corporate-action coverage is unverified; raw-price indicators cannot establish trading conditions.",
+            "企業行動の取得範囲が未確認のため、未調整価格の指標から売買条件は確定できません。"),
+        "RELATIVE_STRENGTH_BENCHMARK_NOT_CONFIGURED": label(
+            "尚未設定相對強弱基準，無法判定是否跑贏大盤。",
+            "No relative-strength benchmark is configured.", "相対強度の比較基準が未設定です。"),
+    }
+    state_labels = {
+        "bullish_stack": label("均線呈多頭排列", "bullish MA stack", "移動平均は上昇配列"),
+        "below_ma20": label("收盤低於 MA20", "close below MA20", "終値はMA20を下回る"),
+        "ma_consolidation": label("均線整理", "MA consolidation", "移動平均は持ち合い"),
+        "upside_breakout": label("收盤突破前期高點", "close above prior high", "終値は前期高値を上回る"),
+        "downside_breakdown": label("收盤跌破前期低點", "close below prior low", "終値は前期安値を下回る"),
+        "inside_range": label("仍在前期區間內", "inside prior range", "前期の値幅内"),
+        "insufficient": label("資料不足", "insufficient data", "データ不足"),
+    }
+    for capability in ("technical.indicators", "technical.structure"):
+        evidence = projected_data.get(capability)
+        resolved = capability_quality.get(capability) or {}
+        if not isinstance(evidence, dict) or resolved.get("facts_usable") is not True:
+            continue
+        sources.append(capability)
+        temporal = resolved.get("temporal") or {}
+        date_label = temporal.get("latest_date") or evidence.get("as_of") or "?"
+        summary.append(
+            f"{label('資料日期', 'Data date', 'データ日付')}: {date_label}; "
+            f"{label('價格基準', 'Price basis', '価格基準')}: {evidence.get('price_basis') or '?'}"
+        )
+        if capability == "technical.indicators":
+            daily_snapshot = (evidence.get("timeframes") or {}).get("daily") or {}
+            current = evidence.get("current") or daily_snapshot.get("completed") or {}
+            close = number(current.get("close"))
+            if close is not None:
+                summary.append(f"{label('日線收盤', 'Daily close', '日足終値')}: {close}; "
+                               f"{label('計算樣本', 'Input bars', '計算本数')}: {evidence.get('bar_count', daily_snapshot.get('completed_bars', '?'))}")
+            for group in ("moving_averages", "rsi", "macd", "atr", "kd"):
+                values = current.get(group) or (current.get("ma") if group == "moving_averages" else {}) or {}
+                rendered = [f"{key.upper()} {number(value)}" for key, value in values.items()
+                            if number(value) is not None]
+                if rendered:
+                    group_label = label("均線", "Moving averages", "移動平均") if group == "moving_averages" else group.upper()
+                    summary.append(f"{group_label}: " + " / ".join(rendered))
+            volume_change = number(current.get("volume_vs_ma20_pct"))
+            if volume_change is not None:
+                summary.append(label("成交量相對 20 日均量", "Volume vs 20-day average", "20日平均出来高比")
+                               + f": {volume_change}%")
+            elif daily_snapshot:
+                volume, average = number(current.get("volume")), number((current.get("volume_ma") or {}).get("volume_ma20"))
+                if volume is not None:
+                    summary.append(label("成交量", "Volume", "出来高") + f": {volume} ({current.get('volume_unit') or '?'})")
+                if average is not None:
+                    summary.append(label("20 日均量", "20-day average volume", "20日平均出来高") + f": {average}")
+            corporate = daily_snapshot.get("corporate_action") or {}
+            if corporate.get("adjustment_applied") is False and corporate.get("affected_dates"):
+                limits.append(label("計算區間含公司行動，價格尚未還原權息。",
+                                    "The input window includes corporate actions and prices remain unadjusted.",
+                                    "計算期間内に企業行動があり、価格は未調整です。"))
+        else:
+            summary.append(label("結構觀測", "Observed structure", "構造の観測")
+                           + ": " + " / ".join(state_labels.get(evidence.get(key), "?")
+                                              for key in ("trend_state", "breakout_state")))
+            levels = evidence.get("levels") or {}
+            observed_range = [f"{key}: {number(levels.get(key))}" for key in ("support", "resistance")
+                              if number(levels.get(key)) is not None]
+            if observed_range:
+                summary.append(label("歷史區間邊界", "Observed historical range", "過去の値幅境界")
+                               + "; " + " / ".join(observed_range))
+            for code in evidence.get("counter_evidence") or []:
+                limits.append(label("反向證據", "Counter-evidence", "反証") + f": {code}")
+        reasons = [*(resolved.get("reason_codes") or []), *(evidence.get("limitations") or [])]
+        for reason in reasons:
+            limits.append(reason_labels.get(reason) or str(reason))
+        if resolved.get("decision_usable") is not True:
+            limits.append(label("以上是已取得的技術事實，尚不足以形成進出場或停損建議。",
+                                "These technical facts do not establish entry, exit, or stop conditions.",
+                                "取得済みの指標だけでは売買・損切り条件は確定できません。"))
+        if resolved.get("fallback_used") is True:
+            limits.append(label("採用備援資料", "Fallback evidence", "代替データ")
+                          + f": {resolved.get('selected_source') or '?'}")
+    if not sources:
+        return {}
+    summary = list(dict.fromkeys(summary))
+    answer = {
+        "kind": "consumer_market_answer", "style": "selected_technical_facts",
+        "source": "canonical_selected_evidence", "source_capabilities": sources,
+        "headline": f"{target.get('id') or target.get('label') or ''} "
+                    + label("技術資料與限制", "technical facts and limits", "テクニカル情報と制限"),
+        "summary": summary, "data_limits": list(dict.fromkeys(limits)),
+        "action_plan": [], "scenarios": [], "risks": [], "counter_evidence": [],
+        "confidence": "low" if limits else "medium", "detail": "\n".join(summary),
+    }
+    answer["text"] = consumer_text(answer, summary_limit=len(summary), response_preferences=response_preferences)
     return answer
 
 

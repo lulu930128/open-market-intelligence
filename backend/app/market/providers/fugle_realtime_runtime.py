@@ -166,7 +166,10 @@ class FugleCanonicalMaterializer:
                 }
             except FugleIndexSessionNotMaterializable:
                 results["index"] = {
-                    "status": "pending",
+                    # This receipt can never provide completed-session evidence.
+                    # Its claimed hash is terminal, unlike a missing seed which
+                    # releases the claim and remains retryable above.
+                    "status": "rejected",
                     "limitation": "FUGLE_INDEX_COMPLETED_SESSION_NOT_MATERIALIZABLE",
                 }
             except Exception:

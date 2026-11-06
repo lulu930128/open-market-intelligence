@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from math import isclose, isfinite
 from statistics import median, pstdev
@@ -11,6 +12,8 @@ from types import SimpleNamespace
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    RawFetchResult,
+    SourceRegistry,
     StockMaster,
     TaiwanIntradayStockState,
     WatchlistGroup,
@@ -29,7 +32,7 @@ from app.market.public_quote_platform import (
     project_taiwan_session_close,
     read_taiwan_session_closes,
 )
-from app.market_data.contracts import InstrumentKey, InstrumentType, Market
+from app.market_data.contracts import InstrumentKey, InstrumentType, Market, SourceLineage
 
 
 INTRADAY_STATE_VERSION = "tw.intraday_stock_state.v3"
@@ -485,11 +488,21 @@ def _component_lineage(raw: dict[str, Any], *, event_time: datetime) -> dict[str
 
 
 def attach_current_market_lineage_to_stock_rows(
-    rows: Iterable[dict[str, Any]],
+    rows: Iterable[dict[str, Any]] | None = None,
     *,
     summary: dict[str, Any],
+    db: Session | None = None,
 ) -> list[dict[str, Any]]:
-    """Attach canonical breadth raw receipts to the stock rows they contain."""
+    """Use the selected canonical receipt's companions, never a mutable cache.
+
+    Explicit rows must be exact members of that receipt. The scheduler omits
+    rows and reads those original companions directly; a cache replacement or
+    empty cache cannot relabel another acquisition. No fetch or persistence.
+    """
+
+    if db is None:
+        raise ValueError("TW_BREADTH_COMPANION_CANONICAL_RECEIPT_REQUIRED")
+    from app.market.tw_current_market_capabilities import current_source_binding, TW_CURRENT_BREADTH_CAPABILITY_ID
 
     lineage_by_market: dict[str, dict[str, Any]] = {}
     for item in summary.get("indices") or []:
@@ -508,8 +521,86 @@ def attach_current_market_lineage_to_stock_rows(
             if isinstance(item.get("breadth"), dict)
             else {}
         )
-        if market and breadth.get("raw_result_id"):
+        if market in SUPPORTED_MARKETS and breadth.get("raw_result_id") and current_source_binding(
+            provider=breadth.get("provider"), source=breadth.get("source"),
+            capability_id=TW_CURRENT_BREADTH_CAPABILITY_ID,
+        ) is not None:
             lineage_by_market[market] = breadth
+
+    canonical_rows: dict[str, list[dict[str, Any]]] = {}
+    for market, breadth in lineage_by_market.items():
+        identity = str(breadth["raw_result_id"])
+        lineage = breadth.get("lineage") or {}
+        if not identity.startswith("raw_fetch_result:") or not identity.split(":", 1)[1].isdigit():
+            raise ValueError("TW_BREADTH_COMPANION_RECEIPT_ID_INVALID")
+        with db.no_autoflush:
+            raw = (db.query(RawFetchResult.raw_text, RawFetchResult.content_hash, RawFetchResult.parser_version,
+                            SourceRegistry.source_name)
+                   .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
+                   .filter(RawFetchResult.id == int(identity.split(":", 1)[1])).first())
+        if (raw is None or raw.source_name != breadth.get("source")
+                or raw.parser_version != lineage.get("raw_contract_version")
+                or raw.content_hash != lineage.get("content_hash")
+                or sha256((raw.raw_text or "").encode("utf-8")).hexdigest() != raw.content_hash):
+            raise ValueError("TW_BREADTH_COMPANION_RECEIPT_MISMATCH")
+        payload = json.loads(raw.raw_text)
+        if not isinstance(payload, dict):
+            raise ValueError("TW_BREADTH_COMPANION_ROWS_INVALID")
+        companions = payload.get("component_stock_rows", [])
+        if (not isinstance(companions, list)
+                or any(not isinstance(row, dict) or row.get("market") != market for row in companions)):
+            raise ValueError("TW_BREADTH_COMPANION_ROWS_INVALID")
+        canonical_rows[market] = companions
+
+    def wire_row(row):
+        return json.dumps(row, ensure_ascii=False, sort_keys=True, default=lambda value:
+                          value.isoformat() if isinstance(value, (date, datetime)) else str(value))
+
+    if rows is None:
+        rows = [row for companions in canonical_rows.values() for row in companions]
+    else:
+        rows = list(rows)
+        membership = {market: {wire_row(row) for row in companions}
+                      for market, companions in canonical_rows.items()}
+        if any(wire_row(row) not in membership.get(str(row.get("market") or "").upper(), set()) for row in rows):
+            raise ValueError("TW_BREADTH_COMPANION_MEMBERSHIP_MISMATCH")
+
+    # Match carried prices to their original canonical receipts, using the same
+    # receipt/hash/source/time evidence as read_breadth_price_states. Batch only
+    # metadata (not payloads), so one full-market companion adds no per-stock IO.
+    carried = {}
+    for row in rows:
+        if row.get("has_actual_trade") and row.get("price_source") == "session_cache" and not row.get("price_lineage"):
+            carried[id(row)] = None
+        if row.get("has_actual_trade") and row.get("price_lineage"):
+            try:
+                price = SourceLineage.model_validate(row["price_lineage"])
+            except ValueError:
+                carried[id(row)] = None
+                continue
+            breadth_hash = (lineage_by_market[str(row["market"]).upper()].get("lineage") or {}).get("content_hash")
+            if price.content_hash != breadth_hash:
+                carried[id(row)] = price
+    receipt_ids = sorted({int(price.raw_receipt_id.split(":", 1)[1]) for price in carried.values()
+                          if price is not None and price.raw_receipt_id
+                          and price.raw_receipt_id.startswith("raw_fetch_result:")
+                          and price.raw_receipt_id.split(":", 1)[1].isdigit()})
+    receipts = {}
+    with db.no_autoflush:
+        for offset in range(0, len(receipt_ids), 400):
+            for raw_id, content_hash, source, fetched in (
+                db.query(RawFetchResult.id, RawFetchResult.content_hash, SourceRegistry.source_name, RawFetchResult.fetched_at)
+                .join(SourceRegistry, SourceRegistry.id == RawFetchResult.source_id)
+                .filter(RawFetchResult.id.in_(receipt_ids[offset:offset + 400])).all()
+            ):
+                receipts[f"raw_fetch_result:{raw_id}"] = (
+                    content_hash, source, fetched.replace(tzinfo=timezone.utc) if fetched.tzinfo is None else fetched,
+                )
+    verified = {key for key, price in carried.items()
+                if price is not None and price.provider == "twse_mis"
+                and price.source in {"twse_mis_live_breadth", "twse_mis_quote_depth"}
+                and price.content_hash is not None and price.received_at is not None
+                and receipts.get(price.raw_receipt_id) == (price.content_hash, price.source, price.fetched_at)}
 
     enriched: list[dict[str, Any]] = []
     for row in rows:
@@ -521,9 +612,8 @@ def attach_current_market_lineage_to_stock_rows(
             raw_result_id = breadth.get("raw_result_id")
             next_row["raw_result_id"] = raw_result_id
             next_row["observation_received_at"] = next_row.get("observation_received_at") or breadth.get("observation_received_at") or (breadth.get("lineage") or {}).get("received_at")
-            next_row["component_raw_result_ids"] = [raw_result_id]
-            next_row["component_event_times"] = [event_at] if event_at else []
-            next_row["component_sources"] = [
+            components = [dict(value) for value in next_row.get("component_sources") or []]
+            components.append(
                 {
                     "domain": "stock_quote_snapshot",
                     "provider": breadth.get("provider"),
@@ -532,6 +622,31 @@ def attach_current_market_lineage_to_stock_rows(
                     "event_at": event_at,
                     "received_at": next_row["observation_received_at"],
                 }
+            )
+            # The receipt proves this snapshot, not a carried trade's origin.
+            # Use the same typed lineage preserved by the breadth adapter and
+            # canonical price-state owner; never relabel an older trade as new.
+            if id(row) in carried:
+                price_lineage = carried[id(row)]
+                component = {
+                    **(price_lineage.model_dump(mode="json") if price_lineage is not None else {}),
+                    "domain": "stock_quote_snapshot",
+                    "raw_result_id": price_lineage.raw_receipt_id if id(row) in verified else None,
+                }
+                if id(row) not in verified:
+                    # An unavailable trade receipt is a per-stock quality gap.
+                    # A null component keeps existing lineage_complete=False;
+                    # it must not abort the valid aggregate or other stocks.
+                    component["reason"] = "TW_BREADTH_COMPANION_TRADE_RECEIPT_UNVERIFIED"
+                    component.pop("raw_receipt_id", None)
+                components.append(component)
+            next_row["component_sources"] = components
+            next_row["component_raw_result_ids"] = list(dict.fromkeys(
+                [*(next_row.get("component_raw_result_ids") or []), raw_result_id]
+                + [component["raw_result_id"] for component in components if component.get("raw_result_id")]
+            ))
+            next_row["component_event_times"] = [
+                component["event_at"] for component in components if component.get("event_at")
             ]
         enriched.append(next_row)
     return enriched

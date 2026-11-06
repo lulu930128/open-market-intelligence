@@ -11,6 +11,8 @@ from typing import Any, Protocol
 
 from app.market.providers import tpex, twse
 from app.market.providers.tw_official_daily import (
+    TPEX_DAILY_CLOSE_RESOURCE_ID,
+    TPEX_DATED_DAILY_RESOURCE_ID,
     TPEX_DAILY_RESOURCE_ID,
     TPEX_HIGHLIGHT_RESOURCE_ID,
     TWSE_DAILY_RESOURCE_ID,
@@ -18,12 +20,14 @@ from app.market.providers.tw_official_daily import (
     endpoint_for_resource,
     official_daily_record_to_bar,
     parse_tpex_official_daily_payload,
+    parse_tpex_dated_daily_payload,
     parse_twse_rwd_official_daily_payload,
     parse_twse_official_daily_payload,
     parser_version_for_resource,
     source_name_for_resource,
 )
 from app.market_data.contracts import (
+    BarFinalization,
     BarObservation,
     ConnectionStatus,
     EnablementStatus,
@@ -46,7 +50,7 @@ from app.market_data.provider_catalog import (
     DataAcquisitionPlanV2,
     ProviderResourceRouteV2,
 )
-from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.market.taiwan_rules import taiwan_published_breadth_observation_at
 from app.parsers.twse_published_breadth import parse_tpex_published_breadth, parse_twse_published_breadth
 
 
@@ -104,11 +108,17 @@ def _default_fetch(
             timeout_seconds=route.timeout_seconds,
             allow_redirects=False,
         )
-    if route.resource_id == TPEX_HIGHLIGHT_RESOURCE_ID:
-        if trade_date is None:
-            raise ValueError("TPEx highlight requires trade_date")
+    if route.resource_id == TPEX_DAILY_CLOSE_RESOURCE_ID:
         return tpex.get_response(
-            tpex.MARKET_HIGHLIGHT_URL,
+            tpex.DAILY_CLOSE_QUOTES_URL,
+            timeout_seconds=route.timeout_seconds,
+            allow_redirects=False,
+        )
+    if route.resource_id in {TPEX_HIGHLIGHT_RESOURCE_ID, TPEX_DATED_DAILY_RESOURCE_ID}:
+        if trade_date is None:
+            raise ValueError("TPEx dated resource requires trade_date")
+        return tpex.get_response(
+            endpoint_for_resource(route.resource_id),
             timeout_seconds=route.timeout_seconds,
             allow_redirects=False,
             params={"date": trade_date.strftime("%Y/%m/%d"), "response": "json"},
@@ -181,7 +191,7 @@ class TaiwanOfficialDailyAcquisitionExecutor:
     ) -> _RouteOutcome:
         checked_at = self._clock()
         if (route.resource_id == TPEX_HIGHLIGHT_RESOURCE_ID or published_only) and (
-            trade_date is None or checked_at < taiwan_daily_price_release_at(trade_date)
+            trade_date is None or checked_at < taiwan_published_breadth_observation_at(trade_date)
         ):
             return _RouteOutcome(receipt=None, bars=(),
                 health=_health(route, checked_at=checked_at, connection=ConnectionStatus.UNKNOWN,
@@ -269,7 +279,9 @@ class TaiwanOfficialDailyAcquisitionExecutor:
                     raw_text,
                     target_symbols=target_symbols,
                 )
-            elif route.resource_id == TPEX_DAILY_RESOURCE_ID:
+            elif route.resource_id == TPEX_DATED_DAILY_RESOURCE_ID:
+                parsed = parse_tpex_dated_daily_payload(raw_text, target_symbols=target_symbols)
+            elif route.resource_id in {TPEX_DAILY_RESOURCE_ID, TPEX_DAILY_CLOSE_RESOURCE_ID}:
                 parsed = parse_tpex_official_daily_payload(
                     raw_text,
                     target_symbols=target_symbols,
@@ -295,9 +307,16 @@ class TaiwanOfficialDailyAcquisitionExecutor:
                 )
                 for record in date_records
             )
+            unqualified_early = any(bar.finalization is BarFinalization.PROVISIONAL for bar in bars)
+            bars = tuple(bar for bar in bars if bar.finalization is not BarFinalization.PROVISIONAL)
             limitations = _unique(
                 (
                     *tuple(issue.reason_code for issue in parsed.issues),
+                    *(limitation for bar in bars for limitation in bar.limitations),
+                    *(("DAILY_REGULAR_SCOPE_UNVERIFIED",) if unqualified_early else ()),
+                    *(("OFFICIAL_PAYLOAD_PREDATES_EXPECTED_DATE",)
+                      if trade_date is not None and parsed.records
+                      and all(record.trade_date < trade_date for record in parsed.records) else ()),
                     *(
                         ("EXPECTED_TRADE_DATE_NOT_OBSERVED",)
                         if trade_date is not None and not date_records
@@ -388,6 +407,7 @@ class TaiwanOfficialDailyAcquisitionExecutor:
         had_failure = False
         external_calls = 0
         published_success = False
+        remaining_instruments = dict(instruments)
         # Planner-selected daily and companion routes share this acquisition's
         # time/call budget and the same persistence batch.
         if len(companion_routes) > 1 or any(
@@ -426,7 +446,7 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             )
             outcome = self._run_route(
                 route,
-                instruments=instruments,
+                instruments=remaining_instruments,
                 trade_date=trade_date,
                 published_only=published_only,
             )
@@ -434,17 +454,25 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             if outcome.receipt is not None:
                 receipts.append(outcome.receipt)
             bars.extend(outcome.bars)
+            for bar in outcome.bars:
+                remaining_instruments.pop(bar.instrument.symbol, None)
             health.append(outcome.health)
             limitations.extend(route.limitations)
             limitations.extend(outcome.limitations)
             if outcome.limitations:
                 had_failure = True
-            if outcome.success:
+            if outcome.success and (published_only or not remaining_instruments):
                 published_success = published_only
                 break
-            had_failure = True
+            had_failure = had_failure or not outcome.success
 
         for route in companion_routes:
+            if trade_date is None or self._clock() < taiwan_published_breadth_observation_at(trade_date):
+                outcome = self._run_route(route, instruments=instruments, trade_date=trade_date)
+                health.append(outcome.health)
+                limitations.extend(outcome.limitations)
+                had_failure = True
+                continue
             route = admitted_route(route)
             if route is None:
                 had_failure = True
@@ -460,6 +488,9 @@ class TaiwanOfficialDailyAcquisitionExecutor:
             had_failure = had_failure or not outcome.success
             published_success = published_success or outcome.success
 
+        if remaining_instruments and not published_only:
+            limitations.append("ELIGIBLE_DAILY_TARGETS_MISSING")
+            had_failure = True
         if bars or published_success:
             status = AcquisitionStatus.PARTIAL if had_failure else AcquisitionStatus.COMPLETED
         elif attempts:

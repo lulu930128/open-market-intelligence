@@ -55,6 +55,11 @@ def test_failed_planned_evidence_retains_facts_without_promoting_fallback(db, re
     assert compact['decision_usable'] is False
     assert compact['levels']['latest_price'] == 12
     assert compact['levels']['entry'] == {} and compact['levels']['risk'] == {}
+    raw_levels = result['data']['technical_levels']
+    assert raw_levels['latest_price'] == 12
+    assert raw_levels['entry'] == {} and raw_levels['risk'] == {}
+    assert raw_levels['validation']['decision_ready'] is False
+    assert 'READ_NODE_UNAVAILABLE' in raw_levels['validation']['reason_codes']
     assert 'READ_NODE_UNAVAILABLE' in compact['analysis']['sufficiency']['reason_codes']
     assert result['data']['technical_reports']['daily']['latest_close'] == 12
     evidence = projected(result, caps)
@@ -79,6 +84,7 @@ def test_successful_technical_reader_does_not_masquerade_as_failed_node(db, read
     result = read(db, deps, ['technical.structure'])
     compact = result['data']['compact']['technical']
     assert compact['status'] == 'ready' and compact['decision_usable'] is True
+    assert result['data']['technical_levels']['entry'] == {'observed': 12}
     assert 'READ_NODE_UNAVAILABLE' not in compact['analysis']['sufficiency']['reason_codes']
 
 

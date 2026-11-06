@@ -34,7 +34,12 @@ from app.market.tw_bar_contracts import (
     TPEX_DERIVED_DAILY_PROVIDER,
     TPEX_DERIVED_DAILY_SOURCE,
 )
-from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.market.taiwan_rules import (
+    TAIWAN_DAILY_REGULAR_LIMITATIONS, TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE,
+    TAIWAN_DAILY_REGULAR_SCOPE, taiwan_daily_price_release_at,
+    taiwan_daily_regular_research_at,
+)
+from app.market.providers.tw_official_daily import TWSE_RWD_DAILY_PARSER_VERSION
 from app.market.official_index_contract import taiwan_index_close_release_at
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market_data.candidate_repository import (
@@ -56,6 +61,8 @@ from app.market_data.contracts import (
     SourceLineage,
 )
 from app.sources.defaults import (
+    TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME,
+    TPEX_DATED_DAILY_QUOTES_SOURCE_NAME,
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
     TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
@@ -68,6 +75,8 @@ _RAW_FETCH_LINEAGE_COLUMNS = (
     RawFetchResult.fetched_at,
     RawFetchResult.content_hash,
     RawFetchResult.parser_version,
+    RawFetchResult.status_code,
+    RawFetchResult.error_message,
 )
 
 
@@ -125,7 +134,17 @@ _SOURCES_BY_VENUE = {
         _OfficialDailySourceBinding(
             venue="TPEX",
             provider="tpex_openapi",
+            source_name=TPEX_DATED_DAILY_QUOTES_SOURCE_NAME,
+        ),
+        _OfficialDailySourceBinding(
+            venue="TPEX",
+            provider="tpex_openapi",
             source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+        ),
+        _OfficialDailySourceBinding(
+            venue="TPEX",
+            provider="tpex_openapi",
+            source_name=TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME,
         ),
     ),
 }
@@ -185,16 +204,36 @@ def _receipt_is_release_qualified(
     trade_date: date,
     fetched_at: datetime,
     instrument_type: InstrumentType = InstrumentType.STOCK,
+    price=None,
+    source_name: str | None = None,
+    receipt: RawFetchResult | None = None,
+    allow_early_regular: bool = False,
 ) -> bool:
     release_at = (
         taiwan_index_close_release_at(trade_date)
         if instrument_type is InstrumentType.INDEX
         else taiwan_daily_price_release_at(trade_date)
     ).astimezone(timezone.utc)
-    return _as_aware_utc(fetched_at) >= release_at
+    research_row = price is not None and price.release_status == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE
+    if not research_row:
+        return _as_aware_utc(fetched_at) >= release_at
+    return bool(
+        allow_early_regular and instrument_type in {InstrumentType.STOCK, InstrumentType.ETF}
+        and source_name == TWSE_RWD_DAILY_TRADING_SOURCE_NAME
+        and receipt is not None and receipt.source_id == price.source_id
+        and receipt.parser_version == TWSE_RWD_DAILY_PARSER_VERSION
+        and receipt.status_code == 200 and receipt.error_message is None and receipt.content_hash
+        and price.canonical_market == "TW" and price.venue == "TWSE"
+        and price.instrument_type in {"stock", "etf"}
+        and price.authority == "exchange" and price.official is True
+        and price.finalization == "final" and price.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE
+        and price.trade_volume is not None and price.trade_volume > 0
+        and price.trade_value is not None and price.transaction_count is not None and price.transaction_count > 0
+        and taiwan_daily_regular_research_at(trade_date) <= _as_aware_utc(fetched_at) < release_at
+    )
 
 
-def taiwan_official_daily_release_qualified_filter(price=MarketDailyPrice):
+def taiwan_official_daily_release_qualified_filter(price=MarketDailyPrice, *, allow_early_regular: bool = False):
     """Return the persisted-receipt equivalent of the per-row release gate.
 
     Raw receipt timestamps are stored as UTC-naive values in the local SQLite
@@ -205,10 +244,28 @@ def taiwan_official_daily_release_qualified_filter(price=MarketDailyPrice):
     fetched_date = func.date(RawFetchResult.fetched_at)
     trade_date = func.date(price.trade_date)
     fetched_time = func.time(RawFetchResult.fetched_at)
-    return or_(
+    final_receipt = and_(
+        or_(price.release_status.is_(None), price.release_status != TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE),
+        or_(
         fetched_date > trade_date,
         and_(fetched_date == trade_date, fetched_time >= "07:15:00"),
+        ),
     )
+    if not allow_early_regular:
+        return final_receipt
+    return or_(final_receipt, and_(
+        price.release_status == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE,
+        price.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE,
+        price.canonical_market == "TW", price.venue == "TWSE",
+        price.instrument_type.in_(("stock", "etf")), price.authority == "exchange",
+        price.official.is_(True), price.finalization == "final",
+        price.trade_volume > 0, price.trade_value.isnot(None), price.transaction_count > 0,
+        SourceRegistry.source_name == TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
+        RawFetchResult.parser_version == TWSE_RWD_DAILY_PARSER_VERSION,
+        RawFetchResult.source_id == price.source_id, RawFetchResult.status_code == 200,
+        RawFetchResult.error_message.is_(None), RawFetchResult.content_hash.isnot(None), RawFetchResult.content_hash != "",
+        fetched_date == trade_date, fetched_time >= "06:30:00", fetched_time < "07:15:00",
+    ))
 
 
 def _missing_ohlc(row: MarketDailyPrice) -> tuple[str, ...]:
@@ -222,8 +279,9 @@ def _missing_ohlc(row: MarketDailyPrice) -> tuple[str, ...]:
 class TaiwanOfficialDailyBarRepository:
     """Load one venue-scoped instrument from existing official daily storage."""
 
-    def __init__(self, db: Session, *, available_at: datetime | None = None) -> None:
+    def __init__(self, db: Session, *, available_at: datetime | None = None, allow_early_regular: bool = False) -> None:
         self._db = db
+        self._allow_early_regular = allow_early_regular
         self._available_at = (
             _as_aware_utc(available_at).replace(tzinfo=None)
             if available_at is not None
@@ -345,7 +403,7 @@ class TaiwanOfficialDailyBarRepository:
                 price.stock_id.in_([item.symbol for item in members]),
                 price.trade_date <= end_date,
                 SourceRegistry.source_name.in_(sources),
-                taiwan_official_daily_release_qualified_filter(price),
+                taiwan_official_daily_release_qualified_filter(price, allow_early_regular=self._allow_early_regular),
             )
             if self._available_at is not None:
                 latest_query = latest_query.filter(RawFetchResult.fetched_at <= self._available_at)
@@ -502,6 +560,8 @@ class TaiwanOfficialDailyBarRepository:
                             trade_date=row.trade_date,
                             fetched_at=raw.fetched_at,
                             instrument_type=instrument.instrument_type,
+                            price=row, source_name=source.source_name, receipt=raw,
+                            allow_early_regular=self._allow_early_regular,
                         )
                     )
                 )
@@ -513,6 +573,26 @@ class TaiwanOfficialDailyBarRepository:
             if len(eligible_dates) >= max_rows:
                 break
         return eligible_dates[-1] if eligible_dates else None
+
+    def has_qualified_final_row(self, *, row: MarketDailyPrice, instrument: InstrumentKey) -> bool:
+        """Protect only this canonical row with a healthy qualified receipt.
+
+        Release time alone cannot qualify legacy OHLC/lineage. Reuse the normal
+        candidate conversion (including BarObservation validation), without
+        selecting another source or calling the Gateway/acquisition owner.
+        """
+        raw = self._db.get(RawFetchResult, row.raw_result_id)
+        if (raw is None or raw.source_id != row.source_id or raw.status_code != 200
+                or raw.error_message or not raw.content_hash):
+            return False
+        stored = self.load_daily_bars(DailyBarCandidateQuery(
+            instrument=instrument, start_date=row.trade_date, end_date=row.trade_date, max_rows=1))
+        return any(
+            row_id == row.id and bar.lineage.raw_receipt_id == f"raw_fetch_result:{raw.id}"
+            and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}
+            and "OFFICIAL_FINAL_PENDING" not in bar.limitations
+            for series in stored.series for row_id, bar in zip(series.storage_row_ids, series.bars, strict=True)
+        )
 
     def load_daily_bars(self, query: DailyBarCandidateQuery) -> DailyBarCandidateRead:
         instrument = query.instrument
@@ -629,6 +709,8 @@ class TaiwanOfficialDailyBarRepository:
                 trade_date=row.trade_date,
                 fetched_at=raw_result.fetched_at,
                 instrument_type=instrument.instrument_type,
+                price=row, source_name=source.source_name, receipt=raw_result,
+                allow_early_regular=self._allow_early_regular,
             ):
                 rejections.append(
                     CandidateRowRejection(
@@ -787,6 +869,10 @@ class TaiwanOfficialDailyBarRepository:
                         if row.finalization
                         else BarFinalization.FINAL
                     ),
+                    derivation_kind=row.derivation_kind,
+                    limitations=TAIWAN_DAILY_REGULAR_LIMITATIONS if row.release_status == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE else (
+                        TAIWAN_DAILY_REGULAR_LIMITATIONS[-1:] if row.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE else ()
+                    ),
                 )
             except (TypeError, ValueError, ValidationError):
                 rejections.append(
@@ -839,7 +925,7 @@ class TaiwanOfficialDailyBarRepository:
             self._daily_candidate_handoff = (id(self._db), self._available_at, result)
         return result
 
-    def resolve_daily_days(self, *, instrument, start_date, end_date, resolved_bars):
+    def resolve_daily_days(self, *, instrument, start_date, end_date, resolved_bars, max_rows: int = 5000):
         """Read official activity and event evidence; resolve one state per date."""
         from datetime import timedelta
         from app.market.trading_calendar import has_taiwan_calendar_year, is_taiwan_trading_day
@@ -851,7 +937,7 @@ class TaiwanOfficialDailyBarRepository:
         available = (_as_aware_utc(self._available_at) if self._available_at else datetime.now(timezone.utc))
         events = read_taiwan_instrument_event_evidence(instrument=instrument, available_at=available)
         query = DailyBarCandidateQuery(
-            instrument=instrument, start_date=start_date, end_date=end_date, max_rows=5000)
+            instrument=instrument, start_date=start_date, end_date=end_date, max_rows=max_rows)
         captured = self._daily_candidate_handoff
         self._daily_candidate_handoff = None
         stored = (captured[2] if captured is not None
@@ -1051,7 +1137,7 @@ class TaiwanOfficialDailyBarRepository:
         universe_query = (
             self._db.query(StockMaster.stock_id, StockMaster.market)
             .filter(StockMaster.is_active.is_(True))
-            .filter(StockMaster.market.in_(("TWSE", "TPEX")))
+            .filter(func.upper(StockMaster.market).in_(("TWSE", "TPEX")))
             .filter(func.lower(StockMaster.instrument_type).in_(instrument_types))
         )
         if normalized_venue is not None:
@@ -1086,22 +1172,36 @@ class TaiwanOfficialDailyBarRepository:
                 trade_date=day, limitations=("ACTIVE_STOCK_UNIVERSE_EMPTY",),
             ) for day in trade_dates}
         price = self._price_rows(symbols=universe_symbols, end_date=trade_dates[-1], trade_dates=trade_dates)
+        # Many stocks share the same large raw receipt. SQLite must otherwise
+        # decode its trailing lineage columns once per joined price row, even
+        # though raw_text is deferred. Keep the exact PIT rows, then materialize
+        # only their receipt metadata once inside this SELECT (no stored cache).
+        visible_prices = select(*(getattr(price, column.name)
+                                  for column in MarketDailyPrice.__table__.columns)).where(
+            price.trade_date.in_(trade_dates), price.stock_id.in_(universe_symbols),
+        ).cte("tw_visible_daily_prices").prefix_with("MATERIALIZED", dialect="sqlite")
+        price = aliased(MarketDailyPriceRevision if self._available_at is not None else MarketDailyPrice,
+                        visible_prices, adapt_on_names=True)
+        receipts = select(*_RAW_FETCH_LINEAGE_COLUMNS).where(
+            RawFetchResult.id.in_(select(price.raw_result_id)),
+        ).cte("tw_daily_receipt_lineage").prefix_with("MATERIALIZED", dialect="sqlite")
+        raw = aliased(RawFetchResult, receipts, adapt_on_names=True)
         query = (
             self._db.query(
                 price,
-                RawFetchResult,
+                raw,
                 SourceRegistry,
                 StockMaster,
             )
-            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS))
-            .outerjoin(RawFetchResult, RawFetchResult.id == price.raw_result_id)
+            .options(load_only(*(getattr(raw, column.key) for column in _RAW_FETCH_LINEAGE_COLUMNS)))
+            .outerjoin(raw, raw.id == price.raw_result_id)
             .outerjoin(SourceRegistry, SourceRegistry.id == price.source_id)
             .join(StockMaster, StockMaster.stock_id == price.stock_id)
             .filter(price.trade_date.in_(trade_dates))
             .filter(price.stock_id.in_(universe_symbols))
         )
         if self._available_at is not None:
-            query = query.filter(RawFetchResult.fetched_at <= self._available_at)
+            query = query.filter(raw.fetched_at <= self._available_at)
         rows = (
             query.order_by(
                 price.trade_date.asc(),
@@ -1165,6 +1265,8 @@ class TaiwanOfficialDailyBarRepository:
             if not _receipt_is_release_qualified(
                 trade_date=row.trade_date,
                 fetched_at=raw_result.fetched_at,
+                price=row, source_name=source.source_name, receipt=raw_result,
+                allow_early_regular=self._allow_early_regular,
             ):
                 rejected += 1
                 rejection_reasons.append((row.stock_id, "DAILY_RECEIPT_BEFORE_RELEASE"))
@@ -1181,7 +1283,7 @@ class TaiwanOfficialDailyBarRepository:
                 continue
             instrument_type = (
                 InstrumentType.ETF
-                if "etf" in str(stock.instrument_type or "").strip().lower()
+                if str(stock.instrument_type or "").strip().lower() in {"etf", "exchange_traded_fund"}
                 else InstrumentType.STOCK
             )
             try:
@@ -1228,6 +1330,10 @@ class TaiwanOfficialDailyBarRepository:
                         _decimal(row.price_change) if row.price_change is not None else None
                     ),
                     finalization=BarFinalization(row.finalization) if row.finalization else BarFinalization.FINAL,
+                    derivation_kind=row.derivation_kind,
+                    limitations=TAIWAN_DAILY_REGULAR_LIMITATIONS if row.release_status == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE else (
+                        TAIWAN_DAILY_REGULAR_LIMITATIONS[-1:] if row.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE else ()
+                    ),
                 )
             except (TypeError, ValueError, ValidationError):
                 rejected += 1

@@ -42,7 +42,7 @@ from app.market_data.contracts import (
 )
 
 
-INPUT_QUALITY_VERSION = "tw.technical.input_quality.v3"
+INPUT_QUALITY_VERSION = "tw.technical.input_quality.v4"
 
 
 class TaiwanTechnicalStatus(str, Enum):
@@ -128,6 +128,7 @@ def _technical_revision(
     *,
     bar_revision: str,
     parameter_contract: dict[str, Any],
+    allow_early_regular: bool = False,
 ) -> str:
     payload = json.dumps(
         {
@@ -136,6 +137,7 @@ def _technical_revision(
             "algorithm_version": INDICATOR_ALGORITHM_VERSION,
             "input_quality_version": INPUT_QUALITY_VERSION,
             "parameter_contract": parameter_contract,
+            "allow_early_regular": allow_early_regular,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -170,11 +172,15 @@ def _bar_subset_revision(
     return sha256(payload).hexdigest()
 
 
-def _terminal_current_partial_index(series: TaiwanBarSeriesRead) -> int | None:
+def _calculation_eligible(state, *, allow_early_regular: bool = False) -> bool:
+    return state.technical_eligible or (allow_early_regular and state.research_eligible)
+
+
+def _terminal_current_partial_index(series: TaiwanBarSeriesRead, *, allow_early_regular: bool = False) -> int | None:
     ineligible = [
         index
         for index, state in enumerate(series.bar_states)
-        if not state.technical_eligible
+        if not _calculation_eligible(state, allow_early_regular=allow_early_regular)
     ]
     if not ineligible:
         return None
@@ -314,6 +320,7 @@ def _input_quality(
     decision_bar_count: int,
     warmup: dict[str, dict[str, Any]],
     eligible: bool,
+    allow_early_regular: bool = False,
 ) -> dict[str, Any]:
     """Qualify recent completed inputs; report wider history separately."""
     required = max(
@@ -331,6 +338,7 @@ def _input_quality(
     window = completed[window_start:]
     window_states = bars.bar_states[window_start:decision_bar_count]
     interval = bars.requested_interval
+    expected_session_dates = frozenset(bars.expected_sessions)
 
     def continuity(items):
         missing = 0
@@ -352,7 +360,7 @@ def _input_quality(
             else:
                 cursor += timedelta(days=1)
             while cursor < end:
-                missing += int(cursor in bars.expected_sessions)
+                missing += int(cursor in expected_session_dates)
                 cursor += timedelta(days=1)
         return missing, ordered
 
@@ -380,7 +388,7 @@ def _input_quality(
     if not window_ordered:
         reasons.append("TW_TECHNICAL_BAR_ORDER_INVALID")
     window_eligible = len(window_states) == len(window) and all(
-        state.technical_eligible for state in window_states
+        _calculation_eligible(state, allow_early_regular=allow_early_regular) for state in window_states
     )
     if not window_eligible:
         reasons.append("TW_TECHNICAL_BAR_STATE_NOT_ELIGIBLE")
@@ -400,8 +408,12 @@ def _input_quality(
         for state in bars.bar_states[:decision_bar_count]
     ):
         history_warnings.append("TW_TECHNICAL_HISTORY_COMPONENT_COVERAGE_UNKNOWN")
+    research_usable = not reasons
+    if any(not state.technical_eligible for state in window_states) and research_usable:
+        reasons.append("OFFICIAL_FINAL_PENDING")
     return {
         "contract_version": INPUT_QUALITY_VERSION,
+        "research_usable": research_usable,
         "canonical_limitations": list(bars.limitations),
         "day_states": [item.model_dump(mode="json") for item in bars.day_states],
         "day_state_blockers": [{"trade_date": item.trade_date.isoformat(), "state": item.state.value,
@@ -533,6 +545,7 @@ class TaiwanTechnicalService:
         expected_series_revision: str | None = None,
         expected_snapshot_revision: str | None = None,
         response_limit: int | None = None,
+        allow_early_regular: bool = False,
     ) -> TaiwanTechnicalSeriesRead:
         if expected_series_revision is not None and expected_snapshot_revision is not None:
             raise ValueError(
@@ -569,7 +582,7 @@ class TaiwanTechnicalService:
             "parameter_revision": resolved.revision,
             **asdict(resolved),
         }
-        partial_index = _terminal_current_partial_index(bars)
+        partial_index = _terminal_current_partial_index(bars, allow_early_regular=allow_early_regular)
         period_partial = bool(
             bars.bars and bars.requested_interval in {"1w", "1mo"}
             and classify_latest_period(
@@ -653,6 +666,7 @@ class TaiwanTechnicalService:
             decision_bar_count=decision_bar_count,
             warmup=warmup,
             eligible=bool(points) and partial_index != -1,
+            allow_early_regular=allow_early_regular,
         )
         if status is TaiwanTechnicalStatus.AVAILABLE and not input_quality["decision_usable"]:
             status = TaiwanTechnicalStatus.PARTIAL
@@ -702,6 +716,7 @@ class TaiwanTechnicalService:
             technical_revision=_technical_revision(
                 bar_revision=technical_input_revision,
                 parameter_contract=parameter_contract,
+                allow_early_regular=allow_early_regular,
             ),
             limitations=tuple(dict.fromkeys(limitations)),
             warnings=tuple(dict.fromkeys((*bars.warnings, *input_quality["warnings"]))),

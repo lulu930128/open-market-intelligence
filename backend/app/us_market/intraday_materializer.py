@@ -202,6 +202,24 @@ def _eod_worker_lease(db: Any):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _eod_retryable_attempt(attempt: dict[str, Any]) -> bool:
+    """Only a returned, known one-call incomplete result may reuse its provider."""
+    route = attempt["planned_resource"]
+    # Legacy finish records already prove the one-call route returned normally:
+    # errors/unknown outcomes never receive canonical_reread_incomplete. Do not
+    # infer that proof for interrupted reservations or a missing resource receipt.
+    return (
+        attempt.get("outcome") == "canonical_reread_incomplete"
+        and not attempt.get("error_type")
+        and not attempt.get("external_call_count_unknown", False)
+        and attempt.get("external_call_count", 1) == 1
+        and attempt.get("persistence_committed", True) is True
+        and "PROVIDER_OUTCOME_UNKNOWN" not in attempt.get("acquisition_limitations", [])
+        and attempt.get("selected_resources") == [{
+            "provider": route["provider_key"], "resource_id": route["resource_id"]}]
+    )
+
+
 def _eod_admit(db: Any, *, symbol: str, trade_date: date, now: datetime,
                evidence: dict[str, Any], allow_call: bool, recover_orphan: bool = False,
                planned_resource: ProviderResourceRouteV2 | None = None,
@@ -232,6 +250,9 @@ def _eod_admit(db: Any, *, symbol: str, trade_date: date, now: datetime,
             for a in attempts
         )
         excluded = tuple(a["planned_resource"]["provider_key"] for a in attempts) if history_valid else ()
+        blocked = tuple(dict.fromkeys(a["planned_resource"]["provider_key"] for a in attempts
+                        if not _eod_retryable_attempt(a))) if history_valid else ()
+        retryable = tuple(provider for provider in dict.fromkeys(excluded) if provider not in blocked)
         if planned_resource is not None and (
             planned_resource.capability_id != "intraday.bars"
             or planned_resource.max_external_calls != 1
@@ -253,7 +274,7 @@ def _eod_admit(db: Any, *, symbol: str, trade_date: date, now: datetime,
             else "external_call_budget_exhausted" if not allow_call
             else "acquisition_plan_unfillable" if route_unavailable
             else "route_pending" if planned_resource is None
-            else "provider_already_reserved" if planned_resource.provider_key in excluded
+            else "provider_already_reserved" if planned_resource.provider_key in blocked
             else "reserved"
         )
         if reason == "reserved":
@@ -271,6 +292,8 @@ def _eod_admit(db: Any, *, symbol: str, trade_date: date, now: datetime,
                 "reason": reason, "next_retry_at": next_retry,
                 "acquisition_attempted": reason == "reserved",
                 "excluded_providers": list(excluded),
+                "retryable_providers": list(retryable),
+                "retry_excluded_providers": list(blocked),
                 "planned_resource": planned_resource.model_dump(mode="json") if reason == "reserved" else None,
                 "reservation_id": attempts[-1]["reservation_id"] if attempts else None,
                 "checked_at": now.isoformat(),
@@ -299,6 +322,8 @@ def _eod_finish(db: Any, item: dict[str, Any], *, now: datetime) -> None:
         request["attempts"][-1]["error_type"] = item.get("error_type")
         request["attempts"][-1]["acquisition_limitations"] = item.get("acquisition_limitations", [])
         request["attempts"][-1]["selected_resources"] = item.get("selected_resources", [])
+        for key in ("external_call_count", "external_call_count_unknown", "persistence_committed"):
+            request["attempts"][-1][key] = item.get(key)
         job.request_json = json.dumps(request)
         job.status = "success" if item["postcondition_satisfied"] else "error"
         job.result_json = json.dumps(item)
@@ -449,7 +474,23 @@ def reconcile_us_intraday_session(
                                 excluded_providers=tuple(item["excluded_providers"]),
                                 before_acquire=reserve_route)
                             acquisition = getattr(refreshed.result, "acquisition", None)
+                            # One bounded re-plan only after the unused-provider plan
+                            # performed no IO/reservation. Both passes retain the same
+                            # atomic admission and one-call budget; never replay a fetch.
+                            if (item["retryable_providers"] and not item["acquisition_attempted"]
+                                    and acquisition is not None and not acquisition.attempted
+                                    and acquisition.external_calls == 0 and not acquisition.resource_attempts
+                                    and not refreshed.postcondition_satisfied):
+                                refreshed = platform.refresh_intraday_bars(
+                                    symbol=symbol, trade_date=trade_date, session_scope="regular",
+                                    bars=1000, now=requested_at, require_live=False,
+                                    max_provider_calls=1, profile=US_BOOTSTRAP_MATERIALIZER_PROFILE,
+                                    excluded_providers=tuple(item["retry_excluded_providers"]),
+                                    before_acquire=reserve_route)
+                                acquisition = getattr(refreshed.result, "acquisition", None)
                             result["external_call_count"] += int(getattr(acquisition, "external_calls", 0) or 0)
+                            item["external_call_count"] = getattr(acquisition, "external_calls", None)
+                            item["external_call_count_unknown"] = acquisition is None
                             item["acquisition_limitations"] = list(getattr(acquisition, "limitations", ()) or ())
                             item["selected_resources"] = [a.model_dump(mode="json") for a in getattr(acquisition, "resource_attempts", ())]
                             item["acquisition_status"] = getattr(getattr(acquisition, "status", None), "value", None)
@@ -1042,17 +1083,19 @@ def materialize_us_intraday_capability(
                     )
                 except PostAcquisitionError as exc:
                     db.rollback()
+                    diagnostic = exc.diagnostics()
                     external_calls = int(exc.acquisition.external_calls or 0)
                     result["external_call_count"] += external_calls
                     result["observed_external_call_count"] += external_calls
                     logger.warning(
                         "US intraday materializer post-acquisition failure "
-                        "capability=%s symbol=%s external_calls=%s error_type=%s stage=%s.",
+                        "capability=%s symbol=%s external_calls=%s error_type=%s stage=%s diagnostics=%s.",
                         capability,
                         symbol,
                         external_calls,
                         type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
                         exc.stage,
+                        json.dumps(diagnostic, separators=(",", ":")),
                     )
                     result["results"].append(
                         {
@@ -1060,6 +1103,8 @@ def materialize_us_intraday_capability(
                             "status": "failed",
                             "reason": "post_acquisition_exception",
                             "post_acquisition_stage": exc.stage,
+                            "post_acquisition_diagnostics": diagnostic,
+                            "persistence_committed": diagnostic["persistence_committed"],
                             "acquisition_attempted": bool(exc.acquisition.attempted),
                             "error_type": (
                                 type(exc.__cause__).__name__

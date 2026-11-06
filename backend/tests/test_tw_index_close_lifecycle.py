@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from copy import deepcopy
 
 import pytest
 from sqlalchemy import create_engine
@@ -66,6 +67,54 @@ def test_reconciliation_is_bounded_and_axes_remain_independent():
     final = _summary(final=True)
     final["indices"][0]["breadth"] = None
     assert indices.market_index_summary_needs_reconciliation(final, now=_now(13, 41))
+
+
+def _published_summary():
+    from app.market.tw_breadth_projection import project_breadth_coverage
+    from app.market_data.contracts import PublishedBreadthLimits
+    from app.parsers.twse_published_breadth import TWSE_AGGREGATE_SCOPE, TPEX_AGGREGATE_SCOPE
+
+    summary = _summary(final=True)
+    for item, config in zip(summary["indices"], indices.INDEX_CONFIGS):
+        scope = TWSE_AGGREGATE_SCOPE if config["market"] == "TWSE" else TPEX_AGGREGATE_SCOPE
+        limits = PublishedBreadthLimits(scope=scope, universe_count=1087, up_count=4, down_count=24)
+        breadth = dict(market=config["market"], trade_date="2026-08-25", scope=scope,
+            status="partial", official=True, provisional=False, finalization="official_final",
+            market_session="closed", price_semantics="exchange_published_stock_breadth",
+            advance_count=105, decline_count=952, unchanged_count=27, total_count=1087,
+            missing_count=0, received_unclassified_count=3, decision_usable=False,
+            raw_result_id="raw_fetch_result:fixture", published_limits=limits.model_dump(mode="json"))
+        item["breadth"] = {**breadth, **project_breadth_coverage(breadth)}
+    return summary
+
+
+def test_published_receipt_completion_stops_reacquisition_without_upgrading_quality():
+    summary = _published_summary()
+    before = deepcopy(summary)
+    assert not indices.market_index_summary_needs_reconciliation(summary, now=_now(13, 41))
+    assert summary == before
+    assert all(item["breadth"]["decision_usable"] is False for item in summary["indices"])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("trade_date", "2026-08-24"), ("official", False), ("provisional", True),
+    ("finalization", "provisional"), ("observation_coverage_status", "partial"),
+    ("published_limits", None), ("raw_result_id", None), ("market", "unknown"),
+    ("total_count", 1086), ("scope", "full_market"), ("price_semantics", "unknown"),
+    ("market_session", "open"), ("raw_result_id", True), ("raw_result_id", ""),
+])
+def test_published_reconciliation_keeps_incomplete_or_mismatched_receipts_pending(field, value):
+    summary = _published_summary()
+    summary["indices"][0]["breadth"][field] = value
+    assert indices.market_index_summary_needs_reconciliation(summary, now=_now(13, 41))
+
+
+def test_published_breadth_cannot_finalize_a_provisional_index_price():
+    summary = _published_summary()
+    provisional = _summary(final=False)
+    for item, prior in zip(summary["indices"], provisional["indices"]):
+        prior["breadth"] = item["breadth"]
+    assert indices.market_index_summary_needs_reconciliation(provisional, now=_now(13, 41))
 
 
 @pytest.mark.parametrize("receipt_minute,accepted", [(34, False), (35, True), (36, True)])

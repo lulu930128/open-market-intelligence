@@ -7,6 +7,8 @@ from typing import Any
 
 from app.market.tw_bar_contracts import TaiwanBarSeriesRead, TaiwanChartPresentationEvent
 from app.market.tw_chart_service import TaiwanChartBundleRead
+from app.market.technical_evidence import indicator_method_catalog
+from app.market.technical_parameters import TechnicalAnalysisParameters
 from app.market.tw_intraday_universe import intraday_materialization_policy
 from app.market.tw_intraday_value import project_taiwan_intraday_values
 
@@ -191,4 +193,74 @@ def project_taiwan_chart_bundle(bundle: TaiwanChartBundleRead) -> dict[str, Any]
     }
 
 
-__all__ = ["project_taiwan_bar_series", "project_taiwan_chart_bundle"]
+def project_taiwan_index_indicators(
+    bundles: dict[str, TaiwanChartBundleRead], *, index_id: str,
+) -> dict[str, Any]:
+    """Expose the chart owner's exact calculation, including its completed cut.
+
+    No second calculation or period classification: the technical owner already
+    separates daily observations and identifies the completed weekly/monthly cut.
+    """
+    timeframes: dict[str, Any] = {}
+    for timeframe, bundle in bundles.items():
+        technical = bundle.technical.model_dump(mode="json")
+        points = technical.get("points") or []
+        count = int(technical.get("decision_bar_count") or 0)
+        completed = points[count - 1] if 0 < count <= len(points) else None
+        observation = technical.get("current_partial") or {}
+        partial = observation.get("point")
+        if partial is None and 0 <= count < len(points):
+            partial = points[-1]
+        timeframes[timeframe] = {
+            "timeframe": timeframe,
+            "completed": {**completed, "bar_status": "completed"} if completed else None,
+            "current_partial": {
+                **partial, "bar_status": "current_partial", "decision_usable": False,
+                **{key: value for key, value in observation.items() if key != "point"},
+            } if partial else None,
+            "decision_snapshot": "completed",
+            "available_bars": technical.get("calculation_bar_count", 0),
+            "completed_bars": count,
+            "warmup": technical.get("warmup", {}),
+            "input_quality": technical.get("input_quality", {}),
+            "decision_usable": bool(completed and technical.get("decision_usable")),
+            "bar_series_revision": technical.get("bar_series_revision"),
+            "technical_revision": technical.get("technical_revision"),
+            "parameter_contract": technical.get("parameter_contract", {}),
+            "warnings": [*technical.get("warnings", []), *technical.get("limitations", [])],
+        }
+    daily = timeframes.get("daily", {})
+    bundle = bundles.get("daily")
+    technical = bundle.technical.model_dump(mode="json") if bundle else {}
+    parameters = technical.get("parameter_contract", {})
+    names = TechnicalAnalysisParameters.__dataclass_fields__
+    methods = indicator_method_catalog(TechnicalAnalysisParameters(
+        **{name: parameters[name] for name in names}
+    )) if all(name in parameters for name in names) else {}
+    completed = daily.get("completed") or {}
+    return {
+        "kind": "tw_technical_indicator_snapshot",
+        "schema_version": technical.get("algorithm_version"),
+        "algorithm_version": technical.get("algorithm_version"),
+        "stock_id": index_id, "symbol": index_id, "market": "TW",
+        "status": "ready" if daily.get("decision_usable") else "partial" if timeframes else "missing",
+        "decision_usable": bool(daily.get("decision_usable")),
+        "as_of": completed.get("time"), "price_basis": "raw_unadjusted",
+        "price_unit": "index_points", "currency": None,
+        "bar_series_fingerprint": technical.get("bar_series_fingerprint"),
+        "bar_series_revision": technical.get("bar_series_revision"),
+        "technical_revision": technical.get("technical_revision"),
+        "input_quality": daily.get("input_quality", {}),
+        "methods": methods, "timeframes": timeframes,
+        "lineage": {
+            "bar_lineage_digest": technical.get("bar_lineage_digest"),
+            "bar_state_digest": technical.get("bar_state_digest"),
+            "bar_series_revision": technical.get("bar_series_revision"),
+        },
+        "source_refs": [{"type": "resolved_market_data", "name": "tw.market_index.daily"}],
+        "missing": [] if completed else ["technical.indicators.daily.completed"],
+        "warnings": list(dict.fromkeys(warning for item in timeframes.values() for warning in item["warnings"])),
+    }
+
+
+__all__ = ["project_taiwan_bar_series", "project_taiwan_chart_bundle", "project_taiwan_index_indicators"]

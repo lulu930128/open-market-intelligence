@@ -90,3 +90,16 @@ def list_taiwan_stock_ids(
             exclude_stock_ids=exclude_stock_ids,
         )
     ]
+
+
+def list_taiwan_daily_collection_universe(
+    db: Session, *, markets: Iterable[str] | None = None,
+) -> list[StockMaster]:
+    """Daily collection includes ETFs; ordinary-stock research stays separate."""
+    normalized = normalize_taiwan_markets(markets)
+    etfs = (db.query(StockMaster)
+            .filter(StockMaster.is_active.is_(True))
+            .filter(func.upper(StockMaster.market).in_(normalized))
+            .filter(func.lower(StockMaster.instrument_type).in_(("etf", "exchange_traded_fund")))
+            .order_by(StockMaster.stock_id.asc()).all())
+    return sorted((*list_taiwan_stock_universe(db, markets=normalized), *etfs), key=lambda row: row.stock_id)

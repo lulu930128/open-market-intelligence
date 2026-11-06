@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import replace
 import unittest
 
@@ -79,18 +79,12 @@ def add_daily_history(
     )
     db.add(source)
     db.flush()
-    raw = RawFetchResult(
-        source_id=source.id,
-        method="GET",
-        url=f"https://example.test/{stock_id}/daily",
-        status_code=200,
-        content_hash=f"daily-{stock_id}",
-        raw_text="{}",
-    )
-    db.add(raw)
-    db.flush()
-
     for index, trade_date in enumerate(trading_dates_ending(end, count)):
+        raw = RawFetchResult(source_id=source.id, method="GET", status_code=200,
+            fetched_at=(datetime.combine(trade_date, datetime.min.time(), tzinfo=TAIWAN_TZ)+timedelta(hours=16)).astimezone(timezone.utc),
+            content_hash=f"daily-{stock_id}-{trade_date}", raw_text="{}")
+        db.add(raw)
+        db.flush()
         close = 100.0 + index
         db.add(
             MarketDailyPrice(

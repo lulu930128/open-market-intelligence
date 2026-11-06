@@ -26,7 +26,7 @@ SELECTIONS = [
 
 @pytest.mark.parametrize("selected", SELECTIONS)
 @pytest.mark.parametrize("minimal_fields", [False, True])
-@pytest.mark.parametrize("node_seconds", [0.25, 16.0])
+@pytest.mark.parametrize("node_seconds", [0.25, 16.0, 26.0])
 def test_selected_technical_node_runs_once_and_keeps_deadline(
     db, dependencies, selected, minimal_fields, node_seconds,
 ):
@@ -103,10 +103,10 @@ def test_selected_technical_node_runs_once_and_keeps_deadline(
     evidence_runs = [run for run in runs if run["node"] == "technical_evidence"]
     assert len(evidence_runs) == 1
     run = evidence_runs[0]
-    assert run["timeout_seconds"] == 15.0
+    assert run["timeout_seconds"] == 25.0
     assert run["duration_ms"] == node_seconds * 1000
-    assert run["status"] == ("timeout" if node_seconds > 15 else "completed")
-    if node_seconds > 15:
+    assert run["status"] == ("timeout" if node_seconds > 25 else "completed")
+    if node_seconds > 25:
         assert captured[0]["data"]["technical_evidence"] == {}
         assert "read_node.technical_evidence" in captured[0]["missing"]
     else:
@@ -116,7 +116,10 @@ def test_selected_technical_node_runs_once_and_keeps_deadline(
         assert indicators["warnings"]
         if minimal_fields and "technical.indicators" in selected:
             projected = response["evidence"]["data"]["technical.indicators"]
-            assert set(projected) <= {"status", "as_of", "warnings"}
+            # Quality and provenance are mandatory even for explicit fields.
+            # Omit unselected numbers, not the restrictions on their use.
+            assert {"status", "as_of", "warnings", "input_quality", "decision_usable"} <= set(projected)
+            assert "timeframes" not in projected
             assert projected["status"] == "partial"
 
 

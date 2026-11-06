@@ -44,9 +44,11 @@ def calculate_active_daily_indicators(
     to_date: date | None = None,
     limit: int = 100,
     parameters: TechnicalAnalysisParameters | None = None,
+    requested_at: datetime | None = None,
+    allow_early_regular: bool = False,
 ) -> list[Any]:
     resolved = parameters or get_technical_analysis_parameters()
-    requested_at = datetime.now(TAIWAN_TZ)
+    requested_at = requested_at or datetime.now(TAIWAN_TZ)
     from_time = (
         datetime.combine(from_date, time.min, tzinfo=TAIWAN_TZ)
         if from_date is not None
@@ -65,8 +67,9 @@ def calculate_active_daily_indicators(
         limit=limit,
         include_partial=False,
         requested_at=requested_at,
+        allow_early_regular=allow_early_regular,
     )
-    technical = TaiwanTechnicalService().calculate(bars, parameters=resolved)
+    technical = TaiwanTechnicalService().calculate(bars, parameters=resolved, allow_early_regular=allow_early_regular)
     return [
         {
             **point,
@@ -86,6 +89,8 @@ def calculate_active_latest_daily_indicator(
     to_date: date | None = None,
     limit: int = 400,
     parameters: TechnicalAnalysisParameters | None = None,
+    requested_at: datetime | None = None,
+    allow_early_regular: bool = False,
 ) -> Any | None:
     points = calculate_active_daily_indicators(
         db=db,
@@ -93,6 +98,8 @@ def calculate_active_latest_daily_indicator(
         to_date=to_date,
         limit=limit,
         parameters=parameters,
+        requested_at=requested_at,
+        allow_early_regular=allow_early_regular,
     )
     return points[-1] if points else None
 

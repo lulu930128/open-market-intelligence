@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 import json
@@ -15,6 +15,7 @@ from app.market.tw_bar_contracts import (
     TPEX_DERIVED_DAILY_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+    TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT,
     TPEX_DERIVED_DAILY_PROVIDER,
     TPEX_DERIVED_DAILY_SOURCE,
 )
@@ -41,6 +42,7 @@ class TaiwanMaterializedBarCandidate:
     source_id: int
     component_raw_result_ids: tuple[int, ...]
     component_content_hashes: tuple[str, ...]
+    opening_raw_result_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +66,7 @@ def _component_digest(rows: tuple[TaiwanIndexSeriesRow, ...]) -> str:
             "source_id": row.source_id,
             "content_hash": row.content_hash,
         }
-        for row in rows
+        for row in {row.raw_result_id: row for row in rows}.values()
     ]
     return sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -91,11 +93,18 @@ def materialize_index_minute_candidates(
         trade_date=trade_date,
         max_rows=page_size,
     )
+    eligible = tuple(row for row in batch.rows if row.event_at <= as_of
+        and row.received_at <= as_of and row.fetched_at <= as_of)
+    openings: dict[str, TaiwanIndexSeriesRow] = {}
+    for row in sorted(eligible, key=lambda item: (item.fetched_at, item.storage_row_id)):
+        if row.opening is not None:
+            openings.setdefault(row.provider, row)
+    limitations = list(batch.limitations)
     grouped: dict[
         tuple[str, str, int, datetime],
         list[TaiwanIndexSeriesRow],
     ] = defaultdict(list)
-    for row in batch.rows:
+    for row in eligible:
         local_event = row.event_at.astimezone(TAIWAN_TZ)
         # The formal 13:30 match remains a marker until its exact component
         # contract is accepted. It cannot enter Base-1m or technical input.
@@ -122,6 +131,20 @@ def materialize_index_minute_candidates(
             for row in rows
         ):
             raise ValueError("index minute candidate crossed source identity")
+        opening_row = openings.get(provider) if minute_start.time() == time(9) else None
+        if opening_row is not None:
+            opening = opening_row.opening
+            # The explicit opening clock excludes pre-opening index references.
+            # This same-provider companion retains its own source/receipt identity.
+            rows = tuple(row for row in rows if row.event_at >= opening.lineage.event_at)
+            seed = replace(opening_row, event_at=opening.lineage.event_at,
+                close_value=opening.value)
+            rows = (seed, *rows)
+            first, last = rows[0], rows[-1]
+        elif (minute_start.time() == time(9) and source == "fugle_indices_stream"
+                and first.event_at.astimezone(TAIWAN_TZ) == minute_start):
+            limitations.append("TW_INDEX_OPENING_REFERENCE_PENDING")
+            continue
         prices = tuple(row.close_value for row in rows)
         minute_end = minute_start + timedelta(minutes=1)
         candidates.append(
@@ -132,10 +155,11 @@ def materialize_index_minute_candidates(
                         provider=provider,
                         source=source,
                         authority=first.authority,
-                        raw_contract_version=TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+                        raw_contract_version=(TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT
+                            if opening_row else TAIWAN_INDEX_MINUTE_RAW_CONTRACT),
                         event_at=last.event_at,
-                        received_at=last.received_at,
-                        fetched_at=last.fetched_at,
+                        received_at=max(row.received_at for row in rows),
+                        fetched_at=max(row.fetched_at for row in rows),
                         content_hash=_component_digest(rows),
                     ),
                     interval="1m",
@@ -161,9 +185,9 @@ def materialize_index_minute_candidates(
                 component_content_hashes=tuple(
                     dict.fromkeys(row.content_hash for row in rows)
                 ),
+                opening_raw_result_id=opening_row.raw_result_id if opening_row else None,
             )
         )
-    limitations = list(batch.limitations)
     if not candidates:
         limitations.append("TW_INDEX_MINUTE_CANDIDATES_MISSING")
     return TaiwanIndexMinuteMaterializationBatch(

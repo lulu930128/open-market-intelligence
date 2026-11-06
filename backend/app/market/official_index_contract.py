@@ -21,7 +21,9 @@ def taiwan_index_close_release_at(trade_date: date) -> datetime:
 
 TW_INDEX_DATASET_ID = "tw.market_index.daily"
 TWSE_INDEX_SOURCE_NAME = "TWSE Official Market Index Daily"
+TWSE_RWD_INDEX_PARSER_VERSION = "twse.rwd_fmtqik.v1"
 TPEX_INDEX_SOURCE_NAME = "TPEx Official Market Index Daily"
+TPEX_HIGHLIGHT_INDEX_PARSER_VERSION = "tpex.highlight_index_close.v1"
 
 
 __all__ = [
@@ -29,6 +31,8 @@ __all__ = [
     "expected_taiwan_index_close_date",
     "taiwan_index_close_release_at",
     "TPEX_INDEX_SOURCE_NAME",
+    "TPEX_HIGHLIGHT_INDEX_PARSER_VERSION",
     "TWSE_INDEX_SOURCE_NAME",
+    "TWSE_RWD_INDEX_PARSER_VERSION",
     "TW_INDEX_DATASET_ID",
 ]

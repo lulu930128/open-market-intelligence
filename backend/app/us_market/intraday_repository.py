@@ -52,6 +52,7 @@ from app.us_market.market_data.descriptors import (
 )
 from app.us_market.session_policy import us_session_for_timestamp
 from app.us_market.trading_calendar import is_us_trading_day, us_session_close_time
+from app.market_data.quality_policy import completed_bar_is_current
 
 
 US_EASTERN = ZoneInfo("America/New_York")
@@ -95,6 +96,12 @@ def _freshness(
     observed_at = freshness_timestamp(lineage, requirement.freshness.basis)
     if observed_at is None:
         return EvidenceFreshness.UNKNOWN
+    completed_current = completed_bar_is_current(
+        requirement.freshness, provider=lineage.provider, observed_at=observed_at,
+        now=requirement.requested_at,
+    )
+    if completed_current is not None:
+        return EvidenceFreshness.LIVE if completed_current else EvidenceFreshness.STALE
     return _timestamp_freshness(requirement, observed_at)
 
 
@@ -143,9 +150,12 @@ def _fair_budgets(total_rows: int, provider_count: int) -> tuple[int, ...]:
     )
 
 
-def _dataset_health(requirement: DataRequirementV2, *, dataset_id: str, events: list[datetime], partial: bool) -> DatasetHealth:
+def _dataset_health(requirement: DataRequirementV2, *, dataset_id: str, events: list[datetime], partial: bool,
+                    latest_freshness: EvidenceFreshness | None = None) -> DatasetHealth:
     latest = max(events) if events else None
-    current = latest is not None and _timestamp_freshness(requirement, latest) is EvidenceFreshness.LIVE
+    current = latest is not None and (
+        latest_freshness if latest_freshness is not None else _timestamp_freshness(requirement, latest)
+    ) is EvidenceFreshness.LIVE
     status = DatasetHealthStatus.PARTIAL if partial and events else DatasetHealthStatus.HEALTHY if current else DatasetHealthStatus.STALE if events else DatasetHealthStatus.MISSING
     return DatasetHealth(
         dataset_id=dataset_id,
@@ -715,7 +725,11 @@ class USIntradayBarRepository:
             limitations.append("US_INTRADAY_CANONICAL_CACHE_MISSING")
         return BarCandidateBatch(
             candidates=tuple(candidates[: requirement.bounds.max_candidates]),
-            dataset_health=_dataset_health(requirement, dataset_id="us.intraday.bars", events=events, partial=bool(rejections) or legacy_row_exists),
+            dataset_health=_dataset_health(
+                requirement, dataset_id="us.intraday.bars", events=events,
+                partial=bool(rejections) or legacy_row_exists,
+                latest_freshness=(max(candidates, key=lambda item: item.bars[-1].end_at).freshness if candidates else None),
+            ),
             rejections=tuple(rejections),
             limitations=tuple(limitations),
         )

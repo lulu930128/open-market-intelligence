@@ -85,9 +85,9 @@ def test_eod_236_390_zero_canonical_postconditions_and_retry_bounds():
     assert run(AFTER_HOURS + timedelta(minutes=1))["results"][0]["reason"] == "cooldown"
     for minutes in (15, 30, 45):
         result = run(AFTER_HOURS + timedelta(minutes=minutes))
-    assert result["results"][0]["reason"] == "acquisition_plan_unfillable"
-    assert "PROVIDER_ALREADY_RESERVED" in result["results"][0]["acquisition_limitations"]
-    assert len(calls) == 2
+    assert result["results"][0]["reason"] == "retry_budget_exhausted"
+    assert result["results"][1]["reason"] == "acquisition_plan_unfillable"
+    assert calls == ["SSO", "AMD", "SSO", "SSO"]  # Known incomplete only; zero-data failure stays excluded.
     assert db.query(MarketIntradayBar).count() == 626  # no fabricated bars
     db.close()
 

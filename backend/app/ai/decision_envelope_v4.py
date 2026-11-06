@@ -343,6 +343,7 @@ def _project_selected_freshness(
                         payload.get("trade_date")
                         or payload.get("as_of")
                         or payload.get("calculated_at")
+                        or payload.get("selected_event_at")
                     ),
                     "source": "selected_payload",
                 }
@@ -414,7 +415,14 @@ def _project_selected_freshness(
         "current"
         if is_current
         else "partial"
-        if any(status_class in {"ready", "limited"} for status_class in readiness)
+        if any(
+            status_class in {"ready", "limited"}
+            or (
+                capability_contract.normalize_status(row.get("status")) == "stale"
+                and not _freshness_row_availability_missing(row)
+            )
+            for status_class, (_, row) in zip(readiness, selected_rows)
+        )
         else "missing"
     )
 
@@ -1538,6 +1546,22 @@ def _brief_technical_indicator_point(value: Any) -> dict[str, Any] | None:
             "volume",
             "algorithm_version",
             "price_basis",
+            "bar_status",
+            "technical_state",
+            "decision_usable",
+            "price_based_observation_usable",
+            "volume_based_observation_usable",
+            "volume_based_decision_usable",
+            "indicator_applicability",
+            "indicator_semantics",
+            "observation_revision",
+            "session_close_finalization",
+            "official_daily_confirmed",
+            "volume_unit",
+            "price_unit",
+            "currency",
+            "warnings",
+            "limitations",
             "ma",
             "volume_ma",
             "ema",
@@ -1977,6 +2001,11 @@ def _brief_capability_summary(
                     "latest_trade_date",
                     "latest_data_date",
                     "expected_data_date",
+                    "latest_finalized_data_date",
+                    "release_status",
+                    "trading_scope",
+                    "official_final",
+                    "decision_usable",
                     "interval",
                     "requested_interval",
                     "source_interval",
@@ -2064,6 +2093,12 @@ def _brief_capability_summary(
                     "base_volume_unit",
                     "quote_volume_unit",
                     "volume_semantics",
+                    "release_status",
+                    "trading_scope",
+                    "official_final",
+                    "limitations",
+                    "raw_receipt_id",
+                    "source",
                 ),
             ),
             "event_time": None if temporal_mismatch else latest_event_time or value.get("event_time"),
@@ -2119,6 +2154,11 @@ def _brief_capability_summary(
                     "quality",
                     "input_quality",
                     "lineage",
+                    "decision_usable",
+                    "price_basis",
+                    "corporate_action",
+                    "warnings",
+                    "quality_projection",
                 ),
             ),
             "analysis": _summary_dict(
@@ -2201,6 +2241,9 @@ def _brief_capability_summary(
                         "available_bars",
                         "completed_bars",
                         "warmup",
+                        "decision_usable",
+                        "input_quality",
+                        "corporate_action",
                     ),
                 ),
                 "completed": _brief_technical_indicator_point(snapshot.get("completed")),
@@ -2241,6 +2284,12 @@ def _brief_capability_summary(
                     "quality",
                     "input_quality",
                     "lineage",
+                    "decision_usable",
+                    "corporate_action_coverage_by_timeframe",
+                    "quality_projection",
+                    "bar_series_fingerprint",
+                    "bar_series_revision",
+                    "technical_revision",
                 ),
             ),
             "timeframes": summarized_timeframes,
@@ -2916,6 +2965,7 @@ def _compact_to_required_core(
                 "primary_reader_attempted",
                 "provider_fetch_requested",
                 "provider_fetch_attempted",
+                "primary_reader_acquisition",
                 "cache_hit",
                 "refresh_requested",
                 "refresh_allowed",
@@ -2937,11 +2987,6 @@ def _compact_to_required_core(
         if (
             capability_id in required_set
             and isinstance(item, dict)
-            and (
-                item.get("attempted") is True
-                or item.get("primary_reader_attempted") is True
-                or item.get("remaining_fill_action")
-            )
         )
     }
     if not envelope["execution"]["tool_runs"]:
@@ -3035,6 +3080,8 @@ def _compact_to_required_core(
     envelope["limitations"] = {
         "missing": _list(limitations.get("missing"))[:4],
         "warnings": _list(limitations.get("warnings"))[:4],
+        "background_source_health": deepcopy(_list(limitations.get("background_source_health"))[:8]),
+        "historical_provider_events": deepcopy(_list(limitations.get("historical_provider_events"))[:8]),
         "current_request_failures": deepcopy(
             _list(limitations.get("current_request_failures"))[:4]
         ),
@@ -3594,6 +3641,13 @@ def _fit_budget(
             },
         }
         mark_field("execution.query_plan.nonessential_fields")
+        # Acquisition and explicit NOT_ATTEMPTED are evidence, not optional
+        # diagnostics. Keep the required outcomes for the final core projection.
+        envelope["execution"]["refresh_reconciliation"]["capabilities"] = {
+            capability_id: deepcopy(item)
+            for capability_id, item in _dict(reconciliation.get("capabilities")).items()
+            if capability_id in required and isinstance(item, dict)
+        }
         mark_field("execution.tool_plan")
         mark_field("execution.tool_runs")
         mark_field("execution.reasoning_steps")
@@ -4009,11 +4063,27 @@ def build(
     *,
     canonical_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    source_response = deepcopy(response)
-    projection_response = deepcopy(source_response)
-    if isinstance(canonical_result, dict):
-        projection_response["result"] = deepcopy(canonical_result)
-    canonical = decision_envelope.build(projection_response)
+    # Only these request fields are read after projection. Do not duplicate the
+    # entire raw technical history for this small immutable request context.
+    source_response = {
+        "question": str(response.get("question") or ""),
+        "policy": {"analysis_horizon": deepcopy(_dict(response.get("policy")).get("analysis_horizon"))},
+    }
+    projection_input = (
+        {**response, "result": canonical_result} if isinstance(canonical_result, dict) else response
+    )
+    result = projection_input.get("result")
+    if isinstance(result, dict) and isinstance(result.get("data"), dict):
+        # Canonical readiness and capability projection only read this graph.
+        # Isolate the selected projection below instead of cloning every raw
+        # history (including evidence the request does not select).
+        projection_response = deepcopy({
+            **projection_input, "result": {**result, "data": {}},
+        })
+        projection_response["result"]["data"] = result["data"]
+    else:
+        projection_response = deepcopy(projection_input)
+    canonical = decision_envelope.build(projection_response, include_evidence_result=False)
     scope_type = _scope_type(projection_response, canonical)
     selection = _selection(projection_response, canonical, scope_type=scope_type)
     _apply_selection_trace(canonical, selection=selection)
@@ -4033,6 +4103,9 @@ def build(
         response=projection_response,
         selection=selection,
     )
+    # Some capability owners intentionally return shallow views. All subsequent
+    # quality reconciliation and consumer mutation must remain caller-isolated.
+    projected_data = deepcopy(projected_data)
     _project_selected_freshness(
         canonical,
         selection=selection,
@@ -4185,7 +4258,7 @@ def build(
         if isinstance(run, dict)
     ]
     reader_data = _dict(_dict(projection_response.get("result")).get("data"))
-    reader_provider_contract = _dict(reader_data.get("provider_contract"))
+    reader_provider_contract = deepcopy(_dict(reader_data.get("provider_contract")))
     keyed_reader_attempts = _dict(reader_provider_contract.get("provider_attempts_by_capability"))
     reader_attempts = {
         capability: _list(_dict(summary).get("resource_attempts")) or [
@@ -4241,6 +4314,16 @@ def build(
             missing=_list(limitations.get("missing")), warnings=_list(limitations.get("warnings")),
             summary_limit=3, response_preferences=preferences,
         )
+    if (
+        scope_type == "us_stock"
+        or (scope_type == "stock" and _dict(canonical.get("answer")).get("style") == "context_status_summary")
+    ) and selection.get("output") != "evidence_only":
+        factual_answer = answer_composer.build_selected_technical_consumer_answer(
+            target=_dict(canonical.get("target")), projected_data=projected_data,
+            quality=quality, response_preferences=preferences,
+        )
+        if factual_answer:
+            canonical["answer"] = factual_answer
     if scope_type == "market" and selection.get("output") != "evidence_only":
         factual_answer = answer_composer.build_selected_market_consumer_answer(
             target=_dict(canonical.get("target")), projected_data=projected_data,

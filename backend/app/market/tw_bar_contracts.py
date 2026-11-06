@@ -33,6 +33,7 @@ TAIWAN_BAR_INTERVALS = TAIWAN_INTRADAY_INTERVALS | TAIWAN_DAILY_INTERVALS
 TAIWAN_CANONICAL_1M_MIN_RETENTION_DAYS = 100
 TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION = "tw.index.minute.materialize.v1"
 TAIWAN_INDEX_MINUTE_RAW_CONTRACT = "tw.index.minute.candidate.v1"
+TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT = "tw.index.minute.opening_candidate.v1"
 TAIEX_OFFICIAL_DAILY_PROVIDER = "twse_index_daily_ohlc"
 TAIEX_OFFICIAL_DAILY_SOURCE = "twse_indices_report_mi_5mins_hist"
 TPEX_DERIVED_DAILY_PROVIDER = "tpex_index_5s"
@@ -335,6 +336,7 @@ class TaiwanBarOutwardState(CanonicalModel):
     persisted: bool
     source_interval: str
     technical_eligible: bool = True
+    research_eligible: bool = False
     component_missing_trading_day_count: int | None = Field(default=None, ge=0)
     source_point_count: int | None = Field(default=None, ge=0)
     missing_evidence_count: int | None = Field(default=None, ge=0)

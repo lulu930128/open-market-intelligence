@@ -42,6 +42,7 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 _CACHE_TTL_SECONDS = 30
 _BATCH_SIZE = 100
 _BATCH_MAX_WAIT_SECONDS = 4.0
+_BATCH_SOCKET_TIMEOUT_SECONDS = 8.0
 _MAX_CODES = 2_000
 _RESCUE_MAX_SYMBOLS = 32
 _RESCUE_MAX_BATCHES = 1
@@ -245,6 +246,12 @@ def _fetch_messages(
             remaining_seconds = max(0.0, deadline - monotonic())
             batch_wait_seconds = min(remaining_seconds, _BATCH_MAX_WAIT_SECONDS)
             evidence["transport_budget_seconds"] = batch_wait_seconds
+            # Caller polling and socket inactivity are different limits. The
+            # 11/03 receipts include successful 4.4-6.9s transports; a 4s read
+            # timeout discards otherwise recoverable batches. Keep both the
+            # socket and resumed caller wait inside the existing scan budget.
+            socket_timeout = min(remaining_seconds, _BATCH_SOCKET_TIMEOUT_SECONDS)
+            evidence["socket_timeout_seconds"] = socket_timeout
             fetch_started = monotonic()
             phase_timing = {}
             # Time the bounded caller-side invocation, including caller deadline.
@@ -254,7 +261,7 @@ def _fetch_messages(
                     twse_mis.fetch_stock_messages, batch_wait_seconds,
                     batch,
                     exchange="otc" if market == "TPEX" else "tse",
-                    timeout_seconds=max(0.001, batch_wait_seconds),
+                    timeout_seconds=max(0.001, socket_timeout),
                     request=http_get,
                     phase_timing=phase_timing,
                 )

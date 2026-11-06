@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 import logging
 
@@ -18,7 +19,7 @@ from app.db.models import (
     TaiwanCurrentBreadthSnapshot,
     TaiwanCurrentIndexSnapshot,
 )
-from app.market.trading_calendar import TAIWAN_TZ, TAIWAN_SESSION_OPEN_TIME, TAIWAN_SESSION_CLOSE_TIME, is_taiwan_trading_day
+from app.market.trading_calendar import TAIWAN_TZ, TAIWAN_SESSION_OPEN_TIME, TAIWAN_SESSION_CLOSE_TIME, is_taiwan_trading_day, taiwan_evidence_session
 from app.market.tw_current_market_capabilities import (
     TW_CURRENT_BREADTH_CAPABILITY_ID,
     TW_CURRENT_BREADTH_DATASET_ID,
@@ -31,6 +32,9 @@ from app.market.tw_current_market_capabilities import (
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
+    AuctionObservation,
+    AuctionType,
+    InstrumentKey,
     AuctionBreadthObservation,
     BreadthPriceState,
     BreadthAcquisitionDiagnostics,
@@ -40,6 +44,7 @@ from app.market_data.contracts import (
     Market,
     MarketBreadthObservation,
     MarketIndexObservation,
+    MarketIndexOpeningObservation,
     MarketSession,
     ObservationState,
     Quantity,
@@ -60,6 +65,15 @@ from app.market_data.resolution import ResolutionCandidate
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class TaiwanStockAuctionCompanionRead:
+    observation: AuctionObservation
+    provider_priority: int
+    storage_row_id: int
+    raw_result_id: int
+    limitations: tuple[str, ...] = ()
 
 
 def inspect_breadth_acquisition_receipt(db: Session, *, raw_result_id: int) -> dict | None:
@@ -168,6 +182,7 @@ class TaiwanIndexSeriesRow:
     finalization: BarFinalization
     official: bool
     provisional: bool
+    opening: MarketIndexOpeningObservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +205,31 @@ def _freshness(requirement: DataRequirementV2, event_at: datetime) -> EvidenceFr
         if -300 <= age <= requirement.freshness.max_age_seconds
         else EvidenceFreshness.STALE
     )
+
+
+def read_qualified_index_opening(
+    db: Session, *, raw: RawFetchResult, provider: str, index_id: str, trade_date: date,
+) -> MarketIndexOpeningObservation | None:
+    """Rehydrate explicit opening evidence from one immutable, qualified receipt."""
+    source = db.get(SourceRegistry, raw.source_id)
+    if source is None or source.source_name != "fugle_http_index_quote":
+        return None
+    binding = current_source_binding(provider=provider, source=source.source_name,
+        capability_id=TW_CURRENT_INDEX_CAPABILITY_ID)
+    if (binding is None or raw.parser_version != binding.parser_version
+            or raw.status_code != 200 or raw.error_message or not raw.raw_text
+            or sha256(raw.raw_text.encode("utf-8")).hexdigest() != raw.content_hash):
+        return None
+    from app.market.providers.fugle_http import index_opening_observation
+    try:
+        observation = index_opening_observation(json.loads(raw.raw_text), scope=index_id,
+            lineage=SourceLineage(provider=provider, source=source.source_name,
+                authority=binding.descriptor.authority, raw_contract_version=raw.parser_version,
+                fetched_at=_aware(raw.fetched_at), content_hash=raw.content_hash,
+                raw_receipt_id=f"raw_fetch_result:{raw.id}"))
+        return observation if observation.trade_date == trade_date else None
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return None
 
 
 class TaiwanCurrentMarketRepository:
@@ -516,6 +556,100 @@ class TaiwanCurrentMarketRepository:
                 () if candidates else ("TW_CURRENT_INDEX_CANONICAL_CACHE_MISSING",)
             ),
         )
+
+    def read_stock_auction_companion(
+        self, *, instrument: InstrumentKey, auction_type: AuctionType,
+        requested_at: datetime, trade_date: date | None = None,
+    ) -> TaiwanStockAuctionCompanionRead | None:
+        """Decode an exact saved breadth companion without promoting a trade.
+
+        Receipt, snapshot and per-stock clocks must all be visible. The bounded
+        historical read uses original companion bytes, never the overwritten
+        intraday state or another receipt's mutable provider cache.
+        """
+        if instrument.market is not Market.TW or instrument.venue not in {"TWSE", "TPEX"}:
+            return None
+        session = {
+            AuctionType.OPENING: MarketSession.OPENING_AUCTION,
+            AuctionType.CLOSING: MarketSession.CLOSING_AUCTION,
+            AuctionType.INTRADAY: MarketSession.CONTINUOUS,
+        }.get(auction_type)
+        if session is None:
+            return None
+        table = TaiwanCurrentBreadthSnapshot
+        if not inspect(self._db.connection()).has_table(table.__tablename__):
+            return None
+        day = trade_date or requested_at.astimezone(TAIWAN_TZ).date()
+        visible_at = requested_at.astimezone(timezone.utc)
+        rows = (self._db.query(table, RawFetchResult, SourceRegistry)
+            .join(RawFetchResult, RawFetchResult.id == table.raw_result_id)
+            .join(SourceRegistry, SourceRegistry.id == table.source_id)
+            .options(load_only(*_RAW_FETCH_LINEAGE_COLUMNS, RawFetchResult.raw_text,
+                RawFetchResult.fetched_at, RawFetchResult.status_code, RawFetchResult.error_message), load_only(
+                table.id, table.provider, table.source, table.authority, table.raw_contract_version,
+                table.source_id, table.raw_result_id, table.received_at, table.fetched_at))
+            .filter(table.venue == instrument.venue, table.trade_date == day,
+                    table.session == session.value, table.event_at <= requested_at,
+                    table.received_at <= visible_at, table.fetched_at <= visible_at,
+                    RawFetchResult.fetched_at <= visible_at)
+            .order_by(table.event_at.desc(), table.id.desc()).limit(8).all())
+        for row, raw, source in rows:
+            if not self._identity_valid(provider=row.provider, source_name=row.source,
+                authority=row.authority, parser_version=row.raw_contract_version,
+                source_id=row.source_id, raw_result_id=row.raw_result_id,
+                source=source, raw=raw, capability_id=TW_CURRENT_BREADTH_CAPABILITY_ID):
+                continue
+            if (row.provider != "twse_mis" or raw.status_code != 200 or raw.error_message
+                or sha256((raw.raw_text or "").encode("utf-8")).hexdigest() != raw.content_hash):
+                continue
+            try:
+                payload = json.loads(raw.raw_text or "")
+                companions = payload.get("component_stock_rows")
+                if not isinstance(companions, list) or len(companions) > 2000:
+                    continue
+                matches = [item for item in companions if isinstance(item, dict)
+                           and item.get("code") == instrument.symbol and item.get("market") == instrument.venue]
+                if len(matches) != 1:
+                    continue
+                item = matches[0]
+                if item.get("indicative_match_available") is not True or item.get("indicative_price_source") != "pz":
+                    continue
+                event_at = datetime.fromisoformat(item["as_of"])
+                received_at = datetime.fromisoformat(item["observation_received_at"])
+                if (event_at.tzinfo is None or received_at.tzinfo is None
+                    or event_at.astimezone(TAIWAN_TZ).date() != day
+                    or item.get("trade_date") != day.isoformat()
+                    or taiwan_evidence_session(event_at) is not session
+                    or not event_at <= received_at <= _aware(raw.fetched_at) <= requested_at):
+                    continue
+                price = Decimal(str(item["indicative_match_price"]))
+                if not price.is_finite() or price <= 0:
+                    continue
+                volume = item.get("indicative_match_volume_lots")
+                lots = Decimal(str(volume)) if volume is not None else None
+                quantity = Quantity(value=lots * 1000, unit=QuantityUnit.SHARE,
+                    original_value=lots, original_unit=QuantityUnit.BOARD_LOT,
+                    scale=Decimal(1000)) if lots is not None else None
+                observation = AuctionObservation(
+                    instrument=instrument, auction_type=auction_type, indicative_price=price,
+                    indicative_quantity=quantity,
+                    lineage=SourceLineage(provider=row.provider, source=row.source,
+                        authority=AuthorityClass(row.authority), raw_contract_version=row.raw_contract_version,
+                        event_at=event_at, received_at=received_at, fetched_at=_aware(raw.fetched_at),
+                        cache_hit=True, raw_receipt_id=f"raw_fetch_result:{raw.id}", content_hash=raw.content_hash,
+                        observation_id=f"taiwan_current_breadth_snapshot:{row.id}:auction:{instrument.symbol}"),
+                )
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                continue
+            binding = current_source_binding(provider=row.provider, source=row.source,
+                                             capability_id=TW_CURRENT_BREADTH_CAPABILITY_ID)
+            limitations = ("TW_REALTIME_PROVIDER_FAILED_AFTER_RECEIPT",) if (
+                source.last_error_at is not None and _aware(source.last_error_at) >= _aware(raw.fetched_at)
+            ) else ()
+            return TaiwanStockAuctionCompanionRead(observation=observation,
+                provider_priority=binding.descriptor.priority, storage_row_id=row.id,
+                raw_result_id=raw.id, limitations=limitations)
+        return None
 
     def read_completed_auction_observations(self, *, venue: str, requested_at: datetime) -> tuple[AuctionBreadthObservation, ...]:
         """Latest saved observation per completed auction, within the requested day."""
@@ -868,6 +1002,7 @@ class TaiwanCurrentMarketRepository:
                 cursor_id = page[-1][0].id
         rows.sort(key=lambda item: (item[0].event_at, item[0].id))
         accepted: list[TaiwanIndexSeriesRow] = []
+        opening_providers: set[str] = set()
         rejections: list[CandidateRowRejection] = []
         limitations: list[str] = []
         for row, raw, source in rows:
@@ -927,6 +1062,12 @@ class TaiwanCurrentMarketRepository:
                     > CURRENT_INDEX_MAX_ABS_CHANGE_RATIO
                 ):
                     raise ValueError("implausible current index value")
+                opening = None
+                if row.source == "fugle_http_index_quote" and row.provider not in opening_providers:
+                    opening = read_qualified_index_opening(self._db, raw=raw,
+                        provider=row.provider, index_id=normalized_index_id, trade_date=trade_date)
+                    if opening is not None:
+                        opening_providers.add(row.provider)
                 accepted.append(
                     TaiwanIndexSeriesRow(
                         storage_row_id=row.id,
@@ -947,6 +1088,7 @@ class TaiwanCurrentMarketRepository:
                         finalization=BarFinalization(row.finalization),
                         official=bool(row.official),
                         provisional=bool(row.provisional),
+                        opening=opening,
                     )
                 )
             except (TypeError, ValueError):

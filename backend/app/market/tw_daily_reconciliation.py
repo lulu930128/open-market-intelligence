@@ -17,7 +17,8 @@ from app.db.models import (
     SourceRegistry,
     utc_now,
 )
-from app.market.official_index_contract import TPEX_INDEX_SOURCE_NAME
+from app.market.official_index_contract import TPEX_INDEX_SOURCE_NAME, TPEX_HIGHLIGHT_INDEX_PARSER_VERSION
+from app.sources.defaults import TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
 from app.market.tw_bar_contracts import (
     TPEX_DERIVED_DAILY_KIND,
     TaiwanReconciliationStatus,
@@ -80,8 +81,13 @@ class TaiwanDailyReconciliationTransaction:
         if evidence is None:
             raise ValueError("TPEX_OFFICIAL_DAILY_STAT_EVIDENCE_MISSING")
         official_stat, source, raw = evidence
+        known_source = source.source_name == TPEX_INDEX_SOURCE_NAME or (
+            source.source_name == TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
+            and raw.parser_version == TPEX_HIGHLIGHT_INDEX_PARSER_VERSION
+            and raw.status_code == 200 and not raw.error_message
+        )
         if (
-            source.source_name != TPEX_INDEX_SOURCE_NAME
+            not known_source
             or str(source.reliability_level or "").strip().lower() != "official"
             or raw.source_id != source.id
             or not raw.content_hash

@@ -7,9 +7,12 @@ semantics, or outward presentation formatting.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
+from sqlite3 import Error as SQLiteError
+from traceback import walk_tb
 from typing import Generic, Protocol, TypeVar, cast
 
 from app.market_data.candidate_repository import CandidateRowRejection
@@ -349,6 +352,10 @@ class PostAcquisitionError(RuntimeError):
     def __init__(
         self, message: str, *, acquisition: AcquisitionSummary,
         stage: str | None = None,
+        acquired: _AcquisitionResultLike | None = None,
+        persistence: PersistenceSummary | None = None,
+        route: ProviderResourceRouteV2 | None = None,
+        requirement: DataRequirementV2 | None = None,
     ) -> None:
         super().__init__(message)
         self.acquisition = acquisition
@@ -356,6 +363,63 @@ class PostAcquisitionError(RuntimeError):
         self.stage = stage if isinstance(stage, str) and stage in {
             "persistence", "validation", "reread_resolve",
         } else None
+        self.context = {
+            "provider": route.provider_key if route is not None else None,
+            "resource_id": route.resource_id if route is not None else None,
+            "symbol": (requirement.target.instrument.symbol
+                if requirement is not None and isinstance(requirement.target, InstrumentTarget) else None),
+            "requested_at": requirement.requested_at.isoformat() if requirement is not None else None,
+            "receipt_count": len(acquired.receipts) if acquired is not None else None,
+            "observation_count": len(acquired.observations) if acquired is not None else None,
+            "receipt_fetched_at": [r.fetched_at.isoformat() for r in acquired.receipts[:4]] if acquired is not None else [],
+            # A later rollback is not evidence that an earlier port commit was undone.
+            "persistence_committed": persistence.committed if isinstance(persistence, PersistenceSummary) else None,
+            "raw_result_ids": list(persistence.raw_result_ids[:4]) if isinstance(persistence, PersistenceSummary) else [],
+        }
+
+    def diagnostics(self) -> dict:
+        """Bounded locations and SQLite diagnostics; never format a SQL wrapper."""
+        causes = []
+        seen = set()
+        cause = self.__cause__
+        while cause is not None and id(cause) not in seen and len(causes) < 3:
+            seen.add(id(cause))
+            frames = deque(maxlen=3)
+            app_frames = deque(maxlen=3)
+            for frame, line in walk_tb(cause.__traceback__):
+                location = {
+                    "file": frame.f_code.co_filename.replace("\\", "/").rsplit("/", 1)[-1][:128],
+                    "function": frame.f_code.co_name[:96], "line": line,
+                }
+                frames.append(location)
+                if str(frame.f_globals.get("__name__", "")).startswith("app."):
+                    app_frames.append(location)
+            detail = {
+                "type": type(cause).__name__[:96], "module": type(cause).__module__[:160],
+                "frames": list(frames), "app_frames": list(app_frames),
+            }
+            # Inspect the actual orig object, not an unrelated chained cause.
+            # SQLite is the only driver whose short native message is exposed;
+            # SQLAlchemy text includes SQL/parameters and must never be logged.
+            original = getattr(cause, "orig", None)
+            dbapi = original if isinstance(original, SQLiteError) else cause
+            if isinstance(dbapi, SQLiteError):
+                message = dbapi.args[0] if dbapi.args and isinstance(dbapi.args[0], str) else None
+                code = getattr(dbapi, "sqlite_errorcode", None)
+                name = getattr(dbapi, "sqlite_errorname", None)
+                detail["dbapi"] = {
+                    "origin": "orig" if dbapi is original else "self",
+                    "type": type(dbapi).__name__[:96], "module": type(dbapi).__module__[:160],
+                    "sqlite_errorcode": code if isinstance(code, int) else None,
+                    "sqlite_errorname": name[:80] if isinstance(name, str) else None,
+                    "message": " ".join(message[:240].split()) if message is not None else None,
+                }
+            causes.append(detail)
+            next_cause = cause.__cause__
+            if next_cause is None and isinstance(original, SQLiteError):
+                next_cause = original
+            cause = next_cause
+        return {**self.context, "stage": self.stage, "causes": causes}
 
 
 def _not_attempted(reason: str) -> AcquisitionSummary:
@@ -784,6 +848,7 @@ class MarketDataGateway:
                 acquired.receipts or acquired.observations
             ):
                 stage = "persistence"
+                persisted = None
                 try:
                     persisted = persist_route(acquired)
                     stage = "validation"
@@ -796,6 +861,8 @@ class MarketDataGateway:
                         f"{label} route post-acquisition processing failed: {exc}",
                         acquisition=aggregate,
                         stage=stage,
+                        acquired=acquired, persistence=persisted,
+                        route=route, requirement=acquisition_requirement,
                     ) from exc
 
                 if _resolved_requirement_satisfied(gate_requirement, resolved):
@@ -1003,6 +1070,7 @@ class MarketDataGateway:
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
                 stage = "persistence"
+                persisted = None
                 try:
                     if acquisition.attempted and (
                         acquired.receipts or acquired.observations
@@ -1011,6 +1079,7 @@ class MarketDataGateway:
                             acquire_requirement,
                             acquired,
                         )
+                        persisted = persistence
                         stage = "validation"
                         self._validate_persistence_result(acquired, persistence)
                         stage = "reread_resolve"
@@ -1032,6 +1101,9 @@ class MarketDataGateway:
                         f"bar post-acquisition processing failed: {exc}",
                         acquisition=acquired.summary,
                         stage=stage,
+                        acquired=acquired, persistence=persisted,
+                        route=plan.routes[0] if len(plan.routes) == 1 else None,
+                        requirement=acquire_requirement,
                     ) from exc
 
         return MarketDataResultV1(
@@ -1166,6 +1238,7 @@ class MarketDataGateway:
                 acquisition = acquired.summary
                 acquisition_health = acquired.provider_health
                 stage = "persistence"
+                persisted = None
                 try:
                     if acquisition.attempted and (
                         acquired.receipts or acquired.observations
@@ -1174,6 +1247,7 @@ class MarketDataGateway:
                             requirement,
                             acquired,
                         )
+                        persisted = persistence
                         stage = "validation"
                         self._validate_persistence_result(acquired, persistence)
                         stage = "reread_resolve"
@@ -1208,6 +1282,9 @@ class MarketDataGateway:
                         f"quote post-acquisition processing failed: {exc}",
                         acquisition=acquired.summary,
                         stage=stage,
+                        acquired=acquired, persistence=persisted,
+                        route=plan.routes[0] if len(plan.routes) == 1 else None,
+                        requirement=requirement,
                     ) from exc
 
         return MarketDataResultV1(

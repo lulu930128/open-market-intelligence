@@ -1202,17 +1202,21 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             else str(quote.get("depth_status") or "unavailable")
         ),
     )
-    snapshot_time = (
+    depth_event_time = (
         quote.get("depth_snapshot_event_time")
         or (order_book_evidence.get("resolved_health") or {}).get(
             "selected_event_at"
         )
         or order_book_evidence.get("event_time")
         or (order_book_evidence.get("lineage") or {}).get("event_at")
-        or quote.get("snapshot_time")
-        or quote.get("provider_event_time")
-        or quote.get("quote_time")
     )
+    snapshot_time = depth_event_time or quote.get("snapshot_time") or quote.get("provider_event_time") or quote.get("quote_time")
+    snapshot_time_basis = (
+        "provider_event_time" if depth_event_time is not None
+        else quote.get("snapshot_time_basis") if quote.get("snapshot_time") is not None
+        else "provider_event_time" if snapshot_time is not None else None
+    )
+    order_book_lineage = order_book_evidence.get("lineage") or {}
     order_book_freshness = _component_freshness(
         quote,
         dataset="taiwan_quote_order_book",
@@ -1316,11 +1320,11 @@ def _quote_components(quote: dict[str, Any]) -> dict[str, Any]:
             "not_provided",
         ),
         "snapshot_time": _json_value(snapshot_time),
-        "snapshot_time_basis": quote.get("snapshot_time_basis"),
+        "snapshot_time_basis": snapshot_time_basis,
         "provider_event_time": _json_value(
             quote.get("provider_event_time")
         ),
-        "fetched_at": _json_value(quote.get("fetched_at")),
+        "fetched_at": _json_value(order_book_lineage.get("fetched_at") if order_book_evidence else quote.get("fetched_at")),
         "latency_ms": quote.get("latency_ms"),
         "provider": quote.get("depth_snapshot_provider")
         or order_book_evidence.get("provider")
@@ -1798,7 +1802,11 @@ def _compact_quote_snapshot(
             or quote_depth.get("snapshot_time")
             or quote_depth.get("quote_time")
         ),
-        "snapshot_time_basis": quote_depth.get("snapshot_time_basis"),
+        "snapshot_time_basis": (
+            "provider_event_time" if quote_depth.get("depth_snapshot_event_time") is not None
+            else quote_depth.get("snapshot_time_basis") if quote_depth.get("snapshot_time") is not None
+            else "provider_event_time" if quote_depth.get("quote_time") is not None else None
+        ),
         "provider_event_time": _json_value(
             quote_depth.get("provider_event_time")
         ),

@@ -1,0 +1,61 @@
+{
+  "provenance": "Bounded actual official GET; exact unmodified excerpt rows, not a full-market fixture.",
+  "receipts": [
+    {
+      "resource": "tpex_mainboard_quotes",
+      "url": "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes",
+      "received_at": "2026-11-03T08:45:52.658008+00:00",
+      "response_sha256": "468d3362af3a6077fe49efbcec2a3d01c1bb08edce97470b27c604bf970d4862",
+      "http_status": 200,
+      "payload": [
+        {
+          "Date": "1151103",
+          "SecuritiesCompanyCode": "6182",
+          "CompanyName": "合晶",
+          "Close": "85.30",
+          "Change": "-8.80",
+          "Open": "91.50",
+          "High": "91.70",
+          "Low": "84.70",
+          "TradingShares": "23661000",
+          "TransactionAmount": "2083646900",
+          "TransactionNumber": "15180",
+          "LatestBidPrice": "85.30",
+          "LatesAskPrice": "85.40",
+          "Capitals": "637607994",
+          "NextLimitUp": "93.80",
+          "NextLimitDown": "76.80"
+        }
+      ]
+    },
+    {
+      "resource": "tpex_mainboard_daily_close_quotes",
+      "url": "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
+      "received_at": "2026-11-03T08:46:02.617182+00:00",
+      "response_sha256": "433dc145540092249dbae7be95da8d954bee4a793c901bbe9ba32c186fe3bd4b",
+      "http_status": 200,
+      "payload": [
+        {
+          "Date": "1151103",
+          "SecuritiesCompanyCode": "6182",
+          "CompanyName": "合晶",
+          "Close": "85.30",
+          "Change": "-8.80 ",
+          "Open": "91.50",
+          "High": "91.70",
+          "Low": "84.70",
+          "Average": "88.06",
+          "TradingShares": "24256298",
+          "TransactionAmount": "2136041355",
+          "TransactionNumber": "22791",
+          "LatestBidPrice": "85.30",
+          "LatesAskPrice": "85.40",
+          "Capitals": "637607994",
+          "NextReferencePrice": "85.30",
+          "NextLimitUp": "93.80",
+          "NextLimitDown": "76.80"
+        }
+      ]
+    }
+  ]
+}

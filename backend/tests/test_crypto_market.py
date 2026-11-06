@@ -200,6 +200,94 @@ def _derivatives_metric(
 
 
 class CryptoMarketBackendTests(unittest.TestCase):
+    def _duplicate_realtime_updates(self, resource, price, second):
+        from app.crypto_market.realtime import CryptoRealtimeUpdate
+        at = _utc(f"2026-06-24T00:00:{second:02d}Z")
+        return CryptoRealtimeUpdate(provider=BINANCE_PROVIDER, resource=resource,
+            symbol="BTC-USDT", provider_symbol="BTCUSDT", instrument_type=SPOT,
+            event_time=at, received_at=at, feed_lag_ms=0, sequence=second,
+            data={"last_price": price, "best_bid_price": price, "best_ask_price": price + 1,
+                  "bids": [], "asks": [], "interval": "1m", "bar_time": _utc("2026-06-24T00:00:00Z"),
+                  "open_price": price, "high_price": price, "low_price": price, "close_price": price},
+            raw_payload={"price": price})
+
+    def test_realtime_same_batch_duplicates_with_runtime_autoflush_disabled(self):
+        self.db.autoflush = False  # Match production SessionLocal, unlike historical fixtures.
+        for resource, model, value_field in (
+            (TICKER_RESOURCE, CryptoTickerHistory, "last_price"),
+            (ORDER_BOOK_RESOURCE, CryptoLiquidityHistory, "best_bid_price"),
+            (OHLCV_RESOURCE, CryptoOhlcvBar, "close_price"),
+        ):
+            with self.subTest(resource=resource):
+                old = self._duplicate_realtime_updates(resource, 100, 1)
+                new = self._duplicate_realtime_updates(resource, 200, 2)
+                result = persist_crypto_realtime_updates(self.db, [old, new])
+                self.assertEqual(result["error_count"], 0)
+                self.assertEqual(self.db.query(model).count(), 1)
+                self.assertEqual(getattr(self.db.query(model).one(), value_field), 200)
+                persist_crypto_realtime_updates(self.db, [old])  # Older batch replay cannot replace latest.
+                self.db.expire_all()
+                self.assertEqual(getattr(self.db.query(model).one(), value_field), 200)
+
+    def test_realtime_two_writers_and_failed_flush_replay_keep_latest(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from threading import Barrier
+        from sqlalchemy import event
+        from sqlalchemy.exc import OperationalError
+
+        models = (CryptoTickerSnapshot, CryptoTickerHistory, CryptoOrderBookSnapshot,
+                  CryptoLiquidityHistory, CryptoOhlcvBar)
+        resources = (TICKER_RESOURCE, ORDER_BOOK_RESOURCE, OHLCV_RESOURCE)
+        with TemporaryDirectory(prefix="omi-crypto-replay-") as directory:
+            engine = create_engine("sqlite:///" + (Path(directory)/"fixture.sqlite").as_posix(),
+                connect_args={"check_same_thread": False, "timeout": 5})
+            Base.metadata.create_all(engine, tables=[m.__table__ for m in models])
+            try:
+                ready = Barrier(2)
+                def writer(price, second):
+                    with Session(engine, autoflush=False) as db:
+                        # Both independent writers observed the empty key before admission.
+                        self.assertEqual(db.query(CryptoTickerHistory).count(), 0)
+                        ready.wait(timeout=5)
+                        return persist_crypto_realtime_updates(db,
+                            [self._duplicate_realtime_updates(r, price, second) for r in resources])
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(writer, 100, 1), pool.submit(writer, 200, 2)]
+                    self.assertEqual([f.result(timeout=10)["error_count"] for f in futures], [0, 0])
+
+                # Fail between snapshot and history; owner must roll back the whole batch.
+                def fail_history(conn, cursor, statement, parameters, context, executemany):
+                    if statement.startswith("INSERT INTO crypto_ticker_history"):
+                        raise OperationalError(statement, parameters, RuntimeError("fixture flush failure"))
+                event.listen(engine, "before_cursor_execute", fail_history)
+                manager = CryptoRealtimePersistenceManager(enabled=True,
+                    session_factory=lambda: Session(engine, autoflush=False))
+                manager.enqueue(self._duplicate_realtime_updates(TICKER_RESOURCE, 300, 3))
+                async def flush_and_replay():
+                    failure = await manager.flush_once()
+                    self.assertEqual(failure["persisted_count"], 0)
+                    self.assertEqual(manager.status()["pending_count"], 1)
+                    with Session(engine) as db:
+                        self.assertEqual(db.query(CryptoTickerSnapshot).one().last_price, 200)
+                    event.remove(engine, "before_cursor_execute", fail_history)
+                    success = await manager.flush_once()
+                    self.assertEqual(success["persisted_count"], 1)
+                    self.assertEqual(manager.status()["pending_count"], 0)
+                asyncio.run(flush_and_replay())
+                with Session(engine, autoflush=False) as db:
+                    persist_crypto_realtime_updates(db, [self._duplicate_realtime_updates(r, 100, 1) for r in resources])
+                    for model in models:
+                        self.assertEqual(db.query(model).count(), 1)
+                    self.assertEqual(db.query(CryptoTickerHistory).one().last_price, 300)
+                    self.assertEqual(db.query(CryptoLiquidityHistory).one().best_bid_price, 200)
+                    self.assertEqual(db.query(CryptoOhlcvBar).one().close_price, 200)
+                    self.assertEqual(json.loads(db.query(CryptoTickerHistory).one().raw_payload_json), {"price": 300})
+                    self.assertEqual(db.query(CryptoTickerHistory).one().fetched_at.second, 3)
+            finally:
+                engine.dispose()
+
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)

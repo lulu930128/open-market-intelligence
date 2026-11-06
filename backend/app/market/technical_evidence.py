@@ -16,6 +16,7 @@ from app.market.technical_parameters import (
 from app.market.taiwan_industries import build_tw_sector_benchmark
 from app.market.trading_calendar import next_taiwan_trading_day
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import taiwan_presentation_session
 from app.market.tw_bar_service import TaiwanBarService, taiwan_bar_read_scope
 from app.research.technical.series import (
     ema_sma_seed,
@@ -560,13 +561,15 @@ def _snapshot_for_timeframe(
                 "indicator_semantics": {
                     "price_based": "intraday_partial",
                     "range_based": "intraday_partial",
-                    "volume_based": "partial_cumulative_volume",
+                    "volume_based": ("not_applicable_to_current_partial"
+                        if partial.get("volume_based_observation_usable") is False
+                        else "partial_cumulative_volume"),
                 },
                 "decision_usable": False,
                 "volume_based_decision_usable": False,
-                "warnings": [
-                    "Volume-based values use current cumulative session volume and are not finalized daily indicators."
-                ],
+                "warnings": (["Current-partial volume indicators are unavailable under the canonical observation contract."]
+                    if partial.get("volume_based_observation_usable") is False else [
+                        "Volume-based values use current cumulative session volume and are not finalized daily indicators."]),
             }
         period = {
             "status": current_partial_point.get("bar_status") or "intraday_partial",
@@ -656,6 +659,8 @@ def build_corporate_action_contract(
         and coverage_end is not None
         and coverage_start <= analysis_start
         and coverage_end >= analysis_end
+        and history.get("result_complete") is not False
+        and history.get("total_count", 0) <= history.get("returned_count", history.get("total_count", 0))
         else "partial"
     )
     warnings = []
@@ -1721,6 +1726,7 @@ def _daily_points(
     to_date: date | None = None,
     limit: int = MAX_DAILY_BARS,
     requested_at: datetime | None = None,
+    allow_early_regular: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], Any]:
     to_time = (
         datetime.combine(to_date + timedelta(days=1), datetime.min.time(), TAIWAN_TZ)
@@ -1734,6 +1740,7 @@ def _daily_points(
         limit=max(1, min(int(limit), MAX_DAILY_BARS)),
         include_partial=False,
         requested_at=requested_at,
+        allow_early_regular=allow_early_regular,
     )
     bars = series.bars
     points = [
@@ -1825,10 +1832,10 @@ def _series_points(series: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _technical_points(series: Any, parameters: TechnicalAnalysisParameters):
+def _technical_points(series: Any, parameters: TechnicalAnalysisParameters, *, allow_early_regular: bool = False):
     from app.market.tw_technical_service import TaiwanTechnicalService
 
-    result = TaiwanTechnicalService().calculate(series, parameters=parameters)
+    result = TaiwanTechnicalService().calculate(series, parameters=parameters, allow_early_regular=allow_early_regular)
     points = []
     for point in result.points:
         normalized = dict(point)
@@ -1844,6 +1851,7 @@ def build_tw_stock_price_map_evidence(
     corporate_event_history: Mapping[str, Any] | None = None,
     to_date: date | None = None,
     parameters: TechnicalAnalysisParameters | None = None,
+    requested_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the bounded daily evidence slice required by Price Map.
 
@@ -1869,6 +1877,8 @@ def build_tw_stock_price_map_evidence(
         stock_id,
         to_date=to_date,
         limit=price_map_bar_limit,
+        requested_at=requested_at,
+        allow_early_regular=True,
     )
     if not daily:
         return {
@@ -1882,7 +1892,7 @@ def build_tw_stock_price_map_evidence(
             ],
         }
     end_date = point_date(daily[-1].get("time"))
-    canonical_daily, daily_technical = _technical_points(daily_series, parameters)
+    canonical_daily, daily_technical = _technical_points(daily_series, parameters, allow_early_regular=True)
     daily_snapshot = _snapshot_for_timeframe(
         daily,
         timeframe="daily",
@@ -1906,6 +1916,9 @@ def build_tw_stock_price_map_evidence(
         and daily_technical.decision_usable
     )
     daily_snapshot["input_quality"] = daily_technical.input_quality
+    daily_snapshot["research_usable"] = bool(
+        daily_corporate_actions.get("coverage_status") == "complete"
+        and daily_snapshot.get("completed") and daily_technical.input_quality.get("research_usable"))
     daily_snapshot["warmup"] = daily_technical.warmup
 
     swing_daily = daily[-SWING_LOOKBACK:]
@@ -2002,6 +2015,7 @@ def build_tw_stock_price_map_evidence(
         "price_basis": PRICE_BASIS,
         "timeframes": {"daily": daily_snapshot},
         "decision_usable": daily_snapshot["decision_usable"],
+        "research_usable": daily_snapshot["research_usable"],
         "input_quality": daily_technical.input_quality,
         "corporate_action": daily_corporate_actions,
         "corporate_action_coverage_by_timeframe": {
@@ -2151,7 +2165,18 @@ def build_tw_stock_technical_evidence(
         end_date = point_date(daily[-1].get("time"))
         current_partial_daily = None
         current_partial_calculated = None
-        if to_date is None:
+        # A finalized daily bar already covering the owner's presentation
+        # session cannot gain another forming bar for that same session.
+        # Keep the current read when that session is absent (including gaps).
+        presentation_date = taiwan_presentation_session(requested_at)["trade_date"]
+        if (
+            to_date is None
+            and end_date != presentation_date
+            # The Bar owner has already resolved the exchange phase. There
+            # cannot be a forming regular-session bar before the opening;
+            # keep the read for intraday and unresolved completed sessions.
+            and daily_series.market_phase not in {"preopen_pending", "preopen"}
+        ):
             current_series = bar_service.read_bars(
                 instrument_id=stock_id,
                 interval="1d",
@@ -2159,12 +2184,21 @@ def build_tw_stock_technical_evidence(
                 include_partial=True,
                 requested_at=requested_at,
             )
-            if len(current_series.bars) > len(daily_series.bars):
+            if current_series.bars and (
+                current_series.bars[-1].start_at > daily_series.bars[-1].start_at
+            ):
                 current_partial_daily = _series_points(current_series)[-1]
-                current_calculated, _ = _technical_points(current_series, parameters)
-                current_partial_calculated = (
-                    current_calculated[-1] if current_calculated else None
-                )
+                _, current_technical = _technical_points(current_series, parameters)
+                observation = current_technical.current_partial
+                if observation is not None:
+                    current_partial_calculated = {
+                        **observation.point,
+                        "time": observation.bar_time.date(),
+                        "volume_based_observation_usable": observation.volume_based_observation_usable,
+                        "indicator_applicability": dict(observation.indicator_applicability),
+                        "observation_revision": observation.observation_revision,
+                        "limitations": list(observation.limitations),
+                    }
     with technical_read_phase(db, "indicators"):
         canonical_daily, daily_technical = _technical_points(daily_series, parameters)
         canonical_weekly, weekly_technical = _technical_points(weekly_series, parameters)

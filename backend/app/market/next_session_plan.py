@@ -47,6 +47,7 @@ def _list_daily_history(
     stock_id: str,
     limit: int,
     as_of_date: date | None = None,
+    requested_at: datetime | None = None,
 ) -> list[TaiwanCanonicalDailyRow]:
     try:
         result = read_taiwan_official_daily(
@@ -54,6 +55,8 @@ def _list_daily_history(
             stock_id=stock_id,
             limit=limit,
             to_date=as_of_date,
+            requested_at=requested_at,
+            allow_early_regular=True,
         )
     except ValueError:
         return []
@@ -121,6 +124,8 @@ def normalize_daily_history(rows: Iterable[Any]) -> tuple[list[dict[str, Any]], 
             "high": _number(_row_value(row, "high_price") or _row_value(row, "high")),
             "low": _number(_row_value(row, "low_price") or _row_value(row, "low")),
             "close": _number(_row_value(row, "close_price") or _row_value(row, "close")),
+            "release_status": _row_value(row, "release_status") or "released",
+            "official_final": _row_value(row, "official_final") is not False,
         }
         previous = selected.get(row_date)
         if previous is None or normalized_id >= int(previous["id"]):
@@ -634,7 +639,7 @@ def build_tw_stock_next_session_plan(
     history_limit = max(HISTORY_LIMIT, max(transition_periods, default=1) + 5)
     if candidate_close is not None and _number(candidate_close) is None:
         raise ValueError("candidate_close must be a positive finite number.")
-    expected_trade_date = expected_daily_price_date(now=local_now)
+    expected_trade_date = expected_daily_price_date(now=local_now, allow_early_regular=True)
     stock = (
         db.query(StockMaster)
         .filter(StockMaster.stock_id == normalized_stock_id)
@@ -645,6 +650,7 @@ def build_tw_stock_next_session_plan(
         stock_id=normalized_stock_id,
         **({"as_of_date": as_of_date} if as_of_date is not None else {}),
         limit=history_limit,
+        requested_at=local_now,
     )
     history, raw_row_count = normalize_daily_history(raw_rows)
     contract = _base_contract(
@@ -659,6 +665,8 @@ def build_tw_stock_next_session_plan(
         candidate_close=candidate_close,
     )
     target_trade_date = contract["target_trade_date"]
+    contract["release_status"] = history[-1]["release_status"] if history else "unavailable"
+    contract["official_final"] = bool(history and history[-1]["official_final"])
     target_session_state = _target_session_state(target_trade_date, local_now)
     contract["target_session_state"] = target_session_state
 
@@ -781,7 +789,8 @@ def build_tw_stock_next_session_plan(
     contract["readiness"].update(
         {
             "status": status,
-            "decision_usable": decision_usable,
+            "decision_usable": decision_usable and contract["official_final"],
+            "research_usable": decision_usable,
             "reason_codes": reasons,
         }
     )

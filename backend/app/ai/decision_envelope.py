@@ -675,6 +675,30 @@ def _provider_failure_scopes(
     supplemental_source_health: list[dict[str, Any]] = []
     historical_provider_events: list[dict[str, Any]] = []
     relevance_context = _source_health_relevance_context(response)
+    # Cache-only reads do not create acquisition tool_runs. Their failures
+    # still belong to this request, not background provider health. Use the
+    # executor's safe diagnostic fields; never project SQL/driver arguments.
+    query_plan = _dict(response.get("query_plan"))
+    read_execution = _dict(query_plan.get("read_execution"))
+    if not read_execution:
+        read_execution = _dict(
+            _dict(_dict(response.get("policy")).get("query_plan")).get("read_execution")
+        )
+    for node in _list(read_execution.get("nodes")):
+        if not isinstance(node, dict) or node.get("status") not in {"timeout", "error"}:
+            continue
+        current_request_failures.append({
+            "failure_scope": "current_request",
+            "failure_kind": "read_node",
+            **{
+                key: deepcopy(node[key])
+                for key in (
+                    "node", "status", "reason_code", "error_type",
+                    "duration_ms", "timeout_seconds",
+                )
+                if key in node
+            },
+        })
     for run in _list(response.get("tool_runs")):
         if not isinstance(run, dict):
             continue
@@ -882,8 +906,19 @@ def _provider_failure_scopes(
     }
 
 
-def build(response: dict[str, Any]) -> dict[str, Any]:
-    response = apply_readiness_to_v2(deepcopy(response))
+def build(response: dict[str, Any], *, include_evidence_result: bool = True) -> dict[str, Any]:
+    # V4 isolates metadata and selected projections, discarding the legacy result. Its
+    # readiness pass only changes root fields and analysis.decision_contract;
+    # the returned branches below have their own copies. Keep the full legacy
+    # isolation path when callers request that result (including its aliases).
+    response = apply_readiness_to_v2(
+        deepcopy(response) if include_evidence_result else {
+            **response, "analysis": {
+                **_dict(response.get("analysis")),
+                "decision_contract": deepcopy(_dict(_dict(response.get("analysis")).get("decision_contract"))),
+            },
+        }
+    )
     readiness = evaluate_readiness(response)
     passport = deepcopy(_dict(response.get("evidence_passport")))
     target = deepcopy(_dict(response.get("target")))
@@ -919,7 +954,9 @@ def build(response: dict[str, Any]) -> dict[str, Any]:
             "freshness_by_domain": _freshness_by_domain(response),
             "freshness_by_capability": _freshness_by_capability(response),
             "slots": canonical_slots(response),
-            "result": _evidence_result(response),
+            # V4 isolates capabilities after projecting the source response and
+            # immediately discards this legacy result. Avoid copying it twice.
+            "result": _evidence_result(response) if include_evidence_result else {},
             "source_refs": deepcopy(_list(response.get("source_refs"))),
         },
         "limitations": {

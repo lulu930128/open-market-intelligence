@@ -8,6 +8,7 @@ import logging
 from datetime import timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+from typing import Literal
 
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect
@@ -24,7 +25,11 @@ from app.db.models import (
 )
 from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_SOURCE
 from app.market.tw_issued_shares import parse_tpex_issued_shares_payload
-from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.market.taiwan_rules import (
+    TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE, TAIWAN_DAILY_REGULAR_SCOPE,
+    taiwan_daily_price_release_at,
+    taiwan_published_breadth_observation_at,
+)
 from app.market_data.contracts import BarFinalization, BarObservation, Market
 from app.market_data.gateway import BarAcquisitionResult
 from app.market_data.integration_contracts import (
@@ -34,6 +39,8 @@ from app.market_data.integration_contracts import (
     RefreshRequirementV1,
 )
 from app.sources.defaults import (
+    TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME,
+    TPEX_DATED_DAILY_QUOTES_SOURCE_NAME,
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TPEX_MARKET_HIGHLIGHT_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -57,7 +64,7 @@ def _persist_published_breadth(db: Session, raw: RawFetchResult, trade_date, *, 
     error = None
     try:
         fetched_at = raw.fetched_at.replace(tzinfo=timezone.utc) if raw.fetched_at.tzinfo is None else raw.fetched_at
-        if fetched_at < taiwan_daily_price_release_at(trade_date):
+        if fetched_at < taiwan_published_breadth_observation_at(trade_date):
             raise ValueError("OFFICIAL_AGGREGATE_NOT_RELEASED")
         if not raw.raw_text or hashlib.sha256(raw.raw_text.encode("utf-8")).hexdigest() != raw.content_hash:
             raise ValueError("TWSE_AGGREGATE_RECEIPT_HASH_MISMATCH")
@@ -73,6 +80,8 @@ def _persist_published_breadth(db: Session, raw: RawFetchResult, trade_date, *, 
 
 def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
     if receipt.source not in {
+        TPEX_DATED_DAILY_QUOTES_SOURCE_NAME,
+        TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME,
         TWSE_DAILY_TRADING_SOURCE_NAME,
         TWSE_RWD_DAILY_TRADING_SOURCE_NAME,
         TPEX_DAILY_QUOTES_SOURCE_NAME,
@@ -87,10 +96,12 @@ def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
         "endpoint_url": receipt.url,
         "enabled": True,
         "priority": (
-            5
+            30
+            if receipt.source == TPEX_DATED_DAILY_QUOTES_SOURCE_NAME
+            else 5
             if receipt.source == TWSE_RWD_DAILY_TRADING_SOURCE_NAME
             else 20
-            if receipt.source == TWSE_DAILY_TRADING_SOURCE_NAME
+            if receipt.source in {TWSE_DAILY_TRADING_SOURCE_NAME, TPEX_DAILY_CLOSE_QUOTES_SOURCE_NAME}
             else 10
         ),
         "parser_type": receipt.parser_version,
@@ -272,7 +283,7 @@ class TaiwanOfficialDailyTransaction:
         *,
         source: SourceRegistry,
         raw: RawFetchResult,
-    ) -> bool:
+    ) -> Literal["inserted", "updated", "unchanged"]:
         if observation.instrument.market is not Market.TW:
             raise ValueError("Taiwan daily transaction requires market=TW")
         if observation.interval != "1d":
@@ -316,12 +327,16 @@ class TaiwanOfficialDailyTransaction:
             "authority": observation.lineage.authority.value,
             "finalization": observation.finalization.value,
             "official": observation.lineage.authority.value == "exchange",
-            "release_status": "released",
+            "release_status": TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE if (
+                observation.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE
+                and "OFFICIAL_FINAL_PENDING" in observation.limitations
+            ) else "released",
             "reconciliation_status": "pending",
-            "derivation_kind": None,
+            "derivation_kind": observation.derivation_kind,
             "aggregation_version": None,
         }
         unchanged = False
+        inserted = row is None
         if row is None:
             row = MarketDailyPrice(
                 **{
@@ -339,6 +354,12 @@ class TaiwanOfficialDailyTransaction:
             )
             self._db.add(row)
         else:
+            if (incoming["release_status"] == TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE
+                    and row.release_status != TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE):
+                from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
+                if TaiwanOfficialDailyBarRepository(self._db).has_qualified_final_row(
+                        row=row, instrument=observation.instrument):
+                    return "unchanged"  # Preserve final identity/revision; raw receipt remains durable.
             # Retain the actual old canonical values before changing its receipt
             # or OHLC. A later acquisition must not rewrite historical knowledge.
             self._retain_daily_revision(row)
@@ -387,7 +408,7 @@ class TaiwanOfficialDailyTransaction:
         lineage.component_raw_result_ids_json = None
         lineage.component_content_hashes_json = None
         lineage.lineage_digest = observation.lineage.content_hash
-        return unchanged
+        return "inserted" if inserted else "unchanged" if unchanged else "updated"
 
     def persist_bar_acquisition(
         self,
@@ -400,6 +421,8 @@ class TaiwanOfficialDailyTransaction:
         raw_ids: list[int] = []
         written = 0
         unchanged = 0
+        inserted = 0
+        updated = 0
         limitations = list(acquisition.summary.limitations)
         try:
             for receipt in acquisition.receipts:
@@ -429,16 +452,18 @@ class TaiwanOfficialDailyTransaction:
                         "canonical observation has no matching raw provider/source receipt"
                     )
                 source, raw = source_raw
-                was_unchanged = self._upsert_bar(
+                outcome = self._upsert_bar(
                     observation,
                     source=source,
                     raw=raw,
                 )
                 observations_by_source[key] = observations_by_source.get(key, 0) + 1
-                if was_unchanged:
+                if outcome == "unchanged":
                     unchanged += 1
                 else:
                     written += 1
+                    inserted += int(outcome == "inserted")
+                    updated += int(outcome == "updated")
 
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
@@ -448,7 +473,23 @@ class TaiwanOfficialDailyTransaction:
                     and receipt.status_code == 200 and not receipt.error_message):
                     dates = {bar.end_at.astimezone(TAIWAN_TZ).date() for bar in acquisition.observations
                         if bar.lineage.source == receipt.source
+                        and "OFFICIAL_FINAL_PENDING" not in bar.limitations
                         and bar.finalization in {BarFinalization.FINAL, BarFinalization.CORRECTED}}
+                    # The independently parsed published aggregate can qualify
+                    # while these same-receipt daily bars remain regular research.
+                    if not dates:
+                        early_dates = {bar.end_at.astimezone(TAIWAN_TZ).date() for bar in acquisition.observations
+                            if bar.lineage.source == receipt.source and "OFFICIAL_FINAL_PENDING" in bar.limitations}
+                        if len(early_dates) == 1:
+                            try:
+                                body = json.loads(raw.raw_text or "{}")
+                                tables = body.get("tables", []) if isinstance(body, dict) else []
+                                if any(isinstance(table, dict) and table.get("title") == "漲跌證券數合計"
+                                       for table in tables):
+                                    dates = early_dates
+                            except (ValueError, TypeError):
+                                limitations.append("OFFICIAL_AGGREGATE_RECEIPT_REJECTED")
+                                logger.warning("Early breadth receipt %s has invalid JSON tables", raw.id)
                     if (not dates and isinstance(_requirement, RefreshRequirementV1)
                         and _requirement.dataset_id == "tw.market_breadth.daily"
                         and _requirement.from_date == _requirement.to_date
@@ -490,6 +531,8 @@ class TaiwanOfficialDailyTransaction:
             committed=True,
             receipts_written=len(acquisition.receipts),
             observations_written=written,
+            observations_inserted=inserted,
+            observations_updated=updated,
             observations_unchanged=unchanged,
             raw_result_ids=tuple(raw_ids),
             limitations=tuple(dict.fromkeys(limitations)),

@@ -125,7 +125,6 @@ def test_scheduler_commits_index_and_atomically_publishes_breadth(monkeypatch, j
     monkeypatch.setattr(scheduler, "refresh_current_market_breadth_snapshots", lambda **_: payload)
     monkeypatch.setattr(scheduler, "refresh_current_market_index_snapshots", lambda **_: payload)
     monkeypatch.setattr(scheduler, "materialize_index_minute_candidates", lambda *a, **k: SimpleNamespace(candidates=[]))
-    monkeypatch.setattr(scheduler, "get_cached_current_breadth_stock_rows", lambda: [])
     monkeypatch.setattr(scheduler, "attach_current_market_lineage_to_stock_rows", lambda *a, **k: [])
     if fail_stock:
         def fail(*args, **kwargs):

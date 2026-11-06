@@ -54,8 +54,9 @@ def test_persisted_6442_missing_price_component_remains_blocked():
 
 def test_6442_missing_z_then_later_z_preserves_receipt_and_point_in_time_gap():
     engine = create_engine("sqlite:///:memory:")
-    for table in (StockMaster.__table__, TaiwanIntradayStockState.__table__):
-        table.create(engine)
+    from app.db.models import Base
+    Base.metadata.create_all(engine)
+    from test_tw_summary_mutex import companion_summary
     first = datetime(2026, 10, 7, 9, 44, tzinfo=TAIWAN_TZ)
     later = datetime(2026, 10, 7, 10, 3, tzinfo=TAIWAN_TZ)
     original = dict(c="6442", d="20261007", t="09:43:34", z="-", v="2489", tv="1",
@@ -68,10 +69,8 @@ def test_6442_missing_z_then_later_z_preserves_receipt_and_point_in_time_gap():
                 ({**original, "z": "1815", "v": "2600", "t": "10:03:00", "_omi_received_at": later.isoformat()}, 102, later)):
             row = _classify_message(raw, "TWSE")
             # Aggregate receipt finishes later than this instrument's batch.
-            rows = attach_current_market_lineage_to_stock_rows([row], summary={
-                "indices": [{"market": "TWSE", "breadth": {"raw_result_id": receipt,
-                    "provider": "twse_mis", "source": "twse_mis_live_breadth",
-                    "as_of": received, "observation_received_at": (received + timedelta(seconds=10)).isoformat()}}]})
+            summary = companion_summary(db, [row], received + timedelta(seconds=10))
+            rows = attach_current_market_lineage_to_stock_rows([row], summary=summary, db=db)
             assert rows[0]["observation_received_at"] == received.isoformat()
             persist_taiwan_intraday_stock_states(db, rows=rows, now=received)
             result = read_tw_intraday_discovery(db, evaluated_at=received)

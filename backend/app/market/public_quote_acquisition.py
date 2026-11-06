@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from app.market.providers import twse_mis
+from app.market.providers.twse_mis_breadth_evidence import AcquisitionInFlight, bounded_fetch
 from app.market.providers.twse_mis_guard import (
     TWSE_MIS_PROVIDER_GUARD,
     TwseMisProviderGuard,
@@ -64,6 +65,8 @@ RouteFetcher = Callable[
     HttpResponseLike,
 ]
 
+MIS_SINGLE_QUOTE_MAX_WAIT_SECONDS = 8
+
 
 @dataclass(frozen=True, slots=True)
 class _QuoteRouteOutcome:
@@ -91,11 +94,14 @@ def _default_fetch(
 ) -> HttpResponseLike:
     if route.resource_id != TWSE_MIS_QUOTE_RESOURCE_ID:
         raise ValueError(f"unsupported public quote resource: {route.resource_id}")
-    return twse_mis.get_stock_response(
-        [instrument.symbol],
-        exchange=exchange_code_for_venue(instrument.venue),
-        timeout_seconds=route.timeout_seconds,
-    )
+    seconds = min(route.timeout_seconds, MIS_SINGLE_QUOTE_MAX_WAIT_SECONDS)
+    def fetch(*, exchange):
+        return twse_mis.get_stock_response([instrument.symbol], exchange=exchange,
+            timeout_seconds=seconds)
+    # Share the existing venue slot with breadth/depth. A socket timeout is
+    # not a wall deadline; timed-out IO remains owned until actual completion.
+    return bounded_fetch(fetch, seconds, interactive=True,
+        exchange=exchange_code_for_venue(instrument.venue))
 
 
 def _health(
@@ -220,6 +226,18 @@ class TaiwanPublicQuoteAcquisitionExecutor:
             raise RuntimeError("TWSE MIS guard allowed a request without an attempt token")
         try:
             response = self._fetch(route, instrument)
+        except AcquisitionInFlight as exc:
+            # Admission refusal performs no IO and is not provider failure.
+            self._provider_guard.cancel_attempt(attempt)
+            sampled_at = self._clock()
+            return _QuoteRouteOutcome(
+                receipt=self._failure_receipt(route, instrument, fetched_at=sampled_at, error=exc),
+                observation=None,
+                health=_health(route, checked_at=sampled_at, connection=ConnectionStatus.UNKNOWN,
+                    operational=OperationalStatus.UNAVAILABLE, freshness=EvidenceFreshness.MISSING,
+                    detail_code=str(exc)),
+                limitations=("PROVIDER_REQUEST_NOT_ADMITTED", str(exc)), external_calls=0,
+            )
         except Exception as exc:
             failed_at = self._clock()
             status_code, headers = response_failure_metadata(exc)

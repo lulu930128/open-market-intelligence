@@ -12,11 +12,15 @@ from typing import Any, Protocol
 from app.market.providers import tpex, twse
 from app.market.providers.tw_official_index import (
     TPEX_INDEX_RESOURCE_ID,
+    TPEX_HIGHLIGHT_INDEX_RESOURCE_ID,
     TWSE_INDEX_RESOURCE_ID,
+    TWSE_RWD_INDEX_RESOURCE_ID,
     endpoint_for_index_resource,
     official_index_record_to_observation,
     parse_tpex_official_index_payload,
+    parse_tpex_highlight_index_payload,
     parse_twse_official_index_payload,
+    parse_twse_rwd_index_payload,
     parser_version_for_index_resource,
     source_name_for_index_resource,
 )
@@ -62,7 +66,20 @@ def _unique(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
-def _default_fetch(route: ProviderResourceRouteV2) -> HttpResponseLike:
+def _default_fetch(route: ProviderResourceRouteV2, *, trade_date: date) -> HttpResponseLike:
+    if route.resource_id == TWSE_RWD_INDEX_RESOURCE_ID:
+        return twse.get_response(
+            twse.MARKET_DAILY_HISTORY_URL,
+            timeout_seconds=route.timeout_seconds,
+            params={"date": trade_date.strftime("%Y%m01"), "response": "json"},
+        )
+    if route.resource_id == TPEX_HIGHLIGHT_INDEX_RESOURCE_ID:
+        return tpex.get_response(
+            tpex.MARKET_HIGHLIGHT_URL,
+            timeout_seconds=route.timeout_seconds,
+            allow_redirects=False,
+            params={"date": trade_date.strftime("%Y/%m/%d"), "response": "json"},
+        )
     if route.resource_id == TWSE_INDEX_RESOURCE_ID:
         return twse.get_response(
             twse.MARKET_DAILY_URL,
@@ -120,8 +137,9 @@ class TaiwanOfficialIndexAcquisitionExecutor:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic
 
-    def _fetch(self, route: ProviderResourceRouteV2) -> HttpResponseLike:
-        return self._fetchers.get(route.resource_id, _default_fetch)(route)
+    def _fetch(self, route: ProviderResourceRouteV2, *, trade_date: date) -> HttpResponseLike:
+        fetcher = self._fetchers.get(route.resource_id)
+        return fetcher(route) if fetcher is not None else _default_fetch(route, trade_date=trade_date)
 
     def _run_route(
         self,
@@ -132,7 +150,7 @@ class TaiwanOfficialIndexAcquisitionExecutor:
     ) -> _RouteOutcome:
         checked_at = self._clock()
         try:
-            response = self._fetch(route)
+            response = self._fetch(route, trade_date=trade_date)
         except Exception as exc:
             return _RouteOutcome(
                 receipt=None,
@@ -193,8 +211,12 @@ class TaiwanOfficialIndexAcquisitionExecutor:
         try:
             if route.resource_id == TWSE_INDEX_RESOURCE_ID:
                 parsed = parse_twse_official_index_payload(raw_text)
+            elif route.resource_id == TWSE_RWD_INDEX_RESOURCE_ID:
+                parsed = parse_twse_rwd_index_payload(raw_text)
             elif route.resource_id == TPEX_INDEX_RESOURCE_ID:
                 parsed = parse_tpex_official_index_payload(raw_text)
+            elif route.resource_id == TPEX_HIGHLIGHT_INDEX_RESOURCE_ID:
+                parsed = parse_tpex_highlight_index_payload(raw_text)
             else:
                 raise ValueError(
                     f"unsupported Taiwan official index resource: {route.resource_id}"
@@ -271,12 +293,25 @@ class TaiwanOfficialIndexAcquisitionExecutor:
         index_id: str,
         trade_date: date,
         routes: Sequence[ProviderResourceRouteV2],
+        timeout_seconds: float = 30,
     ) -> MarketIndexAcquisitionResult:
         started_at = self._monotonic()
-        outcomes = tuple(
-            self._run_route(route, index_id=index_id, trade_date=trade_date)
-            for route in routes
-        )
+        outcomes = []
+        attempted_routes = []
+        budget_limits = ()
+        # Execute the shared planner's ordered fallback only while needed. All
+        # attempts share one deadline; current primary evidence still costs one call.
+        for route in routes:
+            remaining = timeout_seconds - (self._monotonic() - started_at)
+            if remaining < 1:
+                budget_limits = ("TIME_BUDGET_EXHAUSTED",)
+                break
+            route = route.model_copy(update={"timeout_seconds": min(route.timeout_seconds, int(remaining))})
+            attempted_routes.append(route)
+            outcome = self._run_route(route, index_id=index_id, trade_date=trade_date)
+            outcomes.append(outcome)
+            if outcome.success:
+                break
         successful = sum(1 for outcome in outcomes if outcome.success)
         if successful == len(outcomes) and outcomes:
             status = AcquisitionStatus.COMPLETED
@@ -289,19 +324,19 @@ class TaiwanOfficialIndexAcquisitionExecutor:
                 attempted=bool(outcomes),
                 status=(status if outcomes else AcquisitionStatus.NOT_ATTEMPTED),
                 providers_attempted=tuple(
-                    dict.fromkeys(route.provider_key for route in routes)
+                    dict.fromkeys(route.provider_key for route in attempted_routes)
                 ),
                 resource_attempts=tuple(
                     AcquisitionResourceAttempt(
                         provider=route.provider_key,
                         resource_id=route.resource_id,
                     )
-                    for route in routes
+                    for route in attempted_routes
                 ),
                 external_calls=len(outcomes),
                 elapsed_ms=max(int((self._monotonic() - started_at) * 1000), 0),
                 limitations=_unique(
-                    tuple(
+                    budget_limits + tuple(
                         limitation
                         for outcome in outcomes
                         for limitation in outcome.limitations

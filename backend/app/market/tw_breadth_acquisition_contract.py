@@ -23,6 +23,7 @@ class AcquisitionBatchEvidence(CanonicalModel):
     # Null for a batch that never entered its IO worker, including in-flight skips.
     caller_wait_seconds: float | None = Field(default=None, ge=0)
     transport_budget_seconds: float | None = Field(default=None, ge=0, le=4)
+    socket_timeout_seconds: float | None = Field(default=None, ge=0, le=8)
     initial_wait_deadline_exceeded: bool | None = None
     resumed_wait_seconds: float | None = Field(default=None, ge=0)
     admission_detail_code: str | None = Field(default=None, max_length=64)

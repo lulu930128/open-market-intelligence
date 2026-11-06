@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from datetime import date
 
+from sqlalchemy import and_, or_, tuple_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -33,16 +34,27 @@ def upsert_us_sec_fact_records(
     inserted_count = 0
     updated_count = 0
 
-    for record in records:
-        existing = (
-            db.query(USSecCompanyFact)
-            .filter(USSecCompanyFact.fact_key == record.fact_key)
-            .first()
-        )
+    try:
+        # Companyfacts contains tens of thousands of facts. Read bounded key
+        # batches before mutating so SELECT/autoflush is not repeated per fact.
+        # Keep input order and the old duplicate-key update/count semantics.
+        keys = list(dict.fromkeys(record.fact_key for record in records))
+        if keys:
+            # Production sessions disable autoflush. Include pending facts in
+            # this transaction before discovering existing unique keys.
+            db.flush()
+        existing_by_key = {}
+        for start in range(0, len(keys), 500):
+            existing_by_key.update((row.fact_key, row) for row in (
+                db.query(USSecCompanyFact)
+                .filter(USSecCompanyFact.fact_key.in_(keys[start:start + 500]))
+                .all()
+            ))
 
-        if existing is None:
-            db.add(
-                USSecCompanyFact(
+        for record in records:
+            existing = existing_by_key.get(record.fact_key)
+            if existing is None:
+                existing = USSecCompanyFact(
                     fact_key=record.fact_key,
                     cik=record.cik,
                     symbol=record.symbol,
@@ -65,22 +77,26 @@ def upsert_us_sec_fact_records(
                     source_url=record.source_url,
                     fetched_at=utc_now(),
                 )
-            )
-            inserted_count += 1
-            continue
+                db.add(existing)
+                existing_by_key[record.fact_key] = existing
+                inserted_count += 1
+                continue
 
-        existing.symbol = record.symbol or existing.symbol
-        existing.entity_name = record.entity_name or existing.entity_name
-        existing.label = record.label
-        existing.description = record.description
-        existing.value_numeric = record.value_numeric
-        existing.value_text = record.value_text
-        existing.source_url = record.source_url
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
+            existing.symbol = record.symbol or existing.symbol
+            existing.entity_name = record.entity_name or existing.entity_name
+            existing.label = record.label
+            existing.description = record.description
+            existing.value_numeric = record.value_numeric
+            existing.value_text = record.value_text
+            existing.source_url = record.source_url
+            existing.fetched_at = utc_now()
+            existing.updated_at = utc_now()
+            updated_count += 1
 
-    db.commit()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return {
         "inserted_count": inserted_count,
@@ -438,6 +454,8 @@ def list_us_corporate_actions(
 def upsert_us_short_volume_records(
     db: Session,
     records: list[USShortVolumeRecord],
+    *,
+    reconcile_legacy_symbols: bool = False,
 ) -> dict:
     inserted_count = 0
     updated_count = 0
@@ -451,50 +469,56 @@ def upsert_us_short_volume_records(
         ).values()
     )
 
-    for record in deduped_records:
-        existing = (
-            db.query(USShortVolumeDaily)
-            .filter(USShortVolumeDaily.provider == record.provider)
-            .filter(USShortVolumeDaily.symbol == record.symbol)
-            .filter(USShortVolumeDaily.trade_date == record.trade_date)
-            .filter(USShortVolumeDaily.market_center == record.market_center)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                USShortVolumeDaily(
-                    provider=record.provider,
-                    symbol=record.symbol,
-                    trade_date=record.trade_date,
-                    market_center=record.market_center,
-                    short_volume=record.short_volume,
-                    short_exempt_volume=record.short_exempt_volume,
-                    total_volume=record.total_volume,
-                    short_ratio=record.short_ratio,
-                    source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        existing.short_volume = record.short_volume
-        existing.short_exempt_volume = record.short_exempt_volume
-        existing.total_volume = record.total_volume
-        existing.short_ratio = record.short_ratio
-        existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    db.commit()
+    key = lambda row: (row.provider, row.symbol, row.trade_date, row.market_center)
+    valid_keys = {key(record) for record in deduped_records}
+    scopes = {(record.provider, record.trade_date) for record in deduped_records}
+    legacy_aliases = {
+        (record.provider, alias, record.trade_date, record.market_center,
+         record.raw_payload_hash)
+        for record in deduped_records
+        if reconcile_legacy_symbols and record.provider == "finra"
+        and record.source_symbol and record.raw_payload_hash
+        for alias in {normalize_us_symbol(record.source_symbol), record.source_symbol.upper().replace("/", ".")}
+        if alias != record.symbol
+    }
+    reconciled_symbol_count = 0
+    try:
+        existing_rows = db.query(USShortVolumeDaily).filter(
+            tuple_(USShortVolumeDaily.provider, USShortVolumeDaily.trade_date).in_(scopes)
+        ).all() if scopes else []
+        existing_by_key = {}
+        for row in existing_rows:
+            # Only a complete, validated re-read of the exact same raw payload
+            # can retire a legacy case-folded/slash-truncated identity absent
+            # from that file. A real uppercase symbol is updated, never removed.
+            if key(row) not in valid_keys and (*key(row), row.raw_payload_hash) in legacy_aliases:
+                db.delete(row)
+                reconciled_symbol_count += 1
+            else:
+                existing_by_key[key(row)] = row
+        for record in deduped_records:
+            existing = existing_by_key.get(key(record))
+            if existing is None:
+                existing = USShortVolumeDaily(provider=record.provider, symbol=record.symbol,
+                                              trade_date=record.trade_date, market_center=record.market_center)
+                db.add(existing)
+                inserted_count += 1
+            else:
+                updated_count += 1
+            for field in ("short_volume", "short_exempt_volume", "total_volume", "short_ratio",
+                          "source_url", "raw_payload_hash"):
+                setattr(existing, field, getattr(record, field))
+            existing.fetched_at = utc_now()
+            existing.updated_at = utc_now()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return {
         "inserted_count": inserted_count,
         "updated_count": updated_count,
+        "reconciled_symbol_count": reconciled_symbol_count,
     }
 
 
@@ -508,8 +532,18 @@ def list_us_short_volumes(
     limit: int = 500,
     offset: int = 0,
 ) -> list[USShortVolumeDaily]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    query = db.query(USShortVolumeDaily).filter(USShortVolumeDaily.symbol == normalized_symbol)
+    normalized_symbol = normalize_us_symbol(symbol.replace("/", "."))
+    # FINRA CQS identity is case-sensitive. All-lowercase ordinary ticker input
+    # still works, but mixed-case preferred/rights suffixes must remain exact.
+    finra_symbol = symbol.strip().replace("/", ".")
+    if finra_symbol.islower():
+        finra_symbol = finra_symbol.upper()
+    query = db.query(USShortVolumeDaily).filter(or_(
+        and_(finra_symbol == finra_symbol.upper(), USShortVolumeDaily.provider != "finra",
+             USShortVolumeDaily.symbol == normalized_symbol),
+        and_(USShortVolumeDaily.provider == "finra",
+             USShortVolumeDaily.symbol.in_((finra_symbol, finra_symbol.replace("-", ".")))),
+    ))
 
     if provider is not None:
         query = query.filter(USShortVolumeDaily.provider == provider)

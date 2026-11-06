@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
+
 from app.jobs import scheduler
 from app.market import tw_corporate_events
 from app.market.providers import tw_corporate_events as corporate_event_provider
@@ -38,6 +40,115 @@ from app.routers import market as market_router
 
 TEST_TMP_ROOT = Path(__file__).resolve().parents[2] / ".tmp" / "corporate-event-tests"
 TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+@pytest.mark.parametrize("new_start,new_end,expected_start,expected_end", [
+    ("2026-08-10", "2026-08-15", "2026-08-01", "2026-08-31"),
+    ("2026-08-20", "2026-09-05", "2026-08-01", "2026-09-05"),
+    ("2026-07-20", "2026-08-05", "2026-07-20", "2026-08-31"),
+    ("2026-09-01", "2026-09-05", "2026-08-01", "2026-09-05"),
+    ("2026-07-20", "2026-07-31", "2026-07-20", "2026-08-31"),
+    ("2026-09-02", "2026-09-05", "2026-08-01", "2026-08-31"),
+    ("2026-07-20", "2026-07-30", "2026-08-01", "2026-08-31"),
+    (None, None, "2026-08-01", "2026-08-31"),
+    ("malformed", "2026-09-05", "2026-08-01", "2026-08-31"),
+    ("2026-09-05", "2026-09-01", "2026-08-01", "2026-08-31"),
+])
+def test_entry_merge_retains_only_contiguous_proven_coverage(
+    tmp_path, new_start, new_end, expected_start, expected_end,
+):
+    path = tmp_path / "events.json"
+    key = "twse_ex_dividend_history"
+    now = datetime(2026, 9, 6, tzinfo=timezone.utc)
+    try:
+        tw_corporate_events._write_refresh(updates={key: {"entries": [],
+            "coverage_start": "2026-08-01", "coverage_end": "2026-08-31", "coverage_years": [2026]}},
+            errors={}, attempted_at=now, path=path)
+        result = tw_corporate_events._write_refresh(updates={key: {"merge_entries": True,
+            "entries": [], "coverage_start": new_start, "coverage_end": new_end}},
+            errors={}, attempted_at=now, path=path)
+        stored = result["providers"][key]
+        assert (stored["coverage_start"], stored["coverage_end"]) == (expected_start, expected_end)
+        assert stored["coverage_years"] == [2026]
+        if (new_start, new_end) in {("2026-09-02", "2026-09-05"), ("2026-07-20", "2026-07-30")}:
+            from app.market.technical_evidence import build_corporate_action_contract
+            from app.market_data.contracts import InstrumentKey
+            assert stored["coverage_merge_reason"] == "DISCONTIGUOUS_COVERAGE_RETAINED"
+            contract = build_corporate_action_contract(
+                {**stored, "cache_status": "current", "results": []},
+                analysis_start=date(2026, 7, 20), analysis_end=date(2026, 9, 5))
+            assert contract["coverage_status"] == "partial"
+            evidence = tw_corporate_events.read_taiwan_instrument_event_evidence(
+                instrument=InstrumentKey(market="TW", venue="TWSE", symbol="1102", instrument_type="stock"),
+                available_at=now, path=path)
+            basis = tw_corporate_events.resolve_taiwan_price_basis(
+                evidence, prior_date=date(2026, 8, 31), trade_date=date(2026, 9, 2))
+            assert basis.status == "unknown"
+    finally:
+        tw_corporate_events.invalidate_taiwan_corporate_event_cache()
+
+
+def test_entry_merge_cannot_clear_failed_years_or_rejuvenate_retained_coverage(tmp_path):
+    path = tmp_path / "events.json"
+    key = "twse_ex_dividend_history"
+    earlier = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    try:
+        for failed in (False, True):
+            update = {"entries": [], "coverage_start": "2022-01-01", "coverage_end": "2026-10-30",
+                "coverage_years": [2022, 2024, 2025, 2026] if failed else list(range(2022, 2027)),
+                "failed_years": [2023] if failed else [], "partial_success": failed,
+                "successful_windows": ["TWSE:2026"]}
+            details = [{"market": "TWSE", "window": "2023", "message": "fixture timeout"}] if failed else []
+            tw_corporate_events._write_refresh(updates={key: update},
+                errors={key: "2023 failed"} if failed else {},
+                error_details={key: details}, attempted_at=earlier, path=path)
+            before = tw_corporate_events.taiwan_corporate_event_semantic_revision(cache_path=path, available_at=now)
+            written = tw_corporate_events._write_refresh(updates={key: {"merge_entries": True,
+                "entries": [], "coverage_start": "2026-10-19", "coverage_end": "2026-10-29"}},
+                errors={}, attempted_at=now, path=path)["providers"][key]
+            assert written["coverage_years"] == update["coverage_years"]
+            assert written["failed_years"] == update["failed_years"]
+            assert written["partial_success"] is failed
+            assert written["successful_windows"] == update["successful_windows"]
+            assert written["last_failure_details"] == details
+            assert written["fetched_at"] == now.isoformat()
+            assert written["coverage_fetched_at"] == earlier.isoformat()
+            status = tw_corporate_events._provider_cache_status(written, now=now, archive=True)
+            assert status["status"] == ("degraded" if failed else "stale")
+            assert tw_corporate_events.taiwan_corporate_event_semantic_revision(
+                cache_path=path, available_at=now) == before
+            retained_cache = {"providers": {name: written for name in tw_corporate_events.HISTORY_PROVIDER_KEYS}}
+            assert not tw_corporate_events._history_refresh_is_recent(
+                retained_cache, now=now, target_end=date(2026, 10, 30))
+        # An explicit complete refresh still replaces coverage/entries and clears old qualification.
+        replaced = tw_corporate_events._write_refresh(updates={key: {"entries": [],
+            "coverage_start": "2026-10-01", "coverage_end": "2026-11-02", "coverage_years": [2026]}},
+            errors={}, attempted_at=now, path=path)["providers"][key]
+        assert replaced["coverage_start"] == "2026-10-01"
+        assert replaced["failed_years"] == [] and replaced["last_error"] is None
+        assert "coverage_fetched_at" not in replaced
+        assert tw_corporate_events._provider_cache_status(replaced, now=now, archive=True)["status"] == "current"
+    finally:
+        tw_corporate_events.invalidate_taiwan_corporate_event_cache()
+
+
+def test_entry_merge_does_not_infer_coverage_from_old_positive_events_or_years(tmp_path):
+    path = tmp_path / "events.json"
+    key = "twse_ex_dividend_history"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    try:
+        tw_corporate_events._write_refresh(updates={key: {"entries": [
+            {"event_id": "old", "start_date": "2022-01-01"}], "coverage_years": [2022, 2026]}},
+            errors={}, attempted_at=now, path=path)
+        stored = tw_corporate_events._write_refresh(updates={key: {"merge_entries": True,
+            "entries": [], "coverage_start": "2026-10-19", "coverage_end": "2026-10-29"}},
+            errors={}, attempted_at=now, path=path)["providers"][key]
+        assert (stored["coverage_start"], stored["coverage_end"]) == ("2026-10-19", "2026-10-29")
+        assert stored["coverage_years"] == []
+        assert stored["entries"][0]["event_id"] == "old"
+    finally:
+        tw_corporate_events.invalidate_taiwan_corporate_event_cache()
 
 
 class _TestProcessLock:
@@ -748,6 +859,7 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
                             "coverage_start": "2022-01-01",
                             "coverage_end": "2026-09-03",
                             "coverage_years": [2022, 2023, 2024, 2025, 2026],
+                            "coverage_contract": tw_corporate_events.HISTORY_COVERAGE_CONTRACT,
                             "entries": [],
                         }
                         for key in tw_corporate_events.HISTORY_PROVIDER_KEYS
@@ -846,8 +958,9 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
                     Settings.model_fields["scheduler_tw_corporate_event_history_refresh_day_of_week"].default):
             self.assertTrue(scheduler._add_taiwan_corporate_event_history_refresh_job(fake_scheduler))
         kwargs = fake_scheduler.add_job.call_args.kwargs
-        self.assertEqual(kwargs["day_of_week"], "mon-fri")
-        self.assertEqual((kwargs["hour"], kwargs["minute"]), (16, 35))
+        clocks=kwargs["trigger"].triggers
+        self.assertTrue(all(str(t.fields[4])=="mon-fri" for t in clocks))
+        self.assertEqual([(str(t.fields[5]),str(t.fields[6])) for t in clocks], [("14","35"),("15","20"),("16","35")])
         self.assertEqual(kwargs["max_instances"], 1)
 
     def test_history_limit_returns_latest_events_after_descending_sort(self) -> None:
@@ -1016,9 +1129,10 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
             fake_scheduler.add_job.call_args.args[0],
             scheduler.refresh_taiwan_corporate_event_history,
         )
-        self.assertEqual(kwargs["day_of_week"], "sun")
-        self.assertEqual(kwargs["hour"], 7)
-        self.assertEqual(kwargs["minute"], 35)
+        configured=kwargs["trigger"].triggers[0]
+        self.assertEqual(str(configured.fields[4]), "sun")
+        self.assertEqual(str(configured.fields[5]), "7")
+        self.assertEqual(str(configured.fields[6]), "35")
         self.assertEqual(kwargs["id"], "taiwan_corporate_event_history_refresh")
 
 

@@ -104,13 +104,14 @@ def test_fetch_interrupt_keeps_completed_execute_and_failed_phase(db, monkeypatc
         with trace.technical_read_phase(session, 'daily_bars'):
             result = session.execute(text('WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL '
                 'SELECT n+1 FROM x WHERE n<100000000) SELECT n FROM x'))
-            clock[0] += 16
+            clock[0] += TW_STOCK_READ_NODES['technical_evidence'].timeout_seconds + 1
             result.fetchall()
     assert execution.run('technical_evidence', reader) is None
     row = execution.runs[0]
     assert row['status'] == 'timeout' and row['sqlite_errorcode'] == 9
     assert row['deadline_interrupt_observed'] is True
-    assert row['phases'] == [{'phase': 'daily_bars', 'status': 'error', 'wall_ms': 16000,
+    assert row['phases'] == [{'phase': 'daily_bars', 'status': 'error',
+                             'wall_ms': (TW_STOCK_READ_NODES['technical_evidence'].timeout_seconds + 1) * 1000,
                              'thread_cpu_ms': row['phases'][0]['thread_cpu_ms']}]
     assert row['sql_execute']['completed_count'] == 1
     assert row['sql_execute']['error_count'] == 0
@@ -176,7 +177,7 @@ def test_public_v4_failure_contains_actual_owner_phase_and_sql_trace(db, depende
     assert row['status'] == 'error' and row['reason_code'] == 'READ_NODE_UNAVAILABLE'
     assert row['sql_execute']['error_count'] == 1
     assert row['sql_execute']['last_failed_execute']['deadline_remaining_ms_at_sql_start'] > 0
-    assert row['timeout_seconds'] == TW_STOCK_READ_NODES['technical_evidence'].timeout_seconds == 15
+    assert row['timeout_seconds'] == TW_STOCK_READ_NODES['technical_evidence'].timeout_seconds
     assert response['evidence']['capability_status']['technical.structure']['decision_usable'] is False
     assert 'PRIVATE' not in json.dumps(response, default=str)
     dependencies.acquire_taiwan_quote_evidence.assert_not_called()

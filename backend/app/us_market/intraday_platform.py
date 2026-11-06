@@ -20,6 +20,8 @@ from app.market_data.gateway import MarketDataGateway
 from app.market_data.integration_contracts import (
     BarCapabilityRequest,
     BarCoverageRequirement,
+    CompletedBarFreshness,
+    CompletedBarSessionWindow,
     DataRequirementV2,
     EvidenceTarget,
     FreshnessBasis,
@@ -49,7 +51,7 @@ from app.us_market.intraday_transaction import USIntradayBarTransaction, USQuote
 from app.us_market.market_data.descriptors import US_INTRADAY_PROVIDER_DESCRIPTORS, US_QUOTE_PROVIDER_DESCRIPTORS
 from app.us_market.market_data_projection import project_resolved_us_bars, project_resolved_us_quote
 from app.us_market.session_policy import us_session_for_timestamp
-from app.us_market.trading_calendar import is_us_trading_day
+from app.us_market.trading_calendar import is_us_trading_day, us_session_close_time, us_post_market_close_time
 from app.us_market.historical_intraday import (
     US_INTRADAY_HISTORY_DAYS,
     completed_intraday_window,
@@ -65,6 +67,23 @@ US_INTRADAY_CACHE_HISTORY_DAYS = US_INTRADAY_HISTORY_DAYS
 US_INTRADAY_ACQUISITION_HISTORY_DAYS = (
     US_BOOTSTRAP_INTRADAY_PROFILE.acquisition_history_days
 )
+
+
+def _completed_minute_freshness(now: datetime) -> CompletedBarFreshness:
+    """Resolve market sessions here; the shared policy only evaluates supplied grids."""
+    day = now.astimezone(US_EASTERN).date()
+    windows = []
+    if is_us_trading_day(day):
+        opening = datetime.combine(day, time(9, 30), US_EASTERN)
+        closing = datetime.combine(day, us_session_close_time(day), US_EASTERN)
+        boundaries = (datetime.combine(day, time(4), US_EASTERN), opening,
+                      closing, closing + timedelta(minutes=1),
+                      datetime.combine(day, us_post_market_close_time(day), US_EASTERN))
+        windows = [CompletedBarSessionWindow(start_at=start, end_at=end)
+                   for start, end in zip(boundaries, boundaries[1:])]
+    return CompletedBarFreshness(provider_keys=("twelve_data",), interval="1m", interval_seconds=60,
+                                 session_windows=tuple(windows))
+
 @dataclass(frozen=True, slots=True)
 class USIntradayPlatformResult:
     identity: USInstrumentIdentity
@@ -383,6 +402,10 @@ class USIntradayMarketPlatform:
                 ),
                 basis=FreshnessBasis.EVENT_TIME,
                 evidence_target=EvidenceTarget.LATEST_AVAILABLE if completed_only else profile.evidence_target,
+                completed_bar=(_completed_minute_freshness(now)
+                               if allow_acquisition and not completed_only
+                               and profile.completed_minute_freshness
+                               and profile.evidence_target is EvidenceTarget.CURRENT else None),
             ),
             quality=QualityRequirement(required_fields=("open_price", "high_price", "low_price", "close_price"), allow_partial=True, require_canonical_lineage=True),
             bounds=RequestBounds(

@@ -23,6 +23,7 @@ from app.market.trading_calendar import is_taiwan_trading_day
 from app.market.tw_bar_contracts import (
     TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION,
     TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+    TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT,
 )
 from app.market.tw_current_market_capabilities import (
     TW_CURRENT_INDEX_CAPABILITY_ID,
@@ -30,6 +31,7 @@ from app.market.tw_current_market_capabilities import (
 )
 from app.market.tw_dataset_lifecycle import evaluate_taiwan_candidate_dataset_health
 from app.market.tw_intraday_capabilities import intraday_source_binding
+from app.market.tw_current_market_repository import read_qualified_index_opening
 from app.market_data.candidate_repository import CandidateRowRejection
 from app.market_data.contracts import (
     AuthorityClass,
@@ -215,7 +217,8 @@ class TaiwanIntradayBarRepository:
             or lineage.raw_result_id is not None
             or lineage.calculation_version
             != TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION
-            or lineage.raw_contract_version != TAIWAN_INDEX_MINUTE_RAW_CONTRACT
+            or lineage.raw_contract_version not in {TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+                TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT}
         ):
             return None
         binding = current_source_binding(
@@ -246,15 +249,23 @@ class TaiwanIntradayBarRepository:
         )
         if any(item is None for item in ordered):
             return None
+        opening_contract = lineage.raw_contract_version == TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT
+        if opening_contract:
+            opening = read_qualified_index_opening(self._db, raw=ordered[0],
+                provider=row.provider, index_id=row.symbol, trade_date=row.bar_time.date())
+            if (opening is None or opening.value != Decimal(str(row.open_price))
+                    or not _as_taipei(row.bar_time) <= opening.lineage.event_at < _as_taipei(row.bar_time) + timedelta(minutes=1)
+                    or opening.lineage.fetched_at > _as_utc(lineage.fetched_at)):
+                return None
         if any(
             item.source_id != source.id
             or item.parser_version != binding.parser_version
             or not item.content_hash
-            for item in ordered
+            for item in (ordered[1:] if opening_contract else ordered)
         ):
             return None
         payload = [
-            {"source_id": source.id, "content_hash": str(item.content_hash)}
+            {"source_id": item.source_id, "content_hash": str(item.content_hash)}
             for item in ordered
         ]
         hashes = tuple(str(item.content_hash) for item in ordered)
@@ -291,7 +302,8 @@ class TaiwanIntradayBarRepository:
                 or lineage.raw_result_id is not None
                 or lineage.calculation_version
                 != TAIWAN_INDEX_MINUTE_MATERIALIZATION_VERSION
-                or lineage.raw_contract_version != TAIWAN_INDEX_MINUTE_RAW_CONTRACT
+                or lineage.raw_contract_version not in {TAIWAN_INDEX_MINUTE_RAW_CONTRACT,
+                    TAIWAN_INDEX_OPENING_MINUTE_RAW_CONTRACT}
             ):
                 continue
             try:

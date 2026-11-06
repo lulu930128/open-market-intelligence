@@ -277,3 +277,106 @@ def test_published_ready_empty_partial_headers_survive_metadata_but_rebuild_on_r
     with sessions() as db:
         assert all(row.corporate_revision == read_price_map_external_revision()
                    for row in db.query(TaiwanPriceMapSnapshot).all())
+
+
+@pytest.mark.parametrize("venue", ["TWSE", "TPEX"])
+@pytest.mark.parametrize("result_kind", ["empty", "same", "duplicate"])
+def test_bounded_history_refresh_preserves_coverage_digest_and_matcher(caches, monkeypatch, venue, result_kind):
+    from types import SimpleNamespace
+    from app.market.price_map_snapshot_repository import snapshot_matches
+    from app.market.stock_price_map_schemas import METHODOLOGY_VERSION
+
+    key = f"{venue.lower()}_ex_dividend_history"
+    entry = {"event_id": "ex:1102", "stock_id": "1102", "market": venue,
+        "event_type": "ex_dividend", "start_date": "2026-10-20", "end_date": "2026-10-20",
+        "cash_dividend": 2}
+    events._write_refresh(updates={key: {"entries": [entry], "coverage_start": date(2022, 1, 1),
+        "coverage_end": date(2026, 10, 30), "coverage_years": list(range(2022, 2027))}},
+        errors={}, attempted_at=EARLIER)
+    before, raw_before = read_price_map_external_revision(), events.taiwan_corporate_event_revision()
+    calendar_before = calendar.exchange_calendar_semantic_revision("tw")
+    row = SimpleNamespace(input_revision=1, parameter_revision="fixture", corporate_revision=before,
+        basis_date=date(2026, 10, 30), methodology_version=METHODOLOGY_VERSION)
+    expected = dict(input_revision=1, parameter_revision="fixture", corporate_revision=before, basis_date=row.basis_date)
+    assert snapshot_matches(row, **expected)
+    result = [] if result_kind == "empty" else [entry] * (2 if result_kind == "duplicate" else 1)
+    fetch = Mock(return_value=result)
+    monkeypatch.setattr(events, f"fetch_{venue.lower()}_ex_dividend_history", fetch)
+    instrument = INSTRUMENT.model_copy(update={"venue": venue})
+    events.refresh_taiwan_price_basis_events(instrument=instrument,
+        start_date=date(2026, 10, 19), end_date=date(2026, 10, 29), cache_path=caches[0])
+    fetch.assert_called_once()
+    after = read_price_map_external_revision()
+    stored = events.read_taiwan_corporate_event_cache()["providers"][key]
+    assert (stored["coverage_start"], stored["coverage_end"], stored["coverage_years"]) == (
+        "2022-01-01", "2026-10-30", list(range(2022, 2027)))
+    assert stored["entries"] == [entry]
+    assert calendar.exchange_calendar_semantic_revision("tw") == calendar_before
+    assert events.taiwan_corporate_event_revision() != raw_before
+    assert after == before
+    assert snapshot_matches(row, **{**expected, "corporate_revision": after})
+
+
+@pytest.mark.parametrize("change", ["event", "coverage"])
+def test_bounded_history_real_changes_still_invalidate(caches, monkeypatch, change):
+    key = "twse_ex_dividend_history"
+    entry = {"event_id": "ex:1102", "stock_id": "1102", "event_type": "ex_dividend",
+        "start_date": "2026-10-20", "end_date": "2026-10-20", "cash_dividend": 2}
+    events._write_refresh(updates={key: {"entries": [entry], "coverage_start": date(2022, 1, 1),
+        "coverage_end": date(2026, 10, 30), "coverage_years": list(range(2022, 2027))}},
+        errors={}, attempted_at=EARLIER)
+    before = read_price_map_external_revision()
+    changed = {**entry, "cash_dividend": 3} if change == "event" else entry
+    monkeypatch.setattr(events, "fetch_twse_ex_dividend_history", Mock(return_value=[changed]))
+    events.refresh_taiwan_price_basis_events(instrument=INSTRUMENT,
+        start_date=date(2026, 10, 19), end_date=date(2026, 10, 31) if change == "coverage" else date(2026, 10, 29))
+    assert read_price_map_external_revision() != before
+
+
+def test_bounded_history_new_event_keeps_actual_receipt_cutoff(caches, monkeypatch):
+    key = "twse_ex_dividend_history"
+    events._write_refresh(updates={key: {"entries": [], "coverage_start": date(2022, 1, 1),
+        "coverage_end": date(2026, 10, 30)}}, errors={}, attempted_at=EARLIER)
+    entry = {"event_id": "ex:1102", "stock_id": "1102", "event_type": "ex_dividend",
+        "start_date": "2026-10-20", "end_date": "2026-10-20", "cash_dividend": 2}
+    monkeypatch.setattr(events, "fetch_twse_ex_dividend_history", Mock(return_value=[entry]))
+    events.refresh_taiwan_price_basis_events(instrument=INSTRUMENT,
+        start_date=date(2026, 10, 19), end_date=date(2026, 10, 29))
+    stored = events.read_taiwan_corporate_event_cache()["providers"][key]
+    received = datetime.fromisoformat(stored["fetched_at"])
+    assert stored["coverage_fetched_at"] == EARLIER.isoformat()
+    assert received > EARLIER
+    hidden = events.read_taiwan_instrument_event_evidence(
+        instrument=INSTRUMENT, available_at=received - timedelta(seconds=1))
+    visible = events.read_taiwan_instrument_event_evidence(instrument=INSTRUMENT, available_at=received)
+    assert not hidden["events"]
+    assert len(visible["events"]) == 1 and visible["events"][0]["lineage"].fetched_at == received
+
+
+def test_bounded_history_refresh_does_not_rebuild_published_ready_partial_empty(caches, sessions, monkeypatch):
+    from app.jobs.taiwan_price_map_snapshot_scheduler import produce_taiwan_price_map_snapshots
+    from test_tw_price_map_screening import seed, payload, NOW as SNAPSHOT_NOW
+    key = "twse_ex_dividend_history"
+    events._write_refresh(updates={key: {"entries": [], "coverage_start": date(2022, 1, 1),
+        "coverage_end": date(2026, 10, 30), "coverage_years": list(range(2022, 2027))}},
+        errors={}, attempted_at=EARLIER)
+    with sessions() as db:
+        seed(db, 3)
+    def build(**kw):
+        symbol = kw["stock_id"]
+        return {**payload(zones=symbol != "2332", stock_id=symbol), "decision_usable": symbol != "2331"}
+    first = produce_taiwan_price_map_snapshots(session_factory=sessions, builder=build, clock=lambda: SNAPSHOT_NOW)
+    assert first["publication_status_counts"] == {"ready": 1, "partial": 1, "empty": 1}
+    fetch = Mock(return_value=[])
+    monkeypatch.setattr(events, "fetch_twse_ex_dividend_history", fetch)
+    events.refresh_taiwan_price_basis_events(instrument=INSTRUMENT,
+        start_date=date(2026, 10, 19), end_date=date(2026, 10, 29))
+    unchanged = produce_taiwan_price_map_snapshots(session_factory=sessions,
+        builder=Mock(side_effect=AssertionError("bounded refresh recompute")), clock=lambda: SNAPSHOT_NOW)
+    assert unchanged["attempted"] == 0
+    assert unchanged["skipped_reason_counts"] == {"current_published": 3}
+    events.refresh_taiwan_price_basis_events(instrument=INSTRUMENT,
+        start_date=date(2026, 10, 30), end_date=date(2026, 10, 31))
+    changed = produce_taiwan_price_map_snapshots(session_factory=sessions, builder=build, clock=lambda: SNAPSHOT_NOW)
+    assert changed["published"] == 3
+    assert fetch.call_count == 2

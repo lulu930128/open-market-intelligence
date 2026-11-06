@@ -90,6 +90,7 @@ _evaluate_technical_evidence_sufficiency = (
 _apply_technical_sufficiency_gate = (
     technical_analysis.apply_technical_sufficiency_gate
 )
+_apply_technical_price_level_gate = technical_analysis.apply_technical_price_level_gate
 _technical_price_levels = technical_analysis._technical_price_levels
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
@@ -2086,6 +2087,9 @@ def read_stock_technical_context(
         latest_daily=latest_daily,
         resolved_current_price=None,
     )
+    technical_levels = _apply_technical_price_level_gate(
+        technical_levels, sufficiency=technical_sufficiency,
+    )
     market_calendar_status = dependencies.build_taiwan_calendar_status()
     technical_evidence: dict[str, Any] = {}
     if dependencies.build_tw_stock_technical_evidence is not None:
@@ -2095,6 +2099,7 @@ def read_stock_technical_context(
                 market=getattr(stock, "market", None),
                 years=10,
                 max_results=200,
+                event_types={"ex_dividend"},
                 now=dependencies.now(),
             )
             technical_evidence = dependencies.build_tw_stock_technical_evidence(
@@ -2300,6 +2305,7 @@ def read_stock_context(
     chart = read("daily", lambda read_db: dependencies.market_service.list_stock_ohlc_chart_data(
         db=read_db, stock_id=normalized_stock_id, timeframe="daily", bars=bars,
         ensure_history=False, include_intraday=False, to_date=requested_trade_date,
+        allow_early_regular=True,
     ), {})
     branch_summary = read("broker_branch", lambda read_db: dependencies.get_broker_branch_trade_summary(
         db=read_db, stock_id=normalized_stock_id, days=max(branch_days, 1), ensure_daily=False,
@@ -2480,7 +2486,8 @@ def read_stock_context(
             missing.append("intraday_bars")
 
     corporate_event_history = read("corporate_history", lambda _db: dependencies.get_taiwan_stock_event_history(
-        normalized_stock_id, market=getattr(stock, "market", None), years=10, max_results=200, now=dependencies.now(),
+        normalized_stock_id, market=getattr(stock, "market", None), years=10, max_results=200,
+        event_types={"ex_dividend"}, now=dependencies.now(),
     ), {})
     technical_evidence = read("technical_evidence", lambda read_db: dependencies.build_tw_stock_technical_evidence(
         db=read_db, stock_id=normalized_stock_id, corporate_event_history=corporate_event_history,
@@ -2526,6 +2533,9 @@ def read_stock_context(
     if "technical_reports" in plan:
         technical_levels = _technical_price_levels(
             technical_reports=technical_reports, latest_daily=latest_daily, resolved_current_price=resolved_current_price,
+        )
+        technical_levels = _apply_technical_price_level_gate(
+            technical_levels, sufficiency=technical_analysis.get("sufficiency") or {},
         )
     intraday_latest_times = [
         item.get("to_time")
@@ -2776,7 +2786,9 @@ def read_stock_context(
     if "daily" in plan:
         status = str(chart.get("freshness_status") or "missing")
         compact_payload["freshness_by_capability"]["daily.ohlcv"] = {
-            "status": status, "is_current": status == "current", "release_status": "released",
+            "status": status, "is_current": status == "current", "release_status": chart.get("release_status") or "released",
+            "official_final": chart.get("official_final"), "research_usable": chart.get("research_usable"),
+            "decision_usable": chart.get("decision_usable"), "limitations": chart.get("limitations") or [],
             "latest": _json_value(chart.get("latest_data_date")), "refresh_recommended": status in {"missing", "stale"},
         }
     compact_payload["freshness_by_capability"] = {

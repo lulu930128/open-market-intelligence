@@ -26,6 +26,7 @@ from app.market_data.integration_contracts import (
     BarCapabilityRequest,
     DataRequirementV2,
     FreshnessBasis,
+    FreshnessRequirement,
     SnapshotCapabilityRequest,
     freshness_timestamp,
 )
@@ -200,6 +201,27 @@ def _lineage_has_future_timestamp(lineage: SourceLineage, *, now: datetime) -> b
     )
 
 
+def completed_bar_is_current(
+    freshness: FreshnessRequirement, *, provider: str,
+    observed_at: datetime | None, now: datetime,
+) -> bool | None:
+    """Evaluate only the latest completed slot; None retains the usual age policy."""
+    policy = freshness.completed_bar
+    if policy is None or provider not in policy.provider_keys:
+        return None
+    if observed_at is None:
+        return False
+    for window in policy.session_windows:
+        if window.start_at <= now < window.end_at:
+            offset = (observed_at - window.start_at).total_seconds()
+            age = (now - observed_at).total_seconds()
+            return (offset >= policy.interval_seconds
+                    and offset % policy.interval_seconds == 0
+                    and observed_at <= window.end_at
+                    and 0 <= age < policy.interval_seconds)
+    return False
+
+
 def evaluate_candidate_quality(
     observation: CanonicalModel,
     *,
@@ -316,13 +338,18 @@ def evaluate_candidate_quality(
             lineage,
             requirement.freshness.basis,
         )
+        completed_current = completed_bar_is_current(
+            requirement.freshness, provider=lineage.provider,
+            observed_at=observed_at, now=evaluation_time,
+        )
         if (
             observed_at is not None
             and requirement.freshness.basis
             is not FreshnessBasis.COMPLETED_SESSION_DATE
             and requirement.realtime_policy is not RealtimePolicy.COMPLETED_SESSION
-            and evaluation_time - observed_at
-            > timedelta(seconds=requirement.freshness.max_age_seconds)
+            and (completed_current is False or (completed_current is None
+                 and evaluation_time - observed_at
+                 > timedelta(seconds=requirement.freshness.max_age_seconds)))
         ):
             if QualityReasonCode.STALE_EVIDENCE not in reasons:
                 reasons.append(QualityReasonCode.STALE_EVIDENCE)
@@ -406,6 +433,7 @@ __all__ = [
     "QualityReasonCode",
     "authority_satisfies",
     "combine_quality_evaluations",
+    "completed_bar_is_current",
     "evaluate_candidate_quality",
     "required_fields_for",
 ]

@@ -13,7 +13,8 @@ from sqlalchemy import inspect, func
 
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository, _TRUSTED_OFFICIAL_RELIABILITY
 from app.db.models import RawFetchResult, SourceRegistry, TaiwanPublishedBreadthSnapshot
-from app.market.taiwan_rules import taiwan_daily_price_release_at
+from app.market.trading_calendar import TAIWAN_SESSION_CLOSE_TIME, is_taiwan_trading_day
+from app.market.taiwan_rules import taiwan_published_breadth_observation_at
 from app.sources.defaults import TWSE_RWD_DAILY_TRADING_SOURCE_NAME, TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
 from app.parsers.twse_published_breadth import PublishedStockBreadth
 from app.market_data.contracts import (
@@ -47,11 +48,13 @@ class TaiwanOfficialBreadthRepository:
         self._allow_universe_fallback = allow_universe_fallback
 
     def _load_published_breadth(self, trade_date: date, *, venue: str = "TWSE") -> OfficialBreadthRead | None:
-        """Reuse a release-qualified receipt committed by official daily acquisition.
+        """Reuse a qualified published aggregate, independently of daily OHLCV.
 
         The stock aggregate is a different scope from the active-stock bar universe.
         No row-level evaluated coverage is manufactured from published totals.
         """
+        if not is_taiwan_trading_day(trade_date):
+            return None
         if not inspect(self._db.connection()).has_table(TaiwanPublishedBreadthSnapshot.__tablename__):
             return None
         source_name = TWSE_RWD_DAILY_TRADING_SOURCE_NAME if venue == "TWSE" else TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
@@ -62,7 +65,12 @@ class TaiwanOfficialBreadthRepository:
         ).filter(
             TaiwanPublishedBreadthSnapshot.venue == venue,
             TaiwanPublishedBreadthSnapshot.trade_date == trade_date,
-            RawFetchResult.fetched_at >= taiwan_daily_price_release_at(trade_date).astimezone(timezone.utc).replace(tzinfo=None),
+            # 13:30 opens observation of this aggregate, not proof of publication.
+            # The persisted, dated and classified official receipt below is proof
+            # of availability. Daily OHLCV retains its separate 15:15 gate.
+            RawFetchResult.fetched_at >= taiwan_published_breadth_observation_at(
+                trade_date,
+            ).astimezone(timezone.utc).replace(tzinfo=None),
             SourceRegistry.source_name == source_name,
             func.lower(SourceRegistry.reliability_level).in_(tuple(_TRUSTED_OFFICIAL_RELIABILITY)),
             RawFetchResult.status_code == 200,
@@ -76,7 +84,7 @@ class TaiwanOfficialBreadthRepository:
             if stored.error_code or not stored.payload_json:
                 raise ValueError(stored.error_code or "TWSE_AGGREGATE_PAYLOAD_MISSING")
             parsed = PublishedStockBreadth.model_validate_json(stored.payload_json)
-            if parsed.trade_date != trade_date or parsed.venue != venue:
+            if parsed.trade_date != trade_date or parsed.venue != venue or parsed.limits.universe_count == 0:
                 raise ValueError("OFFICIAL_AGGREGATE_DATE_OR_VENUE_MISMATCH")
         except (ValueError, TypeError) as exc:
             logger.warning("Official breadth aggregate receipt %s rejected: %s", raw.id, exc)

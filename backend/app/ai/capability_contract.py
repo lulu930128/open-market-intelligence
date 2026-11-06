@@ -9,6 +9,7 @@ from typing import Any
 from app.ai import capability_resolution_registry, public_contract
 from app.ai.projection_temporal import series_point_sort_key, series_point_time
 from app.ai.market_context import taiwan_swing_research
+from app.market.tw_workspace_research import project_technical_input_quality
 
 
 OUTPUT_MODES = {"evidence_only", "decision", "decision_with_evidence"}
@@ -1463,6 +1464,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "requested_bar_count",
             "interval",
             "latest_data_date",
+            "latest_finalized_data_date",
+            "release_status",
+            "trading_scope",
+            "official_final",
             "expected_data_date",
             "point_count",
             "returned_bar_count",
@@ -1530,6 +1535,10 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "requested_bar_count",
             "interval",
             "latest_data_date",
+            "latest_finalized_data_date",
+            "release_status",
+            "trading_scope",
+            "official_final",
             "expected_data_date",
             "point_count",
             "returned_bar_count",
@@ -1652,6 +1661,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "input_quality",
             "lineage",
             "decision_usable",
+            "quality_projection",
             "decision_snapshot",
             "current_period",
             "momentum_confirmation",
@@ -1720,6 +1730,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "input_quality",
             "lineage",
             "decision_usable",
+            "quality_projection",
             "decision_snapshot",
             "current_period",
             "momentum_confirmation",
@@ -1745,7 +1756,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         capability_id="technical.indicators",
         domain="technical",
         slot="technical",
-        scopes=("stock", "us_stock"),
+        scopes=("stock", "us_stock", "tw_index"),
         markets=("TW", "US"),
         paths=(
             "data.resolved_research.technical_indicators",
@@ -1758,6 +1769,11 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "schema_version",
             "status",
             "stock_id",
+            "decision_usable",
+            "quality_projection",
+            "bar_series_fingerprint",
+            "bar_series_revision",
+            "technical_revision",
             "as_of",
             "requested_trade_date",
             "temporal_semantics",
@@ -1790,11 +1806,18 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "schema_version",
             "status",
             "stock_id",
+            "decision_usable",
+            "quality_projection",
+            "bar_series_fingerprint",
+            "bar_series_revision",
+            "technical_revision",
             "as_of",
             "requested_trade_date",
             "temporal_semantics",
             "request_status",
             "price_basis",
+            "currency",
+            "price_unit",
             "methods",
             "timeframes",
             "corporate_action",
@@ -3106,7 +3129,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
         default_limit=10,
         markets=("TW", "US"),
-        market_schema_versions=(("US", "us.market.breadth.v1"),),
+        market_schema_versions=(("US", "us.market.breadth.v2"),),
         market_scopes=(("US", ("market",)),),
     ),
     CapabilitySpec(
@@ -3695,7 +3718,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "not an official full-market sector-index ranking."
         ),
         markets=("TW", "US"),
-        market_schema_versions=(("US", "us.market.sectors.v1"),),
+        market_schema_versions=(("US", "us.market.sectors.v2"),),
         market_scopes=(("US", ("market",)),),
         frequency="intraday_or_daily",
         unit_semantics="percent_counts_and_twd",
@@ -4638,7 +4661,7 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "inferred by the answer model."
         ),
         markets=("TW", "US"),
-        market_schema_versions=(("US", "us.market.hot_groups.v1"),),
+        market_schema_versions=(("US", "us.market.hot_groups.v2"),),
         market_scopes=(("US", ("market",)),),
         parameter_schema={
             "type": "object",
@@ -4686,6 +4709,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "trade_value_estimate",
             "trade_value_estimate_method",
             "current_value_source",
+            "trade_value_freshness",
+            "latest_trade_value_attempt",
             "trade_value_coverage_status",
             "trade_value_authority_status",
             "previous_minute_cumulative_trade_value",
@@ -4726,6 +4751,8 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
             "included_markets",
             "missing_markets",
             "current_value_source",
+            "trade_value_freshness",
+            "latest_trade_value_attempt",
             "previous_minute_cumulative_trade_value",
             "one_minute_trade_value_change",
             "field_status",
@@ -6919,6 +6946,74 @@ def _reconcile_projected_series_counts(
     return value
 
 
+def _project_technical_evidence(value: dict[str, Any], *, fields: tuple[str, ...]) -> dict[str, Any]:
+    """Preserve quality axes; row limits cannot truncate technical evidence reasons.
+
+    TW's dated provenance uses the same exact semantic grouping as workspace
+    research. Numerical snapshots and the full canonical series remain intact.
+    No generic recursive list/string truncation applies to this capability.
+    """
+    mandatory = (
+        "schema_version", "algorithm_version", "status", "as_of", "price_basis",
+        "decision_usable", "quality", "input_quality", "lineage", "warnings",
+        "missing", "limitations", "source_refs", "corporate_action",
+        "corporate_action_coverage_by_timeframe", "freshness", "period_completeness",
+        "bar_series_fingerprint", "bar_series_revision", "technical_revision",
+    )
+    output = {key: value[key] for key in dict.fromkeys((*fields, *mandatory)) if key in value}
+    qualities: dict[int, dict[str, Any]] = {}
+
+    def compact(quality: dict[str, Any]) -> dict[str, Any]:
+        identity = id(quality)
+        if identity not in qualities:
+            qualities[identity] = project_technical_input_quality(
+                quality, details_projection="canonical_technical_series",
+            )
+        return qualities[identity]
+
+    def project_node(node: dict[str, Any]) -> dict[str, Any]:
+        result = dict(node)
+        quality = node.get("input_quality")
+        if isinstance(quality, dict):
+            result["input_quality"] = compact(quality)
+        lineage = node.get("lineage")
+        if isinstance(lineage, dict) and isinstance(lineage.get("limitations"), list):
+            grouped = project_technical_input_quality(
+                {"canonical_limitations": lineage["limitations"]},
+                details_projection="canonical_technical_series",
+            )
+            if "canonical_limitations_summary" in grouped:
+                result["lineage"] = {
+                    **lineage, "limitations": grouped["canonical_limitations"],
+                    "limitations_summary": {
+                        **grouped["canonical_limitations_summary"],
+                        "details_field": "input_quality.canonical_limitations",
+                    },
+                }
+        return result
+
+    # Only Taiwan's canonical day-state shape is summarized. US quality and
+    # future unknown fields stay verbatim and remain subject to the byte budget.
+    output = project_node(output)
+    timeframes = output.get("timeframes")
+    if isinstance(timeframes, dict):
+        output["timeframes"] = {
+            key: project_node(snapshot) if isinstance(snapshot, dict) else snapshot
+            for key, snapshot in timeframes.items()
+        }
+    if any("day_state_summary" in quality or "canonical_limitations_summary" in quality
+           for quality in qualities.values()) or "limitations_summary" in (output.get("lineage") or {}):
+        output["quality_projection"] = {
+            "version": "tw.technical.quality_summary.v1",
+            "semantics_preserved": True,
+            "date_bounds_are_continuous": False,
+            "details_endpoint_template": "/api/market/technical/{instrument_id}/series",
+            "details_field": "input_quality",
+            "details_note": "Read the matching instrument, interval and history range; compare series revision before treating later detail as the same evidence. No automatic detail request is performed.",
+        }
+    return output
+
+
 def project_selected_data(
     *,
     response: dict[str, Any],
@@ -6980,6 +7075,9 @@ def project_selected_data(
             capability_id,
             limit_map.get(aliases.get(capability_id, ""), spec.default_limit),
         )
+        if capability_id in {"technical.indicators", "technical.structure"} and isinstance(raw_value, dict):
+            projected[capability_id] = _project_technical_evidence(raw_value, fields=fields)
+            continue
         if capability_id in {"screening.swing", "screening.swing_discovery", "research.trade_setup", "research.trade_eligibility"}:
             projected[capability_id] = taiwan_swing_research.project_research_payload(
                 capability_id, raw_value, fields=fields, limit=int(raw_limit),
@@ -6998,6 +7096,20 @@ def project_selected_data(
                                              "truncated": available > len(value[key])}
             value["group_projection"] = group_projection
             value["truncated"] = any(item["truncated"] for item in group_projection.values())
+            projected[capability_id] = value
+            continue
+        if capability_id in {"events.history", "events.upcoming"} and isinstance(raw_value, dict):
+            # Event owners already define page order (history desc/upcoming asc).
+            # Keep that page's head; chronological OHLC series keep their tail.
+            value = dict(raw_value)
+            rows = raw_value.get("events") or []
+            value["events"] = rows[:int(raw_limit)]
+            value = _project_fields(value, fields=fields, limit=int(raw_limit))
+            returned = len(value.get("events") or [])
+            total = raw_value.get("total_count", len(rows))
+            value.update(returned_count=returned, result_count=returned, total_count=total,
+                         offset=raw_value.get("offset", 0), sort_order=raw_value.get("sort_order"),
+                         truncated=raw_value.get("truncated") is True or total > returned)
             projected[capability_id] = value
             continue
         if capability_id == "news.company_documents":

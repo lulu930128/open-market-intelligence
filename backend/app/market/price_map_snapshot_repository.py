@@ -20,7 +20,7 @@ def read_price_map_external_revision() -> str:
     from app.market.tw_bar_aggregation import TAIWAN_BAR_AGGREGATION_VERSION
     from app.market.tw_technical_service import INPUT_QUALITY_VERSION
     from app.market.trading_calendar import TAIWAN_MARKET_HOLIDAYS, TAIWAN_EMERGENCY_MARKET_CLOSURES
-    return sha256(json.dumps({"corporate": taiwan_corporate_event_semantic_revision(),
+    return sha256(json.dumps({"corporate": taiwan_corporate_event_semantic_revision(event_types={"ex_dividend"}),
         "algorithms": [INDICATOR_ALGORITHM_VERSION, ADVANCED_ALGORITHM_VERSION, TAIWAN_BAR_AGGREGATION_VERSION],
         "input_quality": INPUT_QUALITY_VERSION,
         "calendar_builtin": {

@@ -63,7 +63,8 @@ class USDistributionGroup(BaseModel):
 
 class USSectorDistributionRead(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    schema_version: Literal["us.market.sector_distribution.v1"] = "us.market.sector_distribution.v1"
+    # v1 checkpoints remain readable until their next owner materialization.
+    schema_version: Literal["us.market.sector_distribution.v1", "us.market.sector_distribution.v2"] = "us.market.sector_distribution.v2"
     market: Literal["US"] = "US"
     status: Literal["partial", "unavailable"]
     as_of: str | None
@@ -79,7 +80,7 @@ class USSectorDistributionRead(BaseModel):
     freshness_status: Literal["current", "stale", "missing"]
     coverage: dict
     classification_coverage: dict
-    counts: USDistributionCounts
+    counts: USDistributionCounts | None
     avg_return_pct: float | None = None
     median_return_pct: float | None = None
     sectors: list[USDistributionGroup]
@@ -282,7 +283,8 @@ def read_us_sector_distribution(db: Session, *, now: datetime | None = None) -> 
                          MarketDatasetCoverageCheckpoint.checked_at.desc()).first())
     payload = json.loads(row.detail_json).get("us_sector_distribution") if row else None
     if payload is not None:
-        snapshot = USSectorDistributionRead.model_validate(payload)
+        snapshot = USSectorDistributionRead.model_validate(payload).model_copy(
+            update={"schema_version": "us.market.sector_distribution.v2"})
         if datetime.fromisoformat(snapshot.evaluated_at) <= now:
             reasons = []
             if snapshot.provenance.get("daily_validation_policy") != "historical_vendor_receipt.v1":
@@ -310,6 +312,6 @@ def read_us_sector_distribution(db: Session, *, now: datetime | None = None) -> 
         classification_coverage={"mapped_count": None, "sector_count": None, "industry_count": None,
                   "unknown_count": None, "coverage_ratio": None, "as_of": None,
                   "effective_date_status": "unknown"},
-        counts=USDistributionCounts(), sectors=[], industries=[], hot_groups=[],
+        counts=None, sectors=[], industries=[], hot_groups=[],
         provenance={"read_policy": "cache_only", "external_calls": 0},
         limitations=["US_EOD_SNAPSHOT_NOT_MATERIALIZED", "UNIVERSE_COUNTS_UNKNOWN", "EOD_NOT_INTRADAY"])

@@ -146,6 +146,16 @@ def add_chip_rows(db: Session, stock_id: str = "2330") -> None:
 
 
 class TechnicalReportTests(unittest.TestCase):
+    def test_period_report_does_not_calculate_unused_daily_indicator(self) -> None:
+        from app.market.technical_report import _build_indicator_report
+        indicator = {"time": date(2026, 3, 20), "close": 120.0, "volume": 1000}
+        with patch("app.market.technical_report._daily_indicator", side_effect=AssertionError("unused daily calculation")):
+            for timeframe in ("weekly", "monthly"):
+                report = _build_indicator_report(db=self.db, stock_id="2330", timeframe=timeframe, indicator=indicator)
+                row = next(row for row in report["rows"] if row["key"] == "institutional_flow")
+                self.assertEqual(row["value"], 2_000_000)
+                self.assertEqual(report["data"]["indicator"], indicator)
+
     def test_post_close_session_separates_previous_from_latest_completed_day(
         self,
     ) -> None:
@@ -870,7 +880,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIn("weekly", context["data"]["technical_reports"])
         self.assertIn("monthly", context["data"]["technical_reports"])
 
-    def test_stock_context_exposes_technical_price_levels(self) -> None:
+    def test_stock_context_with_insufficient_swing_history_withholds_price_levels(self) -> None:
         context = ai_tools.read_stock_context(
             db=self.db,
             stock_id="2330",
@@ -882,13 +892,10 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(levels["kind"], "technical_price_levels")
         self.assertEqual(levels["basis_timeframe"], "daily")
         self.assertIsNotNone(levels["latest_price"])
-        self.assertIn("preferred_zone", levels["entry"])
-        self.assertIsNotNone(levels["entry"]["preferred_zone"]["low"])
-        self.assertIsNotNone(levels["entry"]["preferred_zone"]["high"])
-        self.assertIn("do_not_chase_above", levels["entry"])
-        self.assertIn("short_stop", levels["risk"])
-        self.assertIn("short_term_stop", levels["risk"])
-        self.assertIn("technical_invalidation", levels["risk"])
+        self.assertFalse(context["data"]["analysis"]["sufficiency"]["decision_usable"])
+        self.assertEqual(levels["entry"], {})
+        self.assertEqual(levels["risk"], {})
+        self.assertFalse(levels["validation"]["decision_ready"])
 
     def test_stock_context_exposes_refined_score_model(self) -> None:
         context = ai_tools.read_stock_context(
@@ -1029,11 +1036,13 @@ class TechnicalReportTests(unittest.TestCase):
                         unit=SimpleNamespace(value="shares"),
                     ),
                     turnover_value=None,
+                    turnover_currency=None,
                     trade_count=None,
                     finalization=SimpleNamespace(value="final"),
                     lineage=SimpleNamespace(
                         provider="test_provider",
                         source=f"test_{interval}",
+                        authority=SimpleNamespace(value="vendor"),
                     ),
                     volume_status="available",
                 ),
@@ -1049,11 +1058,13 @@ class TechnicalReportTests(unittest.TestCase):
                         unit=SimpleNamespace(value="shares"),
                     ),
                     turnover_value=None,
+                    turnover_currency=None,
                     trade_count=None,
                     finalization=SimpleNamespace(value="final"),
                     lineage=SimpleNamespace(
                         provider="test_provider",
                         source=f"test_{interval}",
+                        authority=SimpleNamespace(value="vendor"),
                     ),
                     volume_status="available",
                 ),
@@ -1072,6 +1083,10 @@ class TechnicalReportTests(unittest.TestCase):
                         start_at=bar.start_at,
                         source_interval="1m",
                         technical_eligible=True,
+                        quality_status=None,
+                        source_point_count=None,
+                        gap_reason=None,
+                        missing_evidence_count=None,
                     )
                     for bar in bars
                 ),
@@ -1196,7 +1211,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["quote"]["session_phase"], "regular")
         self.assertTrue(compact["intraday_bars"]["enabled"])
         self.assertEqual(set(compact["intraday_bars"]["series"].keys()), {"1m"})
-        self.assertEqual(compact["intraday_bars"]["series"]["1m"]["returned_point_count"], 2)
+        self.assertEqual(compact["intraday_bars"]["series"]["1m"]["returned_point_count"], 2,
+                         msg=str(context.get("warnings")))
         self.assertEqual(compact["intraday_bars"]["series"]["1m"]["latest"]["close"], 181.5)
         self.assertEqual(compact["intraday_bars"]["session_scope"], "current_session")
         self.assertEqual(
@@ -1272,11 +1288,13 @@ class TechnicalReportTests(unittest.TestCase):
                         close_price=point.get("close", point.get("price")),
                         volume=None,
                         turnover_value=None,
+                        turnover_currency=None,
                         trade_count=None,
                         finalization=SimpleNamespace(value="final"),
                         lineage=SimpleNamespace(
                             provider="test_provider",
                             source="tw_bar_service",
+                            authority=SimpleNamespace(value="vendor"),
                         ),
                         volume_status="not_applicable",
                     )
@@ -1286,11 +1304,16 @@ class TechnicalReportTests(unittest.TestCase):
                         start_at=start_at,
                         source_interval="1m" if interval == "1m" else "1d",
                         technical_eligible=True,
+                        quality_status=None,
+                        source_point_count=None,
+                        gap_reason=None,
+                        missing_evidence_count=None,
                     )
                 )
             revision = (interval.replace("m", "1") + "e" * 64)[:64]
             bar_series = SimpleNamespace(
                 market_phase="regular",
+                current_session_coverage=None,
                 instrument=SimpleNamespace(
                     symbol=instrument_id,
                     model_dump=lambda **_kwargs: {
@@ -1434,7 +1457,7 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertTrue(compact["daily_chart"]["points"])
         self.assertEqual(compact["intraday_bars"]["bar_limit"], 1)
         series = compact["intraday_bars"]["series"]["1m"]
-        self.assertEqual(series["point_count"], 12)
+        self.assertEqual(series["point_count"], 12, msg=str(context.get("warnings")))
         self.assertEqual(series["returned_point_count"], 1)
         self.assertEqual(len(series["points"]), 1)
         self.assertEqual(series["latest"]["price"], 18111.0)

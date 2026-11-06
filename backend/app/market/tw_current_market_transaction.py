@@ -104,11 +104,23 @@ class TaiwanCurrentMarketTransaction:
         )
         self._db.add(raw)
         self._db.flush()
+        # The flush has preserved any caller work in this same transaction.
+        # Refresh only the health clocks before comparing a potentially stale
+        # identity-map SourceRegistry; do not expire/rollback the caller unit.
+        self._db.refresh(source, attribute_names=["last_success_at", "last_error_at", "last_error_message"])
+        success_at = source.last_success_at
+        error_at = source.last_error_at
+        if success_at is not None and success_at.tzinfo is None:
+            success_at = success_at.replace(tzinfo=timezone.utc)
+        if error_at is not None and error_at.tzinfo is None:
+            error_at = error_at.replace(tzinfo=timezone.utc)
         if receipt.error_message is None:
-            source.last_success_at = fetched_at
-            source.last_error_at = None
-            source.last_error_message = None
-        else:
+            if success_at is None or fetched_at > success_at:
+                source.last_success_at = fetched_at
+            if error_at is None or fetched_at > error_at:
+                source.last_error_at = None
+                source.last_error_message = None
+        elif (success_at is None or fetched_at >= success_at) and (error_at is None or fetched_at >= error_at):
             source.last_error_at = fetched_at
             source.last_error_message = receipt.error_message
         return raw
@@ -158,8 +170,15 @@ class TaiwanCurrentMarketTransaction:
             .filter(TaiwanCurrentIndexSnapshot.source == receipt.source)
             .filter(TaiwanCurrentIndexSnapshot.index_id == observation.index_id)
             .filter(TaiwanCurrentIndexSnapshot.event_at == event_at)
+            .populate_existing()
             .first()
         )
+        if existing is not None:
+            stored_fetch = existing.fetched_at
+            if stored_fetch.tzinfo is None:
+                stored_fetch = stored_fetch.replace(tzinfo=timezone.utc)
+            if stored_fetch > receipt.fetched_at:
+                return True
         values = {
             "source_id": source.id,
             "raw_result_id": raw.id,
@@ -232,6 +251,7 @@ class TaiwanCurrentMarketTransaction:
             .filter(TaiwanCurrentBreadthSnapshot.source == receipt.source)
             .filter(TaiwanCurrentBreadthSnapshot.venue == observation.venue)
             .filter(TaiwanCurrentBreadthSnapshot.event_at == event_at)
+            .populate_existing()
             .first()
         )
         if existing is not None:
@@ -349,6 +369,13 @@ class TaiwanCurrentMarketTransaction:
         raw_ids: list[int] = []
         written = unchanged = 0
         try:
+            # Acquisition is complete. Pin fresh precedence reads by obtaining
+            # SQLite write admission inside this owner, never in a read path.
+            # Borrowed physical transactions keep their existing unit; a stale
+            # read snapshot fails/rolls back normally and is never replayed here.
+            connection = self._db.connection()
+            if connection.dialect.name == "sqlite" and not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
                 if key in stored:

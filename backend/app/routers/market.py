@@ -63,6 +63,7 @@ from app.market.tw_realtime_stream_platform import (
     read_taiwan_realtime_market_stream,
 )
 from app.market_data.policies import RealtimePolicy
+from app.market_data.contracts import AuctionType
 from app.market.market_chips import (
     MarketChipFetchError,
     get_latest_market_chip_daily,
@@ -1097,6 +1098,7 @@ def get_stock_ohlc_chart_data(
     bars: int = Query(default=90, ge=1, le=5000),
     ensure_history: bool = Query(default=False, deprecated=True),
     include_intraday: bool = False,
+    allow_early_regular: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = Query(default=0.08, ge=0, le=2),
     db: Session = Depends(get_db),
@@ -1114,6 +1116,7 @@ def get_stock_ohlc_chart_data(
             bars=bars,
             ensure_history=False,
             include_intraday=include_intraday,
+            allow_early_regular=allow_early_regular,
             to_date=to_date,
             sleep_seconds=sleep_seconds,
         )
@@ -1193,13 +1196,14 @@ def get_stock_auction_history(
     as_of: datetime | None = None,
     max_candidates: int = Query(default=2, ge=1, le=8),
     db: Session = Depends(get_db),
+    auction_type: AuctionType = AuctionType.CLOSING,
 ):
     from app.market.taiwan_realtime_platform import read_taiwan_auction_history
 
     try:
         return read_taiwan_auction_history(
             db, stock_id=stock_id, trade_date=trade_date,
-            as_of=as_of, max_candidates=max_candidates,
+            as_of=as_of, max_candidates=max_candidates, auction_type=auction_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1081,11 +1081,11 @@ def test_tw_job_remaining_runtime_controls_next_venue(db, monkeypatch, duration,
     result = reconcile_eod_coverage(db, market="TW", expected_trade_date=EXPECTED, max_runtime_seconds=10,
         taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh)
     assert [item["timeout_seconds"] for item in received] == expected_timeouts
-    assert [item["max_external_calls"] for item in received] == [2, 1][:len(expected_timeouts)]
+    assert [item["max_external_calls"] for item in received] == [1, 1][:len(expected_timeouts)]
     assert result["external_call_budget_used"] == len(expected_timeouts) and not result["postcondition_met"]
 
 
-def test_tw_call_budget_cursor_prevents_starving_other_venue(db, monkeypatch):
+def test_tw_call_budget_reserves_each_venue_before_fallback_and_rotates(db, monkeypatch):
     db.add_all([StockMaster(stock_id="2330", market="TWSE", instrument_type="stock"),
                 StockMaster(stock_id="6488", market="TPEX", instrument_type="stock")])
     db.commit()
@@ -1093,7 +1093,8 @@ def test_tw_call_budget_cursor_prevents_starving_other_venue(db, monkeypatch):
     venues = []
     def refresh(**kwargs):
         venues.append(kwargs["venue"])
-        return {"external_call_count": 2, "fetch_status": "error", "parse_status": "error"}
+        assert kwargs["max_external_calls"] == 1
+        return {"external_call_count": 1, "fetch_status": "error", "parse_status": "error"}
     monkeypatch.setattr("app.market_data.eod_coverage.utc_now", lambda: now[0])
     monkeypatch.setattr("app.market_data.eod_coverage.taiwan_bulk_eod_refresh_window", lambda **_: (True, None, "test"))
     for _ in range(2):
@@ -1101,7 +1102,7 @@ def test_tw_call_budget_cursor_prevents_starving_other_venue(db, monkeypatch):
             taiwan_daily_qualifier=qualify_taiwan_eod_universe, taiwan_venue_refresher=refresh, error_backoff_seconds=60,
             priority_symbols=lambda: ("2330",))
         assert result["external_call_budget_used"] == 2
-        assert result["attempted_count"] == 1
+        assert result["attempted_count"] == 2
         assert not result["postcondition_met"]
         now[0] += timedelta(seconds=61)
-    assert venues == ["TWSE", "TPEX"]
+    assert venues == ["TWSE", "TPEX", "TWSE", "TPEX"]

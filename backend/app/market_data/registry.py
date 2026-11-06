@@ -564,9 +564,11 @@ DATASET_REGISTRY = DatasetRegistry(
             refreshable=True,
             refresh_operation="tw.reconcile_full_market_eod",
             refresh_bounds=RefreshBounds(
-                max_calls=2,
+                max_calls=6,
                 timeout_seconds=120,
-                max_symbols=2,
+                # TW's legacy max_symbols request bounds resource-call slots,
+                # not the two venues or the number of collected instruments.
+                max_symbols=6,
                 max_range_days=1,
             ),
             postcondition="All active TWSE/TPEx ordinary stocks are classified current, partial, stale, or missing for the expected completed session.",
@@ -614,7 +616,7 @@ DATASET_REGISTRY = DatasetRegistry(
             refreshable=True,
             refresh_operation="tw.refresh_official_market_index",
             refresh_bounds=RefreshBounds(
-                max_calls=1,
+                max_calls=2,
                 timeout_seconds=30,
                 max_symbols=1,
                 max_range_days=1,
@@ -643,9 +645,9 @@ DATASET_REGISTRY = DatasetRegistry(
             refreshable=True,
             refresh_operation="tw.reconcile_full_market_eod",
             refresh_bounds=RefreshBounds(
-                max_calls=2,
+                max_calls=6,
                 timeout_seconds=120,
-                max_symbols=2,
+                max_symbols=6,
                 max_range_days=1,
             ),
             postcondition=(

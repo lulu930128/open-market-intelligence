@@ -777,6 +777,15 @@ class MarketTradeValueObservation(CanonicalModel):
     lineage: SourceLineage
 
 
+class MarketIndexOpeningObservation(CanonicalModel):
+    """Explicit session opening value; never inferred from the first snapshot."""
+    market: Market
+    index_id: str
+    trade_date: date
+    value: Decimal = Field(gt=0)
+    lineage: SourceLineage
+
+
 class MarketIndexObservation(CanonicalModel):
     contract_version: str = "omi.market.index_observation.v1"
     market: Market

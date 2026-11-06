@@ -54,6 +54,7 @@ def _descriptor(
     venue_scope: tuple[str, ...] = ("TWSE", "TPEX"),
     max_external_calls: int = 1,
     max_subscriptions: int = 0,
+    max_timeout_seconds: int = 20,
 ) -> ProviderCapabilityDescriptorV2:
     return ProviderCapabilityDescriptorV2(
         provider_key=provider,
@@ -70,7 +71,7 @@ def _descriptor(
         priority=priority,
         can_produce_live=live,
         can_produce_final=False,
-        max_timeout_seconds=20,
+        max_timeout_seconds=max_timeout_seconds,
         max_external_calls_per_attempt=max_external_calls,
         max_subscriptions_per_attempt=max_subscriptions,
         max_symbols_per_call=1,
@@ -165,6 +166,9 @@ TWSE_MIS_CURRENT_BREADTH_DESCRIPTOR = _descriptor(
     live=True,
     sessions=_LIVE_SESSIONS,
     max_external_calls=20,
+    # A sequential full-universe scan must fit the existing 40s requirement,
+    # rather than inherit the single-index request's 20s route ceiling.
+    max_timeout_seconds=40,
     limitations=("PUBLIC_BEST_EFFORT_NO_SLA", "COVERAGE_MAY_BE_PARTIAL"),
 )
 

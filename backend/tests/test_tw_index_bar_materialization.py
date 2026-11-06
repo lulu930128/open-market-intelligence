@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
+import pytest
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
@@ -14,6 +16,7 @@ from app.db.models import (
     SourceRegistry,
     TaiwanCurrentIndexSnapshot,
 )
+from app.db.session import SessionLocal
 from app.market.trading_calendar import TAIWAN_TZ
 from app.market.tw_bar_materialization_transaction import (
     TaiwanBarMaterializationTransaction,
@@ -30,10 +33,171 @@ from app.market.tw_current_market_repository import TaiwanCurrentMarketRepositor
 TRADE_DATE = date(2026, 9, 1)
 
 
+@pytest.mark.parametrize("legacy_source", [False, True])
+def test_materialization_promotes_existing_provider_key_and_preserves_lineage(legacy_source):
+    db, engine = _db()
+    try:
+        _event(db, provider="twse_mis", source_name="twse_mis_index_snapshot",
+            event_at=datetime(2026, 9, 1, 9, 0, 20, tzinfo=TAIWAN_TZ), close=45000)
+        db.commit()
+        candidate = materialize_index_minute_candidates(db, index_id="TAIEX", trade_date=TRADE_DATE,
+            as_of=datetime(2026, 9, 1, 9, 2, tzinfo=TAIWAN_TZ)).candidates[0]
+        # Legacy writer persisted the same provider/bar without canonical identity.
+        row = MarketIntradayBar(provider="twse_mis", stock_id="TAIEX", interval="1m",
+            bar_time=candidate.observation.start_at, source="twse_mis_index_snapshot", close_price=1)
+        if legacy_source:
+            source = SourceRegistry(source_name="legacy-index-source", source_type="test", category="market_data")
+            db.add(source)
+            db.flush()
+            row.source_id, row.canonical_market, row.venue, row.instrument_type = source.id, "TW", "TWSE", "index"
+            db.add(RawFetchResult(source_id=source.id, raw_text="legacy evidence", content_hash="legacy"))
+        db.add(row)
+        db.commit()
+        original_id = row.id
+        original_raw_count = db.query(RawFetchResult).count()
+        owner = TaiwanBarMaterializationTransaction(db)
+        owner.persist_materialized_bars((candidate, candidate))
+        assert db.query(MarketIntradayBar).count() == 1
+        row = db.query(MarketIntradayBar).one()
+        assert row.id == original_id and row.close_price == 45000
+        assert row.source_id == candidate.source_id and row.instrument_type == "index"
+        lineage = db.query(MarketIntradayBarLineage).one()
+        assert lineage.bar_id == original_id and lineage.source_id == candidate.source_id
+        assert json.loads(lineage.component_raw_result_ids_json) == list(candidate.component_raw_result_ids)
+        assert owner.persist_materialized_bars((candidate,)).committed
+        assert db.query(MarketIntradayBar).one().id == original_id
+        assert db.query(RawFetchResult).count() == original_raw_count
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_materialization_rolls_back_promoted_bar_if_later_candidate_invalid():
+    db, engine = _db()
+    try:
+        _event(db, provider="twse_mis", source_name="twse_mis_index_snapshot",
+            event_at=datetime(2026, 9, 1, 9, 0, 20, tzinfo=TAIWAN_TZ), close=45000)
+        db.commit()
+        candidate = materialize_index_minute_candidates(db, index_id="TAIEX", trade_date=TRADE_DATE,
+            as_of=datetime(2026, 9, 1, 9, 2, tzinfo=TAIWAN_TZ)).candidates[0]
+        legacy = MarketIntradayBar(provider="twse_mis", stock_id="TAIEX", interval="1m",
+            bar_time=candidate.observation.start_at, source="twse_mis_index_snapshot", close_price=1)
+        db.add(legacy)
+        db.commit()
+        invalid = replace(candidate, component_content_hashes=("mismatched",))
+        with pytest.raises(ValueError, match="digest mismatch"):
+            TaiwanBarMaterializationTransaction(db).persist_materialized_bars((candidate, invalid))
+        row = db.query(MarketIntradayBar).one()
+        assert row.close_price == 1 and row.source_id is None
+        assert db.query(MarketIntradayBarLineage).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def _db() -> tuple[Session, object]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
-    return Session(engine), engine
+    # Use production Session options, while binding only the isolated engine.
+    return SessionLocal(bind=engine), engine
+
+
+@pytest.mark.parametrize("existing_bar", [False, True])
+@pytest.mark.parametrize("flush_next_bar", [False, True])
+def test_same_provider_sources_reuse_pending_lineage(existing_bar, flush_next_bar):
+    db, engine = _db()
+    try:
+        assert db.autoflush is False
+        for source, close in (("fugle_http_index_quote", 45000), ("fugle_indices_stream", 45002)):
+            _event(db, provider="fugle_marketdata", source_name=source,
+                event_at=datetime(2026, 9, 1, 9, 0, 20, tzinfo=TAIWAN_TZ), close=close)
+        if flush_next_bar:
+            _event(db, provider="fugle_marketdata", source_name="fugle_indices_stream",
+                event_at=datetime(2026, 9, 1, 9, 1, 20, tzinfo=TAIWAN_TZ), close=45003)
+        db.commit()
+        candidates = materialize_index_minute_candidates(db, index_id="TAIEX", trade_date=TRADE_DATE,
+            as_of=datetime(2026, 9, 1, 9, 2, tzinfo=TAIWAN_TZ)).candidates
+        assert [c.observation.lineage.source for c in candidates[:2]] == [
+            "fugle_http_index_quote", "fugle_indices_stream"]
+        if existing_bar:
+            first = candidates[0]
+            db.add(MarketIntradayBar(provider="fugle_marketdata", stock_id="TAIEX", interval="1m",
+                bar_time=first.observation.start_at, source=first.observation.lineage.source,
+                source_id=first.source_id, canonical_market="TW", venue="TWSE", instrument_type="index"))
+            db.commit()
+        raw_count = db.query(RawFetchResult).count()
+        owner = TaiwanBarMaterializationTransaction(db)
+        assert owner.persist_materialized_bars(candidates).committed
+        assert db.query(MarketIntradayBar).count() == 1 + int(flush_next_bar)
+        assert db.query(MarketIntradayBarLineage).count() == 1 + int(flush_next_bar)
+        for candidate in candidates[1:]:
+            bar = db.query(MarketIntradayBar).filter_by(bar_time=candidate.observation.start_at).one()
+            lineage = db.query(MarketIntradayBarLineage).filter_by(bar_id=bar.id).one()
+            assert bar.source_id == lineage.source_id == candidate.source_id
+            assert bar.source == lineage.source == "fugle_indices_stream"
+            assert bar.close_price == float(candidate.observation.close_price)
+            assert json.loads(lineage.component_raw_result_ids_json) == list(candidate.component_raw_result_ids)
+            assert lineage.finalization == candidate.observation.finalization.value
+        assert owner.persist_materialized_bars(candidates).committed
+        assert db.query(MarketIntradayBarLineage).count() == 1 + int(flush_next_bar)
+        assert db.query(RawFetchResult).count() == raw_count
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("existing_bar", [False, True])
+def test_duplicate_revisions_finalize_and_rollback_as_one_batch(existing_bar):
+    db, engine = _db()
+    try:
+        _event(db, provider="fugle_marketdata", source_name="fugle_indices_stream",
+            event_at=datetime(2026, 9, 1, 9, 0, 20, tzinfo=TAIWAN_TZ), close=45000)
+        db.commit()
+        provisional = materialize_index_minute_candidates(db, index_id="TAIEX", trade_date=TRADE_DATE,
+            as_of=datetime(2026, 9, 1, 9, 0, 30, tzinfo=TAIWAN_TZ)).candidates[0]
+        owner = TaiwanBarMaterializationTransaction(db)
+        if existing_bar:
+            owner.persist_materialized_bars((provisional,))
+        _event(db, provider="fugle_marketdata", source_name="fugle_indices_stream",
+            event_at=datetime(2026, 9, 1, 9, 0, 45, tzinfo=TAIWAN_TZ), close=45005)
+        db.commit()
+        final = materialize_index_minute_candidates(db, index_id="TAIEX", trade_date=TRADE_DATE,
+            as_of=datetime(2026, 9, 1, 9, 2, tzinfo=TAIWAN_TZ)).candidates[0]
+        assert provisional.observation.finalization.value == "provisional"
+        assert final.observation.finalization.value == "final"
+        assert len(final.component_raw_result_ids) == 2
+        # A later new minute flushes pending writes before the invalid candidate.
+        next_bar = replace(final, observation=final.observation.model_copy(update={
+            "start_at": datetime(2026, 9, 1, 9, 1, tzinfo=TAIWAN_TZ),
+            "end_at": datetime(2026, 9, 1, 9, 2, tzinfo=TAIWAN_TZ)}))
+        invalid = replace(final, component_content_hashes=("mismatched",))
+        with pytest.raises(ValueError, match="digest mismatch"):
+            owner.persist_materialized_bars((provisional, final, final, next_bar, invalid))
+        assert db.query(MarketIntradayBar).count() == int(existing_bar)
+        assert db.query(MarketIntradayBarLineage).count() == int(existing_bar)
+        if existing_bar:
+            assert db.query(MarketIntradayBar).one().close_price == 45000
+            lineage = db.query(MarketIntradayBarLineage).one()
+            assert lineage.finalization == "provisional"
+            assert json.loads(lineage.component_raw_result_ids_json) == list(provisional.component_raw_result_ids)
+        assert owner.persist_materialized_bars((provisional, final, final)).committed
+        bar = db.query(MarketIntradayBar).one()
+        lineage = db.query(MarketIntradayBarLineage).one()
+        assert bar.open_price == bar.low_price == 45000
+        assert bar.high_price == bar.close_price == 45005
+        assert lineage.bar_id == bar.id and lineage.raw_result_id is None
+        assert lineage.finalization == "final"
+        assert json.loads(lineage.component_raw_result_ids_json) == list(final.component_raw_result_ids)
+        original_ids = bar.id, lineage.id
+        assert owner.persist_materialized_bars((final, final)).committed
+        assert (db.query(MarketIntradayBar).one().id, db.query(MarketIntradayBarLineage).one().id) == original_ids
+        assert db.query(MarketIntradayBar).one().close_price == 45005
+        assert db.query(MarketIntradayBarLineage).one().finalization == "final"
+        assert json.loads(db.query(MarketIntradayBarLineage).one().component_raw_result_ids_json) == list(final.component_raw_result_ids)
+        assert db.query(RawFetchResult).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def _event(

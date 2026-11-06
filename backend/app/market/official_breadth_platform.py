@@ -6,8 +6,9 @@ from datetime import date, datetime
 from sqlalchemy.orm import Session
 
 from app.market.official_breadth_repository import TaiwanOfficialBreadthRepository
-from app.market.taiwan_rules import expected_daily_price_date
-from app.market.trading_calendar import TAIWAN_TZ
+from app.market.trading_calendar import (
+    TAIWAN_TZ, TAIWAN_SESSION_CLOSE_TIME, latest_released_trading_day,
+)
 from app.market_data.contracts import EvidenceFreshness, Market, MarketSession
 from app.market_data.gateway import MarketBreadthCandidateBatch, MarketDataGateway
 from app.market_data.integration_contracts import (
@@ -138,8 +139,8 @@ def read_taiwan_official_breadth(
     allow_universe_fallback: bool = True,
 ) -> MarketDataResultV1:
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    effective_trade_date = trade_date or expected_daily_price_date(
-        now=effective_requested_at
+    effective_trade_date = trade_date or latest_released_trading_day(
+        release_time=TAIWAN_SESSION_CLOSE_TIME, now=effective_requested_at,
     )
     if effective_trade_date is None:
         raise ValueError("latest completed Taiwan trade date is unavailable")
@@ -171,6 +172,9 @@ def project_taiwan_official_breadth(result: MarketDataResultV1) -> dict:
         "status": observation.state.value, "market": observation.venue,
         "scope": observation.scope, "trade_date": observation.trade_date,
         "as_of": observation.lineage.event_at, "source": observation.lineage.source,
+        "snapshot_as_of": observation.lineage.event_at,
+        "observation_received_at": observation.lineage.received_at,
+        "universe_source": observation.universe_source,
         "provider": observation.lineage.provider, "market_session": "closed",
         "raw_result_id": observation.lineage.raw_receipt_id,
         "price_semantics": observation.price_semantics,
@@ -189,10 +193,14 @@ def project_taiwan_official_breadth(result: MarketDataResultV1) -> dict:
         "trade_value_semantics": observation.trade_value_semantics,
         "official_flag": observation.official and observation.trade_value_is_estimate is False,
         "is_provisional": observation.provisional, "official": observation.official,
+        "provisional": observation.provisional,
+        "finalization": "official_final" if observation.official and not observation.provisional else "provisional",
+        "session_semantics": "latest_completed_session",
         "decision_usable": result.resolved.health.research_usable,
         "lineage": observation.lineage.model_dump(mode="json"),
         "resolved_health": result.resolved.health.model_dump(mode="json"),
         "limitations": [*result.limitations, *([] if observation.published_limits else ["EXACT_EXCHANGE_LIMIT_TOTALS_UNAVAILABLE"])],
+        "warnings": list(result.limitations),
     }
     return {**payload, **project_breadth_coverage(payload)}
 

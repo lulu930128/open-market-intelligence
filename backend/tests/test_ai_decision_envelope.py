@@ -136,6 +136,44 @@ def _v2_response(
 
 
 class AiDecisionEnvelopeTests(unittest.TestCase):
+    def test_read_node_failures_survive_shared_v4_projection_without_provider_attribution(self) -> None:
+        for market, target_type, symbol in (("TW", "tw_stock", "2330"), ("US", "us_stock", "AAPL")):
+            for status in ("timeout", "error"):
+                with self.subTest(market=market, status=status):
+                    response = _v2_response()
+                    response["target"].update(type=target_type, market=market, id=symbol)
+                    diagnostics = {"nodes": [
+                        {"node": "identity", "status": "completed", "duration_ms": 1},
+                        {"node": "technical_evidence", "status": status,
+                         "reason_code": "READ_NODE_UNAVAILABLE", "error_type": "TimeoutError",
+                         "duration_ms": 15001, "timeout_seconds": 15,
+                         "error": "private SQL and driver arguments", "phases": [{"sql": "private"}]},
+                    ]}
+                    response["query_plan"]["read_execution"] = diagnostics
+                    response["policy"]["query_plan"] = deepcopy(response["query_plan"])
+                    for version in ("omi.decision.v3", "omi.decision.v4"):
+                        result = decision_envelope.for_requested_contract(response, requested_contract_version=version)
+                        failures = result["limitations"]["current_request_failures"]
+                        self.assertEqual(len(failures), 1)
+                        self.assertEqual(failures[0], {
+                            "failure_scope": "current_request", "failure_kind": "read_node",
+                            "node": "technical_evidence", "status": status,
+                            "reason_code": "READ_NODE_UNAVAILABLE", "error_type": "TimeoutError",
+                            "duration_ms": 15001, "timeout_seconds": 15,
+                        })
+                        self.assertEqual(result["limitations"]["background_source_health"], [])
+
+    def test_completed_read_nodes_do_not_create_failures_and_policy_fallback_is_supported(self) -> None:
+        response = _v2_response()
+        response["policy"]["query_plan"] = {"read_execution": {"nodes": [
+            {"node": "identity", "status": "completed"}, None,
+        ]}}
+        self.assertEqual(decision_envelope.build(response)["limitations"]["current_request_failures"], [])
+        response["policy"]["query_plan"]["read_execution"]["nodes"].append({
+            "node": "daily", "status": "error", "reason_code": "READ_NODE_UNAVAILABLE",
+        })
+        self.assertEqual(decision_envelope.build(response)["limitations"]["current_request_failures"][0]["node"], "daily")
+
     def test_v4_session_final_keeps_usability_through_default_field_projection(self) -> None:
         from datetime import datetime
         from app.ai import realtime_contract

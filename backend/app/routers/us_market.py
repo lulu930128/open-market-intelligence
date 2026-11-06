@@ -36,6 +36,8 @@ from app.us_market.daily_ohlcv_chart import (
     read_us_daily_ohlcv_history,
 )
 from app.us_market.daily_ohlcv_platform import refresh_us_daily_ohlcv
+from app.us_market.daily_market_state import resolve_us_instrument_identity
+from app.us_market.daily_rollout import build_us_daily_operation_rollout_state
 from app.us_market.market_truth import (
     read_us_intraday_series_projection,
     read_us_market_truth_snapshot,
@@ -1084,6 +1086,10 @@ def refresh_us_daily_prices(
             symbol=symbol,
             outputsize=outputsize,
             adjusted=adjusted,
+            rollout_state=build_us_daily_operation_rollout_state(
+                symbols=(resolve_us_instrument_identity(db, symbol).instrument.symbol,),
+                max_symbols=1,
+            ),
         )
     except ValueError as exc:
         raise HTTPException(

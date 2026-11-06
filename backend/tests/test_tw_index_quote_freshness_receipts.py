@@ -164,7 +164,8 @@ def test_receipt_survives_v4_projection_without_promoting_stale_trade(status, at
     assert result["evidence"]["realtime"]["quote.snapshot"]["decision_usable"] is False
 
 
-def test_real_bundle_receipt_retains_resource_and_persistence_but_old_trade_stays_stale():
+@pytest.mark.parametrize("legacy_row", [True, False])
+def test_real_bundle_receipt_retains_resource_and_persistence_but_old_trade_stays_stale(monkeypatch, legacy_row):
     # Real adapter/parser/canonical persistence with a deterministic fake HTTP receipt.
     now = datetime(2026, 8, 26, 10, 2, tzinfo=TAIWAN_TZ)
     db, engine = _db()
@@ -173,7 +174,12 @@ def test_real_bundle_receipt_retains_resource_and_persistence_but_old_trade_stay
         bundle = acquire_taiwan_quote_evidence_bundle(db, stock_id="2330", requested_at=now,
             requested_capabilities=("quote.snapshot",),
             acquisition=_adapter(_payload(event_time="10:00:00"), now, calls))
+        if not legacy_row:
+            monkeypatch.setattr("app.market.quote_depth._resolved_quote_row", lambda *args: None)
         result = project_taiwan_quote_evidence_bundle(db=db, stock_id="2330", bundle=bundle)
+        assert result["snapshot_time"] == now
+        assert result["snapshot_time_basis"] == "provider_response_received_at"
+        assert result["last_trade_time"] < result["snapshot_time"]
         receipt = result["provider_attempts_by_capability"]["quote.snapshot"]
         assert len(calls) == 1
         assert receipt["requested"] and receipt["attempted"]

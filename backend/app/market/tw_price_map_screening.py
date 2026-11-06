@@ -19,6 +19,7 @@ from app.market.trading_calendar import TAIWAN_TZ, latest_completed_taiwan_sessi
 from app.market.tw_intraday_state import read_tw_price_map_observations
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
 from app.market_data.contracts import AuthorityClass, BarFinalization
+from app.market.taiwan_rules import TAIWAN_DAILY_REGULAR_SCOPE
 
 POSITION_RELATIONS = ("near_zone", "touching", "above_zone", "below_zone")
 REACTION_RELATIONS = ("support_reaction", "resistance_reaction", "breakout_retest", "breakdown_retest")
@@ -67,7 +68,7 @@ def normalize_price_map_scan_parameters(parameters: dict | None) -> dict[str, An
 def _read_completed_daily_observations(db: Session, *, stock_ids: list[str], basis_date: date,
         now: datetime) -> dict[str, dict[str, Any]]:
     """Compose the existing exact-session official reader; never use intraday state or carry a stale close."""
-    repository = TaiwanOfficialDailyBarRepository(db, available_at=now)
+    repository = TaiwanOfficialDailyBarRepository(db, available_at=now, allow_early_regular=True)
     result = {}
     for start in range(0, len(stock_ids), 500):
         symbols = tuple(stock_ids[start:start + 500])
@@ -91,15 +92,18 @@ def _read_completed_daily_observations(db: Session, *, stock_ids: list[str], bas
                     or lineage.fetched_at > now or bar.price_basis != "raw"):
                 reasons.append("COMPLETED_DAILY_LINEAGE_UNQUALIFIED")
             price = float(bar.close_price)
+            early_regular = "OFFICIAL_FINAL_PENDING" in bar.limitations
             if not isfinite(price) or price <= 0:
                 reasons.append("COMPLETED_DAILY_CLOSE_INVALID")
             result[bar.instrument.symbol] = {
                 "market": bar.instrument.venue, "trade_date": basis_date, "price": price,
                 "event_time": bar.end_at, "received_at": lineage.fetched_at,
-                "price_semantics": "official_finalized_daily_close", "finalization": bar.finalization.value,
+                "price_semantics": "official_regular_session_research_close" if early_regular else "official_finalized_daily_close", "finalization": bar.finalization.value,
+                "trading_scope": "regular_session" if bar.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE else "official_daily",
+                "limitations": list(bar.limitations),
                 "authority": lineage.authority.value, "price_basis": bar.price_basis,
                 **metadata.get(lineage.observation_id, {}),
-                "has_actual_trade": False, "research_usable": not reasons, "decision_usable": not reasons,
+                "has_actual_trade": False, "research_usable": not reasons, "decision_usable": not reasons and not early_regular,
                 "reason_codes": reasons, "samples": [], "lineage": lineage.model_dump(mode="json"),
                 "source_refs": [{"type": "resolved_market_data", "name": "taiwan_official_daily",
                     "provider": lineage.provider, "source": lineage.source,
@@ -213,6 +217,8 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
     complete = counts["eligible_symbols"] == total and ready_storage
     status = "ready" if complete else "partial" if counts["eligible_symbols"] else "missing"
     selected_rows = matches[request["offset"]:request["offset"] + request["limit"]]
+    early_research_present = any("OFFICIAL_FINAL_PENDING" in (item.get("limitations") or [])
+        for item in observations.values())
     for rank, row in enumerate(selected_rows, request["offset"] + 1):
         row["rank"] = rank
     warnings = [] if complete else ["Requested universe is only partially covered; pagination does not change coverage."]
@@ -220,6 +226,8 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
         warnings.append("Indicative matching prices are not actual trades and are not decision usable.")
     if completed_daily:
         warnings.append("Finalized daily close position only; no intraday touch, reaction or retest sequence is inferred.")
+    if early_research_present:
+        warnings.append("Regular-session research evidence; official final reconciliation is pending.")
     return {
         "kind": "tw_price_map_screening", "version": SCANNER_VERSION, "status": status,
         "freshness_status": "current" if complete else status, "computed_at": now, "as_of": now,
@@ -232,7 +240,9 @@ def build_tw_price_map_screening_snapshot(db: Session, *, parameters: dict | Non
         "pagination": {"offset": request["offset"], "limit": request["limit"], "total": len(matches), "returned": len(selected_rows)},
         "empty_result_is_valid": complete and not matches,
         "facts_usable": complete or bool(matches), "facts_usable_for_ranking": complete or bool(matches),
-        "decision_usable": complete and request["lane"] in {"actual", "completed_daily"},
+        "decision_usable": complete and request["lane"] in {"actual", "completed_daily"}
+            and not early_research_present and all(row["decision_usable"] for row in matches),
+        "release_status": "regular_research" if early_research_present else "released",
         "intraday_research_usable": bool(matches) and request["lane"] == "actual", "execution_grade_usable": False,
         "cache_policy": "cache_only_no_refresh_no_build", "missing": list(sorted(reasons)), "warnings": warnings,
         "source_refs": [{"type": "derived", "name": "taiwan_price_map_snapshot"},

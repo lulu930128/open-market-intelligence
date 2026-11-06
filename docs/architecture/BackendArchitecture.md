@@ -197,6 +197,14 @@ Materialization dispatch 由既有 jobs service 管理有界 execution lanes：i
 ## 盤後分批與個股優先需求
 
 Daily EOD 沿用既有 full-market coverage／checkpoint 與 market-owned acquisition。
+TW 日 OHLC 的 collection universe 為 active TWSE/TPEx 普通股及 ETF（含 master alias
+`exchange_traded_fund`），不受 watchlist membership 限制。普通股 breadth/research universe
+與原 checkpoint 頂層分母／scope／hash不變；同一 checkpoint detail 另列 `etf_coverage`
+的 expected date、universe hash、current/partial/stale/missing及完成條件。
+EOD 收集 postcondition 同時要求兩個日線scope及原 published breadth；普通股healthy
+不代表ETF已齊。原 enqueue、already-current、venue admission、reread及retry共用此條件；
+ETF membership改變會失效舊venue route continuation。Provider acquisition／日線transaction
+與cache-only read owner不分叉，qualified current普通股不因ETF缺口每輪重寫。
 美股 bounded shard 若 canonical current count 已增加、沒有 provider error 且仍有
 未處理候選，可回傳 `continuation_required=true`：該批正常結束，但
 `postcondition_met=false` 與 partial coverage 必須保留。無進展、錯誤或來源未提供
@@ -611,6 +619,10 @@ Internal data requirement 不自動成為 public request enum。Outward request 
 - SEC / FINRA / FRED integration。
 - US-specific symbol / exchange / fundamentals semantics。
 
+FINRA short-volume integration 使用來源專屬代號規則，保留 slash 後的股別／權證識別並映射為 dot notation；不得沿用會移除 slash suffix 的一般查詢代號正規化。數量以 Decimal 解析至六位小數，正式 dated refresh 必須驗證 header、日期、唯一 key 與 footer 筆數，任何無法無損保存或格式錯誤均整批失敗。Alembic 0100 將既有三個股數欄位改為 Numeric(24,6)；正式 migration 採用另由 Launcher 證明。SQLite 無法在六位精度 round-trip 的超大數值明確拒絕，不能靜默截斷。原 refresh transaction owner 原子寫入、更正同一 raw hash 可證明的 legacy slash-truncated identity，並回報 reconciled_symbol_count；失敗 rollback。含 fractional evidence 時禁止有損降回整數 schema。
+
+FINRA 的 CQS 代號區分大小寫，例如 `TpC` 與 `TPC` 是不同證券；provider parser、持久化及 short-volume history 查詢保留此區別，不將小寫 `p`／`r`／`w` suffix 大寫化。這是 FINRA dataset identity，不代表已建立跨 provider 的優先股 alias mapping。限定重載只可更正同一日期／provider／market／raw hash 可證明且完整原檔不存在的舊 case-folded key；原檔內實際存在的大寫代號保留並按其自身原始列更新。依據 [FINRA 使用說明](https://www.finra.org/sites/default/files/2020-12/short-sale-volume-user-guide.pdf) 與 [Cboe CQS symbology](https://www.cboe.com/document/tech-spec/content/technical-specifications/cboe-titanium-u.s.-equitiesoptionsfutures-symbology-reference/us-equities-symbology)。
+
 TW 與 US 都依賴共通 Canonical / Resolver，而不是互相複製 fallback architecture。
 
 #### United States completed-session consumer boundary
@@ -623,6 +635,9 @@ TW 與 US 都依賴共通 Canonical / Resolver，而不是互相複製 fallback 
 - Explicit refresh固定走`read -> resolve -> plan -> acquire -> persist -> reread -> resolve -> postcondition`；provider fetch成功但persist／reread／expected-session postcondition失敗時不得回success。
 - Daily provider inventory由V2 executable descriptors投影：Yahoo Chart是P1；Alpaca SIP historical bars是P2；Alpha Vantage Daily不在production inventory。Quote／Intraday使用獨立capability inventory：Yahoo P1明確標示`can_produce_live=False`，Twelve Data P2保留`PARTIAL_US_MARKET_VOLUME`，兩者只經`USIntradayMarketPlatform`、Shared Gateway與Shared Resolver。Twelve Data不進Daily production plan，source integration也不等於runtime／live acceptance。
 - US Quote與Intraday Bars是分離的dataset lifecycle，但共用同一個application boundary。Read path只讀`us_quote_snapshot`或帶完整`market_intraday_bar_lineage`的persisted candidates；legacy無lineage row不得進Resolver。Refresh path才可執行bounded provider I/O，且必須在transaction commit後由Gateway reread再resolve。Previous Close與Volume Pace只能使用resolved Daily evidence，不得直接對`USDailyPrice`另做provider selection或同日`max(volume)`。
+- Twelve 1m acquisition 在 tail bound 前只 defer 合法 PROVISIONAL forming minute；full raw receipt 與真實 event/fetched 時鐘保留，end==fetched 可持久化。Recurring CURRENT producer 明示啟用預設關閉的 `FreshnessRequirement.completed_bar`；US owner 提供交易日/session 時窗，shared policy 只判同時窗已完成格的 `0 <= cutoff-end < interval`。Gateway 實際 receipt cutoff 用於 acquisition、candidate、Resolver 與 quality，歷史 bars 不套最新格 freshness；bar dataset health 沿 candidate freshness，partial/rejections 優先。45 秒 producer cadence／due、180 秒 consumer stale、quote、bootstrap latest-available 不改成通用寬鬆 TTL。
+- US completed-session intraday 的原 durable JobRun 每日每標的上限仍為 3 reservations、每輪最多 2 外呼。未使用 provider 優先；無 IO 的 plan 不可填滿時，僅允許已知正常返回的 incomplete、精確 resource receipt 且 cooldown 到期的 provider 有界重用。Unknown/interrupted、error、未知 commit 保留 reservation 並禁止該 provider 自動重用；原 DB lease、reserve-before-IO、15 分鐘 cooldown、retention 與總計費不重置。
+- US intraday receipt ordering 由 `USIntradayBarTransaction` 同一 transaction 擁有：`us_intraday_observation_state` 保存每個 bar 最新 validated receipt 的時間與 content hash，canonical lineage 仍指向實際 materialization 的 immutable provenance。較新 compatible 同值觀測只寫水位，不觸發 analysis generation；已有 raw 的 exact replay 不寫相關表。比較使用水位與 stored lineage 的較新證據，不推算部署前未保存的觀測。0099 additive migration 安裝 per-bar delete cleanup；Yahoo minute maintenance 保留／還原 state beforeimage，無法證明 transfer 的 semantic rekey 回報 conflict。此為 Source 契約；正式採用需原 schema maintenance／Launcher gate。
 - Quote refresh完成canonical reread後必須invalidate相關Intraday read model；Intraday snapshot revision涵蓋points、current observation與comparison reference，因此headline/truth變更不可被舊`since_revision`誤判為unchanged。US Daily／Weekly／Monthly與Intraday技術series由Backend Shared Technical Engine投影，帶algorithm／parameter contract；Frontend只能以backend authority顯示，缺失時維持unavailable。Backend calendar缺失時本機時間估算只供顯示，consumer acquisition／polling policy必須fail closed。
 - Persisted reread必須重建evidence-owned session並保留selected provider descriptor limitations；current request session只表示caller需求，不得改寫舊evidence。Intraday raw candidate read與provider acquisition range分離：raw reader在總row bound內查35 calendar days；`recurring_current` acquisition只查1 calendar day／最多600 bars，`bootstrap_latest_available`才可查最多5 calendar days／1000 bars。Acquisition executor在交給Gateway前同時強制`max_bars`與operation `max_rows`，provider多回的資料不能靠Gateway最後才拒絕。Volume Pace的5／20-session historical baseline另由repository對Resolver-selected provider／source執行最多35 calendar days、20 sessions的canonical lineage aggregate query，不載入無界1m rows，也不另做provider selection。
 - `us_quote_snapshot`定位為recent canonical quote cache，retention horizon定為30 calendar days；清理責任屬於US market maintenance/job boundary，不得放在GET、repository read或refresh transaction。Feature-off materializer將equity Quote／Intraday與US INDEX Quote／Intraday分成typed lanes；success postcondition由typed `USIntradayPlatformResult`依operation profile判定，Shared `MarketDataResultV1`不承擔US lifecycle語意。Requirement的typed `EvidenceTarget`明確分開`CURRENT`與`LATEST_AVAILABLE`：Recurring只在fresh且required fields完整時停止fallback；explicit `us.bootstrap_current_market_cache` tracked Job可在第一個usable latest-available candidate停止，但freshness仍維持stale／not-live，cache已滿足時零provider call no-op。Default bootstrap budget固定為16個normal-path calls加2個bounded fallback headroom，總額18；normal path涵蓋6個Index與2個Equity各自的Quote／Intraday lane。Operation ledger只計實際acquisition summary，persist／reread失敗則由typed post-acquisition error保留已知calls，不再於provider I/O前永久預扣整個symbol budget。Runtime summary除last result外，依lane + capability累積run／success／partial／failed／skipped、lock contention、duration、provider calls與refreshed symbols。三條scheduler仍共用non-blocking global lock；連續兩個interval因`materializer_run_in_flight`跳過同一lane是Runtime starvation blocker，Source階段不先重構scheduler owner。Retention registration獨立於materializer enable flag。這不授權full-market polling；runtime adoption、live cadence與擴大universe仍是獨立gate。
@@ -969,6 +984,10 @@ REST quote-depth、legacy Chart quote-side、Today、Depth/Auction、AI/MCP 共�
 `MarketBreadthObservation.limits` 是 actual-trade 對交易所門檻的觀測計數及各側可判定範圍。只有非空 universe 全部可判定，outward limit_up_count/limit_down_count 才有精確值；缺門檻不轉成 false/0。方向、limit、資料接收與 decision usability 分開。分類子原因核對 mapping_error、reference_price_unavailable 與 actual_trade_unavailable；缺少參考價或實際成交價不等於代號映射失敗，也不由無成交推論停牌。
 
 逐股價格前態存於既有 current breadth snapshot 的 typed companion JSON，與原 observation/receipt 由同一 transaction owner 保存。Public quote repository 的 shared current-stock reader 合併同日、同 venue 的 MIS quote actual observations 與 breadth companion，逐筆核對原 receipt/hash/source；acquisition 與 cache-only quote consumer 共用此讀取結果。Provider 接受明確前態，不持有程序全域價格 cache、不讀寫 DB。缺少本次成交價不清除最後真實成交；carry-forward 保留原價格時間與 receipt，不以本次接收時間更新原價格 freshness。最新 observation lineage 與價格 lineage 分開投影。沒有可信歷史前態時保持缺值直到取得新 actual evidence。
+
+Current summary 的既有 mutex 只包住 transaction port 的完整 persistence callback；proxy 只 lock／計時／delegate，commit／rollback 仍屬 `TaiwanCurrentMarketTransaction`。Executor build、provider acquisition、Gateway 與 summary reread、response 在 mutex 外。`summary_mutex_wait` 累計 callback 等待次數與時間，`canonical_persistence_callback` 記錄整個 callback，不等同 SQLite 持鎖時間。原 owner 在 SQLite 尚無 physical transaction 時取得 `BEGIN IMMEDIATE` admission；外借 physical transaction 不清除、不重播。Canonical 同 key 的 fetched precedence 與 SourceRegistry health clocks 在原交易內重新讀取，比較限原 provider/source/identity，不建立全域時間排序。
+
+Breadth scheduler 的 stock companion 由 selected canonical raw receipt 載回並核對 source/parser/hash，不再從 mutable provider cache 依 market 貼 lineage；每個 selected venue 最多讀一份 payload。Carried trade 另以有界批次 metadata 驗其原 receipt，將 snapshot A 與 actual trade B 一起保留於既有 component sources/IDs；個股 received time 與 price time 不改標 aggregate 時間。單股 B 無法證明時保留值及原時間，以 null raw component、原因、既有 `lineage_complete=false`／partial quality 表達，不拖垮有效 aggregate 與其他股票。Selected A 結構性證據錯誤仍拒絕；DB／commit 錯誤不吞掉。Minute＋stock derived state 仍在原 scheduler 同 transaction 提交／rollback，且在 summary mutex 外；不新增 cache、schema 或 transaction owner。
 
 Minute-state derived v3 依成交額所屬 component 的 event minute 檢查 bucket coherence；舊 breadth 金額不得隨 index refresh 變成新分鐘觀測。分鐘差額要求相鄰 bucket、兩市場資料齊全、來源／scope／semantics 可比較且各自累計不倒退。Read path 對既有 rows 同樣檢查 lineage/coherence，不重寫歷史 DB。
 

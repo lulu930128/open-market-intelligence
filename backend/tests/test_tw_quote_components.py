@@ -13,6 +13,24 @@ from app.ai.market_context.taiwan_projection import (
 
 
 class TaiwanQuoteComponentTests(unittest.TestCase):
+    def test_book_timestamp_basis_and_receipt_belong_to_selected_book(self) -> None:
+        quote = _compact_quote_snapshot(latest_daily=None, quote_error=None, quote_depth={
+            "session_phase": "regular_live", "depth_available": True, "depth_status": "current",
+            "snapshot_time": "2026-11-06T12:01:25+08:00", "snapshot_time_basis": "provider_response_received_at",
+            "fetched_at": "2026-11-06T12:01:25+08:00",
+            "freshness": {"status": "current", "is_stale": False},
+            "data_core_components": {"quote.order_book": {
+                "event_time": "2026-11-06T11:57:00+08:00",
+                "lineage": {"fetched_at": "2026-11-06T11:57:05+08:00"},
+                "resolved_health": {"status": "stale", "facts_usable": True, "research_usable": False},
+            }},
+        })
+        book = quote["components"]["order_book"]
+        self.assertEqual(book["snapshot_time"], "2026-11-06T11:57:00+08:00")
+        self.assertEqual(book["snapshot_time_basis"], "provider_event_time")
+        self.assertEqual(book["fetched_at"], "2026-11-06T11:57:05+08:00")
+        self.assertFalse(book["decision_usable"])
+
     def test_bar_fallback_preserves_snapshot_identity_and_ohlc(self) -> None:
         from app.ai.market_context.taiwan_stock import _apply_taiwan_current_price_contract
 

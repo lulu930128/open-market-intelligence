@@ -1,0 +1,49 @@
+{
+  "source_receipt": {
+    "url": "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes",
+    "observed_at": "2026-11-02T10:10:43.961794+00:00",
+    "status": 200,
+    "sha256": "04bcf7f44ff0c6478faf1ce127c1e9879f57174b8f43acc5d18472ee25deeef0",
+    "bytes": 358751,
+    "row_count": 1018
+  },
+  "note": "Exact rows from the recorded primary; active targets absent from this receipt remain missing. Tests that remove a row explicitly inject that omission.",
+  "payload": [
+    {
+      "Date": "1151102",
+      "SecuritiesCompanyCode": "3105",
+      "CompanyName": "穩懋",
+      "Close": "588.00",
+      "Change": "+10.00",
+      "Open": "558.00",
+      "High": "596.00",
+      "Low": "550.00",
+      "TradingShares": "29531000",
+      "TransactionAmount": "16958663000",
+      "TransactionNumber": "21562",
+      "LatestBidPrice": "587.00",
+      "LatesAskPrice": "588.00",
+      "Capitals": "423940384",
+      "NextLimitUp": "646.00",
+      "NextLimitDown": "530.00"
+    },
+    {
+      "Date": "1151102",
+      "SecuritiesCompanyCode": "6488",
+      "CompanyName": "環球晶",
+      "Close": "760.00",
+      "Change": "+4.00",
+      "Open": "740.00",
+      "High": "770.00",
+      "Low": "731.00",
+      "TradingShares": "10013000",
+      "TransactionAmount": "7537975000",
+      "TransactionNumber": "8040",
+      "LatestBidPrice": "760.00",
+      "LatesAskPrice": "761.00",
+      "Capitals": "528113725",
+      "NextLimitUp": "836.00",
+      "NextLimitDown": "684.00"
+    }
+  ]
+}

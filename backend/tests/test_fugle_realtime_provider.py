@@ -453,7 +453,7 @@ def test_fugle_post_close_index_remains_transport_only() -> None:
             active_stock=None,
         ) == {
             "index": {
-                "status": "pending",
+                "status": "rejected",
                 "limitation": "FUGLE_INDEX_COMPLETED_SESSION_NOT_MATERIALIZABLE",
             }
         }

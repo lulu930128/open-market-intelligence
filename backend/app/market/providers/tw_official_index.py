@@ -13,10 +13,14 @@ from pydantic import Field
 
 from app.market.official_index_contract import (
     TPEX_INDEX_SOURCE_NAME,
+    TPEX_HIGHLIGHT_INDEX_PARSER_VERSION,
     TWSE_INDEX_SOURCE_NAME,
+    TWSE_RWD_INDEX_PARSER_VERSION,
     TW_INDEX_DATASET_ID,
 )
+from app.market.index_parsers import parse_twse_market_daily_history_rows
 from app.market.providers import tpex, twse
+from app.sources.defaults import TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
@@ -38,7 +42,9 @@ from app.market_data.provider_catalog import (
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 TWSE_INDEX_RESOURCE_ID = "twse_fmtqik"
+TWSE_RWD_INDEX_RESOURCE_ID = "twse_rwd_fmtqik"
 TPEX_INDEX_RESOURCE_ID = "tpex_daily_trading_index"
+TPEX_HIGHLIGHT_INDEX_RESOURCE_ID = "tpex_after_trading_highlight"
 TWSE_INDEX_PARSER_VERSION = "twse.fmtqik.v1"
 TPEX_INDEX_PARSER_VERSION = "tpex.daily_trading_index.v1"
 
@@ -83,9 +89,23 @@ TPEX_OFFICIAL_INDEX_DESCRIPTOR = ProviderCapabilityDescriptorV2(
     limitations=("OFFICIAL_COMPLETED_SESSION_ONLY",),
 )
 
+TPEX_HIGHLIGHT_INDEX_DESCRIPTOR = TPEX_OFFICIAL_INDEX_DESCRIPTOR.model_copy(update={
+    "resource_id": TPEX_HIGHLIGHT_INDEX_RESOURCE_ID,
+    "priority": 20,
+    "limitations": ("OFFICIAL_COMPLETED_SESSION_ONLY", "INDEX_MARKET_TOTALS_PARTIAL"),
+})
+
+TWSE_RWD_INDEX_DESCRIPTOR = TWSE_OFFICIAL_INDEX_DESCRIPTOR.model_copy(update={
+    "provider_key": twse.RWD_PROVIDER,
+    "resource_id": TWSE_RWD_INDEX_RESOURCE_ID,
+    "priority": 20,
+})
+
 TW_OFFICIAL_INDEX_DESCRIPTORS = (
     TWSE_OFFICIAL_INDEX_DESCRIPTOR,
+    TWSE_RWD_INDEX_DESCRIPTOR,
     TPEX_OFFICIAL_INDEX_DESCRIPTOR,
+    TPEX_HIGHLIGHT_INDEX_DESCRIPTOR,
 )
 
 
@@ -226,8 +246,64 @@ def parse_twse_official_index_payload(raw_text: str) -> OfficialIndexParseResult
     return _parse_official_index_payload(raw_text, index_id="TAIEX")
 
 
+def parse_twse_rwd_index_payload(raw_text: str) -> OfficialIndexParseResult:
+    """Qualify the dated monthly FMTQIK table, never its request/header date."""
+    payload = json.loads(raw_text.lstrip("\ufeff").strip())
+    if not isinstance(payload, dict) or str(payload.get("stat", "")).upper() != "OK":
+        raise ValueError("TWSE RWD index payload status is not OK")
+    fields = ["日期", "成交股數", "成交金額", "成交筆數", "發行量加權股價指數", "漲跌點數"]
+    rows = payload.get("data")
+    if payload.get("fields") != fields or not isinstance(rows, list):
+        raise ValueError("TWSE RWD index table schema mismatch")
+    for row in rows:
+        if not isinstance(row, list) or len(row) != len(fields):
+            raise ValueError("TWSE RWD index row shape mismatch")
+        # The legacy pure parser converts numeric aggregates to int. Require
+        # actual nonnegative integers first, rather than accepting truncation.
+        if any(_integer(row[i]) is None or _integer(row[i]) < 0 for i in (1, 2, 3)):
+            raise ValueError("TWSE RWD index market totals invalid")
+    parsed = parse_twse_market_daily_history_rows(payload)
+    if len(parsed) != len(rows):
+        raise ValueError("TWSE RWD index row date invalid")
+    records = tuple(OfficialIndexDailyRecord(index_id="TAIEX", venue="TWSE", **item) for item in parsed)
+    if len({record.trade_date for record in records}) != len(records):
+        raise ValueError("TWSE RWD index duplicate trade date")
+    return OfficialIndexParseResult(index_id="TAIEX", input_row_count=len(rows),
+                                    records=tuple(sorted(records, key=lambda record: record.trade_date)))
+
+
 def parse_tpex_official_index_payload(raw_text: str) -> OfficialIndexParseResult:
     return _parse_official_index_payload(raw_text, index_id="TPEX")
+
+
+def parse_tpex_highlight_index_payload(raw_text: str) -> OfficialIndexParseResult:
+    """Use only exact published close/change; rounded, scoped totals stay unknown."""
+    payload = json.loads(raw_text.lstrip("\ufeff").strip())
+    if not isinstance(payload, dict) or str(payload.get("stat", "")).lower() != "ok":
+        raise ValueError("TPEx highlight payload status is not OK")
+    trade_date = _date(payload.get("date"))
+    tables = [table for table in payload.get("tables", []) if isinstance(table, dict)
+              and "收市指數" in table.get("fields", []) and "指數漲跌" in table.get("fields", [])]
+    if trade_date is None or len(tables) != 1:
+        raise ValueError("TPEx highlight index date/table is ambiguous")
+    table = tables[0]
+    fields, rows = table["fields"], table.get("data", [])
+    if _date(table.get("date")) != trade_date or len(rows) != 1 or len(fields) != len(set(fields)):
+        raise ValueError("TPEx highlight index table/date mismatch")
+    row = rows[0]
+    if not isinstance(row, list) or len(row) != len(fields):
+        raise ValueError("TPEx highlight index row shape mismatch")
+    close = _decimal(row[fields.index("收市指數")])
+    change = _decimal(row[fields.index("指數漲跌")])
+    if close is None or close <= 0 or change is None:
+        raise ValueError("TPEx highlight index close/change missing")
+    return OfficialIndexParseResult(
+        index_id="TPEX", input_row_count=1,
+        records=(OfficialIndexDailyRecord(index_id="TPEX", venue="TPEX", trade_date=trade_date,
+                                         close_value=close, price_change=change),),
+        issues=(OfficialIndexParseIssue(reason_code="INDEX_MARKET_TOTALS_PARTIAL", count=1),
+                OfficialIndexParseIssue(reason_code="TPEX_HIGHLIGHT_TOTALS_OMITTED", count=1)),
+    )
 
 
 def official_index_record_to_observation(
@@ -295,7 +371,9 @@ def official_index_record_to_observation(
 
 
 def source_name_for_index_resource(resource_id: str) -> str:
-    if resource_id == TWSE_INDEX_RESOURCE_ID:
+    if resource_id == TPEX_HIGHLIGHT_INDEX_RESOURCE_ID:
+        return TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
+    if resource_id in {TWSE_INDEX_RESOURCE_ID, TWSE_RWD_INDEX_RESOURCE_ID}:
         return TWSE_INDEX_SOURCE_NAME
     if resource_id == TPEX_INDEX_RESOURCE_ID:
         return TPEX_INDEX_SOURCE_NAME
@@ -303,6 +381,10 @@ def source_name_for_index_resource(resource_id: str) -> str:
 
 
 def parser_version_for_index_resource(resource_id: str) -> str:
+    if resource_id == TWSE_RWD_INDEX_RESOURCE_ID:
+        return TWSE_RWD_INDEX_PARSER_VERSION
+    if resource_id == TPEX_HIGHLIGHT_INDEX_RESOURCE_ID:
+        return TPEX_HIGHLIGHT_INDEX_PARSER_VERSION
     if resource_id == TWSE_INDEX_RESOURCE_ID:
         return TWSE_INDEX_PARSER_VERSION
     if resource_id == TPEX_INDEX_RESOURCE_ID:
@@ -311,6 +393,10 @@ def parser_version_for_index_resource(resource_id: str) -> str:
 
 
 def endpoint_for_index_resource(resource_id: str) -> str:
+    if resource_id == TWSE_RWD_INDEX_RESOURCE_ID:
+        return twse.MARKET_DAILY_HISTORY_URL
+    if resource_id == TPEX_HIGHLIGHT_INDEX_RESOURCE_ID:
+        return tpex.MARKET_HIGHLIGHT_URL
     if resource_id == TWSE_INDEX_RESOURCE_ID:
         return twse.MARKET_DAILY_URL
     if resource_id == TPEX_INDEX_RESOURCE_ID:
@@ -323,15 +409,21 @@ __all__ = [
     "OfficialIndexParseIssue",
     "OfficialIndexParseResult",
     "TPEX_INDEX_RESOURCE_ID",
+    "TPEX_HIGHLIGHT_INDEX_RESOURCE_ID",
+    "TPEX_HIGHLIGHT_INDEX_DESCRIPTOR",
     "TPEX_INDEX_SOURCE_NAME",
     "TWSE_INDEX_RESOURCE_ID",
+    "TWSE_RWD_INDEX_RESOURCE_ID",
+    "TWSE_RWD_INDEX_DESCRIPTOR",
     "TWSE_INDEX_SOURCE_NAME",
     "TW_INDEX_DATASET_ID",
     "TW_OFFICIAL_INDEX_DESCRIPTORS",
     "endpoint_for_index_resource",
     "official_index_record_to_observation",
     "parse_tpex_official_index_payload",
+    "parse_tpex_highlight_index_payload",
     "parse_twse_official_index_payload",
+    "parse_twse_rwd_index_payload",
     "parser_version_for_index_resource",
     "source_name_for_index_resource",
 ]

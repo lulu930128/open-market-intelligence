@@ -3966,7 +3966,7 @@ def refresh_us_short_volume_from_finra(
         trade_date=trade_date,
         source_url=source_url,
     )
-    result = upsert_us_short_volume_records(db, records)
+    result = upsert_us_short_volume_records(db, records, reconcile_legacy_symbols=True)
 
     return {
         "status": "success",
@@ -3976,6 +3976,7 @@ def refresh_us_short_volume_from_finra(
         "inserted_count": result["inserted_count"],
         "updated_count": result["updated_count"],
         "message": "US short volume refreshed from FINRA daily short sale volume.",
+        "reconciled_symbol_count": result["reconciled_symbol_count"],
     }
 
 
@@ -4229,12 +4230,14 @@ def _refresh_us_watchlist_daily_through_platform(
     symbol: str,
     outputsize: str = "compact",
     adjusted: bool = False,
+    rollout_state=None,
 ) -> dict:
     return refresh_us_daily_ohlcv(
         db=db,
         symbol=symbol,
         outputsize=outputsize,
         adjusted=adjusted,
+        rollout_state=rollout_state,
     )
 
 def _us_watchlist_workflow_dependencies() -> watchlist_workflows.USWatchlistWorkflowDependencies:
@@ -4437,6 +4440,7 @@ def refresh_us_watchlist_daily_prices(
     adjusted: bool = False,
     sleep_seconds: float = 12.0,
     progress_callback: ProgressCallback | None = None,
+    explicit_operation: bool = False,
 ) -> dict:
     return watchlist_workflows.refresh_us_watchlist_daily_prices(
         db,
@@ -4448,6 +4452,7 @@ def refresh_us_watchlist_daily_prices(
         adjusted=adjusted,
         sleep_seconds=sleep_seconds,
         progress_callback=progress_callback,
+        explicit_operation=explicit_operation,
     )
 
 

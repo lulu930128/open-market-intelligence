@@ -93,7 +93,7 @@ EVENT_ONLY_EXCLUDED_READERS = (
     *QUOTE_ONLY_EXCLUDED_READERS,
 )
 DOMAIN_HINTS = {
-    "chart": ("日K", "日線", "K線", "daily chart", "daily ohlcv", "ohlcv"),
+    "chart": ("日K", "日 K", "日線", "K線", "K 線", "daily chart", "daily ohlcv", "ohlcv"),
     "technical": (
         "技術面",
         "技術分析",
@@ -353,6 +353,10 @@ MARKET_CAPABILITY_HINTS = {
 # executable capability registry; the NLP planner selects the first compatible
 # candidate and never teaches a stock capability to accept a market target.
 CAPABILITY_SCOPE_ALTERNATIVES = {
+    "technical.breakout": (
+        "technical.breakout",
+        "technical.structure",
+    ),
     "chips.institutional": (
         "market.institutional_flow",
         "chips.institutional",
@@ -1160,12 +1164,17 @@ def build_query_plan(
     request_domains_before_selection = requested_domains
     selection_input = payload.selection
     if (
-        scope_type == "us_stock"
+        (scope_type == "us_stock" or (
+            scope_type == "tw_index"
+            and ("technical.indicators" in requested_capabilities
+                 or "chart" in request_domains_before_selection)
+        ))
         and not has_explicit_capability_selection
         and (requested_capabilities or request_domains_before_selection)
     ):
-        # Seed only identity; normalization still expands requested domains and
-        # preserves automatic optional evidence, without the vague-stock default.
+        # Seed identity for specific research questions; normalization still
+        # expands requested domains and preserves automatic optional evidence.
+        # An index indicator/chart question does not require unrelated breadth.
         selection_input = {
             **raw_selection,
             "required": list(dict.fromkeys([

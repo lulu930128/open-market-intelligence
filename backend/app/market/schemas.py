@@ -440,6 +440,13 @@ class MarketDailyChartRead(BaseModel):
     volume: int | None = None
     trade_value: int | None = None
     transaction_count: int | None = None
+    finalization: str | None = None
+    release_status: str | None = None
+    trading_scope: str | None = None
+    official_final: bool | None = None
+    limitations: list[str] = Field(default_factory=list)
+    raw_receipt_id: str | None = None
+    source: str | None = None
 
 
 class TwseBackfillMonthRead(BaseModel):
@@ -520,6 +527,11 @@ class MarketOhlcChartRead(BaseModel):
     freshness_status: str = "missing"
     is_current: bool = False
     refresh_recommended: bool = True
+    release_status: str | None = None
+    official_final: bool | None = None
+    trading_scope: str | None = None
+    research_usable: bool = False
+    decision_usable: bool = False
 
 
 class ChartDrawingSnapshotWrite(BaseModel):
@@ -573,6 +585,10 @@ class MarketBreadthRead(BaseModel):
     price_semantics: str | None = None
     decision_usable: bool = False
     is_provisional: bool = False
+    official: bool = False
+    finalization: str = "unknown"
+    session_semantics: str | None = None
+    universe_source: str | None = None
     scope: str | None = None
     label: str | None = None
     trade_date: date | None = None

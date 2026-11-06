@@ -2378,6 +2378,14 @@ def project_taiwan_quote_evidence_bundle(
         ):
             response[field] = projected_quote[field]
         quote = quote_result.resolved.quote
+        # Canonical quotes need not have a legacy snapshot row. Keep receipt
+        # time separate from the last trade, including when that trade is stale.
+        response["snapshot_time"] = quote.lineage.received_at or quote.lineage.fetched_at
+        response["snapshot_time_basis"] = (
+            "provider_response_received_at" if quote.lineage.received_at is not None
+            else "omi_fetch_completed_at" if quote.lineage.fetched_at is not None else None
+        )
+        response["quote_time_basis"] = "provider_event_time" if quote.lineage.event_at is not None else None
         daily_volume = getattr(official_daily_bar, "volume", None)
         response.update(build_taiwan_quote_volume_contract(
             snapshot_trade_date=quote.trade_date,

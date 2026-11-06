@@ -101,7 +101,7 @@ def test_direct_collector_serializes_venues_then_persists(monkeypatch):
         def __exit__(self, *args):
             phases.append("summary_lock_exit")
 
-    db = SimpleNamespace(commit=lambda: phases.append("derived_commit"),
+    db = SimpleNamespace(info={}, commit=lambda: phases.append("derived_commit"),
                          rollback=lambda: pytest.fail("unexpected rollback"),
                          close=lambda: phases.append("close"))
     monkeypatch.setattr(owner, "SessionLocal", lambda: db)
@@ -109,15 +109,19 @@ def test_direct_collector_serializes_venues_then_persists(monkeypatch):
     monkeypatch.setattr(indices, "_SUMMARY_REFRESH_LOCK", LockTrace())
     monkeypatch.setattr(tw_current_market_operations, "build_current_market_executors", lambda *a, **k: (None, object()))
 
-    def acquire(*args, venue, **kwargs):
+    from app.market.tw_current_market_transaction import TaiwanCurrentMarketTransaction
+    monkeypatch.setattr(TaiwanCurrentMarketTransaction, "persist_market_breadth_acquisition",
+                        lambda *a: phases.append("callback"))
+
+    def acquire(*args, venue, transaction_port, **kwargs):
         phases.extend([f"{venue}_start", f"{venue}_finish"])
+        transaction_port.persist_market_breadth_acquisition(None, None)
         return SimpleNamespace(limitations=[])
 
     monkeypatch.setattr(tw_current_market_platform, "refresh_taiwan_current_breadth", acquire)
     monkeypatch.setattr(indices, "_shared_current_market_summary", lambda *a, **k: {"warnings": []})
-    monkeypatch.setattr(owner, "get_cached_current_breadth_stock_rows", lambda: [])
     monkeypatch.setattr(owner, "attach_current_market_lineage_to_stock_rows", lambda *a, **k: [])
     for name in ("persist_taiwan_market_minute_state", "persist_taiwan_intraday_stock_states"):
         monkeypatch.setattr(owner, name, lambda *a, **k: {})
     owner.collect_taiwan_market_breadth_summary()
-    assert phases == ["summary_lock_enter", "TWSE_start", "TWSE_finish", "TPEX_start", "TPEX_finish", "summary_lock_exit", "derived_commit", "close"]
+    assert phases == ["TWSE_start", "TWSE_finish", "summary_lock_enter", "callback", "summary_lock_exit", "TPEX_start", "TPEX_finish", "summary_lock_enter", "callback", "summary_lock_exit", "derived_commit", "close"]

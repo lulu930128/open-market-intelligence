@@ -6,6 +6,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sqlalchemy import func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -282,18 +285,25 @@ def _history_enabled() -> bool:
     return bool(settings.enable_crypto_market_history)
 
 
+def _upsert_latest_sample(db: Session, model, key: dict[str, Any], values: dict[str, Any]):
+    """One natural-key statement; the caller retains commit/rollback ownership."""
+    table = model.__table__
+    insert = postgresql_insert if db.get_bind().dialect.name == "postgresql" else sqlite_insert
+    statement = insert(table).values(**key, **values)
+    statement = statement.on_conflict_do_update(
+        index_elements=list(key),
+        set_={name: getattr(statement.excluded, name) for name in values},
+        # Older flush retries cannot overwrite a later observation in this bucket.
+        where=statement.excluded.fetched_at >= table.c.fetched_at,
+    )
+    db.execute(statement)
+    return db.query(model).populate_existing().filter_by(**key).one()
+
+
 def _upsert_ticker_history(db: Session, record: CryptoTickerRecord) -> CryptoTickerHistory | None:
     if not _history_enabled():
         return None
     sampled_at = _sampled_at(record.fetched_at, settings.crypto_market_history_sample_seconds)
-    row = (
-        db.query(CryptoTickerHistory)
-        .filter(CryptoTickerHistory.provider == record.provider)
-        .filter(CryptoTickerHistory.symbol == record.symbol)
-        .filter(CryptoTickerHistory.instrument_type == record.instrument_type)
-        .filter(CryptoTickerHistory.sampled_at == sampled_at)
-        .first()
-    )
     values = {
         "exchange": record.exchange,
         "provider_symbol": record.provider_symbol,
@@ -316,34 +326,16 @@ def _upsert_ticker_history(db: Session, record: CryptoTickerRecord) -> CryptoTic
         "fetched_at": record.fetched_at,
         "updated_at": utc_now(),
     }
-    if row is None:
-        row = CryptoTickerHistory(
-            provider=record.provider,
-            symbol=record.symbol,
-            instrument_type=record.instrument_type,
-            sampled_at=sampled_at,
-            **values,
-        )
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
-    return row
+    return _upsert_latest_sample(db, CryptoTickerHistory, {
+        "provider": record.provider, "symbol": record.symbol,
+        "instrument_type": record.instrument_type, "sampled_at": sampled_at,
+    }, values)
 
 
 def _upsert_liquidity_history(db: Session, record: CryptoOrderBookRecord) -> CryptoLiquidityHistory | None:
     if not _history_enabled():
         return None
     sampled_at = _sampled_at(record.fetched_at, settings.crypto_market_history_sample_seconds)
-    row = (
-        db.query(CryptoLiquidityHistory)
-        .filter(CryptoLiquidityHistory.provider == record.provider)
-        .filter(CryptoLiquidityHistory.symbol == record.symbol)
-        .filter(CryptoLiquidityHistory.instrument_type == record.instrument_type)
-        .filter(CryptoLiquidityHistory.depth_limit == record.depth_limit)
-        .filter(CryptoLiquidityHistory.sampled_at == sampled_at)
-        .first()
-    )
     values = {
         "exchange": record.exchange,
         "provider_symbol": record.provider_symbol,
@@ -363,20 +355,11 @@ def _upsert_liquidity_history(db: Session, record: CryptoOrderBookRecord) -> Cry
         "fetched_at": record.fetched_at,
         "updated_at": utc_now(),
     }
-    if row is None:
-        row = CryptoLiquidityHistory(
-            provider=record.provider,
-            symbol=record.symbol,
-            instrument_type=record.instrument_type,
-            depth_limit=record.depth_limit,
-            sampled_at=sampled_at,
-            **values,
-        )
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
-    return row
+    return _upsert_latest_sample(db, CryptoLiquidityHistory, {
+        "provider": record.provider, "symbol": record.symbol,
+        "instrument_type": record.instrument_type, "depth_limit": record.depth_limit,
+        "sampled_at": sampled_at,
+    }, values)
 
 
 def _upsert_derivatives_history(
@@ -721,13 +704,6 @@ def upsert_crypto_long_short_ratio_history(
 
 
 def _upsert_ticker(db: Session, record: CryptoTickerRecord) -> CryptoTickerSnapshot:
-    row = (
-        db.query(CryptoTickerSnapshot)
-        .filter(CryptoTickerSnapshot.provider == record.provider)
-        .filter(CryptoTickerSnapshot.symbol == record.symbol)
-        .filter(CryptoTickerSnapshot.instrument_type == record.instrument_type)
-        .first()
-    )
     values = {
         "exchange": record.exchange,
         "provider_symbol": record.provider_symbol,
@@ -750,30 +726,15 @@ def _upsert_ticker(db: Session, record: CryptoTickerRecord) -> CryptoTickerSnaps
         "fetched_at": record.fetched_at,
         "updated_at": utc_now(),
     }
-    if row is None:
-        row = CryptoTickerSnapshot(
-            provider=record.provider,
-            symbol=record.symbol,
-            instrument_type=record.instrument_type,
-            **values,
-        )
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
+    row = _upsert_latest_sample(db, CryptoTickerSnapshot, {
+        "provider": record.provider, "symbol": record.symbol,
+        "instrument_type": record.instrument_type,
+    }, values)
     _upsert_ticker_history(db, record)
     return row
 
 
 def _upsert_order_book(db: Session, record: CryptoOrderBookRecord) -> CryptoOrderBookSnapshot:
-    row = (
-        db.query(CryptoOrderBookSnapshot)
-        .filter(CryptoOrderBookSnapshot.provider == record.provider)
-        .filter(CryptoOrderBookSnapshot.symbol == record.symbol)
-        .filter(CryptoOrderBookSnapshot.instrument_type == record.instrument_type)
-        .filter(CryptoOrderBookSnapshot.depth_limit == record.depth_limit)
-        .first()
-    )
     values = {
         "exchange": record.exchange,
         "provider_symbol": record.provider_symbol,
@@ -793,32 +754,15 @@ def _upsert_order_book(db: Session, record: CryptoOrderBookRecord) -> CryptoOrde
         "fetched_at": record.fetched_at,
         "updated_at": utc_now(),
     }
-    if row is None:
-        row = CryptoOrderBookSnapshot(
-            provider=record.provider,
-            symbol=record.symbol,
-            instrument_type=record.instrument_type,
-            depth_limit=record.depth_limit,
-            **values,
-        )
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
+    row = _upsert_latest_sample(db, CryptoOrderBookSnapshot, {
+        "provider": record.provider, "symbol": record.symbol,
+        "instrument_type": record.instrument_type, "depth_limit": record.depth_limit,
+    }, values)
     _upsert_liquidity_history(db, record)
     return row
 
 
 def _upsert_ohlcv_bar(db: Session, record: CryptoOhlcvBarRecord) -> CryptoOhlcvBar:
-    row = (
-        db.query(CryptoOhlcvBar)
-        .filter(CryptoOhlcvBar.provider == record.provider)
-        .filter(CryptoOhlcvBar.symbol == record.symbol)
-        .filter(CryptoOhlcvBar.instrument_type == record.instrument_type)
-        .filter(CryptoOhlcvBar.interval == record.interval)
-        .filter(CryptoOhlcvBar.bar_time == record.bar_time)
-        .first()
-    )
     values = {
         "exchange": record.exchange,
         "provider_symbol": record.provider_symbol,
@@ -835,20 +779,11 @@ def _upsert_ohlcv_bar(db: Session, record: CryptoOhlcvBarRecord) -> CryptoOhlcvB
         "fetched_at": record.fetched_at,
         "updated_at": utc_now(),
     }
-    if row is None:
-        row = CryptoOhlcvBar(
-            provider=record.provider,
-            symbol=record.symbol,
-            instrument_type=record.instrument_type,
-            interval=record.interval,
-            bar_time=record.bar_time,
-            **values,
-        )
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
-    return row
+    return _upsert_latest_sample(db, CryptoOhlcvBar, {
+        "provider": record.provider, "symbol": record.symbol,
+        "instrument_type": record.instrument_type, "interval": record.interval,
+        "bar_time": record.bar_time,
+    }, values)
 
 
 def _upsert_derivatives_metric(
@@ -1250,6 +1185,11 @@ def persist_crypto_realtime_updates(
                 persisted_by_resource[LIQUIDATION_RESOURCE] += 1
             else:
                 skipped.append({"resource": update.resource, "provider": update.provider, "symbol": update.symbol})
+        except SQLAlchemyError:
+            # A failed statement invalidates the batch, including earlier counts.
+            # Let the existing persistence manager replay only after rollback.
+            db.rollback()
+            raise
         except Exception as exc:
             errors.append(
                 {

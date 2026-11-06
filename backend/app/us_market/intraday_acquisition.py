@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import Settings
 from app.market_data.contracts import (
+    BarFinalization,
     ConnectionStatus,
     EntitlementStatus,
     EvidenceFreshness,
@@ -35,6 +36,7 @@ from app.market_data.integration_contracts import (
 )
 from app.market_data.provider_catalog import DataAcquisitionPlanV2, ProviderResourceRouteV2
 from app.market_data.policies import DataPurpose, RealtimePolicy
+from app.market_data.quality_policy import completed_bar_is_current
 from app.us_market.daily_ohlcv_acquisition import _failure_health, _health, _unique
 from app.us_market.market_data.descriptors import (
     MASSIVE_INDEX_INTRADAY_RESOURCE_ID,
@@ -310,9 +312,28 @@ class USIntradayAcquisitionExecutor:
                     current = (canonical,) if canonical is not None else ()
                 else:
                     assert isinstance(requirement.request, BarCapabilityRequest)
+                    # Defer only a valid Twelve 1m forming observation. Malformed
+                    # identities/times remain visible to the canonical writer.
+                    completed = []
+                    for bar in batch.bars:
+                        forming = (
+                            route.provider_key == "twelve_data"
+                            and requirement.request.interval == bar.interval == "1m"
+                            and bar.instrument == requirement.target.instrument
+                            and bar.start_at.second == bar.start_at.microsecond == 0
+                            and bar.end_at - bar.start_at == timedelta(minutes=1)
+                            and bar.lineage.event_at == bar.end_at
+                            and bar.lineage.fetched_at == fetched_at
+                            and bar.finalization is BarFinalization.PROVISIONAL
+                            and bar.start_at <= fetched_at < bar.end_at
+                        )
+                        if forming:
+                            limitations.append("INCOMPLETE_INTRADAY_BAR_DEFERRED")
+                        else:
+                            completed.append(bar)
                     bounded = sorted(
                         (
-                            bar for bar in batch.bars
+                            bar for bar in completed
                             if requirement.request.start_at <= bar.start_at <= requirement.request.end_at
                         ),
                         key=lambda bar: bar.start_at,
@@ -330,8 +351,9 @@ class USIntradayAcquisitionExecutor:
                             "PROVIDER_RESPONSE_TRUNCATED_TO_REQUEST_BOUND"
                         )
                     current = tuple(bounded[-route_limit:]) if route_limit else ()
+                receipt_evidence = current or (batch.bars if not quote else ())
                 source = (
-                    current[0].lineage.source if current else
+                    receipt_evidence[0].lineage.source if receipt_evidence else
                     "massive.indices.snapshot" if route.resource_id == MASSIVE_INDEX_QUOTE_RESOURCE_ID else
                     f"massive.indices.aggregates.{requirement.request.interval}" if route.resource_id == MASSIVE_INDEX_INTRADAY_RESOURCE_ID else
                     "yahoo.chart.1m" if route.provider_key == "yahoo_chart" else
@@ -339,7 +361,7 @@ class USIntradayAcquisitionExecutor:
                     f"twelve_data.time_series.{requirement.request.interval}"
                 )
                 parser = (
-                    current[0].lineage.raw_contract_version if current else
+                    receipt_evidence[0].lineage.raw_contract_version if receipt_evidence else
                     "massive.indices.snapshot.v3" if route.resource_id == MASSIVE_INDEX_QUOTE_RESOURCE_ID else
                     "massive.indices.aggregates.v2" if route.resource_id == MASSIVE_INDEX_INTRADAY_RESOURCE_ID else
                     "yahoo.chart.v8" if route.provider_key == "yahoo_chart" else
@@ -370,6 +392,13 @@ class USIntradayAcquisitionExecutor:
                     <= evidence_age_seconds
                     <= requirement.freshness.max_age_seconds
                 )
+                if not quote:
+                    completed_current = completed_bar_is_current(
+                        requirement.freshness, provider=route.provider_key,
+                        observed_at=latest_event, now=max(requirement.requested_at, fetched_at),
+                    )
+                    if completed_current is not None:
+                        evidence_is_fresh = bool(current) and completed_current
                 snapshot_age_seconds = (
                     requirement.requested_at - fetched_at
                 ).total_seconds()
@@ -459,7 +488,8 @@ class USIntradayAcquisitionExecutor:
                     http_failure = provider_http_failure(exc)
                     if isinstance(exc, TimeoutError) or (http_failure is not None and http_failure.status == "timeout"):
                         limitations.append("INTRADAY_PROVIDER_TIMEOUT")
-        status = AcquisitionStatus.PARTIAL if observations and failures else AcquisitionStatus.COMPLETED if observations else AcquisitionStatus.FAILED if attempts else AcquisitionStatus.NOT_ATTEMPTED
+        deferred_only = bool(receipts) and "INCOMPLETE_INTRADAY_BAR_DEFERRED" in limitations
+        status = AcquisitionStatus.PARTIAL if (observations or deferred_only) and failures else AcquisitionStatus.COMPLETED if observations else AcquisitionStatus.FAILED if attempts else AcquisitionStatus.NOT_ATTEMPTED
         summary = AcquisitionSummary(
             attempted=bool(attempts),
             status=status,

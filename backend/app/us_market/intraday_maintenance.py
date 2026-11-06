@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     MarketIntradayBar,
     MarketIntradayBarLineage,
+    USIntradayObservationState,
     USQuoteSnapshot,
 )
 
@@ -72,6 +73,26 @@ _BAR_VALUE_FIELDS = (
     "volume_status",
     "trade_value",
 )
+
+
+def _observation_state_snapshots(db: Session, bar_ids: list[int]) -> dict[int, dict[str, Any]]:
+    states = {}
+    for offset in range(0, len(bar_ids), 500):
+        for state in (db.query(USIntradayObservationState)
+                      .filter(USIntradayObservationState.bar_id.in_(bar_ids[offset:offset + 500]))
+                      .populate_existing().all()):
+            states[state.bar_id] = {
+                "bar_id": state.bar_id,
+                "observed_fetched_at": _utc(state.observed_fetched_at).isoformat(),
+                "observed_content_hash": state.observed_content_hash,
+            }
+    return states
+
+
+def _begin_minute_repair_write(db: Session) -> None:
+    connection = db.connection()
+    if connection.dialect.name == "sqlite" and not connection.connection.driver_connection.in_transaction:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 def _utc(value: datetime) -> datetime:
@@ -522,6 +543,8 @@ def repair_us_yahoo_intraday_minute_integrity(
     missing_lineage_count = 0
     planned_candidate_row_count = 0
     row_budget_exhausted = False
+    state_conflicts = []
+    last_group_id = after_group_id
 
     for group in selected_groups:
         canonical_minute = _canonical_minute(group.canonical_minute)
@@ -538,6 +561,7 @@ def repair_us_yahoo_intraday_minute_integrity(
             has_more = True
             break
         planned_candidate_row_count += len(candidates)
+        last_group_id = int(group.minimum_id)
         survivor, survivor_lineage = _recommended_survivor(
             candidates,
             canonical_minute=canonical_minute,
@@ -546,6 +570,16 @@ def repair_us_yahoo_intraday_minute_integrity(
             candidates,
             canonical_minute=canonical_minute,
         )
+        states = _observation_state_snapshots(db, [bar.id for bar, _ in candidates])
+        semantic_change = any(
+            (_utc(survivor.bar_time) != _utc(datetime.fromisoformat(str(value))))
+            if field == "bar_time" else getattr(survivor, field) != value
+            for field, value in survivor_after.items()
+        )
+        if states and semantic_change:
+            state_conflicts.append({"survivor_id": survivor.id, "symbol": group.stock_id,
+                "reason": "OBSERVATION_STATE_REKEY_REQUIRES_REVALIDATION"})
+            continue
         missing_lineage_count += sum(1 for _, lineage in candidates if lineage is None)
         affected_symbols.add(group.stock_id)
         affected_dates.add(canonical_minute.date().isoformat())
@@ -563,6 +597,7 @@ def repair_us_yahoo_intraday_minute_integrity(
                 "survivor_policy": survivor_policy,
                 "survivor_before": {
                     "bar": _snapshot(survivor, _BAR_MANIFEST_FIELDS),
+                    "observation_state": states.get(survivor.id),
                     "lineage": (
                         _snapshot(survivor_lineage, _LINEAGE_MANIFEST_FIELDS)
                         if survivor_lineage is not None
@@ -573,6 +608,7 @@ def repair_us_yahoo_intraday_minute_integrity(
                 "deleted": [
                     {
                         "bar": _snapshot(bar, _BAR_MANIFEST_FIELDS),
+                        "observation_state": states.get(bar.id),
                         "lineage": (
                             _snapshot(lineage, _LINEAGE_MANIFEST_FIELDS)
                             if lineage is not None
@@ -585,11 +621,7 @@ def repair_us_yahoo_intraday_minute_integrity(
             }
         )
 
-    next_after_group_id = (
-        int(planned_groups[-1]["minimum_row_id"])
-        if planned_groups
-        else after_group_id
-    )
+    next_after_group_id = last_group_id
     manifest = {
         "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -602,12 +634,15 @@ def repair_us_yahoo_intraday_minute_integrity(
         "has_more_groups": has_more,
         "row_budget_exhausted": row_budget_exhausted,
         "groups": planned_groups,
+        "conflicts": state_conflicts,
     }
     if not apply:
         return {
             "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
             "dry_run": True,
-            "status": "partial" if has_more else "complete",
+            "status": "partial" if has_more or state_conflicts else "complete",
+            "conflict_group_count": len(state_conflicts),
+            "conflicts": state_conflicts[:100],
             "after_group_id": after_group_id,
             "next_after_group_id": next_after_group_id,
             "planned_group_count": len(planned_groups),
@@ -644,6 +679,7 @@ def repair_us_yahoo_intraday_minute_integrity(
     lineage_rows_deleted = 0
     bar_rows_updated = 0
     try:
+        _begin_minute_repair_write(db)
         for group in planned_groups:
             survivor_id = int(group["survivor_id"])
             candidate_ids = [
@@ -657,12 +693,22 @@ def repair_us_yahoo_intraday_minute_integrity(
                     MarketIntradayBarLineage.bar_id == MarketIntradayBar.id,
                 )
                 .filter(MarketIntradayBar.id.in_(candidate_ids))
+                .populate_existing()
                 .all()
             )
             if {bar.id for bar, _ in candidates} != set(candidate_ids):
                 raise RuntimeError(
                     "US Yahoo intraday repair candidates changed after manifest preparation."
                 )
+            states = _observation_state_snapshots(db, candidate_ids)
+            before = {int(item["bar"]["id"]): item
+                      for item in [group["survivor_before"], *group["deleted"]]}
+            for bar, lineage in candidates:
+                item = before[bar.id]
+                if (states.get(bar.id) != item.get("observation_state")
+                        or _snapshot(bar, _BAR_MANIFEST_FIELDS) != item["bar"]
+                        or (_snapshot(lineage, _LINEAGE_MANIFEST_FIELDS) if lineage is not None else None) != item["lineage"]):
+                    raise RuntimeError("US Yahoo intraday repair evidence changed after manifest preparation.")
             for bar, lineage in candidates:
                 if bar.id == survivor_id:
                     continue
@@ -705,7 +751,9 @@ def repair_us_yahoo_intraday_minute_integrity(
     return {
         "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
         "dry_run": False,
-        "status": "partial" if has_more else "complete",
+        "status": "partial" if has_more or state_conflicts else "complete",
+        "conflict_group_count": len(state_conflicts),
+        "conflicts": state_conflicts[:100],
         "after_group_id": after_group_id,
         "next_after_group_id": next_after_group_id,
         "repaired_group_count": len(planned_groups),
@@ -739,33 +787,51 @@ def rollback_us_yahoo_intraday_minute_repair(
     if manifest.get("status") != "applied":
         raise ValueError("only an applied US Yahoo intraday repair can be rolled back")
 
-    conflicts: list[dict[str, Any]] = []
-    for group in manifest.get("groups") or []:
-        survivor_id = int(group["survivor_id"])
-        survivor = db.get(MarketIntradayBar, survivor_id)
-        expected_time = datetime.fromisoformat(str(group["survivor_after"]["bar_time"]))
-        if survivor is None or _utc(survivor.bar_time) != _utc(expected_time):
-            conflicts.append({"survivor_id": survivor_id, "reason": "SURVIVOR_CHANGED"})
-        for item in group.get("deleted") or []:
-            deleted_id = int(item["bar"]["id"])
-            if db.get(MarketIntradayBar, deleted_id) is not None:
-                conflicts.append({"bar_id": deleted_id, "reason": "DELETED_ROW_ID_REUSED"})
-    if conflicts:
-        return {
-            "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
-            "dry_run": not apply,
-            "status": "blocked",
-            "conflicts": conflicts[:100],
-            "writes_performed": 0,
-        }
-    if not apply:
-        return {
-            "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
-            "dry_run": True,
-            "status": "ready",
-            "group_count": len(manifest.get("groups") or []),
-            "writes_performed": 0,
-        }
+    try:
+        conflicts: list[dict[str, Any]] = []
+        if apply:
+            _begin_minute_repair_write(db)
+        state_ids = [int(item["bar"]["id"]) for group in manifest.get("groups") or []
+                     for item in [group["survivor_before"], *(group.get("deleted") or [])]]
+        states = _observation_state_snapshots(db, state_ids)
+        for group in manifest.get("groups") or []:
+            survivor_id = int(group["survivor_id"])
+            survivor = db.get(MarketIntradayBar, survivor_id, populate_existing=True)
+            expected_time = datetime.fromisoformat(str(group["survivor_after"]["bar_time"]))
+            if survivor is None or _utc(survivor.bar_time) != _utc(expected_time):
+                conflicts.append({"survivor_id": survivor_id, "reason": "SURVIVOR_CHANGED"})
+            # Missing keys in legacy manifests mean no recorded state, never
+            # permission to overwrite an observation accepted since that repair.
+            if states.get(survivor_id) != group["survivor_before"].get("observation_state"):
+                conflicts.append({"bar_id": survivor_id, "reason": "OBSERVATION_STATE_CHANGED"})
+            for item in group.get("deleted") or []:
+                deleted_id = int(item["bar"]["id"])
+                if db.get(MarketIntradayBar, deleted_id) is not None:
+                    conflicts.append({"bar_id": deleted_id, "reason": "DELETED_ROW_ID_REUSED"})
+                if states.get(deleted_id) is not None:
+                    conflicts.append({"bar_id": deleted_id, "reason": "OBSERVATION_STATE_CHANGED"})
+        if conflicts:
+            if apply:
+                db.rollback()
+            return {
+                "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
+                "dry_run": not apply,
+                "status": "blocked",
+                "conflicts": conflicts[:100],
+                "writes_performed": 0,
+            }
+        if not apply:
+            return {
+                "contract_version": US_YAHOO_INTRADAY_REPAIR_CONTRACT,
+                "dry_run": True,
+                "status": "ready",
+                "group_count": len(manifest.get("groups") or []),
+                "writes_performed": 0,
+            }
+    except Exception:
+        if apply:
+            db.rollback()
+        raise
 
     restored_bars = 0
     restored_lineages = 0
@@ -789,6 +855,10 @@ def rollback_us_yahoo_intraday_minute_repair(
                 restored_bars += 1
             db.flush()
             for item in group.get("deleted") or []:
+                state_snapshot = item.get("observation_state")
+                if state_snapshot is not None:
+                    db.add(USIntradayObservationState(**_restore_values(
+                        state_snapshot, datetime_fields={"observed_fetched_at"})))
                 lineage_snapshot = item.get("lineage")
                 if lineage_snapshot is None:
                     continue

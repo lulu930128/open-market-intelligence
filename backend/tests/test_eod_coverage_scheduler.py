@@ -49,7 +49,7 @@ def test_tw_eod_cron_next_fire_times_use_taiwan_timezone_without_startup_catchup
         assert scheduler._add_market_eod_coverage_reconcile_job(jobs)
     assert not jobs.running and len(jobs.get_jobs()) == 1
     job = jobs.get_job("taiwan_eod_coverage_reconcile")
-    assert job.kwargs == {"markets": ("TW",)}
+    assert job.kwargs == {"markets": ("TW",), "retry_scheduler": jobs}
     assert not hasattr(job, "next_run_time")  # Cron chooses the first slot on startup.
     trigger = job.trigger
     # UTC caller clock must still select the TW afternoon release window.
@@ -64,9 +64,12 @@ def test_tw_eod_cron_next_fire_times_use_taiwan_timezone_without_startup_catchup
     assert trigger.get_next_fire_time(None, datetime(2026, 11, 2, 22, 0, tzinfo=TAIWAN_TZ)).minute == 5
     last = datetime(2026, 11, 6, 23, 50, tzinfo=TAIWAN_TZ)
     assert trigger.get_next_fire_time(last, last + timedelta(seconds=1)) == datetime(
-        2026, 11, 9, 15, 20, tzinfo=TAIWAN_TZ)
+        2026, 11, 9, 14, 35, tzinfo=TAIWAN_TZ)
     assert trigger.get_next_fire_time(None, datetime(2026, 11, 7, 12, tzinfo=TAIWAN_TZ)) == datetime(
-        2026, 11, 9, 15, 20, tzinfo=TAIWAN_TZ)
+        2026, 11, 9, 14, 35, tzinfo=TAIWAN_TZ)
+    early = trigger.get_next_fire_time(None, datetime(2026, 11, 3, 14, 0, tzinfo=TAIWAN_TZ))
+    assert (early.hour, early.minute) == (14, 35)
+    assert trigger.get_next_fire_time(early, early + timedelta(seconds=1)).minute == 50
 
 
 @pytest.mark.parametrize("markets,expected_ids", [
@@ -257,7 +260,7 @@ def test_scheduler_enqueues_bounded_tw_and_us_repairs() -> None:
 
     assert enqueue.call_count == 2
     assert enqueue.call_args_list[0].kwargs["market"] == "TW"
-    assert enqueue.call_args_list[0].kwargs["max_symbols"] == 2
+    assert enqueue.call_args_list[0].kwargs["max_symbols"] == 6
     assert enqueue.call_args_list[0].kwargs["expected_trade_date"] == expected_tw
     assert enqueue.call_args_list[1].kwargs["market"] == "US"
     assert enqueue.call_args_list[1].kwargs["max_symbols"] == 250
@@ -289,7 +292,7 @@ def test_scheduler_tw_only_configuration_does_not_touch_us_lifecycle() -> None:
     ):
         scheduler.enqueue_market_eod_coverage_reconcile()
 
-    expected.assert_called_once_with("TW", us_port=None)
+        expected.assert_called_once_with("TW", us_port=None, include_early_regular=True)
     should_enqueue.assert_called_once()
     assert should_enqueue.call_args.kwargs["market"] == "TW"
     assert should_enqueue.call_args.kwargs["us_port"] is None
@@ -359,8 +362,9 @@ def test_scheduler_enqueues_priority_us_ohlc_with_bounded_request() -> None:
     (60, True, "error", 0),
     (1800, False, "success", 1),
 ])
+@pytest.mark.parametrize("error_count", [0, 1])
 def test_priority_restart_resumes_only_due_successful_shard(
-    elapsed, continuation, status, expected_calls,
+    elapsed, continuation, status, expected_calls, error_count,
 ):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -371,7 +375,7 @@ def test_priority_restart_resumes_only_due_successful_shard(
             status=status, target="priority-research", ended_at=ended,
             result_json=json.dumps({"expected_trade_date": "2026-09-28", "cursor_symbol": "AAPL",
                 "continuation_required": continuation, "continuation_remaining_count": 7,
-                "error_count": 0})))
+                "error_count": error_count})))
         db.commit()
     try:
         with (
@@ -512,10 +516,10 @@ def test_eod_enqueue_clamps_effective_work_to_registry_bounds() -> None:
     assert job is fake_job
     assert created is True
     kwargs = enqueue.call_args.kwargs
-    assert kwargs["request"]["max_symbols"] == 2
+    assert kwargs["request"]["max_symbols"] == 6
     assert kwargs["request"]["max_runtime_seconds"] == 120
-    assert kwargs["progress_total"] == 2
-    assert kwargs["task_args"][3:5] == (2, 120)
+    assert kwargs["progress_total"] == 6
+    assert kwargs["task_args"][3:5] == (6, 120)
 
 
 def test_progressing_partial_shard_is_not_a_failed_job():

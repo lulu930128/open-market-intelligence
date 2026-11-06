@@ -131,6 +131,25 @@ def read_fugle_http(kind: str, symbol: str, timeout_seconds: int) -> FugleHttpPa
     return outcome[0]
 
 
+def index_opening_observation(data: dict, *, scope: str, lineage: SourceLineage):
+    """Decode the explicit opening price and its own clock from a quote receipt."""
+    from app.market_data.contracts import MarketIndexOpeningObservation
+    expected = {"TAIEX": ("IX0001", "TWSE", "TSE"), "TPEX": ("IX0043", "TPEx", "OTC")}[scope]
+    if (data.get("symbol"), data.get("exchange"), data.get("market")) != expected or data.get("type") != "INDEX":
+        raise ValueError("FUGLE_INDEX_OPENING_SCOPE_MISMATCH")
+    day = date.fromisoformat(data["date"])
+    value = _decimal(data.get("openPrice"))
+    event = _microsecond_time(data.get("openTime"))
+    last = _microsecond_time(data.get("closeTime"))
+    if (value is None or not value.is_finite() or value <= 0 or event is None
+            or last is None or event > last or lineage.fetched_at is None
+            or last > lineage.fetched_at or event.astimezone(TAIPEI_TZ).date() != day
+            or event.astimezone(TAIPEI_TZ).strftime("%H:%M") != "09:00"):
+        raise ValueError("FUGLE_INDEX_OPENING_INVALID")
+    return MarketIndexOpeningObservation(market="TW", index_id=scope,
+        trade_date=day, value=value, lineage=lineage.model_copy(update={"event_at": event}))
+
+
 def index_trade_value_observation(data: dict, *, scope: str, lineage: SourceLineage):
     """Decode original HTTP receipt; total.time never borrows the price clock."""
     from app.market_data.contracts import MarketTradeValueObservation

@@ -304,7 +304,12 @@ def test_twse_rwd_venue_refresh_accepts_runtime_scale_universe(
         )
 
     executor = TaiwanOfficialDailyAcquisitionExecutor(
-        fetchers={TWSE_RWD_DAILY_RESOURCE_ID: fetch},
+        fetchers={
+            TWSE_RWD_DAILY_RESOURCE_ID: fetch,
+            TWSE_DAILY_RESOURCE_ID: lambda _route: FakeResponse(
+                text='{"detail":"fixture fallback unavailable"}', status_code=503,
+            ),
+        },
         clock=lambda: datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
         monotonic=lambda: 10.0,
     )
@@ -323,7 +328,7 @@ def test_twse_rwd_venue_refresh_accepts_runtime_scale_universe(
     assert db.query(MarketDailyPrice).one().stock_id == "3711"
 
 
-def test_twse_venue_refresh_includes_only_active_watchlist_etfs_beyond_stock_universe(
+def test_twse_venue_refresh_collects_active_etfs_independent_of_watchlist(
     db: Session,
 ) -> None:
     db.add_all(
@@ -390,7 +395,12 @@ def test_twse_venue_refresh_includes_only_active_watchlist_etfs_beyond_stock_uni
         return FakeResponse(text=json.dumps(payload, ensure_ascii=False))
 
     executor = TaiwanOfficialDailyAcquisitionExecutor(
-        fetchers={TWSE_RWD_DAILY_RESOURCE_ID: fetch},
+        fetchers={
+            TWSE_RWD_DAILY_RESOURCE_ID: fetch,
+            TWSE_DAILY_RESOURCE_ID: lambda _route: FakeResponse(
+                text='{"detail":"fixture fallback unavailable"}', status_code=503,
+            ),
+        },
         clock=lambda: datetime(2026, 8, 27, 15, 35, tzinfo=timezone.utc),
         monotonic=lambda: 10.0,
     )
@@ -403,7 +413,7 @@ def test_twse_venue_refresh_includes_only_active_watchlist_etfs_beyond_stock_uni
         acquisition=executor,
     )
 
-    assert route_symbol_bounds == [2]
+    assert route_symbol_bounds == [3]
     assert result["parsed_count"] == 2
     assert {row.stock_id for row in db.query(MarketDailyPrice).all()} == {
         "0050",
@@ -755,6 +765,8 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
     assert first.persistence.committed is True
     assert first.persistence.receipts_written == 1
     assert first.persistence.observations_written == 1
+    assert first.persistence.observations_inserted == 1
+    assert first.persistence.observations_updated == 0
     assert first.result.resolved.health.status is ResolvedEvidenceStatus.SELECTED
     assert first.result.resolved.bars[0].lineage.cache_hit is True
     assert float(first.result.resolved.bars[0].close_price) == close
@@ -782,6 +794,8 @@ def test_actual_excerpt_refresh_persists_rereads_resolves_and_is_idempotent(
 
     assert second.postcondition_satisfied is True
     assert second.persistence.observations_written == 0
+    assert second.persistence.observations_inserted == 0
+    assert second.persistence.observations_updated == 0
     assert second.persistence.observations_unchanged == 1
     assert db.query(RawFetchResult).count() == 2
     assert db.query(MarketDailyPrice).count() == 1
@@ -1026,9 +1040,11 @@ def test_refresh_dataset_scope_cannot_cross_venue() -> None:
     )
 
 
+@pytest.mark.parametrize("expected_date", [date(2026, 8, 27), date(2026, 8, 28)])
 def test_production_refresh_entrypoint_is_provider_neutral_and_registry_owned(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
+    expected_date: date,
 ) -> None:
     fixture_name = "twse_mi_index_allbut0999_excerpt_20260827.json"
     calls: list[str] = []
@@ -1054,7 +1070,7 @@ def test_production_refresh_entrypoint_is_provider_neutral_and_registry_owned(
     db.commit()
     monkeypatch.setattr(
         "app.market.daily_ohlcv_platform.expected_daily_price_date",
-        lambda **_kwargs: date(2026, 8, 27),
+        lambda **_kwargs: expected_date,
     )
 
     result = refresh_taiwan_official_daily(
@@ -1068,15 +1084,20 @@ def test_production_refresh_entrypoint_is_provider_neutral_and_registry_owned(
     assert calls == [TWSE_RWD_DAILY_RESOURCE_ID]
     assert result.postcondition_satisfied is True
     assert result.plan.routes[0].provider_key == "twse_rwd"
+    if expected_date > date(2026, 8, 27):
+        assert result.requirement.max_external_calls == 1
+        assert [route.resource_id for route in result.plan.routes] == [TWSE_RWD_DAILY_RESOURCE_ID]
     spec = DATASET_REGISTRY.get("tw.daily.ohlcv")
     assert spec.owner == "app.market.daily_ohlcv_platform"
     assert spec.read_operation == "MarketDataGateway.resolve_bars"
     assert "raw_fetch_result" in str(spec.storage_reference)
 
 
+@pytest.mark.parametrize("trade_date", [date(2026, 8, 23), date(2026, 8, 25), date(2026, 7, 23), date(2024, 8, 23)])
 def test_production_refresh_rejects_non_expected_date_before_provider_call(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
+    trade_date: date,
 ) -> None:
     calls = 0
 
@@ -1109,7 +1130,7 @@ def test_production_refresh_rejects_non_expected_date_before_provider_call(
         refresh_taiwan_official_daily(
             db,
             stock_id="2330",
-            trade_date=date(2026, 8, 23),
+            trade_date=trade_date,
             requested_at=datetime(2026, 8, 25, 18, 30, tzinfo=timezone.utc),
             acquisition=executor,
         )

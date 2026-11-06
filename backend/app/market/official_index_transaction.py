@@ -23,8 +23,11 @@ from app.market_data.contracts import (
     BarFinalization,
     Market,
     MarketIndexObservation,
+    ObservationState,
     QuantityUnit,
 )
+from app.sources.defaults import TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
+from app.market.official_index_repository import TaiwanOfficialIndexRepository
 from app.market_data.gateway import MarketIndexAcquisitionResult
 from app.market_data.integration_contracts import (
     DatasetTarget,
@@ -35,7 +38,7 @@ from app.market_data.integration_contracts import (
 
 
 def _source_defaults(receipt: RawFetchReceiptV1) -> dict[str, object]:
-    if receipt.source not in {TWSE_INDEX_SOURCE_NAME, TPEX_INDEX_SOURCE_NAME}:
+    if receipt.source not in {TWSE_INDEX_SOURCE_NAME, TPEX_INDEX_SOURCE_NAME, TPEX_MARKET_HIGHLIGHT_SOURCE_NAME}:
         raise ValueError(f"unsupported Taiwan official index source: {receipt.source}")
     return {
         "source_name": receipt.source,
@@ -108,6 +111,7 @@ class TaiwanOfficialIndexTransaction:
         source: SourceRegistry,
         raw: RawFetchResult,
         receipt: RawFetchReceiptV1,
+        limitations: list[str],
     ) -> bool:
         if observation.market is not Market.TW:
             raise ValueError("Taiwan index transaction requires market=TW")
@@ -137,6 +141,15 @@ class TaiwanOfficialIndexTransaction:
             .filter(MarketIndexDailyStat.trade_date == observation.trade_date)
             .first()
         )
+        if row is not None and receipt.source == TPEX_MARKET_HIGHLIGHT_SOURCE_NAME:
+            # A later partial fallback must not erase qualified complete evidence.
+            # Keep its immutable receipt, but never blend its close with old totals.
+            stored = TaiwanOfficialIndexRepository(self._db).load_market_index(
+                index_id=observation.index_id, trade_date=observation.trade_date,
+            )
+            if stored.observation is not None and stored.observation.state is ObservationState.AVAILABLE:
+                limitations.append("INDEX_PARTIAL_RECEIPT_NOT_REPLACING_COMPLETE")
+                return True
         incoming = {
             "market": observation.venue,
             "source_id": source.id,
@@ -232,6 +245,7 @@ class TaiwanOfficialIndexTransaction:
         raw_ids: list[int] = []
         written = unchanged = 0
         observation_counts: dict[tuple[str, str], int] = {}
+        limitations = list(acquisition.summary.limitations)
         try:
             for receipt in acquisition.receipts:
                 key = (receipt.provider, receipt.source)
@@ -254,6 +268,7 @@ class TaiwanOfficialIndexTransaction:
                     source=source,
                     raw=raw,
                     receipt=receipt,
+                    limitations=limitations,
                 )
                 observation_counts[key] = observation_counts.get(key, 0) + 1
                 if was_unchanged:
@@ -266,7 +281,7 @@ class TaiwanOfficialIndexTransaction:
                     raw=raw,
                     receipt=receipt,
                     observation_count=observation_counts.get(key, 0),
-                    limitations=acquisition.summary.limitations,
+                    limitations=tuple(dict.fromkeys(limitations)),
                 )
             self._db.commit()
         except Exception:
@@ -279,7 +294,7 @@ class TaiwanOfficialIndexTransaction:
             observations_written=written,
             observations_unchanged=unchanged,
             raw_result_ids=tuple(raw_ids),
-            limitations=acquisition.summary.limitations,
+            limitations=tuple(dict.fromkeys(limitations)),
         )
 
 

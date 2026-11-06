@@ -15,6 +15,7 @@ from app.db.models import (
     TaiwanStockDepthSnapshot,
 )
 from app.market.trading_calendar import TAIWAN_TZ
+from app.market.tw_current_market_repository import TaiwanCurrentMarketRepository
 from app.market.tw_realtime_capabilities import (
     TW_AUCTION_CAPABILITY_ID,
     TW_ORDER_BOOK_CAPABILITY_ID,
@@ -490,12 +491,6 @@ class TaiwanAuctionRepository(_RealtimeRepository):
                 rows.append(row)
                 if len(rows) >= max_candidates:
                     break
-        if not rows:
-            return (
-                PersistedAuctionRead(
-                    limitations=("TW_AUCTION_CANDIDATE_MISSING",)
-                ),
-            )
         reads: list[PersistedAuctionRead] = []
         seen: set[tuple[str, str]] = set()
         for row in rows:
@@ -506,7 +501,24 @@ class TaiwanAuctionRepository(_RealtimeRepository):
             reads.append(self._decode(instrument, row))
             if len(reads) >= max_candidates:
                 break
-        return tuple(reads)
+        companion = TaiwanCurrentMarketRepository(self._db).read_stock_auction_companion(
+            instrument=instrument, auction_type=auction_type, trade_date=trade_date,
+            requested_at=as_of or datetime.now(TAIWAN_TZ),
+        )
+        if companion is not None:
+            observation = companion.observation
+            existing = next((item for item in reads if item.provider == observation.lineage.provider), None)
+            if (existing is None or existing.observation is None
+                or existing.observation.lineage.event_at < observation.lineage.event_at):
+                reads = [item for item in reads if item.provider != observation.lineage.provider]
+                reads.append(PersistedAuctionRead(observation=observation,
+                    provider=observation.lineage.provider, source=observation.lineage.source,
+                    provider_priority=companion.provider_priority,
+                    storage_row_id=companion.storage_row_id, raw_result_id=companion.raw_result_id,
+                    limitations=companion.limitations))
+        return tuple(sorted(reads, key=lambda item: item.provider_priority)[:max_candidates]) or (
+            PersistedAuctionRead(limitations=("TW_AUCTION_CANDIDATE_MISSING",)),
+        )
 
 
 __all__ = [

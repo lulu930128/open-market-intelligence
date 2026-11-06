@@ -9,6 +9,35 @@
 - Outward AI／API projection 必須保留正交 axes，不重新壓成單一 readiness 或 finalization 字串。
 - 缺少的 axis 優先 additive typed extension；只有改變既有 serialized value、field meaning 或 consumer contract 時才需要 migration／version gate。
 
+## 台股一般交易日 K 的早期研究資格
+
+免費官方 RWD 的同日 OHLCV 若明載僅一般交易，原 Provider／Transaction 可保存
+`regular_research` 版本及 scope、Raw Receipt、immutable revision。Regular bucket 的
+`final` 不代表正式 EOD 已發布。Repository／SQL／freshness 的預設仍使用正式
+15:15 receipt 資格；明示研究讀取可使用已證實的早期版本，並保留
+`OFFICIAL_FINAL_PENDING`、一般交易量能範圍與 decision denial。Chart／AI／MCP
+投影保留這些 axes；1d bar 的 `include_partial=false` 維持 strict。
+早期完整 regular coverage 不完成正式 EOD postcondition；原 15:20 起的取得與修訂
+仍由原 EOD Owner 執行。TPEx early availability 未證實時維持原正式路徑。
+
+## 台股官方廣度彙總與時段選擇
+
+官方 published breadth aggregate 與每日 OHLCV 有獨立可用資格。13:30 僅開啟當日
+彙總的觀測窗口；不是固定發布時間，也不表示已取得資料。原 OfficialBreadthRepository
+驗證 persisted snapshot 的官方 source／reliability、HTTP 200 無錯誤、日期／venue／scope、
+非空母體與分類 partition，以及收據 fetched_at 介於該日收盤與 requested_at。
+只有通過 Gateway／Resolver 的 qualified published aggregate 可投影為 official_final；
+unknown 仍限制 decision_usable，不能當平盤。Event time 表示統計所屬收盤，fetched_at
+表示選中收據取得時間；沒有獨立收件證據時 received_at 保持 null，兩者皆不宣稱官方首發。
+
+盤前顯示最近完成交易日的官方彙總；09:00 至 13:30 前（含收盤競價）使用 MIS
+當輪快照及實際覆蓋。13:30 起主廣度等待當日 qualified official receipt，缺失時 pending
+且觀測數字為 null；MIS 仍獨立保留供診斷。兩種母體不混算，TPEx published scope
+包含換股權利證書。日 OHLCV 的 15:15 正式 gate 與 early regular research 資格不變。
+Acquisition、transaction 與 reader 共用該彙總觀測邊界；TWSE early regular 回應中已通過
+日期／scope／partition 驗證的 published 表可由原 transaction 同批保存，不提升日 K 資格。
+Summary、Dashboard 與 Web 共用 backend 選擇；requested_at 必須從入口一致傳遞。
+
 ## US daily 修訂與比較基準
 
 美股 16:05／early-close 13:05 是 expected release window，不是 vendor 數值已準確或不可修訂的證明。
@@ -30,6 +59,31 @@ Pre-market／regular 使用 expected completed session；after-hours 使用當�
 只保留為 `provider_previous_close_hint`，日期為 null、price basis 為 `provider_default`，
 不可作 close role 或計算變動。Typed `USCloseEvidence.trade_date` 只允許這類 hint 為 null；
 其他 close evidence 仍必須有日期。Daily comparison 使用 `daily_vs_*`，不把 vendor daily 稱為 official。
+
+## US 形成中日／週／月 K 的展示
+
+US 圖表的 opt-in `intraday_overlay` 由 US market owner 從當日 canonical regular 1m bars 合成，
+`point` 保留當日日 K；新增的 `display_timeframe`／`display_point` 將同一期已定稿日線與當日
+暫定資料合成日／週／月最後一根，週以週一、月以一日為 key。Consumer 僅按 key 替換顯示，
+並依 backend daily／intraday／calendar revisions 重讀。`points`、research／AI／Tape 仍使用
+原已定稿資料；形成中的同 key 不配上舊 finalized indicator。舊版僅日 K overlay 的展示仍相容。
+正常時段開始前、指定歷史日期、無合格 regular evidence 或已有當日 finalized daily 時不合成。
+盤前／盤後交易不混入 regular OHLC。缺少本期歷史交易日由 `display_missing_trade_dates` 與
+limitation 揭露；缺歷史日或任一組成量未知時 period volume 為 null，不將已知小計當完整量。
+Overlay 維持 provisional／derived／decision-unusable，保留 intraday freshness、coverage、
+release 與 source 限制；GET 不 acquisition、不寫入、不補值。
+
+## 台股指數開盤證據
+
+台股指數的第一個 current snapshot 不自動等於正式開盤。Index minute materializer
+可使用同 provider、同指數、同交易日的明示 opening receipt，依其開盤 event time
+排除更早的參考點，並以明示開盤值組成首分鐘 OHLC。伴隨收據保有獨立 source、
+parser 與 content hash；opening candidate contract 的第一個 component 是該收據，
+Transaction 與 Repository 都驗證它，不將 HTTP 收據偽裝成串流。原始收據不覆寫；
+既有 minute transaction 可有界重播修正 Bar，derived daily 由相同 canonical Bar 重讀。
+缺少有效開盤證據時，Fugle 恰於 09:00 的 index reference 不可直接物化成首分鐘；
+等於昨收本身不是排除條件。Receipt／event 不得晚於本次 materialization cutoff。
+這項資格不把 vendor 開盤升格為 official daily，也不代表盤中日 K 已定稿。
 
 ## Independent axes
 
@@ -309,6 +363,8 @@ Marker可以攜帶兩個獨立的volume facts：closing-match volume與session c
 - Public quote 候選先通過顯示交易日與角色資格，再套 provider candidate bound。Current breadth price-state bridge 保留原始 trade receipt；讀取時點不能製造 session-close confirmation。Tier-A 收盤確認仍是有界股票集合與時窗，不能代表全市場確認。
 - Session-close repository 的單檔 decode、breadth bridge、batch preload／SQL 候選資格及 outward `confirmed_at` 只使用該價格 observation 的 `received_at`。`RawFetchResult.fetched_at` 與 lineage fetch time 僅保留 acquisition／可見性用途，可能代表 cache／fallback attempt，不能取兩者最大值或作為替代 confirmation。缺少原 receipt 即未確認；真正 post-confirmation receipt 可確認合法 closing-match event，不套用盤中成交 TTL。
 - Index official-close 最早評估時間由 `official_index_contract.py` 擁有，與股票 Daily release 分開。最早評估不代表 provider 發布保證；reconciliation 必須驗證官方日期、receipt、authority 與 finalization，breadth ready 不足以停止重試。
+- 官方指數 close／change 合格但市場總量缺失時，Resolver 可選用 factual partial，摘要可確認官方收盤價；總量仍為 null、dataset／resolved health 保持 partial、research usability 為 false。完整資料的 refresh postcondition 與 scheduler completion 不因此放行，缺漏總量仍需有界回查。
+- 指數盤後 reconciliation 的廣度完成條件接受已選用、當日、同市場且 observation coverage complete 的正式 published aggregate；typed published limits、scope、universe 與 receipt 必須一致。它不要求此獨立統計範圍變成 `full_market / ready`，也不提升 partial、directional coverage 或 decision usability。缺失、暫定或不一致的 aggregate 仍需核對，且兩個指數價格的 official-close 條件仍獨立必要。
 - Bar 的 market phase 由 `TaiwanBarService` 傳遞至 AI compact／capability；current interval bar 可以滿足研究用 freshness，但不因此取得 execution usability。
 - 成交值與 baseline 組合由 `taiwan_market_state.py` 擁有。兩市場 component 需有可比日期、分鐘、scope 與明示 authority；baseline 另需相同 comparison date、minute、component scope 與足夠樣本。Warnings、ratio、field status 隨資格重算。AI 只委派組合與投影。
 - Baseline readiness 每次 composition 依當前 qualification 雙向重算；current unavailable／unqualified 不預測再等 5／20 天即可 ready，缺樣本數仍保留。合格 current 且歷史不足才標 warming_up；empty／missing reader 維持原 availability。原始 owns_trade_value event minute 不因盤後而 clamp，無同分鐘合格樣本可正確拒絕比較。

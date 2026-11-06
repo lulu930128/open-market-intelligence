@@ -254,15 +254,15 @@ def test_formal_us_ask_and_tw_schema_unchanged(db, monkeypatch, mode):
     assert response["target"]["market"] == "US"
     for cap in caps:
         value = response["evidence"]["data"][cap]
-        assert value["schema_version"] == f"us.{cap}.v1"
+        assert value["schema_version"] == f"us.{cap}.v2"
         assert value["status"] == "unavailable" and value["decision_usable"] is False
         manifest = next(item for item in response["evidence"]["manifest"]["capabilities"] if item["capability"] == cap)
-        assert manifest["schema_version"] == f"us.{cap}.v1"
+        assert manifest["schema_version"] == f"us.{cap}.v2"
         assert manifest["decision_usable"] is False
         assert manifest["refresh_strategy"] == "cache_only"
         assert manifest["fill_operation"] is None and manifest["estimated_calls"] == 0
         assert manifest["writes_market_cache"] is False
-        assert response["execution"]["capability_schema_versions"][cap] == f"us.{cap}.v1"
+        assert response["execution"]["capability_schema_versions"][cap] == f"us.{cap}.v2"
     assert CAPABILITIES["market.hot_groups"].schema_version_for_market("TW") == "tw.market.hot_groups.v1"
     assert not response["continuation"]["fill_plan"]["actions"]
 
@@ -329,7 +329,7 @@ def test_us_projection_limit_keeps_leading_groups_and_complete_safety_metadata(d
     assert not missing and value["groups"][0]["industry"] == "A"
     assert value["group_projection"]["groups"] == {"available_count": 2, "returned_count": 1, "truncated": True}
     assert len(value["groups"][0]["members"][0]["price_lineage"]) == 2
-    assert value["schema_version"] == "us.market.hot_groups.v1"
+    assert value["schema_version"] == "us.market.hot_groups.v2"
     assert "CORPORATE_ACTION_INTERVAL_PROOF_MISSING" in value["limitations"]
 
 
@@ -354,7 +354,7 @@ def test_mcp_ask_forwards_the_same_v4_without_new_market_logic(db, monkeypatch):
         "selection": {"include": ["market.sectors", "market.hot_groups", "market.breadth"], "max_response_bytes": 64000},
     })
     assert result is forwarded[0]
-    assert result["evidence"]["data"]["market.hot_groups"]["schema_version"] == "us.market.hot_groups.v1"
+    assert result["evidence"]["data"]["market.hot_groups"]["schema_version"] == "us.market.hot_groups.v2"
 
 
 @pytest.mark.parametrize("budget", [64000, 1000000])

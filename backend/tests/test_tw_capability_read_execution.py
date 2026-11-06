@@ -194,14 +194,16 @@ def test_canonical_bar_reads_share_only_identical_request_inputs(db):
         with taiwan_bar_read_scope():
             with Session(db.get_bind()) as other:
                 TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=False)
-                TaiwanBarService(other).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=False)
+                TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=False)
                 assert reader.call_count == 1
-                TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=True)
+                TaiwanBarService(other).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=False)
                 assert reader.call_count == 2
-                TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=120, include_partial=False)
+                TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=True)
                 assert reader.call_count == 3
+                TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=120, include_partial=False)
+                assert reader.call_count == 4
         TaiwanBarService(db).read_bars(instrument_id="2328", interval="1d", limit=260, include_partial=False)
-        assert reader.call_count == 4
+        assert reader.call_count == 5
 
 
 @pytest.mark.parametrize("mode", ["data_only", "brief", "full"])

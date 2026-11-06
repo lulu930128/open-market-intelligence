@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.market_data.contracts import BreadthLimitObservation
+from app.market_data.contracts import BreadthLimitObservation, PublishedBreadthLimits
 
 from datetime import date, datetime
 from typing import Any, Literal
@@ -39,19 +39,28 @@ class TaiwanDashboardBreadthRead(BaseModel):
     decision_usable: bool
     deprecated: bool = False
     canonical_ref: str | None = None
-    universe: int
-    coverage: int
-    advance: int
-    decline: int
-    unchanged: int
-    unknown: int
+    universe: int | None
+    coverage: int | None
+    advance: int | None
+    decline: int | None
+    unchanged: int | None
+    unknown: int | None
+    official: bool = False
+    finalization: str = "unknown"
+    session_semantics: str | None = None
+    selected_lane: str | None = None
+    selection_reason: str | None = None
+    provider: str | None = None
+    raw_result_id: str | None = None
+    published_limits: PublishedBreadthLimits | None = None
+    current_registered: dict[str, Any] | None = None
     limits: BreadthLimitObservation | None = None
     limit_up_count: int | None = None
     limit_down_count: int | None = None
     classification_diagnostics: dict[str, int] = Field(default_factory=dict)
     auction_breadth: dict[str, Any] | None = None
     acquisition_diagnostics: dict[str, Any] | None = None
-    coverage_ratio: float
+    coverage_ratio: float | None
     received_count: int | None = Field(default=None, ge=0)
     received_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
     classified_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
@@ -80,6 +89,12 @@ class TaiwanDashboardBreadthRead(BaseModel):
 
     @model_validator(mode="after")
     def validate_coverage_reconciliation(self):
+        counts = (self.universe, self.coverage, self.advance, self.decline, self.unchanged, self.unknown)
+        if any(value is None for value in counts):
+            if (self.status != "pending" or any(value is not None for value in counts)
+                or self.decision_usable or self.official or self.coverage_ratio is not None):
+                raise ValueError("only pending breadth may omit all observation counts")
+            return self
         if min(self.universe, self.coverage, self.advance, self.decline, self.unchanged, self.unknown) < 0:
             raise ValueError("breadth counts must be nonnegative")
         if self.classification_summary:
@@ -349,6 +364,7 @@ class TaiwanDashboardIntradayChartRead(BaseModel):
     source: str
     interval: str
     trade_date: date | None = None
+    session_relation: Literal["current_session", "previous_session", "missing"] = "missing"
     point_count: int
     cache_status: str
     cache_hit: bool

@@ -23,7 +23,9 @@ from app.market.daily_ohlcv_platform import (
     read_taiwan_official_daily,
 )
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
-from app.market.taiwan_rules import expected_daily_price_date
+from app.market.taiwan_rules import (
+    TAIWAN_DAILY_REGULAR_SCOPE, expected_daily_price_date, expected_daily_research_date,
+)
 from app.market.trading_calendar import previous_taiwan_trading_day
 from app.market.tw_daily_freshness import read_taiwan_daily_freshness
 from app.market_data.contracts import (
@@ -245,6 +247,13 @@ def _platform_chart_row(bar) -> dict:
         "volume": _whole_number(bar.volume.value) if bar.volume else None,
         "trade_value": _whole_number(bar.turnover_value),
         "transaction_count": bar.trade_count,
+        "finalization": bar.finalization.value,
+        "release_status": "regular_research" if "OFFICIAL_FINAL_PENDING" in bar.limitations else "released",
+        "trading_scope": "regular_session" if bar.derivation_kind == TAIWAN_DAILY_REGULAR_SCOPE else "official_daily",
+        "official_final": "OFFICIAL_FINAL_PENDING" not in bar.limitations,
+        "limitations": list(bar.limitations),
+        "raw_receipt_id": bar.lineage.raw_receipt_id,
+        "source": bar.lineage.source,
     }
 
 
@@ -255,6 +264,7 @@ def _platform_daily_read(
     start_date: date,
     end_date: date,
     requested_to_date: date | None,
+    allow_early_regular: bool = False,
 ) -> tuple[list[dict], MarketDataResultV1]:
     result = read_taiwan_official_daily(
         db,
@@ -262,6 +272,7 @@ def _platform_daily_read(
         from_date=start_date,
         to_date=requested_to_date,
         limit=MAX_CHART_BARS,
+        allow_early_regular=allow_early_regular,
     )
     return [_platform_chart_row(bar) for bar in result.resolved.bars], result
 
@@ -273,6 +284,7 @@ def _daily_points_with_platform(
     start_date: date,
     end_date: date,
     requested_to_date: date | None,
+    allow_early_regular: bool = False,
 ) -> tuple[list[dict], date | None, MarketDataResultV1 | None]:
     stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
     if stock is not None and str(stock.market or "").strip().upper() in {"TWSE", "TPEX"}:
@@ -282,6 +294,7 @@ def _daily_points_with_platform(
             start_date=start_date,
             end_date=end_date,
             requested_to_date=requested_to_date,
+            allow_early_regular=allow_early_regular,
         )
         latest_date = points[-1]["time"] if points else None
         return points, latest_date, result
@@ -318,6 +331,7 @@ def list_stock_ohlc_chart_data(
     include_intraday: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = 0.1,
+    allow_early_regular: bool = False,
 ) -> dict:
     del sleep_seconds  # retained only for outward compatibility; GET is cache-only
     if timeframe not in CHART_LOOKBACK_MULTIPLIER:
@@ -329,7 +343,10 @@ def list_stock_ohlc_chart_data(
     if bars > MAX_CHART_BARS:
         raise ValueError(f"bars must be less than or equal to {MAX_CHART_BARS}.")
 
-    latest_potentially_released_date = expected_daily_price_date()
+    allow_early_regular = allow_early_regular and timeframe == "daily"
+    latest_potentially_released_date = (
+        expected_daily_research_date() if allow_early_regular else expected_daily_price_date()
+    )
     end_date = (
         min(to_date, latest_potentially_released_date)
         if to_date is not None
@@ -349,6 +366,7 @@ def list_stock_ohlc_chart_data(
         start_date=start_date,
         end_date=end_date,
         requested_to_date=to_date,
+        allow_early_regular=allow_early_regular,
     )
     available_points = aggregate_ohlc_points(
         points=daily_points,
@@ -408,6 +426,12 @@ def list_stock_ohlc_chart_data(
         else "current"
     )
     data_quality, warnings = _platform_quality(platform_result)
+    early_regular = any(point.get("release_status") == "regular_research" for point in base_points)
+    for point in base_points:
+        warnings.extend(point.get("limitations") or [])
+    if early_regular:
+        data_quality = "partial"
+    final_dates = [point["time"] for point in daily_points if point.get("release_status") == "released"]
 
     return {
         "stock_id": stock_id,
@@ -425,7 +449,7 @@ def list_stock_ohlc_chart_data(
         "missing_session_count": missing_session_count,
         "coverage_status": coverage_status,
         "bootstrap_recommended": bool(missing_session_count),
-        "limitations": coverage_limitations,
+        "limitations": list(dict.fromkeys((*coverage_limitations, *(("OFFICIAL_FINAL_PENDING",) if early_regular else ())))),
         "bars": bars,
         "bars_legacy_count": bars,
         "deprecated_fields": ["bars"],
@@ -443,13 +467,18 @@ def list_stock_ohlc_chart_data(
         "volume_semantics": (
             "provisional_cumulative_traded_shares_overlay"
             if intraday_overlay is not None
-            else "finalized_traded_shares"
+            else "regular_session_traded_shares" if early_regular else "finalized_traded_shares"
         ),
         "volume_status": "available",
         "data_quality": data_quality,
         "warnings": warnings,
         "latest_data_date": latest_data_date,
-        "latest_finalized_data_date": latest_data_date,
+        "latest_finalized_data_date": max(final_dates, default=None) if early_regular else latest_data_date,
+        "release_status": "regular_research" if early_regular else "released" if base_points else "unavailable",
+        "trading_scope": "regular_session" if early_regular else "official_daily",
+        "official_final": bool(base_points) and not early_regular,
+        "research_usable": bool(base_points),
+        "decision_usable": bool(base_points) and not early_regular,
         "expected_data_date": resolved_expected_data_date,
         "freshness_status": freshness_status,
         "is_current": freshness_status == "current",

@@ -45,34 +45,40 @@ CACHE_SCHEMA_VERSION = 1
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 PROVIDER_CONFIG = {
     "twse_instrument_history": {
+        "event_types": ["suspension", "resume", "ex_dividend", "capital_reduction", "price_basis_change"],
         "provider": TWSE_PROVIDER, "market": "TWSE", "archive": True,
         "source": "TWSE official instrument lifecycle announcements",
         "source_url": "https://www.twse.com.tw/en/announcement/announcement/list.html",
     },
     "tpex_instrument_history": {
+        "event_types": ["suspension", "resume", "ex_dividend", "capital_reduction", "price_basis_change"],
         "provider": TPEX_PROVIDER, "market": "TPEX", "archive": True,
         "source": "TPEx official instrument lifecycle",
         "source_url": "https://www.tpex.org.tw/zh-tw/announce/market/reduction/reference.html",
     },
     "twse_ex_dividend": {
+        "event_types": ["ex_dividend"],
         "provider": TWSE_PROVIDER,
         "market": "TWSE",
         "source": "TWSE 上市股票除權除息預告表",
         "source_url": TWSE_EX_DIVIDEND_URL,
     },
     "tpex_ex_dividend": {
+        "event_types": ["ex_dividend"],
         "provider": TPEX_PROVIDER,
         "market": "TPEX",
         "source": "TPEx 上櫃股票除權除息預告表",
         "source_url": TPEX_EX_DIVIDEND_URL,
     },
     "mops_conference": {
+        "event_types": ["investor_conference", "financial_report"],
         "provider": MOPS_PROVIDER,
         "market": "TWSE,TPEX",
         "source": "MOPS 法人說明會一覽表",
         "source_url": MOPS_CONFERENCE_URL,
     },
     "twse_ex_dividend_history": {
+        "event_types": ["ex_dividend"],
         "provider": TWSE_PROVIDER,
         "market": "TWSE",
         "source": "TWSE 除權除息計算結果表",
@@ -80,6 +86,7 @@ PROVIDER_CONFIG = {
         "archive": True,
     },
     "tpex_ex_dividend_history": {
+        "event_types": ["ex_dividend"],
         "provider": TPEX_PROVIDER,
         "market": "TPEX",
         "source": "TPEx 除權除息計算結果表",
@@ -87,6 +94,7 @@ PROVIDER_CONFIG = {
         "archive": True,
     },
     "mops_conference_history": {
+        "event_types": ["investor_conference", "financial_report"],
         "provider": MOPS_PROVIDER,
         "market": "TWSE,TPEX",
         "source": "MOPS 法人說明會歷史資料",
@@ -110,6 +118,7 @@ STOCK_REMINDER_EVENT_TYPES = frozenset(
 )
 
 _CACHE_LOCK = RLock()
+HISTORY_COVERAGE_CONTRACT = "tw.corporate.checked_range.v2"
 _CACHE_STATE: dict[str, Any] | None = None
 _CACHE_PATH: Path | None = None
 _CACHE_MTIME_NS: int | None = None
@@ -199,7 +208,8 @@ def _semantic_rows(rows):
 
 
 def taiwan_corporate_event_semantic_revision(*, cache_path: Path | None = None,
-                                          available_at: datetime | None = None) -> str:
+                                          available_at: datetime | None = None,
+                                          event_types: set[str] | None = None) -> str:
     """Current derived-structure dependency, not a replacement for receipt/PIT truth.
 
     Validate referenced raw evidence before omitting receipt IDs/hashes/times.
@@ -211,6 +221,9 @@ def taiwan_corporate_event_semantic_revision(*, cache_path: Path | None = None,
     payload = read_taiwan_corporate_event_cache(path=cache_path)
     providers = {}
     for key, provider in (payload.get("providers") or {}).items():
+        if (event_types and not key.endswith("_instrument_history")
+                and not event_types.intersection(PROVIDER_CONFIG.get(key, {}).get("event_types", []))):
+            continue
         if not isinstance(provider, dict):
             providers[key] = {"invalid_provider": provider}
             continue
@@ -464,6 +477,44 @@ def _json_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_entry_coverage(
+    previous: Mapping[str, Any], update: Mapping[str, Any], *, attempted_at: str,
+) -> dict[str, Any]:
+    """Keep the single verified interval separate from positive event retention.
+
+    The legacy cache cannot represent disjoint intervals. Retain the previous
+    interval in that case; events outside it remain positive evidence only.
+    A bounded success cannot clear unresolved annual/failure qualification.
+    """
+    merged = dict(update)
+    old_start, old_end = (_parse_date(previous.get(name)) for name in ("coverage_start", "coverage_end"))
+    if (old_start is None or old_end is None or old_end < old_start
+            or _parse_datetime(previous.get("fetched_at")) is None):
+        return merged
+    for name in ("coverage_years", "failed_years", "partial_success", "successful_windows",
+                 "last_failure_details", "last_error"):
+        if name in previous:
+            merged[name] = previous[name]
+    first, last = old_start, old_end
+    new_start, new_end = (_parse_date(update.get(name)) for name in ("coverage_start", "coverage_end"))
+    qualified = not any(previous.get(name) or update.get(name)
+                        for name in ("failed_years", "partial_success", "last_error", "last_failure_details"))
+    valid_new = new_start is not None and new_end is not None and new_start <= new_end
+    if valid_new and qualified:
+        if (new_start - old_end).days <= 1 and (old_start - new_end).days <= 1:
+            first, last = min(old_start, new_start), max(old_end, new_end)
+        else:
+            merged["coverage_merge_reason"] = "DISCONTIGUOUS_COVERAGE_RETAINED"
+    merged.update(coverage_start=first, coverage_end=last)
+    # fetched_at remains the actual latest receipt cutoff. The oldest retained
+    # coverage receipt separately prevents a narrow refresh rejuvenating it.
+    merged["coverage_fetched_at"] = (
+        attempted_at if valid_new and qualified and new_start <= first and new_end >= last
+        else previous.get("coverage_fetched_at") or previous["fetched_at"]
+    )
+    return merged
+
+
 def _write_refresh(
     *,
     updates: Mapping[str, dict[str, Any]],
@@ -492,6 +543,8 @@ def _write_refresh(
                 if update.get("merge_instrument_evidence") or update.get("merge_entries"):
                     previous = providers.get(provider_key) or {}
                     update = dict(update)
+                    if update.get("merge_entries"):
+                        update = _merge_entry_coverage(previous, update, attempted_at=attempted_text)
                     for field, identity in (("entries", "event_id"), ("raw_receipts", "receipt_id"),
                                             ("evidence_windows", "window_id")):
                         merged = {item[identity]: item for item in previous.get(field, [])}
@@ -501,7 +554,7 @@ def _write_refresh(
                     **config,
                     "fetched_at": attempted_text,
                     "last_attempt_at": attempted_text,
-                    "last_error": None,
+                    "last_error": update.get("last_error"),
                     "last_failure_details": list(
                         update.get("last_failure_details") or []
                     ),
@@ -531,6 +584,7 @@ def _write_refresh(
                     "entries": [
                         _json_entry(entry) for entry in update.get("entries") or []
                     ],
+                    **{name: update[name] for name in ("coverage_fetched_at", "coverage_merge_reason", "coverage_contract") if name in update},
                     **({field: update.get(field, []) for field in ("raw_receipts", "evidence_windows")}
                        if update.get("merge_instrument_evidence") else {}),
                 }
@@ -823,9 +877,13 @@ def _provider_cache_status(
             1,
         )
     )
+    coverage_fetched_at = (
+        _parse_datetime(entry.get("coverage_fetched_at"))
+        if archive and "coverage_fetched_at" in entry else fetched_at
+    )
     age_seconds = (
-        max(0, int((now.astimezone(timezone.utc) - fetched_at).total_seconds()))
-        if fetched_at is not None
+        max(0, int((now.astimezone(timezone.utc) - coverage_fetched_at).total_seconds()))
+        if coverage_fetched_at is not None
         else None
     )
     is_stale = age_seconds is None or age_seconds > stale_hours * 3600
@@ -856,6 +914,7 @@ def _provider_cache_status(
         "successful_windows": list(entry.get("successful_windows") or []),
         "recovered_windows": list(entry.get("recovered_windows") or []),
         "retry_count": max(int(entry.get("retry_count") or 0), 0),
+        "coverage_merge_reason": entry.get("coverage_merge_reason"),
         "warning": warning,
     }
 
@@ -964,6 +1023,8 @@ def list_taiwan_corporate_events(
 
     for provider_key in provider_keys:
         config = PROVIDER_CONFIG[provider_key]
+        if normalized_types and not normalized_types.intersection(config.get("event_types", normalized_types)):
+            continue
         if normalized_markets and not any(
             _provider_matches_market(provider_key, requested_market)
             for requested_market in normalized_markets
@@ -1081,6 +1142,9 @@ def list_taiwan_corporate_events(
         "stock_ids": sorted(normalized_stock_ids),
         "markets": sorted(normalized_markets),
         "event_types": sorted(normalized_types),
+        "uncovered_event_types": sorted(normalized_types - {
+            kind for key in source_status for kind in PROVIDER_CONFIG[key].get("event_types", [])
+        }),
         "financial_report_related": financial_report_related,
         "event_statuses": sorted(normalized_statuses),
         "timing_statuses": sorted(normalized_timing_statuses),
@@ -1155,6 +1219,9 @@ def get_taiwan_stock_event_history(
     max_results: int = 20,
     now: datetime | None = None,
     cache_path: Path | None = None,
+    event_types: set[str] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict[str, Any]:
     local_now = _local_now(now)
     history_years = max(
@@ -1168,8 +1235,8 @@ def get_taiwan_stock_event_history(
         ),
         1,
     )
-    date_to = latest_completed_taiwan_session_date(local_now)
-    date_from = date(date_to.year - history_years + 1, 1, 1)
+    date_to = min(date_to, latest_completed_taiwan_session_date(local_now)) if date_to else latest_completed_taiwan_session_date(local_now)
+    date_from = date_from or date(date_to.year - history_years + 1, 1, 1)
     normalized_limit = max(1, min(max_results, 200))
     listing = list_taiwan_corporate_events(
         stock_id=stock_id,
@@ -1181,6 +1248,7 @@ def get_taiwan_stock_event_history(
         now=local_now,
         cache_path=cache_path,
         history_only=True,
+        event_types=event_types,
     )
     results = list(listing["results"])
     status_rank = {"missing": 3, "degraded": 2, "stale": 1, "current": 0}
@@ -1192,6 +1260,8 @@ def get_taiwan_stock_event_history(
         if statuses
         else "missing"
     )
+    if listing.get("uncovered_event_types"):
+        cache_status = "missing"
     fetched_dates = [
         source.get("fetched_at")
         for source in listing["sources"].values()
@@ -1213,8 +1283,12 @@ def get_taiwan_stock_event_history(
         "history_years": history_years,
         "cache_status": cache_status,
         "cache_fetched_at": min(fetched_dates) if fetched_dates else None,
-        "coverage_start": min(coverage_starts) if coverage_starts else None,
-        "coverage_end": max(coverage_ends) if coverage_ends else None,
+        "coverage_start": max(coverage_starts) if cache_status != "missing" and len(coverage_starts) == len(statuses) and coverage_starts else None,
+        "coverage_end": min(coverage_ends) if cache_status != "missing" and len(coverage_ends) == len(statuses) and coverage_ends else None,
+        "uncovered_event_types": listing.get("uncovered_event_types", []),
+        "sources": listing["sources"],
+        "event_types": sorted(event_types or []),
+        "result_complete": listing["total_count"] == len(results),
         "warning": listing["warning"],
         "offset": 0,
         "limit": normalized_limit,
@@ -1550,11 +1624,16 @@ def refresh_taiwan_corporate_events(
     }
 
 
+def _history_provider_end(provider_key: str, target_end: date, now: datetime) -> date:
+    return min(target_end, _local_now(now).date() - timedelta(days=1)) if provider_key == "mops_conference_history" else target_end
+
+
 def _history_cache_complete(
     cache: Mapping[str, Any],
     *,
     target_start: date,
     target_end: date,
+    now: datetime,
 ) -> bool:
     providers = cache.get("providers") or {}
     for provider_key in HISTORY_PROVIDER_KEYS:
@@ -1565,7 +1644,9 @@ def _history_cache_complete(
             return False
         if coverage_start is None or coverage_start > target_start:
             return False
-        if coverage_end is None or coverage_end < target_end:
+        if provider_key == "mops_conference_history" and entry.get("coverage_contract") != HISTORY_COVERAGE_CONTRACT:
+            return False
+        if coverage_end is None or coverage_end < _history_provider_end(provider_key, target_end, now):
             return False
     return True
 
@@ -1583,14 +1664,18 @@ def _history_refresh_is_recent(
     )
     for provider_key in HISTORY_PROVIDER_KEYS:
         entry = providers.get(provider_key)
-        fetched_at = _parse_datetime(entry.get("fetched_at")) if isinstance(entry, dict) else None
+        fetched_at = (
+            _parse_datetime(entry.get("coverage_fetched_at", entry.get("fetched_at")))
+            if isinstance(entry, dict) else None
+        )
         coverage_end = _parse_date(entry.get("coverage_end")) if isinstance(entry, dict) else None
         if (
             not isinstance(entry, dict)
             or entry.get("last_error")
             or fetched_at is None
             or coverage_end is None
-            or coverage_end < target_end
+            or coverage_end < _history_provider_end(provider_key, target_end, now)
+            or provider_key == "mops_conference_history" and entry.get("coverage_contract") != HISTORY_COVERAGE_CONTRACT
             or now - fetched_at >= timedelta(days=refresh_days)
         ):
             return False
@@ -1633,12 +1718,13 @@ def backfill_taiwan_corporate_event_history(
     mops_max_attempts = _resolved_mops_max_attempts()
     as_of = local_started.date()
     history_end = latest_completed_taiwan_session_date(started_at)
-    target_start = date(as_of.year - history_years + 1, 1, 1)
+    target_start = date(history_end.year - history_years + 1, 1, 1)
     cache = read_taiwan_corporate_event_cache(path=cache_path)
     full_backfill = force or not _history_cache_complete(
         cache,
         target_start=target_start,
         target_end=history_end,
+        now=started_at,
     )
     if not force and not full_backfill and _history_refresh_is_recent(
         cache,
@@ -1674,7 +1760,7 @@ def backfill_taiwan_corporate_event_history(
         }
 
     providers = cache.get("providers") or {}
-    all_years = list(range(target_start.year, as_of.year + 1))
+    all_years = list(range(target_start.year, history_end.year + 1))
     refresh_days = max(
         int(getattr(settings, "tw_corporate_event_history_refresh_days", 7)),
         1,
@@ -1683,7 +1769,7 @@ def backfill_taiwan_corporate_event_history(
     for provider_key in HISTORY_PROVIDER_KEYS:
         previous = providers.get(provider_key)
         previous_fetched_at = (
-            _parse_datetime(previous.get("fetched_at"))
+            _parse_datetime(previous.get("coverage_fetched_at", previous.get("fetched_at")))
             if isinstance(previous, dict)
             else None
         )
@@ -1717,7 +1803,9 @@ def backfill_taiwan_corporate_event_history(
             and started_at - previous_fetched_at < timedelta(days=refresh_days)
         )
 
-        if force:
+        legacy_mops = provider_key == "mops_conference_history" and (
+            not isinstance(previous, dict) or previous.get("coverage_contract") != HISTORY_COVERAGE_CONTRACT)
+        if force or legacy_mops:
             provider_years = all_years
         elif previous_failed_years:
             provider_years = sorted(previous_failed_years)
@@ -1731,7 +1819,7 @@ def backfill_taiwan_corporate_event_history(
             full_backfill
             and provider_recent
             and previous_coverage_end is not None
-            and previous_coverage_end >= history_end
+            and previous_coverage_end >= _history_provider_end(provider_key, history_end, started_at)
         ):
             provider_years = []
         else:
@@ -1776,9 +1864,10 @@ def backfill_taiwan_corporate_event_history(
         retry_count = 0
         request_count = 0
 
+        checked_ranges: dict[int, tuple[date, date]] = {}
         for year in requested_years:
             year_start = date(year, 1, 1)
-            year_end = min(date(year, 12, 31), history_end)
+            year_end = min(date(year, 12, 31), _history_provider_end(provider_key, history_end, started_at))
             if year_end < year_start:
                 continue
             try:
@@ -1838,12 +1927,24 @@ def backfill_taiwan_corporate_event_history(
                     if fetch_provider is not None:
                         request_count += 4 if provider_key == "mops_conference_history" else 1
                     fetched_entries.extend(list(fetched or []))
+                declared_start = fetched.coverage_start if isinstance(fetched, MopsConferenceBatch) else (
+                    _parse_date(fetched.get("coverage_start")) if isinstance(fetched, dict) else year_start)
+                declared_end = fetched.coverage_end if isinstance(fetched, MopsConferenceBatch) else (
+                    _parse_date(fetched.get("coverage_end")) if isinstance(fetched, dict) else year_end)
+                start, end = max(declared_start or year_start, year_start), min(declared_end or year_end, year_end)
+                if start > end or start > year_start or end < year_end:
+                    raise ValueError("Provider checked range does not cover requested history window")
+                checked_ranges[year] = (start, end)
+                if year not in failed_years and provider_key != "mops_conference_history":
+                    successful_windows.append(f"{PROVIDER_CONFIG[provider_key]['market']}:{year}")
             except Exception as exc:
                 failed_years.add(year)
                 provider_errors.append(f"{year}: {str(exc).strip() or type(exc).__name__}")
-                provider_failure_details.append(
-                    _provider_error_detail(provider_key, exc)
-                )
+                detail = _provider_error_detail(provider_key, exc)
+                # This annual request has a known failure boundary even when
+                # the transport error did not carry a provider window.
+                detail["window"] = str(year)
+                provider_failure_details.append(detail)
                 exceptions[provider_key] = exc
 
         preserved_entries.extend(
@@ -1903,12 +2004,13 @@ def backfill_taiwan_corporate_event_history(
                 for year in re.findall(r"\b(20\d{2})\b", str(previous["last_error"]))
             )
         successful_years = [
-            year for year in requested_years if year not in failed_years
+            year for year in requested_years if year not in failed_years and year in checked_ranges
         ]
-        successful_starts = [date(year, 1, 1) for year in successful_years]
-        successful_ends = [
-            min(date(year, 12, 31), history_end) for year in successful_years
-        ]
+        successful_starts = [checked_ranges[year][0] for year in successful_years]
+        successful_ends = [checked_ranges[year][1] for year in successful_years]
+        if provider_key == "mops_conference_history" and successful_ends and previous_coverage_end:
+            # A new checked range supersedes a legacy union's overclaimed end.
+            previous_coverage_end = min(previous_coverage_end, max(successful_ends))
         coverage_start_candidates = [
             item
             for item in [previous_coverage_start, *successful_starts]
@@ -1919,9 +2021,10 @@ def backfill_taiwan_corporate_event_history(
             for item in [previous_coverage_end, *successful_ends]
             if item is not None
         ]
-        if fetched_entries or not provider_errors:
+        if fetched_entries or successful_years or not provider_errors:
             updates[provider_key] = {
                 "entries": list(combined.values()),
+                "coverage_contract": HISTORY_COVERAGE_CONTRACT,
                 "request_count": request_count,
                 "coverage_start": (
                     min(coverage_start_candidates)

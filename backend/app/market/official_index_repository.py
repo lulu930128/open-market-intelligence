@@ -16,10 +16,13 @@ from app.db.models import (
 )
 from app.market.official_index_contract import (
     TPEX_INDEX_SOURCE_NAME,
+    TPEX_HIGHLIGHT_INDEX_PARSER_VERSION,
     TWSE_INDEX_SOURCE_NAME,
+    TWSE_RWD_INDEX_PARSER_VERSION,
     taiwan_index_close_release_at,
 )
 from app.market.tw_bar_contracts import TAIEX_OFFICIAL_DAILY_PROVIDER, TAIEX_OFFICIAL_DAILY_SOURCE
+from app.sources.defaults import TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
 from app.market_data.contracts import (
     AuthorityClass,
     BarFinalization,
@@ -78,8 +81,18 @@ class TaiwanOfficialIndexRepository:
         source: SourceRegistry | None,
     ) -> OfficialIndexRead:
         venue, provider, source_name = binding
+        if (index_id == "TAIEX" and source is not None and raw is not None
+                and source.source_name == TWSE_INDEX_SOURCE_NAME
+                and raw.parser_version == TWSE_RWD_INDEX_PARSER_VERSION):
+            provider = "twse_rwd"
         if index_id == "TAIEX" and source is not None and source.source_name == TAIEX_OFFICIAL_DAILY_SOURCE:
             provider, source_name = TAIEX_OFFICIAL_DAILY_PROVIDER, TAIEX_OFFICIAL_DAILY_SOURCE
+        if (index_id == "TPEX" and source is not None and raw is not None
+                and source.source_name == TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
+                and raw.parser_version == TPEX_HIGHLIGHT_INDEX_PARSER_VERSION
+                and source.reliability_level == "official"
+                and raw.status_code == 200 and not raw.error_message and raw.content_hash):
+            source_name = TPEX_MARKET_HIGHLIGHT_SOURCE_NAME
         if row is None:
             return OfficialIndexRead(limitations=("OFFICIAL_INDEX_DATE_MISSING",))
         if row.source_id is None or row.raw_result_id is None:
@@ -129,6 +142,8 @@ class TaiwanOfficialIndexRepository:
             )
         )
         limitations = (("INDEX_MARKET_TOTALS_PARTIAL",) if incomplete else ())
+        if source_name == TPEX_MARKET_HIGHLIGHT_SOURCE_NAME:
+            limitations += ("TPEX_HIGHLIGHT_TOTALS_OMITTED",)
         event_at = datetime.combine(
             trade_date,
             time(13, 30),

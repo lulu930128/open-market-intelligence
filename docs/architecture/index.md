@@ -16,6 +16,8 @@
 - [Financial Date Semantics](FinancialDateSemantics.md)：財務期間與日期語意。
 - [Market Temporal Contract](MarketTemporalContract.md)：Market Session、item finalization、authority、release、reconciliation 與 freshness 的正交 axes。
 - [Taiwan Technical Research](TaiwanTechnicalResearch.md)：技術參數、Price Map 結構、背景 snapshot 與唯讀 Scanner 的責任與驗收。
+- [US Watchlist Research](USWatchlistResearch.md)：美股觀察名單技術研究、Journal 市場邊界、分批掃描與公司行動資料限制。
+- [Research Proposal Lifecycle](ResearchProposalLifecycle.md)：台股／美股研究候選的刪除、版本保留、分頁與重掃去重。
 - [Radar v2](RadarV2.md)：Radar contract、evaluation 與 legacy audit boundary。
 - [Intraday Radar v1](IntradayRadarV1.md)：全市場輕量 discovery、coverage 與 deterministic candidate source seam；runtime／live 尚未驗收。
 

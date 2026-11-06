@@ -848,6 +848,7 @@ class MarketDailyPrice(Base):
     __tablename__ = "market_daily_price"
 
     __table_args__ = (
+        Index("ix_market_daily_stock_date_read", "stock_id", "trade_date"),
         UniqueConstraint(
             "source_id",
             "stock_id",
@@ -946,6 +947,7 @@ class MarketDailyPriceRevision(Base):
                  nullable=False if column.name in {"id", "raw_result_id"} else column.nullable)
           for column in MarketDailyPrice.__table__.columns),
         Index("ix_market_daily_revision_source_stock_date", "source_id", "stock_id", "trade_date"),
+        Index("ix_market_daily_revision_stock_date_read", "stock_id", "trade_date"),
     )
 
 
@@ -1099,6 +1101,19 @@ class MarketIntradayBar(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USIntradayObservationState(Base):
+    """Latest validated receipt per US bar, separate from materialized provenance."""
+
+    __tablename__ = "us_intraday_observation_state"
+
+    bar_id: Mapped[int] = mapped_column(
+        ForeignKey("market_intraday_bar.id", ondelete="CASCADE"),
+        primary_key=True, autoincrement=False,
+    )
+    observed_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
 class MarketIntradayBarLineage(Base):
@@ -6115,9 +6130,9 @@ class USShortVolumeDaily(Base):
     trade_date: Mapped[date] = mapped_column(Date, index=True)
     market_center: Mapped[str] = mapped_column(String(40), default="", index=True)
 
-    short_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    short_exempt_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    total_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_volume: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    short_exempt_volume: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    total_volume: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
     short_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)

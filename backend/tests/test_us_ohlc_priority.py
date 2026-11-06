@@ -2,18 +2,25 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+import json
+
+import pytest
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.jobs import backfill_tasks
+from app.jobs import backfill_tasks, scheduler
+from app.us_market.daily_ohlcv_platform import USDailyOhlcvPlatform
+from app.utils.owner_checkpoint import OwnerOutcomeUnknown
 from app.market_data.integration_contracts import (
     AcquisitionStatus,
     AcquisitionSummary,
 )
 from app.db.models import (
     Base,
+    JobRun,
     PortfolioHolding,
     USWatchlistGroup,
     USWatchlistItem,
@@ -413,7 +420,8 @@ def test_priority_reconcile_enforces_symbol_and_external_call_budgets() -> None:
         assert result["checked_count"] == 2
         assert result["external_call_count"] == 1
         assert result["unscanned_count"] == 1
-        assert not result["continuation_required"]
+        assert result["continuation_required"]
+        assert result["continuation_remaining_count"] == 1
         platform.ensure_history_coverage.assert_called_once_with(
             symbol="^GSPC",
             bars=260,
@@ -479,3 +487,185 @@ def test_priority_tracked_job_does_not_reuse_job_status_session_for_market_io() 
 
     assert "db" not in reconcile.call_args.kwargs
     assert reconcile.call_args.kwargs["progress_callback"] is progress
+
+
+@pytest.mark.parametrize("failure", ["identity", "known_read_error", "incomplete"])
+def test_partial_priority_continues_finite_unscanned_pass_through_scheduler(failure):
+    db = _session()
+    factory = sessionmaker(db.get_bind())
+    reads, acquisitions = [], []
+    now = datetime(2026, 9, 29, 0, 30, tzinfo=timezone.utc)
+
+    class Platform:
+        def __init__(self, chart_db):
+            self.db = chart_db
+
+        def read(self, **kwargs):
+            symbol = kwargs["symbol"]
+            reads.append(symbol)
+            if symbol == "BK":
+                if failure == "identity":
+                    # Exercise the real canonical master lookup; no provider IO.
+                    return USDailyOhlcvPlatform(self.db).read(**kwargs)
+                if failure == "known_read_error":
+                    raise ValueError("fixture known per-symbol read failure")
+                return _platform_result(satisfied=False)
+            return _platform_result(satisfied=True)
+
+        def ensure_history_coverage(self, symbol, max_provider_calls, **kwargs):
+            acquisitions.append((symbol, max_provider_calls))
+            return _platform_result(satisfied=False, attempts=1)
+
+    def run(request):
+        return reconcile_us_priority_ohlc(
+            **{key: value for key, value in request.items() if key != "expected_trade_date"},
+            to_date=date(2026, 9, 28), requested_at=now,
+            session_factory=factory, platform_factory=Platform)
+
+    request = dict(max_runtime_seconds=30, max_symbols=3, max_external_calls=1,
+        max_provider_attempts=2, required_symbols=["SMH"], cursor_symbol=None,
+        continuation_remaining_count=None)
+    try:
+        with (
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_symbols",
+                return_value=("^GSPC", "BK", "AAPL", "MSFT")),
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols",
+                return_value=("^GSPC",)),
+            patch.object(scheduler, "SessionLocal", factory),
+            patch.object(scheduler.settings, "scheduler_us_priority_ohlc_interval_minutes", 30),
+            patch.object(scheduler.settings, "scheduler_us_priority_ohlc_continuation_interval_seconds", 60),
+            patch.object(scheduler.settings, "scheduler_us_priority_ohlc_max_symbols", 3),
+            patch.object(scheduler.settings, "scheduler_us_priority_ohlc_max_external_calls", 1),
+            patch.object(scheduler, "list_active_cross_market_us_requirement_symbols", return_value=("SMH",)),
+            patch.object(scheduler.job_service, "enqueue_job", return_value=(Mock(id=99), True)) as enqueue,
+        ):
+            for index, symbol in enumerate(("BK", "AAPL", "MSFT")):
+                result = run(request)
+                assert result["status"] == "partial" and result["checked_count"] == 3
+                assert result["cursor_symbol"] == symbol
+                assert result["continuation_remaining_count"] == 2 - index
+                assert result["continuation_required"] is (index < 2)
+                if index == 0:
+                    assert result["satisfied_count"] == 2 and result["unscanned_count"] == 2
+                    assert result["unresolved_count"] == 3
+                    if failure == "incomplete":
+                        assert result["unresolved_sample"][0]["symbol"] == "BK"
+                        assert result["unresolved_sample"][0]["reason"] == "shared_core_postcondition_unsatisfied"
+                        assert result["external_call_count"] == result["external_call_budget_used"] == 1
+                    else:
+                        assert result["errors"][0]["symbol"] == "BK" and result["error_count"] == 1
+                        assert result["external_call_count"] == 0
+                        if failure == "identity":
+                            assert result["errors"][0]["error_type"] == "USInstrumentIdentityUnavailableError"
+                with factory() as receipt_db:
+                    receipt_db.add(JobRun(job_type=scheduler.US_PRIORITY_OHLC_RECONCILE_JOB_TYPE,
+                        status="success", target="priority-research", ended_at=now,
+                        result_json=json.dumps(result, default=str)))
+                    receipt_db.commit()
+                enqueue.reset_mock()
+                scheduler.enqueue_us_priority_ohlc_reconcile(now=now + timedelta(seconds=59))
+                enqueue.assert_not_called()
+                scheduler.enqueue_us_priority_ohlc_reconcile(now=now + timedelta(seconds=60))
+                assert enqueue.call_count == int(index < 2)
+                if index < 2:
+                    request = enqueue.call_args.kwargs["request"]
+                    assert request["cursor_symbol"] == symbol
+                    assert request["continuation_remaining_count"] == 2 - index
+                    assert request["required_symbols"] == ["SMH"]
+                now += timedelta(seconds=60)
+            assert reads == ["^GSPC", "SMH", "BK", "^GSPC", "SMH", "AAPL", "^GSPC", "SMH", "MSFT"]
+            assert acquisitions == ([("BK", 1)] if failure == "incomplete" else [])
+            # The ordinary round revisits unresolved symbols after the pass ends.
+            scheduler.enqueue_us_priority_ohlc_reconcile(now=now + timedelta(minutes=30))
+            request = enqueue.call_args.kwargs["request"]
+            assert request["continuation_remaining_count"] is None
+            assert run(request)["cursor_symbol"] == "BK"
+            assert reads.count("BK") == 2
+    finally:
+        db.close()
+        db.get_bind().dispose()
+
+
+@pytest.mark.parametrize("usage", [None, True, -1, 3, "exception"])
+def test_priority_unknown_usage_stops_continuation_and_keeps_reservation(usage):
+    db = _session()
+    platform = Mock()
+    platform.read.return_value = _platform_result(satisfied=False)
+    result = _platform_result(satisfied=False)
+    result.result.acquisition = SimpleNamespace(external_calls=usage)
+    if usage == "exception":
+        platform.ensure_history_coverage.side_effect = RuntimeError("provider outcome unknown")
+    else:
+        platform.ensure_history_coverage.return_value = result
+    try:
+        with (
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_symbols", return_value=("BK", "AAPL", "MSFT")),
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols", return_value=()),
+        ):
+            result = reconcile_us_priority_ohlc(max_symbols=2, max_external_calls=2,
+                session_factory=lambda: Session(db.get_bind()), platform_factory=lambda _: platform)
+        assert result["checked_count"] == 1 and result["continuation_remaining_count"] == 2
+        assert result["external_call_count"] is None and result["provider_call_count"] is None
+        assert result["external_call_budget_used"] == 2
+        assert result["stopped_reason"] == "provider_usage_unknown"
+        assert not result["continuation_required"]
+        assert platform.read.call_count == platform.ensure_history_coverage.call_count == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("fault", ["persistence", "rollback"])
+def test_priority_unknown_persistence_or_rollback_retains_inflight(fault):
+    db = _session()
+    ledger = []
+    platform = Mock()
+    platform.read.side_effect = (OperationalError("fixture query", None, RuntimeError("unknown"))
+        if fault == "persistence" else ValueError("fixture read error"))
+
+    class ChartSession(Session):
+        def rollback(self):
+            if fault == "rollback":
+                raise RuntimeError("rollback unknown")
+            super().rollback()
+
+    try:
+        with (
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_symbols", return_value=("BK", "AAPL")),
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols", return_value=()),
+            pytest.raises(OwnerOutcomeUnknown, match=f"US_PRIORITY_{fault.upper()}_UNKNOWN"),
+        ):
+            reconcile_us_priority_ohlc(max_symbols=1, session_factory=lambda: ChartSession(db.get_bind()),
+                platform_factory=lambda _: platform, continuation=lambda phase, state: ledger.append((phase, state)))
+        state = ledger[-1][1]
+        assert state["inflight"] == {"item": "BK", "calls": 2}
+        assert state["totals"]["calls"] == 2 and not state["results"]
+        platform.ensure_history_coverage.assert_not_called()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("repair,critical,advance", [(False, (), True), (True, ("^GSPC",), False), (True, (), True)])
+def test_priority_runtime_boundary_requires_repair_and_cursor_progress(repair, critical, advance):
+    db = _session()
+    clock = [0.0]
+    platform = Mock()
+
+    def read(**kwargs):
+        clock[0] += 1
+        return _platform_result(satisfied=True)
+
+    platform.read.side_effect = read
+    try:
+        with (
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_symbols", return_value=("^GSPC", "AAPL", "MSFT")),
+            patch("app.us_market.ohlc_priority.list_us_priority_ohlc_critical_symbols", return_value=critical),
+            patch("app.us_market.ohlc_priority.monotonic", side_effect=lambda: clock[0]),
+        ):
+            result = reconcile_us_priority_ohlc(max_runtime_seconds=1, max_symbols=2, repair=repair,
+                session_factory=lambda: Session(db.get_bind()), platform_factory=lambda _: platform)
+        assert result["checked_count"] == 1 and result["stopped_reason"] == "runtime_budget_exhausted"
+        assert result["continuation_required"] is (repair and advance)
+        assert result["cursor_symbol"] == ("^GSPC" if advance else None)
+        platform.ensure_history_coverage.assert_not_called()
+    finally:
+        db.close()

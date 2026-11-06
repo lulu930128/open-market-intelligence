@@ -154,6 +154,7 @@ def refresh_taiwan_broker_branch_market(
     progress: ProgressCallback | None = None,
     job_run_id: int | None = None,
     checkpoint: Callable[[dict], None] | None = None,
+    resume_checkpoint: dict | None = None,
 ) -> dict:
     """Collect the latest nStock Top15 snapshot for the ordinary-stock universe.
 
@@ -161,16 +162,31 @@ def refresh_taiwan_broker_branch_market(
     intentionally validates the provider date before starting the all-market
     loop. Existing stock/date rows are never fetched again.
     """
-    if checkpoint:
-        db.commit()
-        checkpoint({"safe_point": "before_universe", "current": 0, "total": 1})
+    state = resume_checkpoint.get("state") if resume_checkpoint else None
+    offset = (state["offset"] if state else
+              resume_checkpoint.get("current", 0) if resume_checkpoint else 0)
+    current = max(offset + state["completed"] if state else offset,
+                  resume_checkpoint.get("current", 0) if resume_checkpoint else 0)
+    progress_floor = current
+    total = offset + len(state["candidates"]) if state else max(
+        resume_checkpoint.get("total", 1) if resume_checkpoint else 1, 1)
+
+    def safe_point(name, current, total, **detail):
+        nonlocal progress_floor
+        progress_floor = max(progress_floor, current)
+        if checkpoint:
+            db.commit()
+            checkpoint({"safe_point": name, "current": progress_floor, "total": total,
+                        **({"state": state.copy()} if state else {}), **detail})
+
+    safe_point("before_universe", current, total)
     universe = list_taiwan_broker_branch_stock_ids(db)
     covered_before = _covered_stock_ids(
         db,
         trade_date=trade_date,
         universe=universe,
     )
-    quality_reconciliation = _reconcile_existing_snapshot_quality(
+    quality_reconciliation = state["quality_reconciliation"] if state else _reconcile_existing_snapshot_quality(
         db,
         trade_date=trade_date,
         covered_stock_ids=covered_before,
@@ -178,8 +194,8 @@ def refresh_taiwan_broker_branch_market(
     completed_before = covered_before | _completed_snapshot_ids(db, trade_date, universe)
     missing = [stock_id for stock_id in universe if stock_id not in completed_before]
     request_budget = max(int(max_stocks), 1)
-    candidates = missing[:request_budget]
-    total = max(len(candidates), 1)
+    candidates = state["candidates"] if state else missing[:max(request_budget - offset, 0)]
+    total = max(offset + len(candidates), 1)
 
     if not universe:
         result = {
@@ -212,9 +228,10 @@ def refresh_taiwan_broker_branch_market(
         )
         return result
 
-    if not missing:
+    if not missing and state is None:
         if progress:
-            progress(1, 1, "Taiwan broker-branch snapshots already persisted; coverage may remain partial.")
+            progress(max(current, 1), max(total, current, 1),
+                     "Taiwan broker-branch snapshots already persisted; coverage may remain partial.")
         return {
             "status": "completed" if len(covered_before) == len(universe) else "partial",
             "reason": "already_complete" if len(covered_before) == len(universe) else "snapshots_attempted",
@@ -236,11 +253,11 @@ def refresh_taiwan_broker_branch_market(
         }
 
     probe_stock_id = "2330" if "2330" in universe else universe[0]
-    if checkpoint:
-        db.commit()
-        checkpoint({"safe_point": "before_probe", "current": 0, "total": len(candidates)})
+    safe_point("before_probe", current, total)
     try:
-        probe = probe_broker_branch_release(probe_stock_id)
+        # A slice continues the same date-validated loop, not a new collection.
+        probe = ({"trade_date": date.fromisoformat(state["provider_trade_date"])} if state else
+                 probe_broker_branch_release(probe_stock_id))
     except Exception as exc:
         db.rollback()
         result = {
@@ -306,41 +323,53 @@ def refresh_taiwan_broker_branch_market(
         return result
 
     started_at = monotonic()
-    attempted_count = 0
-    success_count = 0
-    no_data_count = 0
-    error_count = 0
-    no_data_stock_ids: list[str] = []
-    errors: list[dict[str, str]] = []
+    if state is None:
+        state = dict(candidates=candidates, completed=0, offset=offset,
+                     provider_trade_date=provider_trade_date.isoformat(),
+                     covered_before_count=len(covered_before), missing_count=len(missing),
+                     quality_reconciliation=quality_reconciliation, elapsed_seconds=0.0,
+                     attempted_count=0, success_count=0, no_data_count=0, error_count=0,
+                     no_data_stock_ids=[], errors=[])
+    elapsed_before = state["elapsed_seconds"]
+    attempted_count = state["attempted_count"]
+    success_count = state["success_count"]
+    no_data_count = state["no_data_count"]
+    error_count = state["error_count"]
+    no_data_stock_ids: list[str] = list(state["no_data_stock_ids"])
+    errors: list[dict[str, str]] = list(state["errors"])
     stopped_reason: str | None = None
     delay_seconds = max(float(sleep_seconds), 0.0)
     runtime_limit = max(int(max_runtime_seconds), 1)
 
-    for index, stock_id in enumerate(candidates, start=1):
-        if checkpoint:
-            db.commit()
-            checkpoint({"safe_point": "before_stock", "current": index - 1,
-                        "total": len(candidates), "trade_date": trade_date.isoformat()})
-        if monotonic() - started_at >= runtime_limit:
+    for index in range(state["completed"] + 1, len(candidates) + 1):
+        stock_id = candidates[index - 1]
+        safe_point("before_stock", offset + index - 1, total, trade_date=trade_date.isoformat())
+        if elapsed_before + monotonic() - started_at >= runtime_limit:
             stopped_reason = "max_runtime_reached"
             break
 
-        attempted_count += 1
+        restart_checkpoint = None
+        before_stock = state.copy()
         try:
-            rows = ensure_broker_branch_daily(
+            # Source DB remains the authority if another original job persisted
+            # this stock while the continuation was waiting (including empty).
+            rows = [] if stock_id in completed_before else ensure_broker_branch_daily(
                 db,
                 stock_id=stock_id,
                 trade_date=trade_date,
                 force=False,
             )
+            if stock_id not in completed_before:
+                attempted_count += 1
             if rows:
                 success_count += 1
-            else:
+            elif stock_id not in completed_before:
                 no_data_count += 1
                 if len(no_data_stock_ids) < 100:
                     no_data_stock_ids.append(stock_id)
         except Exception as exc:
             db.rollback()
+            attempted_count += 1
             error_count += 1
             if len(errors) < 50:
                 errors.append({"stock_id": stock_id, "error": str(exc)})
@@ -350,25 +379,31 @@ def refresh_taiwan_broker_branch_market(
                 trade_date,
                 exc,
             )
+            restart_checkpoint = {"safe_point": "before_stock", "state": before_stock,
+                                  "trade_date": trade_date.isoformat(),
+                                  "current": offset + index, "total": total}
+
+        state.update(completed=index, elapsed_seconds=elapsed_before + monotonic() - started_at,
+                     attempted_count=attempted_count, success_count=success_count,
+                     no_data_count=no_data_count, error_count=error_count,
+                     no_data_stock_ids=list(no_data_stock_ids), errors=list(errors))
 
         if progress and (index == 1 or index % 10 == 0 or index == len(candidates)):
             progress(
-                index,
+                offset + index,
                 total,
                 (
                     "Collecting Taiwan broker-branch daily snapshots "
-                    f"({index}/{len(candidates)}; saved={success_count}; "
+                    f"({offset + index}/{total}; saved={success_count}; "
                     f"empty={no_data_count}; errors={error_count})."
                 ),
             )
 
-        if checkpoint:
-            # ensure_* owns stock commit/rollback; end subsequent progress/read
-            # transactions before acknowledging, never interrupt provider IO.
-            db.commit()
-            checkpoint({"safe_point": "stock_transaction_complete", "stock_id": stock_id,
-                        "trade_date": trade_date.isoformat(), "current": index,
-                        "total": len(candidates)})
+        # ensure_* owns stock commit/rollback; end progress/read transactions
+        # before acknowledging, never interrupt provider IO.
+        safe_point("stock_transaction_complete", offset + index, total, stock_id=stock_id,
+                   trade_date=trade_date.isoformat(),
+                   **({"restart_checkpoint": restart_checkpoint} if restart_checkpoint else {}))
 
         if delay_seconds > 0 and index < len(candidates):
             sleep(delay_seconds)
@@ -386,7 +421,7 @@ def refresh_taiwan_broker_branch_market(
         status = "partial"
         reason = stopped_reason or (
             "batch_limit_reached"
-            if len(missing) > len(candidates)
+            if state["missing_count"] > len(candidates)
             else "missing_provider_data"
         )
 
@@ -397,7 +432,7 @@ def refresh_taiwan_broker_branch_market(
         "provider_trade_date": provider_trade_date,
         "source_name": NSTOCK_BRANCH_SOURCE_NAME,
         "expected_count": len(universe),
-        "covered_before_count": len(covered_before),
+        "covered_before_count": state["covered_before_count"],
         "covered_count": len(covered_after),
         "remaining_count": remaining_count,
         "request_count": attempted_count + 1,

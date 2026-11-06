@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import replace
 import unittest
 from unittest.mock import patch
@@ -37,21 +37,15 @@ def add_daily_fixture(db: Session) -> None:
     )
     db.add(source)
     db.flush()
-    raw = RawFetchResult(
-        source_id=source.id,
-        method="GET",
-        url="https://example.test/2330/daily",
-        status_code=200,
-        content_hash="price-map-fixture",
-        raw_text="{}",
-    )
-    db.add(raw)
-    db.flush()
     cursor = date(2026, 8, 7)
     dates = [cursor]
     while len(dates) < 90:
         dates.append(previous_taiwan_trading_day(dates[-1], include_value=False))
     for index, trade_date in enumerate(reversed(dates)):
+        raw=RawFetchResult(source_id=source.id,status_code=200,raw_text="{}",content_hash=f"fixture-{trade_date}",
+            fetched_at=(datetime.combine(trade_date,datetime.min.time(),tzinfo=TAIWAN_TZ)+timedelta(hours=16)).astimezone(timezone.utc))
+        db.add(raw)
+        db.flush()
         close = 100.0 + index
         db.add(MarketDailyPrice(
             source_id=source.id,

@@ -836,6 +836,24 @@ def _build_resolved_indices(
                 }
             )
         raw_breadth = raw_item.get("breadth")
+        lanes = raw_item.get("breadth_lanes") or {}
+        if lanes.get("status") == "pending":
+            market = str(raw_item.get("market") or "")
+            resolved_breadth[market] = {
+                "market": market, "status": "pending", "session_phase": "closed",
+                "price_semantics": "unavailable", "provisional": True,
+                "official": False, "finalization": "unknown", "decision_usable": False,
+                "selected_lane": lanes.get("selected_lane"),
+                "selection_reason": lanes.get("reason"),
+                "session_semantics": "latest_completed_session",
+                "trade_date": lanes.get("trade_date"),
+                "universe": None, "coverage": None, "advance": None,
+                "decline": None, "unchanged": None, "unknown": None,
+                "coverage_ratio": None,
+                "current_registered": lanes.get("current_registered"),
+                "warnings": list((lanes.get("official_daily") or {}).get("limitations") or []),
+            }
+            continue
         if not isinstance(raw_breadth, dict):
             continue
         market = str(raw_breadth.get("market") or raw_item.get("market") or "")
@@ -872,6 +890,15 @@ def _build_resolved_indices(
                 raw_breadth.get("price_semantics") or "unavailable"
             ),
             "provisional": bool(raw_breadth.get("is_provisional")),
+            "official": bool(raw_breadth.get("official")),
+            "finalization": raw_breadth.get("finalization") or "provisional",
+            "session_semantics": raw_breadth.get("session_semantics"),
+            "selected_lane": lanes.get("selected_lane"),
+            "selection_reason": lanes.get("reason"),
+            "provider": raw_breadth.get("provider"),
+            "raw_result_id": raw_breadth.get("raw_result_id"),
+            "published_limits": raw_breadth.get("published_limits"),
+            "current_registered": lanes.get("current_registered"),
             "decision_usable": bool(raw_breadth.get("decision_usable")),
             "universe": universe,
             "coverage": coverage,
@@ -999,7 +1026,7 @@ def build_tw_market_dashboard(
         resolved_indices,
         resolved_breadth,
         resolved_index_warnings,
-    ) = _build_resolved_indices(db)
+    ) = _build_resolved_indices(db, requested_at=checked_at)
     trade_date_floor = datetime.combine(
         trade_date,
         time.min,
@@ -1100,7 +1127,7 @@ def search_tw_dashboard_symbols(
     prefix = f"{escaped}%"
     rows = (
         db.query(StockMaster)
-        .filter(StockMaster.market.in_(SUPPORTED_MARKETS))
+        .filter(func.upper(StockMaster.market).in_(SUPPORTED_MARKETS))
         .filter(func.lower(StockMaster.instrument_type).in_(("stock", "etf")))
         .filter(StockMaster.is_active.is_(True))
         .filter(
@@ -1240,6 +1267,7 @@ def _dashboard_intraday_chart(
         "source": source,
         "interval": str(history.get("effective_interval") or "1m"),
         "trade_date": trade_date,
+        "session_relation": "current_session" if trade_date == datetime.now(TAIWAN_TZ).date() else "previous_session" if trade_date else "missing",
         "point_count": len(session_points),
         "cache_status": str(history.get("cache_status") or "persisted_miss"),
         "cache_hit": bool(history.get("cache_hit")),
@@ -1279,7 +1307,7 @@ def _build_tw_stock_chart(
     stock = (
         db.query(StockMaster)
         .filter(StockMaster.stock_id == normalized_stock_id)
-        .filter(StockMaster.market.in_(SUPPORTED_MARKETS))
+        .filter(func.upper(StockMaster.market).in_(SUPPORTED_MARKETS))
         .filter(func.lower(StockMaster.instrument_type).in_(("stock", "etf")))
         .filter(StockMaster.is_active.is_(True))
         .first()
@@ -1305,6 +1333,7 @@ def _build_tw_stock_chart(
         bars=historical_bars,
         ensure_history=False,
         include_intraday=include_intraday,
+        allow_early_regular=normalized_timeframe in {"daily", "today"},
     )
     intraday_chart = None
     intraday_override = None
@@ -1374,7 +1403,7 @@ def build_tw_stock_research(
     with db.no_autoflush:
         normalized = str(stock_id or "").strip()
         stock = db.query(StockMaster).filter(
-            StockMaster.stock_id == normalized, StockMaster.market.in_(SUPPORTED_MARKETS),
+            StockMaster.stock_id == normalized, func.upper(StockMaster.market).in_(SUPPORTED_MARKETS),
             func.lower(StockMaster.instrument_type).in_(("stock", "etf")), StockMaster.is_active.is_(True),
         ).first()
         if stock is None:

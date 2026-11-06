@@ -12,6 +12,24 @@ NOW = datetime.fromisoformat("2026-10-12T13:10:00+08:00")
 POSITION = {"has_position_context": True, "entry_price": 1500, "decision_topic": "stop_loss"}
 
 
+@pytest.mark.parametrize("trade_date,expected", [("2026-10-12", True), ("2026-10-09", False), (None, False)])
+def test_session_identity_survives_stale_price_denial_without_unlocking_consumers(trade_date, expected):
+    raw = quote(headline_trade_date=trade_date, trade_date=trade_date,
+        headline_event_time="2026-10-12T09:12:00+08:00", last_trade_time="2026-10-12T09:12:00+08:00",
+        headline_decision_usable=False, price_decision_usable=False,
+        freshness={"status":"stale", "is_stale":True, "is_live":False})
+    data = result(raw)
+    current = data["data"]["compact"]["quote"]["current_price"]
+    assert current["is_current_session"] is expected
+    assert current["value"] is None and not current["decision_usable"] and not current["execution_usable"]
+    if trade_date is None:
+        assert current["reason"] == "PRICE_TIME_INVALID"
+    else:
+        assert current["quality"]["is_stale"] is True
+    assert latest_price_snapshot(data) == {}
+    assert build_position_math(position_context=POSITION, result=data)["latest_price"] is None
+
+
 def quote(**overrides):
     return dict(
         trade_date="2026-10-12", headline_trade_date="2026-10-12",
@@ -162,16 +180,23 @@ def test_identified_taiwan_without_qualified_contract_never_falls_back(raw):
     assert latest_price_snapshot(data) == {}
 
 
-def test_nested_trade_remains_unverified_in_single_and_batch_parsers():
+def test_nested_trade_keeps_original_old_event_in_single_and_batch_parsers():
     from app.market.providers.twse_mis_canonical import canonical_snapshot_from_twse_mis
     from app.market.providers.twse_mis_current_breadth import _classify_message
     from app.market_data.contracts import InstrumentKey, Market
     raw = dict(c="3324", d="20261012", t="13:10:00", z="-", tv="-", v="200", ts="0",
                trade={"t": "09:15:35", "v": 3, "z": 1470, "ft": 12})
-    row = _classify_message(raw, "TPEX")
-    assert row["current_price"] is None and not row["has_actual_trade"]
+    row = _classify_message(raw, "TPEX", observed_at=NOW)
+    assert row["current_price"] == 1470 and row["has_actual_trade"]
+    assert row["price_as_of"] == NOW.replace(hour=9, minute=15, second=35)
     snapshot = canonical_snapshot_from_twse_mis(
         message=raw, instrument=InstrumentKey(market=Market.TW, symbol="3324", instrument_type="stock", venue="TPEX"),
         fetched_at=NOW, session="regular", expected_trade_date=NOW.date(),
     )
-    assert snapshot.quote.last_trade_price is None
+    assert snapshot.quote.last_trade_price == 1470
+    assert snapshot.quote.lineage.event_at == row["price_as_of"]
+    # A valid old execution stays historical; a recent receipt cannot make it
+    # a current decision price. The shared MIS normalization has its own bounds.
+    resolved = result(quote(headline_price=1470, last_trade_price=1470,
+                            headline_event_time=row["price_as_of"].isoformat()))
+    assert latest_price_snapshot(resolved) == {}

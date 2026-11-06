@@ -268,7 +268,10 @@ TW_STOCK_READ_NODES = {
         CapabilityReadNode("events", ("identity",)),
         CapabilityReadNode("intraday", ("identity", "calendar"), 15.0),
         CapabilityReadNode("corporate_history", ("identity",)),
-        CapabilityReadNode("technical_evidence", ("daily", "corporate_history", "calendar"), 15.0),
+        # Full TW history, forming-day qualification and the 61-session sector
+        # comparison exceeded 15s in measured intraday reads after duplicate
+        # work was removed. Retain the request's total deadline in ReadExecution.
+        CapabilityReadNode("technical_evidence", ("daily", "corporate_history", "calendar"), 25.0),
         CapabilityReadNode("price_map", ("identity",), 15.0),
     )
 }

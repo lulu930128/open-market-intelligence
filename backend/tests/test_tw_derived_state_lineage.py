@@ -163,33 +163,21 @@ def test_stock_state_lineage_is_attached_and_missing_lineage_fails_closed() -> N
         "market_session": "regular",
         "source": "twse_mis_twse_registered_universe",
     }
-    summary = {
-        "indices": [
-            {
-                "market": "TWSE",
-                "current_data_core": {
-                    "breadth": {
-                        "provider": "twse_mis",
-                        "source": "twse_mis_live_breadth",
-                        "raw_result_id": "raw_fetch_result:21",
-                        "as_of": NOW.isoformat(),
-                    }
-                },
-            }
-        ]
-    }
     db, engine = _db()
     try:
+        from test_tw_summary_mutex import companion_summary
+        summary = companion_summary(db, [source_row], NOW)
+        expected_id = summary["indices"][0]["breadth"]["raw_result_id"]
         enriched = attach_current_market_lineage_to_stock_rows(
             [source_row],
-            summary=summary,
+            summary=summary, db=db,
         )
         persist_taiwan_intraday_stock_states(db, rows=enriched, now=NOW)
         row = db.query(TaiwanIntradayStockState).one()
         assert row.lineage_complete is True
         assert row.decision_usable is True
         assert json.loads(row.component_raw_result_ids_json or "[]") == [
-            "raw_fetch_result:21"
+            expected_id
         ]
         assert json.loads(row.component_sources_json or "[]")[0][
             "event_at"

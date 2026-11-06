@@ -10,6 +10,8 @@ PROVIDER = "tpex_openapi"
 INDEX_5S_PROVIDER = "tpex_index_5s"
 DAILY_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_daily_trading_index"
 DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+DAILY_CLOSE_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+DATED_DAILY_QUOTES_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
 INDEX_5S_URL = "https://www.tpex.org.tw/www/zh-tw/indexInfo/miIndex"
 MARKET_HIGHLIGHT_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/highlight"
 TPEX50_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex50_index"
@@ -25,7 +27,7 @@ def _resource(url: str) -> str:
         return "institutional_summary"
     if "/margin/balance" in url:
         return "margin_balance"
-    if "mainboard_quotes" in url:
+    if "mainboard_quotes" in url or "mainboard_daily_close_quotes" in url or "afterTrading/dailyQuotes" in url:
         return "daily_quotes"
     return "market_daily"
 

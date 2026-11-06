@@ -110,6 +110,38 @@ def _read_provisional_daily_overlay(db: Session, *, symbol: str, now: datetime) 
     ).model_dump()
 
 
+def _project_overlay_period(overlay: dict, *, daily_points: list[dict], timeframe: str) -> dict:
+    """Aggregate a display point without changing the finalized research series."""
+    day = overlay["trade_date"]
+    period_start = (
+        day - timedelta(days=day.weekday()) if timeframe == "weekly"
+        else day.replace(day=1) if timeframe == "monthly" else day
+    )
+    history = [point for point in daily_points if period_start <= point["time"] < day]
+    available = {point["time"] for point in history}
+    missing = [
+        candidate for offset in range((day - period_start).days)
+        if is_us_trading_day(candidate := period_start + timedelta(days=offset))
+        and candidate not in available
+    ]
+    components = [*history, overlay["point"]]
+    display_point = aggregate_ohlc_points(points=components, timeframe=timeframe)[-1]
+    limitations = list(overlay["limitations"])
+    if missing:
+        limitations.append("DISPLAY_PERIOD_HISTORY_INCOMPLETE")
+    if missing or any(point["volume"] is None for point in components):
+        # A subtotal must not masquerade as the period's full observed volume.
+        display_point["volume"] = None
+        limitations.append("DISPLAY_PERIOD_VOLUME_INCOMPLETE")
+    return {
+        **overlay,
+        "display_timeframe": timeframe,
+        "display_point": display_point,
+        "display_missing_trade_dates": missing,
+        "limitations": list(dict.fromkeys(limitations)),
+    }
+
+
 def read_us_daily_ohlcv_chart(
     db: Session,
     *,
@@ -161,11 +193,12 @@ def read_us_daily_ohlcv_chart(
     overlay = None
     if (
         include_intraday_overlay
-        and timeframe == "daily"
         and (to_date is None or to_date == today)
         and not any(point["time"] == today for point in daily_points)
     ):
         overlay = _read_provisional_daily_overlay(db, symbol=symbol, now=resolved_now)
+        if overlay is not None:
+            overlay = _project_overlay_period(overlay, daily_points=daily_points, timeframe=timeframe)
     points = aggregate_ohlc_points(
         points=daily_points,
         timeframe=timeframe,

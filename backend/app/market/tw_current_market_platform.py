@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 from app.market.official_index_platform import read_taiwan_official_index
 from app.market.trading_calendar import (
     TAIWAN_TZ,
+    TAIWAN_SESSION_OPEN_TIME,
+    TAIWAN_SESSION_CLOSE_TIME,
+    is_taiwan_trading_day,
+    latest_released_trading_day,
     previous_taiwan_trading_day,
     taiwan_market_session,
     taiwan_presentation_session,
@@ -46,7 +50,7 @@ from app.market_data.contracts import (
     Market,
     MarketSession,
 )
-from app.market_data.gateway import MarketDataGateway
+from app.market_data.gateway import MarketDataGateway, MarketIndexTransactionPort, MarketBreadthTransactionPort
 from app.market_data.integration_contracts import (
     DataRequirementV2,
     DatasetCapabilityRequest,
@@ -520,6 +524,7 @@ def refresh_taiwan_current_index(
     acquisition: TaiwanCurrentIndexAcquisitionExecutor,
     require_trade_value: bool = False,
     completion_clock=None,
+    transaction_port: MarketIndexTransactionPort | None = None,
 ) -> MarketDataResultV1:
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("current index refresh requires prefer_live or require_live")
@@ -538,7 +543,7 @@ def refresh_taiwan_current_index(
         reader=TaiwanCurrentMarketRepository(db),
         descriptors=tuple(descriptors),
         acquisition_port=acquisition,
-        transaction_port=TaiwanCurrentMarketTransaction(db),
+        transaction_port=transaction_port if transaction_port is not None else TaiwanCurrentMarketTransaction(db),
         official_first=False,
         route_resolution_gate=True,
         completion_clock=completion_clock,
@@ -576,6 +581,7 @@ def refresh_taiwan_current_breadth(
         ProviderCapabilityDescriptorV2
     ] = TW_CURRENT_BREADTH_DESCRIPTORS,
     acquisition: TaiwanCurrentBreadthAcquisitionExecutor,
+    transaction_port: MarketBreadthTransactionPort | None = None,
 ) -> MarketDataResultV1:
     if policy not in {RealtimePolicy.PREFER_LIVE, RealtimePolicy.REQUIRE_LIVE}:
         raise ValueError("current breadth refresh requires prefer_live or require_live")
@@ -593,7 +599,7 @@ def refresh_taiwan_current_breadth(
         reader=TaiwanCurrentMarketRepository(db),
         descriptors=tuple(descriptors),
         acquisition_port=acquisition,
-        transaction_port=TaiwanCurrentMarketTransaction(db),
+        transaction_port=transaction_port if transaction_port is not None else TaiwanCurrentMarketTransaction(db),
         route_resolution_gate=True,
     )
 
@@ -862,20 +868,28 @@ def read_taiwan_completed_auction_breadth(db: Session, *, venue: str, requested_
 
 
 def read_taiwan_breadth_lanes(db: Session, *, venue: str, requested_at: datetime) -> dict:
-    """Cache-only scope comparison, without substituting unlike universes."""
+    """Select the session's breadth scope; unlike universes remain separate."""
     from app.market.official_breadth_platform import (
         read_taiwan_official_breadth, project_taiwan_official_breadth,
     )
 
-    presentation = taiwan_presentation_session(requested_at)
-    if presentation["state"] not in {"completed", "previous_session"}:
+    local_now = requested_at.astimezone(TAIWAN_TZ)
+    if (is_taiwan_trading_day(local_now.date())
+        and TAIWAN_SESSION_OPEN_TIME <= local_now.time() < TAIWAN_SESSION_CLOSE_TIME):
         return {"status": "not_applicable", "selected_lane": "current_registered",
-                "reason": "CURRENT_SESSION_REQUIREMENT", "official_daily": None}
+                "reason": "CURRENT_SESSION_REQUIREMENT", "official_daily": None,
+                "cache_only": True}
+    trade_date = latest_released_trading_day(
+        release_time=TAIWAN_SESSION_CLOSE_TIME, now=local_now,
+    )
     official = project_taiwan_official_breadth(read_taiwan_official_breadth(
-        db, venue=venue, trade_date=presentation["trade_date"], requested_at=requested_at,
+        db, venue=venue, trade_date=trade_date, requested_at=requested_at,
+        allow_universe_fallback=False,
     ))
-    return {"status": "shadow", "selected_lane": "current_registered",
-            "reason": "DISTINCT_UNIVERSE_SCOPES", "official_daily": official,
+    qualified = bool(official.get("official") and official.get("published_limits"))
+    return {"status": "selected" if qualified else "pending", "selected_lane": "official_daily",
+            "reason": "QUALIFIED_OFFICIAL_AGGREGATE" if qualified else "OFFICIAL_AGGREGATE_PENDING",
+            "trade_date": trade_date, "official_daily": official,
             "comparison": "scope_only", "cache_only": True}
 
 

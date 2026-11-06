@@ -9,9 +9,10 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
+from app.db.models import StockMaster, MarketDailyPrice
 from app.market.daily_ohlcv_acquisition import TaiwanOfficialDailyAcquisitionExecutor
 from app.market.daily_price_candidates import TaiwanCompletedDailyCandidateReader
 from app.market.daily_price_repository import TaiwanOfficialDailyBarRepository
@@ -23,18 +24,23 @@ from app.market.providers.tw_official_daily import (
     parse_twse_official_daily_payload,
     parse_twse_rwd_official_daily_payload,
     parse_tpex_official_daily_payload,
+    parse_tpex_dated_daily_payload,
     source_name_for_resource,
     TWSE_DAILY_RESOURCE_ID,
     TWSE_RWD_DAILY_RESOURCE_ID,
     TPEX_DAILY_RESOURCE_ID,
+    TPEX_DAILY_CLOSE_RESOURCE_ID,
+    TPEX_DATED_DAILY_RESOURCE_ID,
     TW_BREADTH_DATASET_ID,
     TPEX_OFFICIAL_BREADTH_DESCRIPTOR,
 )
-from app.market.tw_universe import list_taiwan_stock_universe
-from app.market.tw_intraday_universe import (
-    list_taiwan_active_watchlist_instruments,
+from app.market.tw_universe import list_taiwan_stock_universe, list_taiwan_daily_collection_universe
+from app.market.trading_calendar import has_taiwan_calendar_year, is_taiwan_trading_day
+from app.market.taiwan_rules import (
+    TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE, TAIWAN_DAILY_REGULAR_SCOPE,
+    expected_daily_price_date, expected_daily_research_date, taiwan_daily_price_release_at,
+    taiwan_published_breadth_observation_at,
 )
-from app.market.taiwan_rules import expected_daily_price_date, taiwan_daily_price_release_at
 from app.market_data.contracts import (
     AuthorityClass,
     BarObservation,
@@ -126,6 +132,8 @@ class TaiwanCanonicalDailyRow:
     selected_source: str
     volume_unit: str = "shares"
     trade_value_unit: str = "TWD"
+    release_status: str = "released"
+    official_final: bool = True
 
 
 class TaiwanDailyRefreshResult(CanonicalModel):
@@ -207,6 +215,7 @@ def build_taiwan_daily_cache_requirement(
     requested_at: datetime,
     max_rows: int,
     minimum_authority: AuthorityClass = AuthorityClass.EXCHANGE,
+    purpose: DataPurpose = DataPurpose.VIEWER,
 ) -> DataRequirementV2:
     """Build a zero-I/O completed-session read for viewer/research consumers."""
 
@@ -234,7 +243,7 @@ def build_taiwan_daily_cache_requirement(
             price_basis="raw",
             series_resolution=BarSeriesResolutionMode.COMPOSE_BY_TIMESTAMP,
         ),
-        purpose=DataPurpose.VIEWER,
+        purpose=purpose,
         realtime_policy=RealtimePolicy.COMPLETED_SESSION,
         session=MarketSession.CLOSED,
         requested_at=requested_at,
@@ -268,6 +277,7 @@ def read_taiwan_official_daily(
     to_date: date | None = None,
     limit: int = 250,
     requested_at: datetime | None = None,
+    allow_early_regular: bool = False,
 ) -> MarketDataResultV1:
     """Resolve persisted official daily candidates without provider acquisition."""
 
@@ -287,7 +297,7 @@ def read_taiwan_official_daily(
     if limit < 1 or limit > 5000:
         raise ValueError("limit must be between 1 and 5000")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
-    latest_potentially_released_date = expected_daily_price_date(
+    latest_potentially_released_date = (expected_daily_research_date if allow_early_regular else expected_daily_price_date)(
         now=effective_requested_at.astimezone(TAIWAN_TZ)
     )
     effective_to_date = (
@@ -302,7 +312,7 @@ def read_taiwan_official_daily(
         )
     instrument_type = (
         InstrumentType.ETF
-        if "etf" in str(stock.instrument_type or "").strip().lower()
+        if str(stock.instrument_type or "").strip().lower() in {"etf", "exchange_traded_fund"}
         else InstrumentType.STOCK
     )
     instrument = InstrumentKey(
@@ -314,6 +324,7 @@ def read_taiwan_official_daily(
     repository = TaiwanOfficialDailyBarRepository(
         db,
         available_at=effective_requested_at,
+        allow_early_regular=allow_early_regular,
     )
     effective_from_date = from_date
     if effective_from_date is None:
@@ -471,6 +482,8 @@ def project_taiwan_daily_bars(
                 updated_at=item["updated_at"],
                 selected_provider=bar.lineage.provider,
                 selected_source=bar.lineage.source,
+                release_status="regular_research" if "OFFICIAL_FINAL_PENDING" in bar.limitations else "released",
+                official_final="OFFICIAL_FINAL_PENDING" not in bar.limitations,
             )
         )
     return projected
@@ -627,14 +640,23 @@ def refresh_taiwan_official_daily(
         raise ValueError("official Taiwan daily refresh requires TWSE/TPEX venue")
     effective_requested_at = requested_at or datetime.now(TAIWAN_TZ)
     expected_date = expected_daily_price_date(now=effective_requested_at)
-    if expected_date is None or trade_date != expected_date:
+    if (expected_date is None or trade_date > expected_date
+            or (expected_date - trade_date).days > 31
+            or not has_taiwan_calendar_year(trade_date.year)
+            or not is_taiwan_trading_day(trade_date)):
         raise ValueError(
-            "official daily refresh trade_date must equal the latest expected "
-            f"completed Taiwan session ({expected_date})"
+            "official daily refresh trade_date must be a known trading day within "
+            f"31 days of the latest expected completed Taiwan session ({expected_date})"
         )
+    historical = trade_date < expected_date
+    # Snapshot-only resources cannot answer a historical correction. Keep the
+    # existing dated adapters and transaction owner, with one symbol/day/call.
+    descriptors = tuple(item for item in TW_OFFICIAL_DAILY_DESCRIPTORS
+                        if not historical or item.resource_id in {
+                            TWSE_RWD_DAILY_RESOURCE_ID, TPEX_DATED_DAILY_RESOURCE_ID})
     instrument_type = (
         InstrumentType.ETF
-        if "etf" in str(stock.instrument_type or "").strip().lower()
+        if str(stock.instrument_type or "").strip().lower() in {"etf", "exchange_traded_fund"}
         else InstrumentType.STOCK
     )
     requirement = RefreshRequirementV1(
@@ -651,8 +673,8 @@ def refresh_taiwan_official_daily(
         to_date=trade_date,
         requested_at=effective_requested_at,
         purpose=DataPurpose.REPAIR,
-        max_provider_attempts=2 if venue == "TWSE" else 1,
-        max_external_calls=2 if venue == "TWSE" else 1,
+        max_provider_attempts=2 if venue == "TWSE" and not historical else 1,
+        max_external_calls=2 if venue == "TWSE" and not historical else 1,
         timeout_seconds=30,
         max_symbols=1,
         max_range_days=1,
@@ -667,6 +689,7 @@ def refresh_taiwan_official_daily(
         ),
         transaction=TaiwanOfficialDailyTransaction(db),
         acquisition=acquisition,
+        descriptors=descriptors,
     ).refresh_instrument(requirement)
 
 
@@ -681,6 +704,7 @@ def refresh_taiwan_official_daily_venue(
     refresh_published: bool = True,
     timeout_seconds: int = 30,
     max_external_calls: int = 2,
+    route_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Refresh one official venue receipt through the existing daily owner.
 
@@ -699,40 +723,41 @@ def refresh_taiwan_official_daily_venue(
     if timeout_seconds < 1 or max_external_calls < 1:
         raise ValueError("official venue refresh requires a positive remaining time/call budget")
     instruments: dict[str, InstrumentKey] = {}
-    for stock in list_taiwan_stock_universe(db):
+    for stock in list_taiwan_daily_collection_universe(db, markets=(normalized_venue,)):
         stock_venue = str(stock.market or "").strip().upper()
         if stock_venue != normalized_venue:
             continue
         instruments[stock.stock_id] = InstrumentKey(
             market=Market.TW,
             symbol=stock.stock_id,
-            instrument_type=InstrumentType.STOCK,
+            instrument_type=(InstrumentType.STOCK if str(stock.instrument_type).lower() == "stock" else InstrumentType.ETF),
             venue=normalized_venue,
-        )
-    for instrument in list_taiwan_active_watchlist_instruments(db):
-        instrument_venue = str(instrument.market or "").strip().upper()
-        if instrument_venue != normalized_venue:
-            continue
-        instrument_type = str(instrument.instrument_type or "").strip().lower()
-        if instrument_type != "etf":
-            continue
-        instruments.setdefault(
-            instrument.stock_id,
-            InstrumentKey(
-                market=Market.TW,
-                symbol=instrument.stock_id,
-                instrument_type=InstrumentType.ETF,
-                venue=normalized_venue,
-            ),
         )
     if not instruments:
         raise ValueError(
-            f"active Taiwan ordinary-stock universe is empty for venue={normalized_venue}"
+            f"active Taiwan daily collection universe is empty for venue={normalized_venue}"
         )
 
-    # TWSE permits its existing fallback; TPEx reserves one additional resource
-    # call for the planner-selected published breadth companion.
-    attempt_bound = min(max(int(max_external_calls), 1), 2)
+    # EOD continuation is scoped by the existing date/universe checkpoint. The
+    # canonical repository owns qualification; never refetch/overwrite its current
+    # members merely because another symbol in this venue remains unresolved.
+    if route_state is not None:
+        repository = TaiwanOfficialDailyBarRepository(
+            db, allow_early_regular=effective_requested_at < taiwan_daily_price_release_at(trade_date),
+        )
+        # Reuse the bounded canonical reader; its explicit symbol limit is 500.
+        symbols = tuple(instruments)
+        for offset in range(0, len(symbols), 500):
+            qualified = repository.load_market_universe(trade_date=trade_date, include_etf=True,
+                venue=normalized_venue, symbols=symbols[offset:offset + 500])
+            for bar in qualified.bars:
+                instruments.pop(bar.instrument.symbol, None)
+        refresh_daily = refresh_daily and bool(instruments)
+
+    # Plan the bounded venue route pool independently of this job's remaining
+    # calls. Execution still admits at most attempt_bound calls, including breadth.
+    attempt_bound = max(int(max_external_calls), 1)
+    early_attempt = effective_requested_at < taiwan_daily_price_release_at(trade_date)
     requirement = RefreshRequirementV1(
         dataset_id=TW_FULL_MARKET_DAILY_DATASET_ID,
         target=DatasetTarget(
@@ -747,7 +772,7 @@ def refresh_taiwan_official_daily_venue(
         max_provider_attempts=attempt_bound,
         max_external_calls=attempt_bound,
         timeout_seconds=min(max(int(timeout_seconds), 1), 30),
-        max_symbols=len(instruments),
+        max_symbols=max(1, len(instruments)),
         max_range_days=1,
         postcondition=(
             f"Official {normalized_venue} daily observations reach "
@@ -755,7 +780,7 @@ def refresh_taiwan_official_daily_venue(
         ),
     )
     plan = plan_refresh_acquisition_v1(
-        requirement,
+        requirement.model_copy(update={"max_provider_attempts": 3, "max_external_calls": 3}),
         TW_OFFICIAL_DAILY_DESCRIPTORS,
     )
     if plan.unfillable:
@@ -775,7 +800,7 @@ def refresh_taiwan_official_daily_venue(
 
     executor = acquisition or TaiwanOfficialDailyAcquisitionExecutor()
     companion_routes = ()
-    if refresh_published and normalized_venue == "TPEX" and effective_requested_at >= taiwan_daily_price_release_at(trade_date):
+    if refresh_published and normalized_venue == "TPEX" and effective_requested_at >= taiwan_published_breadth_observation_at(trade_date):
         breadth_requirement = requirement.model_copy(update={
             "dataset_id": TW_BREADTH_DATASET_ID,
             "target": DatasetTarget(market=Market.TW, dataset_id=TW_BREADTH_DATASET_ID, scope_key="TPEX"),
@@ -788,6 +813,39 @@ def refresh_taiwan_official_daily_venue(
     daily_routes = plan.routes if refresh_daily else tuple(
         route for route in plan.routes if refresh_published and route.resource_id == TWSE_RWD_DAILY_RESOURCE_ID
     )
+    if early_attempt:
+        # Early daily OHLCV remains TWSE RWD only. Published aggregates have
+        # their independent post-close boundary and share the same call budget.
+        daily_routes = tuple(route for route in daily_routes
+            if route.resource_id == TWSE_RWD_DAILY_RESOURCE_ID and (
+                refresh_daily and trade_date == expected_daily_research_date(now=effective_requested_at)
+                or not refresh_daily and refresh_published
+                and effective_requested_at >= taiwan_published_breadth_observation_at(trade_date)))
+    route_pool = (*daily_routes, *companion_routes)
+    route_keys = {route.resource_id for route in route_pool}
+    # Respect both caller admission and the existing planner's finite pool:
+    # up to two TWSE resources, or three TPEx daily plus one breadth companion.
+    attempt_bound = min(attempt_bound, max(1, len(route_keys)))
+    requirement = requirement.model_copy(update={
+        "max_provider_attempts": attempt_bound, "max_external_calls": attempt_bound,
+    })
+    attempted_resources: set[str] = set()
+    if route_state:
+        if (route_state.get("version") != 1 or route_state.get("venue") != normalized_venue
+                or route_state.get("trade_date") != trade_date.isoformat()):
+            raise ValueError("official daily route continuation context changed")
+        prior = route_state.get("attempted_resources")
+        if not isinstance(prior, list) or len(prior) > 4 or any(not isinstance(item, str) for item in prior):
+            raise ValueError("invalid official daily route continuation")
+        attempted_resources = set(prior) & route_keys
+        if not early_attempt and route_state.get("release_phase") == "regular_research":
+            attempted_resources.clear()
+        # A completed round can retry after the EOD owner's existing backoff.
+        # An unfinished round must reach the secondary/companion before replaying.
+        if route_keys <= attempted_resources:
+            attempted_resources.clear()
+    daily_routes = tuple(route for route in daily_routes if route.resource_id not in attempted_resources)
+    companion_routes = tuple(route for route in companion_routes if route.resource_id not in attempted_resources)
     acquired = executor.acquire_dataset_routes(
         instruments if refresh_daily else {},
         daily_routes,
@@ -821,16 +879,29 @@ def refresh_taiwan_official_daily_venue(
     observed_sources = list(
         dict.fromkeys(bar.lineage.source for bar in acquired.observations)
     )
+    attempted_resources.update(item.resource_id for item in acquired.summary.resource_attempts)
+    missing_symbols = set(instruments) - {bar.instrument.symbol for bar in acquired.observations}
+    pending_resources = route_keys - attempted_resources
+    if not missing_symbols:
+        pending_resources -= {route.resource_id for route in daily_routes}
+    next_route_state = {
+        "version": 1, "venue": normalized_venue, "trade_date": trade_date.isoformat(),
+        "attempted_resources": sorted(attempted_resources),
+        "pending_resources": sorted(pending_resources),
+        "release_phase": "regular_research" if early_attempt else "official_final",
+    }
     # Keep the daily command's primary receipt bound to its bars. The aggregate
     # has its own receipt in raw_result_ids, committed in this same transaction.
     primary_receipt_index = next((
         index for index in reversed(range(len(acquired.receipts)))
         if acquired.receipts[index].source in observed_sources
     ), len(acquired.receipts) - 1)
-    parse_success = bool(acquired.observations)
-    fetch_success = parse_success and any(
-        receipt.error_message is None
-        and receipt.status_code is not None
+    # A continuation may have only a published companion left in its route pool.
+    # Its valid receipt does not imply daily coverage; EOD rereads both axes.
+    parse_success = acquired.summary.status in {AcquisitionStatus.COMPLETED, AcquisitionStatus.PARTIAL}
+    # Parsing/qualification errors can accompany a successfully received body.
+    fetch_success = any(
+        receipt.status_code is not None
         and 200 <= receipt.status_code < 300
         for receipt in acquired.receipts
     )
@@ -840,12 +911,19 @@ def refresh_taiwan_official_daily_venue(
         parse_success = acquired.summary.status in {AcquisitionStatus.COMPLETED, AcquisitionStatus.PARTIAL} and any(
             receipt.status_code == 200 and not receipt.error_message for receipt in acquired.receipts
         )
-        fetch_success = parse_success
+    publication_pending = early_attempt and not acquired.summary.attempted
     return {
         "external_call_count": acquired.summary.external_calls,
-        "fetch_status": "success" if fetch_success else "error",
-        "parse_status": "success" if parse_success else "error",
-        "source_name": observed_sources[0] if len(observed_sources) == 1 else None,
+        "publication_pending": publication_pending,
+        "research_ready_count": sum("OFFICIAL_FINAL_PENDING" in bar.limitations for bar in acquired.observations),
+        "release_status": TAIWAN_DAILY_REGULAR_RESEARCH_RELEASE if any(
+            "OFFICIAL_FINAL_PENDING" in bar.limitations for bar in acquired.observations
+        ) else "released" if acquired.observations else "unavailable",
+        "fetch_status": "skipped" if publication_pending else "success" if fetch_success else "error",
+        "parse_status": "skipped" if publication_pending else "success" if parse_success else "error",
+        "source_name": observed_sources[0] if len(observed_sources) == 1 else (
+            acquired.receipts[primary_receipt_index].source if acquired.receipts and not observed_sources else None
+        ),
         "parsed_count": len(acquired.observations),
         "inserted_count": persistence.observations_written,
         "unchanged_observation_count": persistence.observations_unchanged,
@@ -869,13 +947,15 @@ def refresh_taiwan_official_daily_venue(
         "error_message": None if parse_success else "Expected official daily observations were not acquired.",
         "limitations": list(
             dict.fromkeys(
-                (*acquired.summary.limitations, *persistence.limitations)
+                (*acquired.summary.limitations, *persistence.limitations,
+                 *(("EARLY_OFFICIAL_SOURCE_UNVERIFIED",) if publication_pending and normalized_venue == "TPEX" else ()))
             )
         ),
         "resource_attempts": [
             item.model_dump(mode="json")
             for item in acquired.summary.resource_attempts
         ],
+        "route_continuation": next_route_state,
     }
 
 
@@ -884,16 +964,32 @@ def qualify_taiwan_eod_universe(
 ) -> dict[str, object]:
     """Batch eligibility port for shared coverage; no refresh or per-stock resolver."""
     batch = TaiwanOfficialDailyBarRepository(db).load_market_universe(trade_date=trade_date)
+    collection = list_taiwan_daily_collection_universe(db)
+    etfs = [item for item in collection if str(item.instrument_type).lower() != "stock"]
+    etf_bars = []
+    etf_rejections = []
+    repository = TaiwanOfficialDailyBarRepository(db)
+    for offset in range(0, len(etfs), 500):
+        etf_batch = repository.load_market_universe(trade_date=trade_date, include_etf=True,
+            symbols=tuple(item.stock_id for item in etfs[offset:offset + 500]))
+        etf_bars.extend(etf_batch.bars)
+        etf_rejections.extend(etf_batch.rejection_reasons)
+    etf_symbols = tuple(item.stock_id for item in etfs)
+    etf_latest = dict(db.query(MarketDailyPrice.stock_id, func.max(MarketDailyPrice.trade_date))
+        .filter(MarketDailyPrice.stock_id.in_(etf_symbols))
+        .filter(MarketDailyPrice.trade_date <= trade_date).group_by(MarketDailyPrice.stock_id).all()) if etfs else {}
     reasons: dict[str, list[str]] = {}
-    for symbol, reason in batch.rejection_reasons:
+    for symbol, reason in (*batch.rejection_reasons, *etf_rejections):
         reasons.setdefault(symbol, []).append(reason)
-    qualified = {bar.instrument.symbol for bar in batch.bars}
+    qualified = {bar.instrument.symbol for bar in (*batch.bars, *etf_bars)}
     universe = list_taiwan_stock_universe(db)
-    unresolved = {item.stock_id for item in universe if item.stock_id not in qualified}
+    unresolved = {item.stock_id for item in collection if item.stock_id not in qualified}
     parser_by_source = {
         source_name_for_resource(TWSE_DAILY_RESOURCE_ID): parse_twse_official_daily_payload,
         source_name_for_resource(TWSE_RWD_DAILY_RESOURCE_ID): parse_twse_rwd_official_daily_payload,
         source_name_for_resource(TPEX_DAILY_RESOURCE_ID): parse_tpex_official_daily_payload,
+        source_name_for_resource(TPEX_DAILY_CLOSE_RESOURCE_ID): parse_tpex_official_daily_payload,
+        source_name_for_resource(TPEX_DATED_DAILY_RESOURCE_ID): parse_tpex_dated_daily_payload,
     }
     diagnostics = []
     if unresolved:
@@ -902,7 +998,8 @@ def qualify_taiwan_eod_universe(
         )
         for raw, source in receipts:
             diagnostic = {"source": source.source_name, "raw_result_id": raw.id, "fetched_at": raw.fetched_at.isoformat(),
-                          "transport_status": "failed" if raw.error_message or raw.status_code is not None and raw.status_code >= 400 else "received"}
+                          "transport_status": "received" if raw.status_code is not None and 200 <= raw.status_code < 300
+                          else "failed" if raw.error_message or raw.status_code is not None and raw.status_code >= 400 else "received"}
             diagnostics.append(diagnostic)
             parser = parser_by_source.get(source.source_name)
             if diagnostic["transport_status"] == "failed":
@@ -923,8 +1020,8 @@ def qualify_taiwan_eod_universe(
             diagnostic["payload_status"] = "expected_date_observed"
             diagnostic["observed_symbol_count"] = len(dated_records | dated_rejections.keys())
             diagnostic["symbol_reasons"] = {}
-            for member in universe:
-                if member.stock_id not in unresolved or member.market != parsed.venue:
+            for member in collection:
+                if member.stock_id not in unresolved or str(member.market).upper() != parsed.venue:
                     continue
                 reason = ("PROVIDER_" + dated_rejections[member.stock_id] if member.stock_id in dated_rejections
                           else "PROVIDER_ROW_NOT_CANONICALLY_MATERIALIZED" if member.stock_id in dated_records
@@ -941,6 +1038,12 @@ def qualify_taiwan_eod_universe(
         observation = resolved.resolved.breadth
         published_breadth[venue] = bool(observation is not None and observation.published_limits is not None)
     return {
+        "etf_scope": {
+            "members": tuple({"symbol": item.stock_id, "venue": str(item.market).upper()} for item in etfs),
+            "qualified_symbols": tuple(bar.instrument.symbol for bar in etf_bars),
+            "latest_by_symbol": etf_latest,
+            "rejection_reasons": {symbol: tuple(dict.fromkeys(reasons.get(symbol, ()))) for symbol in etf_symbols},
+        },
         "published_breadth": published_breadth,
         "qualified_symbols": tuple(bar.instrument.symbol for bar in batch.bars),
         "rejection_reasons": {symbol: tuple(dict.fromkeys(values)) for symbol, values in reasons.items()},
