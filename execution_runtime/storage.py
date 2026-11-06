@@ -108,7 +108,7 @@ class OwnerLease:
 
 
 class Journal:
-    def __init__(self, path: Path, account_id: str):
+    def __init__(self, path: Path, account_id: str, *, scope=None):
         self.path = path
         # Never apply this schema to an existing foreign/production database.
         if path.exists():
@@ -119,6 +119,9 @@ class Journal:
                         "UNSUPPORTED_JOURNAL_VERSION")
                 row = con.execute("SELECT value FROM metadata WHERE key='account_id'").fetchone()
                 require(row is not None and row[0] == account_id, "JOURNAL_ACCOUNT_MISMATCH")
+                scoped = con.execute("SELECT value FROM metadata WHERE key='scope'").fetchone()
+                require((scoped[0] if scoped else None) == (encoded(scope) if scope else None),
+                        "JOURNAL_MARKET_SCOPE_MISMATCH")
         else:
             with self.connection() as con:
                 con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
@@ -127,6 +130,8 @@ class Journal:
                         con.execute(f"CREATE TRIGGER immutable_{table}_{action} BEFORE {action} ON {table} "
                                     "BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_EXECUTION_FACT'); END")
                 con.execute("INSERT INTO metadata VALUES ('account_id', ?)", (account_id,))
+                if scope is not None:
+                    con.execute("INSERT INTO metadata VALUES ('scope', ?)", (encoded(scope),))
                 con.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 con.commit()

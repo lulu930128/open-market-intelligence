@@ -18,6 +18,6 @@ def validate_binding(binding, draft):
     if binding["protection"] is not None:
         rules = StrategyRules(**binding["protection"])
         rules.validate()
-        require((draft.command.action, draft.command.condition) == ("Buy", "CASH"), "SHORT_COVER_UNVERIFIED")
+        require(rules.direction == (1 if draft.command.action == "Buy" else -1), "STRATEGY_DIRECTION_MISMATCH")
         require(draft.command.strategy_id is not None and draft.command.revision == 1, "STRATEGY_LINEAGE_REQUIRED")
     return binding

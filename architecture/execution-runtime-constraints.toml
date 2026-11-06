@@ -13,7 +13,7 @@ forbidden_prefixes = ["app", "backend", "agents", "execution_simulation", "execu
 [[rules]]
 id = "execution_config_launch_owner"
 kind = "python_forbidden_import"
-description = "Only the OMI config bootstrap loads dotenv and launches the fixed native interpreter."
+description = "Only the OMI config bootstrap loads dotenv; its single supervisor launches the fixed native interpreter."
 roots = ["execution_runtime"]
 exclude_path_prefixes = ["execution_runtime/tests", "execution_runtime/launch.py"]
 extensions = [".py"]
@@ -31,7 +31,7 @@ forbidden_prefixes = ["kgisuperpy"]
 [[rules]]
 id = "execution_native_login_owner"
 kind = "python_forbidden_call"
-description = "Only the explicit native factory logs in; no automatic credential loaders."
+description = "Only the explicit native factory logs in; managed retries remain under the existing Runtime/session owner."
 roots = ["execution_runtime"]
 exclude_path_prefixes = ["execution_runtime/tests", "execution_runtime/native.py"]
 extensions = [".py"]
@@ -40,7 +40,7 @@ forbidden_call_names = ["login", "getenv"]
 [[rules]]
 id = "execution_runtime_no_ordinary_callers"
 kind = "python_forbidden_import"
-description = "No Backend, MCP, launcher, M1 or simulation adoption of the execution runtime."
+description = "No Backend, MCP, M1, simulation or script imports of the execution engine; the desktop Launcher may invoke only the fixed launch supervisor through its authenticated local component."
 roots = ["backend/app", "agents", "scripts", "execution", "execution_simulation", "execution_simulation_gateway", "execution_broker_preflight", "execution_kgi_simulator", "execution_manual_mock"]
 exclude_path_prefixes = ["execution/tests", "execution_simulation/tests", "execution_simulation_gateway/tests", "execution_broker_preflight/tests", "execution_kgi_simulator/tests", "execution_manual_mock/tests"]
 extensions = [".py"]
@@ -68,7 +68,7 @@ forbidden_call_names = ["Popen"]
 id = "execution_adapter_no_transaction_or_reducer"
 kind = "python_forbidden_call"
 description = "The KGI session owner maps IO only; application owns transactions and calls the pure reducer."
-roots = ["execution_runtime/kgi.py", "execution_runtime/contracts.py", "execution_runtime/native.py"]
+roots = ["execution_runtime/kgi.py", "execution_runtime/kgi_us.py", "execution_runtime/contracts.py", "execution_runtime/us_contracts.py", "execution_runtime/native.py"]
 extensions = [".py"]
 forbidden_call_names = ["connect", "commit", "rollback", "reduce_order", "transition"]
 
@@ -91,7 +91,7 @@ forbidden_prefixes = ["sqlite3", "execution_runtime.storage", "execution_runtime
 [[rules]]
 id = "execution_clients_no_submit_bypass"
 kind = "python_forbidden_call"
-description = "Normal client entrypoints only confirm a durable exact snapshot; no raw engine submit."
+description = "Clients delegate to Runtime's durable review/claim, including per-order TW/US Desk confirmations; no raw SDK or engine submit."
 roots = ["execution_runtime/application.py", "execution_runtime/cli.py", "execution_runtime/headless.py", "execution_runtime/control.py", "execution_runtime/service.py", "execution_runtime/__main__.py", "execution_runtime/native.py"]
 extensions = [".py"]
 forbidden_call_names = ["submit", "_submit_engine", "_claim_command", "_dispatch_claimed", "create_order", "connect", "commit", "rollback", "_transaction"]
@@ -108,7 +108,7 @@ forbidden_call_names = ["open", "read_text", "write_text", "connect", "commit", 
 id = "execution_adapter_no_strategy"
 kind = "python_forbidden_import"
 description = "Dumb KGI IO/normalizer must not import mutable strategy or review policy."
-roots = ["execution_runtime/kgi.py", "execution_runtime/storage.py", "execution_runtime/contracts.py", "execution_runtime/native.py"]
+roots = ["execution_runtime/kgi.py", "execution_runtime/kgi_us.py", "execution_runtime/storage.py", "execution_runtime/contracts.py", "execution_runtime/us_contracts.py", "execution_runtime/native.py"]
 extensions = [".py"]
 forbidden_prefixes = ["execution_runtime.strategy", "execution_runtime.review"]
 
@@ -144,4 +144,12 @@ description = "Only the existing KGI session owner queries account cash inventor
 roots = ["execution_runtime"]
 exclude_path_prefixes = ["execution_runtime/tests", "execution_runtime/kgi.py"]
 extensions = [".py"]
-forbidden_call_names = ["InventorySum", "Inventory"]
+forbidden_call_names = ["InventorySum", "Inventory", "StockPositionReport", "PositionDetailReport", "DeliveryReport"]
+
+[[rules]]
+id = "execution_us_mapping_no_io"
+kind = "python_forbidden_call"
+description = "US values and vendor mapping remain pure; the existing SDK owner performs every effect."
+roots = ["execution_runtime/kgi_us.py", "execution_runtime/us_contracts.py"]
+extensions = [".py"]
+forbidden_call_names = ["open", "read_text", "write_text", "login", "logout", "now", "utcnow", "getenv", "create_order", "cancel_order", "get_trades", "set_event", "OrderReport", "ExecReport", "_transaction", "StockPositionReport", "set_SubAccount"]

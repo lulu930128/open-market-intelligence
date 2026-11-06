@@ -34,6 +34,9 @@ reports/*
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.owner
 
 # OS / Editor
 .DS_Store

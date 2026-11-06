@@ -52,6 +52,11 @@ class BoundaryTests(unittest.TestCase):
                                ("execution_runtime/headless.py", "runtime._submit_engine(command)"),
                                ("execution_runtime/bad.py", "api.Order.cancel_order_all()"),
                                ("execution_runtime/kgi.py", "db.commit()"),
+                               ("execution_runtime/kgi_us.py", "db.commit()"),
+                               ("execution_runtime/kgi_us.py", "api.SubOrder.create_order()"),
+                               ("execution_runtime/kgi_us.py", "import execution_runtime.strategy"),
+                               ("execution_runtime/us_contracts.py", "datetime.now()"),
+                               ("execution_runtime/runtime.py", "api.SubAccount.StockPositionReport()"),
                                ("execution_runtime/storage.py", "reduce_order(x)"),
                                ("backend/app/bad.py", "from execution_runtime.runtime import ExecutionRuntime"),
                                ("execution/bad.py", "import execution_runtime")):

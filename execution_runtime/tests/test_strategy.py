@@ -1,9 +1,11 @@
 """Phase 3 offline acceptance: canonical review, mutable policy, actual fills."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
 import json
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -379,12 +381,13 @@ class StrategyTests(unittest.TestCase):
     def test_unknown_version_source_tamper_or_orphan_claim_fails_before_factory(self):
         idle(self.runtime)
         self.runtime.close()
-        original = self.path.read_bytes()
         from execution_runtime.storage import Journal
         for change in ("version", "digest", "lineage", "claim"):
             with self.subTest(change=change):
-                self.path.write_bytes(original)  # temporary test DB only, runtime closed
-                journal = Journal(self.path, ACCOUNT)
+                scenario_path = self.path.with_name(f"tamper-{change}.sqlite")
+                with self.runtime._journal.connection(readonly=True) as source, closing(sqlite3.connect(scenario_path)) as target:
+                    source.backup(target)
+                journal = Journal(scenario_path, ACCOUNT)
                 with journal.connection() as con:
                     if change == "claim":
                         con.execute("INSERT INTO journal VALUES (9999,'invalid',?,'STRATEGY_EXIT_CLAIMED',?,?)",
@@ -403,12 +406,11 @@ class StrategyTests(unittest.TestCase):
                             payload["strategy_id"] = "other"
                         con.execute("UPDATE journal SET payload=? WHERE seq=?", (json.dumps(payload), row["seq"]))
                 calls = []
-                runtime = ExecutionRuntime(self.path, account_id=ACCOUNT, trade_date=DAY,
+                runtime = ExecutionRuntime(scenario_path, account_id=ACCOUNT, trade_date=DAY,
                     session_factory=lambda: calls.append(True), clock=lambda: NOW)
                 with self.assertRaises((ValueError, TypeError)):
                     runtime.start()
                 self.assertEqual(calls, [])
-        self.path.write_bytes(original)
         self.open()
 
     def test_entry_fill_callback_concurrent_with_exit_triggers_is_quantity_bounded(self):

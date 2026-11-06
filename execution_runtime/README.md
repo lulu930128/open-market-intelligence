@@ -1,5 +1,22 @@
 # Execution Runtime／原生 KGI headless 入口
 
+台、美股由同一 SDK session 處理人工送單、精確撤單與每單可調停損停利，Backend／MCP Apps 已接到原 Native owner。AI 只管理研究及未送草稿；MCP 前端使用者點按送單才派送。正式啟動預設綁定兩市場，以恢復已保存的美股出場規則。美股無官方 simulation；`OFFLINE` fixture 只作測試。完整邊界見 [current architecture](../docs/architecture/LiveExecutionRuntime.md)。
+
+僅測試檔內的假 SDK 流程：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m unittest execution_runtime.tests.test_us_execution -q
+```
+
+新增設定沿用 OMI 既有安全設定與 child environment，這裡不保存帳戶值：
+
+| 設定 | 預設／語意 |
+|---|---|
+| `KGI_SUPERPY_US_ENABLED` | 正式環境未指定時為 `true`，simulation 為 `false`；保留明確 override |
+| `KGI_SUPERPY_US_ACCOUNT` | 未指定時僅在恰好一個複委託帳戶時選擇；多帳戶須明確指定，重連不得切換 |
+
+正式環境同時綁定 US 時，台北／UTC 換日由既有 owner 更新各市場日期並保留共用登入，既有委託日期不改寫。US Sell 是現股賣出；本機出場使用限價 ROD，不是券商原生 bracket。每單出場規則可修改，已派送子單不回溯改寫。
+
 獨立的 execution source package。原生操作入口見 [NativeOperations.md](NativeOperations.md)：使用 OMI 現有設定、`.venv-kgi` 與官方 `KGI_SUPERPY_SIMULATION`，單一 stdin 程序內共用 `ExecutionApplication → ExecutionRuntime → KgiSessionOwner`。Import／help 不登入；只有明確 `--connect` 才登入與查單，Entry 只在 exact Confirm 後送出。策略 effects 預設停用，修改規則仍可保存。
 
 2026-10-30 已驗證正式 broker login、唯讀 account/order/deal query、正常 reconnect/stop 與獨立背景 Runtime；兩 Space 的 headless commands 共用既有 Application／Runtime。Order/Deal callback 只確認註冊，真事件及實單送出／撤單仍未驗收；原生行情接線已測試，但目前沒有 qualified trade 或已啟用的 SL/TP 保護。官方 simulation probe 為 `BLOCKED / KGI_LOGIN_INCOMPLETE`。最新部署 PID、Loaded Source 與分級證據見 [Progress](../docs/exec-plans/active/live-execution-plane-20261029/Progress.md)。以下 Phase 1–3 段落保留歷史設計與測試說明；其中 fake harness／當時沒有 native factory 的描述不是目前操作方式。唯一正式環境切換為官方 SDK simulation 設定，不提供 fake native runtime。

@@ -6,11 +6,13 @@ SDK 2.1.0 Order.py; native behavior is deliberately NOT certified by these tests
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from threading import RLock
+from threading import Event, RLock
 
 from execution.contracts import ExecutionRejected
 from execution.validation import identifier, require
 from .contracts import BrokerKey, Command, Observation, QueryBatch, ReportDiagnostic, SourceRead, day, decimal, parse_stamp
+from .us_contracts import UsAccountBinding, UsCommand, us_symbol
+from . import kgi_us
 
 
 # v2.7 public_report fields plus fill identity/quantity and source channel.
@@ -36,15 +38,15 @@ def whole(value):
     return int(number)
 
 
-def price_observation(raw, received_at):
+def price_observation(raw, received_at, *, market="TW"):
     """Strict execution price evidence from the SDK's real tick schema.
 
     Unlike a display fallback, missing/invalid event time never becomes receipt
     time. Trial, suspended, delayed and zero-volume ticks cannot trigger exits.
     """
-    require(get(raw, "simtrade") in (0, "0", False) and get(raw, "suspend") in (0, "0", False),
+    require((market == "US" or get(raw, "simtrade") in (0, "0", False)) and get(raw, "suspend") in (0, "0", False),
             "PRICE_NOT_FORMAL_TRADE")
-    require(decimal(get(raw, "delay_time")) == 0 and decimal(get(raw, "volume")) > 0,
+    require(0 <= decimal(get(raw, "delay_time")) <= 5 and decimal(get(raw, "volume")) > 0,
             "PRICE_DELAYED_OR_NO_TRADE")
     stamp = get(raw, "datetime")
     if isinstance(stamp, datetime):
@@ -54,20 +56,28 @@ def price_observation(raw, received_at):
         stamp = str(stamp)
         observed = (datetime.strptime(stamp, "%Y%m%d%H%M%S") if len(stamp) == 14 and stamp.isdigit()
                     else datetime.fromisoformat(stamp.replace("Z", "+00:00")))
+    time_basis = "SOURCE_TIMESTAMP"
     if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone(timedelta(hours=8)))
+        if market == "US":
+            # The SDK does not document this string's timezone. Use the live
+            # callback receipt explicitly; never label an assumed NY clock as fact.
+            observed = received_at
+            time_basis = "LOCAL_CALLBACK_RECEIPT"
+        else:
+            observed = observed.replace(tzinfo=timezone(timedelta(hours=8)))
     observed = observed.astimezone(timezone.utc)
     require(0 <= (received_at - observed).total_seconds() <= 5, "PRICE_STALE_OR_FUTURE")
     symbol = get(raw, "symbol")
-    identifier(symbol)
+    (us_symbol if market == "US" else identifier)(symbol)
     price = decimal(get(raw, "close"))
     total = whole(get(raw, "total_volume"))
     require(total > 0, "PRICE_NO_TRADE_PROGRESS")
-    require(price > 0 and get(raw, "odd_lot") in (True, False, 0, 1, "0", "1"), "PRICE_MAPPING_UNAVAILABLE")
-    return {"symbol": symbol, "price": str(price), "odd_lot": get(raw, "odd_lot") in (True, 1, "1"),
+    require(price > 0 and (market == "US" or get(raw, "odd_lot") in (True, False, 0, 1, "0", "1")), "PRICE_MAPPING_UNAVAILABLE")
+    return {"symbol": symbol, "price": str(price), "odd_lot": False if market == "US" else get(raw, "odd_lot") in (True, 1, "1"),
             "observed_at": observed.isoformat(), "received_at": received_at.isoformat(),
             "total_volume": total,
-            "source": "KGI.Quote.set_cb_all"}
+            "time_basis": time_basis, "source_time_raw": str(stamp),
+            "source": "KGI.USQuote.set_cb_all" if market == "US" else "KGI.Quote.set_cb_all"}
 
 
 def labels(action, condition, lot):
@@ -182,6 +192,9 @@ class SessionBinding:
     trade_date: str
     current_day: object = None  # native clock guard; fixtures may use historical dates
     cash_inventory_required: bool = False  # native factory always enables; historical engine fixtures do not
+    us: UsAccountBinding | None = None
+    us_reason: str = "US_DISABLED"
+    native_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,6 +202,7 @@ class Submission:
     order_id: str
     rejected: bool
     not_sent: str | None = None
+    original_id: str | None = None
 
 
 def submission(trade):
@@ -207,17 +221,34 @@ class KgiSessionOwner:
     the old session before creating the next; it never resubmits an order.
     """
 
-    def __init__(self, factory, account_id, trade_date, on_event, on_price=None):
+    def __init__(self, factory, account_id, trade_date, on_event, on_price=None, on_binding=None):
         self._factory = factory
         self.account_id, self.trade_date = account_id, day(trade_date)
         self._on_event = on_event
         self._on_price = on_price
+        self._on_binding = on_binding
         self._price_symbols = set()
+        self._us_price_symbols = set()
+        self._us_on_price = None
         self.callback_counts = {"order": 0, "deal": 0, "other": 0}
         self._lock = RLock()
         self._binding = None
         self._pending = {}
         self.generation = 0
+        self.disconnected = Event()
+        self.disconnect_callback_registered = False
+        self.order_callback_registered = False
+        self.close_unverified = False
+        self._us_pending = {}
+        self._us_on_event = None
+        self.us_callback_registered = False
+        self._us_probe_binding = None
+
+    def current_day(self):
+        clock = getattr(self._factory, "current_day", None)
+        if clock is None and self._binding is not None:
+            clock = self._binding.current_day
+        return clock() if clock is not None else self.trade_date
 
     def start(self):
         with self._lock:
@@ -226,10 +257,24 @@ class KgiSessionOwner:
             require(type(binding) is SessionBinding, "INVALID_SESSION_FACTORY_RESULT")
             self._binding = binding
             try:
-                require(type(binding) is SessionBinding and binding.account_id == self.account_id
+                require(type(binding) is SessionBinding and self.account_id in {None, binding.account_id}
                         and binding.trade_date == self.trade_date, "SESSION_BINDING_MISMATCH")
+                self.account_id = binding.account_id
+                if self._on_binding is not None:
+                    self._on_binding(binding)
                 self.generation += 1
                 generation = self.generation
+                self.disconnected.clear()
+                # The installed SDK calls this synchronously with no arguments.
+                # Never login, wait, take the SDK lock or touch Journal here.
+                def disconnected():
+                    if generation == self.generation:
+                        self.disconnected.set()
+                register = getattr(binding.api, "set_disconnect_cb", None)
+                self.disconnect_callback_registered = False
+                if callable(register):
+                    register(disconnected)
+                    self.disconnect_callback_registered = True
                 # Freeze vendor values before the SDK can mutate a Trade/Event.
                 def callback(event):
                     if generation != self.generation:
@@ -239,6 +284,8 @@ class KgiSessionOwner:
                     self.callback_counts[key] += 1
                     self._on_event(event, generation)
                 binding.api.Order.set_event(callback)
+                self.order_callback_registered = True
+                self._attach_us_callback()
                 quote = getattr(binding.api, "Quote", None)
                 # Do not initialize lazy quote connections for account-only login.
                 # Quotes are registered only after an explicit strategy exists.
@@ -248,29 +295,250 @@ class KgiSessionOwner:
                 self.close()
                 raise
 
+    def _attach_us_callback(self):
+        binding, generation = self._binding, self.generation
+        self.us_callback_registered = False
+        if binding.us is None:
+            return
+        binding.us.validate()
+        def us_callback(event):
+            if generation == self.generation and self._us_on_event is not None:
+                try:
+                    value = kgi_us.callback_observation(event, self._binding.us)
+                except Exception as exc:
+                    value = exc.code if isinstance(exc, ExecutionRejected) else "US_CALLBACK_UNQUALIFIED"
+                self._us_on_event(value, generation)
+        try:
+            binding.api.SubOrder.set_event(us_callback)
+            self.us_callback_registered = True
+        except Exception:
+            # Explicit report queries still work; callback failure does not log out TW.
+            self.us_callback_registered = False
+
+    def ensure_us_execution(self):
+        with self._lock:
+            b = self._active(require_date=False)
+            if b.us is None:
+                prepare = getattr(self._factory, "prepare_us_execution", None)
+                require(callable(prepare), "US_ACCOUNT_UNAVAILABLE")
+                context = prepare(b, self._us_probe_binding)
+                self._binding = replace(b, us=context, us_reason=None)
+                if self._on_binding is not None:
+                    self._on_binding(self._binding)
+                self._attach_us_callback()
+            self.refresh_market_dates()
+            return self._binding.us
+
+    def refresh_market_dates(self):
+        """Advance local journal dates without logging out the shared session."""
+        with self._lock:
+            b = self._binding
+            if b is None or not b.native_session or b.us is None:
+                return
+            tw_day = self.current_day()
+            us_day = b.us.current_day() if b.us.current_day else b.us.trade_date
+            if (b.trade_date, b.us.trade_date) != (tw_day, us_day):
+                self.trade_date = tw_day
+                self._binding = replace(b, trade_date=tw_day, us=replace(b.us, trade_date=us_day))
+                if self._on_binding is not None:
+                    self._on_binding(self._binding)
+
+    def us_instrument(self, symbol):
+        with self._lock:
+            b = self._us_active()
+            return kgi_us.instrument_snapshot(b.api.SubOrder.contract("dic"), symbol)
+
     def close(self):
         with self._lock:
             if self._binding is not None:
                 self.generation += 1
-                self._binding.api.logout()
+                self.disconnect_callback_registered = False
+                self.order_callback_registered = False
+                self.us_callback_registered = False
+                try:
+                    self._binding.api.logout()
+                except BaseException:
+                    self.close_unverified = True
+                    raise
                 self._binding = None
                 self._pending.clear()
+                self._us_pending.clear()
+                self._us_probe_binding = None
+                self.close_unverified = False
 
-    def reconnect(self):
-        self.close()
-        self.start()
+    def reconnect(self, *, trade_date=None):
+        with self._lock:
+            self.close()
+            if trade_date is not None:
+                self.trade_date = day(trade_date)
+            self.start()
 
-    def _active(self):
+    def _active(self, *, require_date=True):
         require(self._binding is not None, "SESSION_NOT_STARTED")
-        require(self.date_matches(), "SESSION_DATE_EXPIRED")
+        require(not self.disconnected.is_set() and not self.close_unverified, "SESSION_DISCONNECTED")
+        require(not require_date or self.date_matches(), "SESSION_DATE_EXPIRED")
         return self._binding
+
+    def needs_reconnect(self):
+        # A TW date rollover cannot log out the US binding. TW admission remains
+        # blocked until its market-local rollover has been qualified.
+        return not self.connected or (not self.date_matches() and
+            (self._binding is None or self._binding.us is None))
+
+    def us_status(self):
+        b = self._binding
+        context = b.us if b else None
+        return {"market": "US", "timezone": "America/New_York", "account_bound": context is not None,
+                "callback_registered": self.us_callback_registered, "connected": self.connected,
+                "date_ready": bool(context and context.date_matches()),
+                "ready": bool(context and self.connected and context.date_matches() and
+                              context.environment == ("PRODUCTION" if b.native_session else "OFFLINE")),
+                "live_execution": "MANUAL" if context else "NOT_BOUND",
+                "date_basis": "CLIENT_SUBMISSION_UTC" if b and b.native_session else "FIXTURE",
+                "broker_business_date": None,
+                "reason": None if context else b.us_reason if b else "SESSION_NOT_STARTED"}
+
+    def us_probe(self, symbol):
+        """Explicit account/contract/report diagnostics; never order effects."""
+        us_symbol(symbol)
+        with self._lock:
+            b = self._active(require_date=False)
+            require(b.native_session, "US_PROBE_REQUIRES_NATIVE_PRODUCTION")
+            if b.us is None and self._us_probe_binding is None:
+                prepare = getattr(self._factory, "prepare_us_probe", None)
+                require(callable(prepare), "US_PROBE_FACTORY_UNAVAILABLE")
+                self._us_probe_binding = prepare(b)
+            context = b.us or self._us_probe_binding
+            require(type(context) is UsAccountBinding, "US_ACCOUNT_UNAVAILABLE")
+            reads = []
+            def read(source, operation):
+                try:
+                    value = operation()
+                    reads.append({"source": source, "status": "AVAILABLE"})
+                    return value
+                except Exception as exc:
+                    transport = isinstance(exc, (TimeoutError, ConnectionError))
+                    if transport:
+                        self.disconnected.set()
+                    reads.append({"source": source, "status": "UNAVAILABLE", "reason":
+                        exc.code if isinstance(exc, ExecutionRejected) else
+                        "SDK_TRANSPORT_FAILED" if transport else "SDK_READ_FAILED"})
+                    return None
+            instrument = read("SubOrder.contract", lambda: kgi_us.instrument_snapshot(
+                b.api.SubOrder.contract("dic"), symbol))
+            reports = {}
+            for name in ("OrderReport", "ExecReport"):
+                rows = read("SubAccount." + name, lambda name=name: records(
+                    getattr(b.api.SubAccount, name)(), {"market", "orderno", "trade_date"}))
+                reports[name] = {"row_count": len(rows) if rows is not None else None,
+                                 "history_complete": False}
+            return {"market": "US", "broker_session": "CONNECTED" if self.connected else "DISCONNECTED",
+                    "account": "SELECTED_US", "account_selected": True, "symbol": symbol,
+                    "instrument": instrument, "reports": reports, "sources": reads,
+                    "status": "AVAILABLE" if all(r["status"] == "AVAILABLE" for r in reads) else "PARTIAL",
+                    "session_generation": self.generation, "new_login": False,
+                    "operational_us_enabled": b.us is not None,
+                    "order_effects": "NOT_REQUESTED", "live_execution": "MANUAL" if b.us else "NOT_BOUND"}
+
+    def _us_active(self):
+        b = self._active(require_date=False)
+        require(b.us is not None, "US_ACCOUNT_UNAVAILABLE")
+        return b
+
+    def us_admit(self, command):
+        with self._lock:
+            b = self._us_active()
+            contract = kgi_us.instrument_snapshot(b.api.SubOrder.contract("dic"), command.symbol)
+            return kgi_us.order_arguments(command, b.us, contract, b.sdk, native_session=b.native_session)
+
+    def us_submit(self, command):
+        with self._lock:
+            args = self.us_admit(command)
+            b = self._us_active()
+            trade = b.api.SubOrder.create_order(**args)
+            oid, original, rejected = kgi_us.submission_identity(trade)
+            self._us_pending[command.execution_id] = trade
+            return Submission(oid, rejected, original_id=original or None)
+
+    def us_pending_returns(self):
+        with self._lock:
+            result = {}
+            for execution_id, trade in self._us_pending.items():
+                oid, original, rejected = kgi_us.submission_identity(trade)
+                result[execution_id] = Submission(oid, rejected, original_id=original or None)
+            return result
+
+    def us_order_readback(self, command, *, original_id=None, order_id=None):
+        with self._lock:
+            b = self._us_active()
+            trade = self._us_pending.get(command.execution_id)
+            if trade is None and original_id:
+                trades = b.api.SubOrder.get_trades()
+                require(type(trades) is dict, "US_TRADES_UNAVAILABLE")
+                trade = trades.get(original_id)
+            if trade is None:
+                return {"available": False, "reason": "US_ORDER_NOT_IN_SDK_CACHE", "resend": False}
+            result = kgi_us.trade_snapshot(trade, command, original_id=original_id, order_id=order_id)
+            # Recovery is by a durable original ID, never by symbol/price/quantity.
+            self._us_pending[command.execution_id] = trade
+            return result
+
+    def us_query(self, *, partial=False):
+        with self._lock:
+            b = self._us_active()
+            observations, diagnostics, sources, totals = [], [], [], []
+            for source, method, required in (
+                ("SubAccount.OrderReport", b.api.SubAccount.OrderReport,
+                 {"customer_id", "market", "orderno", "orig_seqnum", "trade_date"}),
+                ("SubAccount.ExecReport", b.api.SubAccount.ExecReport,
+                 {"customer_id", "market", "orderno", "trade_date", "exe_qty"})):
+                try:
+                    rows = records(method(), required)
+                except Exception as exc:
+                    if not partial:
+                        raise
+                    sources.append(SourceRead(source, "UNAVAILABLE", reason="SDK_TRANSPORT_FAILED" if
+                        isinstance(exc, (TimeoutError, ConnectionError)) else "SDK_READ_FAILED"))
+                    continue
+                for index, row in enumerate(rows):
+                    if source == "SubAccount.OrderReport":
+                        try:
+                            totals.append(kgi_us.order_total(row, b.us))
+                        except ValueError:
+                            pass  # The ordinary report path below retains the diagnostic.
+                    try:
+                        require(source == "SubAccount.OrderReport", "US_FILL_ID_UNQUALIFIED")
+                        observations.append(kgi_us.report_observation(row, b.us))
+                    except ValueError as exc:
+                        reason = exc.code if isinstance(exc, ExecutionRejected) else "US_REPORT_TIME_INVALID"
+                        diagnostics.append(kgi_us.diagnostic(row, b.us, source, index, reason))
+                sources.append(SourceRead(source, "PARTIAL" if any(d.source == source for d in diagnostics)
+                                          else "AVAILABLE", len(rows)))
+            return QueryBatch(tuple(observations), frozenset(), 0, diagnostics=tuple(diagnostics),
+                              sources=tuple(sources), us_order_totals=tuple(totals))
+
+    def us_cancel(self, key, command, *, original_id):
+        with self._lock:
+            b = self._us_active()
+            require(b.us.environment == command.environment == ("PRODUCTION" if b.native_session else "OFFLINE"),
+                    "US_ENVIRONMENT_MISMATCH")
+            # Cancellation uses the durable original ID; no calendar admission
+            # or today's date is required for an already-bound historical order.
+            original = kgi_us.validate_cancel(b.api.SubOrder.get_trades(), original_id, key, command, b.us)
+            returned = b.api.SubOrder.cancel_order(original)
+            require(returned is not None, "US_CANCEL_RESPONSE_UNKNOWN")
+            return returned
 
     def date_matches(self):
         binding = self._binding
-        return binding is None or binding.current_day is None or binding.current_day() == self.trade_date
+        return binding is not None and (binding.current_day is None or binding.current_day() == self.trade_date)
 
     @property
     def connected(self):
+        return self._binding is not None and not self.disconnected.is_set() and not self.close_unverified
+
+    @property
+    def bound(self):
         return self._binding is not None
 
     @property
@@ -339,6 +607,20 @@ class KgiSessionOwner:
                 quote.subscribe_all(symbol, odd_lot=odd_lot)
                 self._price_symbols.add(key)
 
+    def watch_us_price(self, symbol):
+        us_symbol(symbol)
+        with self._lock:
+            binding = self._us_active()
+            quote = getattr(binding.api, "USQuote", None)
+            require(self._us_on_price is not None and callable(getattr(quote, "subscribe_all", None))
+                    and callable(getattr(quote, "set_cb_all", None)), "NATIVE_US_PRICE_SOURCE_UNAVAILABLE")
+            key = (self.generation, symbol)
+            if key not in self._us_price_symbols:
+                generation = self.generation
+                quote.set_cb_all(lambda event: self._us_on_price(event, generation))
+                quote.subscribe_all(symbol)
+                self._us_price_symbols.add(key)
+
     def _attach_prices(self, quote, generation):
         require(callable(getattr(quote, "set_cb_all", None)) and callable(getattr(quote, "subscribe_all", None)),
                 "NATIVE_PRICE_SOURCE_UNAVAILABLE")
@@ -350,6 +632,8 @@ class KgiSessionOwner:
         command.validate()
         with self._lock:
             b = self._active()
+            require((command.account_id, command.trade_date) == (self.account_id, self.trade_date),
+                    "COMMAND_SESSION_MISMATCH")
             if before_send is not None:
                 try:
                     allowed = before_send()  # Runtime-owned check under this same SDK lock
@@ -415,7 +699,8 @@ class KgiSessionOwner:
                     # Only fixed validation codes leave the SDK owner. Never
                     # serialize arbitrary vendor messages/account information.
                     sources.append(SourceRead(source, "UNAVAILABLE",
-                        reason=exc.code if isinstance(exc, ExecutionRejected) else "SDK_READ_FAILED"))
+                        reason=exc.code if isinstance(exc, ExecutionRejected) else
+                            "SDK_TRANSPORT_FAILED" if isinstance(exc, (TimeoutError, ConnectionError)) else "SDK_READ_FAILED"))
                     return fallback
                 sources.append(SourceRead(source, "AVAILABLE", len(value[0]) if source == "Order.get_trades(full=True)" else len(value)))
                 return value
@@ -466,3 +751,61 @@ class KgiSessionOwner:
                     and whole(get(order, "quantity")) * command.shares_per_unit == command.quantity
                     and decimal(get(order, "price")) == decimal(command.price), "CANCEL_TARGET_MISMATCH")
             return b.api.Order.cancel_order(key.order_id)
+
+
+class UsSessionView:
+    """Account view of the existing owner; cannot start, close or reconnect it."""
+
+    def __init__(self, owner):
+        self.owner = owner
+
+    @property
+    def context(self):
+        binding = self.owner._binding
+        require(binding is not None and binding.us is not None, "US_ACCOUNT_UNAVAILABLE")
+        return binding.us  # status/date projection must also work while disconnected
+
+    @property
+    def generation(self):
+        return self.owner.generation
+
+    @property
+    def connected(self):
+        return self.owner.connected and self.owner._binding.us is not None
+
+    @property
+    def bound(self):
+        return self.owner.bound and self.owner._binding.us is not None
+
+    @property
+    def disconnected(self):
+        return self.owner.disconnected
+
+    @property
+    def disconnect_callback_registered(self):
+        return self.owner.disconnect_callback_registered
+
+    @property
+    def cash_inventory_required(self):
+        return False  # US available-to-sell is unqualified; never call TW inventory.
+
+    def date_matches(self):
+        return self.bound and self.context.date_matches()
+
+    def admit(self, command):
+        return self.owner.us_admit(command)
+
+    def watch_price(self, symbol, odd_lot=False):
+        return self.owner.watch_us_price(symbol)
+
+    def submit(self, command):
+        return self.owner.us_submit(command)
+
+    def pending_returns(self):
+        return self.owner.us_pending_returns()
+
+    def query(self, *, partial=False):
+        return self.owner.us_query(partial=partial)
+
+    def cancel(self, key, command, *, original_id):
+        return self.owner.us_cancel(key, command, original_id=original_id)

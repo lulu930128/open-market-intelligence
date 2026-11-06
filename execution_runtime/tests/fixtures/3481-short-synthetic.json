@@ -1,0 +1,15 @@
+{
+  "synthetic": true,
+  "purpose": "Fake SDK mapping only. Invented price and shares; not today's limit-up or a live order instruction.",
+  "command": {
+    "symbol": "3481",
+    "action": "Sell",
+    "condition": "SHORT_SELLING",
+    "lot": "Common",
+    "shares_per_unit": 1000,
+    "quantity": 2000,
+    "price": "16.50",
+    "intent_id": "synthetic-3481-short",
+    "request_id": "synthetic-3481-request"
+  }
+}

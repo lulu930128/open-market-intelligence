@@ -1,22 +1,36 @@
 """One execution transaction/session owner, independent of the OMI app lifecycle."""
 
 from contextlib import contextmanager
-from dataclasses import asdict
-from datetime import datetime, timezone
+from collections import deque
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+import random
+import time
 import json
 from pathlib import Path
 from threading import Event, RLock, Thread
 
 from execution.contracts import EventKind, ExecutionRejected
 from execution.order_reducer import OrderFact, OrderProgress, OrderStatus, TERMINAL, reduce_order
-from execution.validation import instant, require
-from .contracts import BrokerKey, Command, Observation, QueryBatch, SourceRead, decimal, digest, encoded, observation_from
-from .kgi import KgiSessionOwner, callback_observation, price_observation
+from execution.validation import identifier, instant, require
+from .contracts import BrokerKey, Command, Observation, QueryBatch, ReportDiagnostic, SourceRead, command_from, command_payload, decimal, digest, encoded, observation_from
+from .kgi import KgiSessionOwner, UsSessionView, callback_observation, price_observation
+from .us_contracts import UsBrokerKey, UsCommand, UsObservation
 from .storage import Journal, OwnerLease, state_from, state_payload
-from .review import Draft, REVIEW_VERSION, expected, replay, snapshot
+from .review import Draft, draft_payload, REVIEW_VERSION, expected, replay, snapshot
 from .candidate import validate_binding
-from .strategy import (CONSENT_POLICY, STRATEGY_VERSION, SourceSnapshot, StrategyRules, price_trigger,
+from .strategy import (CONSENT_POLICY, STRATEGY_VERSION, SourceSnapshot, StrategyRules, price_trigger, trigger_target,
                        exit_command, quantities, replay as replay_strategies, source_payload)
+
+
+def serialized(operation):
+    """Lifecycle/commands share one lane; callbacks never acquire this lock."""
+    @wraps(operation)
+    def call(self, *args, **kwargs):
+        with self.operation(operation.__name__):
+            return operation(self, *args, **kwargs)
+    return call
 
 
 class ExecutionRuntime:
@@ -28,12 +42,31 @@ class ExecutionRuntime:
     """
 
     def __init__(self, journal_path, *, account_id, trade_date, session_factory,
-                 clock=None, fault=None, strategy_effects=True, native_prices=False):
+                 clock=None, fault=None, strategy_effects=True, native_prices=False, _parent=None, _session=None):
         self.path = Path(journal_path).resolve()
         self.account_id, self.trade_date = account_id, trade_date
+        self._parent = _parent
+        self.market = "US" if _parent is not None else "TW"
+        require((_parent is None) == (_session is None), "INVALID_SHARED_SESSION")
+        require(_parent is None or type(_session) is UsSessionView, "INVALID_SHARED_SESSION")
+        self.us_runtime = None
+        self._us_events = deque(maxlen=256)
+        self._us_event_overflow = False
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._fault = fault or (lambda stage: None)
         self._mutex = RLock()
+        self._operation_lock = RLock()
+        self._busy = None
+        self._managed = False
+        self._desired = "OFFLINE"
+        self._actual = "OFFLINE"
+        self._lifecycle_stop = Event()
+        self._lifecycle_worker = None
+        self._retry_attempt = 0
+        self._retry_at = None
+        self._last_connection_error = None
+        self._last_broker_read = None
+        self.stop_reason = None
         self._lease = OwnerLease(self.path)
         self._journal = None
         self._started = False
@@ -52,30 +85,410 @@ class ExecutionRuntime:
         self._price_strategies = ()  # immutable projection from the canonical journal; no tick IO
         self._cash_inventory = None  # last read evidence only; never a position ledger
         self._strategy_query_needed = False
-        self.session = KgiSessionOwner(session_factory, account_id, trade_date, self._callback,
-                                       self._native_price if native_prices else None)
+        self.session = _session or KgiSessionOwner(session_factory, account_id, trade_date, self._callback,
+                                       self._native_price if native_prices else None, self._session_bound)
+        self.environment = _session.context.environment if _session is not None else None
+
+    def _session_bound(self, binding):
+        if self._managed:
+            self.account_id, self.trade_date = binding.account_id, binding.trade_date
+            if not self._started:
+                self._open_journal()  # Replay before attaching vendor callbacks.
+        if binding.us is not None and binding.us.trade_date is not None:
+            if self.us_runtime is None:
+                child = ExecutionRuntime(self.path.with_name(self.path.stem + ".us.sqlite"),
+                    account_id=binding.us.account_id, trade_date=binding.us.trade_date,
+                    session_factory=None, clock=self._clock, fault=self._fault, strategy_effects=False, native_prices=self.native_prices,
+                    _parent=self, _session=UsSessionView(self.session))
+                child._lease.acquire()
+                try:
+                    child._open_journal()
+                except BaseException:
+                    child._lease.release()
+                    raise
+                self.us_runtime = child
+                self.session._us_on_event = child._enqueue_us_event
+                self.session._us_on_price = child._native_price
+            else:
+                require((self.us_runtime.account_id, self.us_runtime.environment) ==
+                        (binding.us.account_id, binding.us.environment), "US_CONTEXT_BINDING_CHANGED")
+                self.us_runtime.trade_date = binding.us.trade_date
+            self.us_runtime._desired, self.us_runtime._actual = "ONLINE", "ONLINE"
+            self.us_runtime._prices.clear()
+
+    def _key(self, account_id, trade_date, order_id):
+        if self.market == "US":
+            return UsBrokerKey(account_id, trade_date, order_id, self.environment)
+        return BrokerKey(account_id, trade_date, order_id)
+
+    def _enqueue_us_event(self, value, generation):
+        # SDK callback: bounded memory only. No journal, transaction, query or
+        # waiting on the command lane; immutable observations were frozen by owner.
+        if len(self._us_events) == self._us_events.maxlen:
+            self._us_event_overflow = True
+        self._us_events.append((value, generation))
+        self._wake_strategies(query=True)
+
+    def _drain_us_events(self):
+        values = []
+        for _ in range(256):
+            try:
+                values.append(self._us_events.popleft())
+            except IndexError:
+                break
+        if self._us_event_overflow:
+            values.append(("US_CALLBACK_QUEUE_OVERFLOW", self.session.generation))
+            self._us_event_overflow = False
+        for value, generation in values:
+            if generation != self.session.generation:
+                continue
+            if isinstance(value, Observation):
+                self._ingest(value)
+            else:
+                self.callback_error = value
+                with self._transaction() as con:
+                    con.execute("UPDATE orders SET reconcile_required=1 WHERE submit_stage!='NOT_SENT'")
+                    self._append(con, "CALLBACK_UNRESOLVED", None, {"reason": value, "market": "US"})
+
+    @contextmanager
+    def operation(self, name, *, blocking=True):
+        if self._parent is not None:
+            with self._parent.operation("US." + name, blocking=blocking):
+                yield
+            return
+        require(self._operation_lock.acquire(blocking=blocking), "EXECUTOR_BUSY")
+        outer = self._busy is None
+        if outer:
+            self._busy = {"operation": name, "started_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            yield
+        finally:
+            if outer:
+                self._busy = None
+            self._operation_lock.release()
+
+    def connection_status(self):
+        """Memory projection only: no SDK lock, IO, login, Journal or health probe."""
+        read = self._last_broker_read
+        if read is not None:
+            age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(read["observed_at"])).total_seconds())
+            read = {**read, "age_seconds": age, "stale": age > 120 or
+                    read["session_generation"] != self.session.generation}
+        result = {"contract": "omi.execution.connection.v1", "market": self.market,
+                "timezone": "America/New_York" if self.market == "US" else "Asia/Taipei",
+                "desired": self._desired, "actual": self._actual,
+                "session_bound": self.session.bound, "disconnect_observed": self.session.disconnected.is_set(),
+                "disconnect_callback_registered": self.session.disconnect_callback_registered,
+                "session_generation": self.session.generation, "trade_date": self.trade_date,
+                "date_ready": self.session.date_matches(),
+                "ready": self._desired == "ONLINE" and self._actual == "ONLINE" and
+                    self.session.connected and self.session.date_matches() and self._busy is None,
+                "busy": self._busy, "retry_attempt": self._retry_attempt, "retry_at": self._retry_at,
+                "last_error": self._last_connection_error, "last_broker_read": read}
+        if self._parent is None:
+            result["us"] = self.session.us_status()
+            if self.session.bound and self.session._binding.us is not None and not self.session.date_matches():
+                result["date_block_reason"] = "TW_MARKET_REBIND_UNQUALIFIED"
+        else:
+            result.update(live_execution="MANUAL", date_basis="CLIENT_SUBMISSION_UTC"
+                          if self.environment == "PRODUCTION" else "FIXTURE", broker_business_date=None)
+        return result
+
+    def request_offline(self, *, reason=None):
+        # Intent changes immediately even while a vendor call cannot be stopped.
+        self._desired = "OFFLINE"
+        if reason is not None:
+            self.stop_reason = reason
+        self._lifecycle_stop.set()
+        self._strategy_stop.set()
+        self._strategy_wake.set()
+        if self._actual != "OFFLINE":
+            self._actual = "STOPPING"
+
+    @serialized
+    def probe_us(self, symbol):
+        require(self._parent is None and self._started, "US_PROBE_REQUIRES_ROOT_OWNER")
+        return {**self.session.us_probe(symbol), "observed_at": self._now().isoformat()}
+
+    def _manual_us_context(self):
+        require(self._parent is None and self._started, "RUNTIME_NOT_STARTED")
+        self.session.ensure_us_execution()
+        self.trade_date = self.session.trade_date
+        require(self.us_runtime is not None, "US_ACCOUNT_UNAVAILABLE")
+        return self.us_runtime
+
+    @staticmethod
+    def _manual_us_review(child, request_id):
+        identifier(request_id)
+        with child._journal.connection(readonly=True) as con:
+            matches = [r for r in child._reviews(con).values() if r.draft.command.request_id == request_id]
+        require(len(matches) <= 1, "REVIEW_IDEMPOTENCY_CONFLICT")
+        return matches[0] if matches else None
+
+    def _manual_us_output(self, child, review):
+        command = review.draft.command
+        value = child.review_status(review.draft.review_id)
+        broker = {"available": False, "reason": "NOT_SUBMITTED", "resend": False}
+        if value["execution"] is not None:
+            execution = value["execution"]
+            try:
+                broker = self.session.us_order_readback(command, original_id=execution["original_order_id"],
+                                                       order_id=execution["broker_order_id"])
+                if broker.get("available"):
+                    child._record_us_origin(command.execution_id, broker["original_order_id"])
+                    if broker["broker_order_id"]:
+                        child._bind(command.execution_id, child._key(command.account_id, command.trade_date,
+                                                                   broker["broker_order_id"]))
+                    if broker["rejected"]:
+                        child._rejected_return(command.execution_id)
+            except Exception as exc:
+                broker = {"available": False, "reason": exc.code if isinstance(exc, ExecutionRejected)
+                          else "SDK_READ_FAILED", "resend": False}
+            value = child.review_status(review.draft.review_id)
+        # One concise local receipt. Full journal/audit stays with its existing owner.
+        execution = value["execution"]
+        submission_status = "NOT_SUBMITTED" if execution is None else (
+            "UNKNOWN" if execution["submit_stage"] == "CLAIMED" or execution["state"] == "UNKNOWN"
+            else "REJECTED" if execution["state"] == "REJECTED" else execution["submit_stage"])
+        return {"market": "US", "environment": command.environment, "request_id": command.request_id,
+                "review_id": value["review_id"], "execution_id": value["execution_id"],
+                "symbol": command.symbol, "action": command.action, "quantity": command.quantity,
+                "price": command.price, "trade_currency": "USD", "settlement_mode": command.settlement_mode,
+                "execution": execution, "submission_status": submission_status, "broker": broker, "resend": False,
+                "date_basis": "CLIENT_SUBMISSION_UTC" if command.environment == "PRODUCTION" else "FIXTURE",
+                "broker_business_date": None, "observed_at": self._now().isoformat()}
+
+    @serialized
+    def manual_us_order(self, *, request_id, symbol, action, quantity, price, settlement_mode):
+        """A user's explicit command persists the existing review/claim then sends once."""
+        identifier(request_id)
+        require(type(quantity) is int and all(type(v) is str for v in (symbol, action, price, settlement_mode)),
+                "INVALID_US_COMMAND_FIELD")
+        child = self._manual_us_context()
+        review = self._manual_us_review(child, request_id)
+        requested = (symbol, action, quantity, price, settlement_mode)
+        if review is not None:
+            c = review.draft.command
+            require(requested == (c.symbol, c.action, c.quantity, c.price, c.settlement_mode),
+                    "REVIEW_IDEMPOTENCY_CONFLICT")
+            if review.execution_id is not None:
+                return self._manual_us_output(child, review)  # Includes timeout/crash, across dates/restarts.
+        else:
+            instrument = self.session.us_instrument(symbol)
+            command = UsCommand(child.account_id, child.trade_date, request_id, request_id,
+                symbol, action, quantity, price, settlement_mode, child.environment, instrument["revision"])
+            draft = Draft(command, "manual-cli", "MANUAL")
+            child.create_review(draft)
+            review = self._manual_us_review(child, request_id)
+        if review.state in {"DRAFT", "PREVIEW"}:
+            child.preview_review(review.draft.review_id, expected_revision=review.revision)
+            review = self._manual_us_review(child, request_id)
+        require(review.snapshot is not None, "REVIEW_NOT_CONFIRMABLE")
+        child.confirm_review(review.draft.review_id, expected_revision=review.revision,
+                             expected_digest=review.snapshot["digest"])
+        return self._manual_us_output(child, self._manual_us_review(child, request_id))
+
+    @serialized
+    def manual_us_status(self, request_id=None):
+        child = self._manual_us_context()
+        if request_id is None:
+            return {"market": "US", "environment": child.environment, "account": "SELECTED_US",
+                    **self.session.us_status(), "order_effects": "NOT_REQUESTED"}
+        review = self._manual_us_review(child, request_id)
+        require(review is not None, "UNKNOWN_US_REQUEST")
+        child.query()
+        return self._manual_us_output(child, review)
+
+    @serialized
+    def manual_us_cancel(self, request_id):
+        child = self._manual_us_context()
+        review = self._manual_us_review(child, request_id)
+        require(review is not None and review.execution_id is not None, "UNKNOWN_US_REQUEST")
+        value = self._manual_us_output(child, review)
+        execution, command = value["execution"], review.draft.command
+        require(execution["broker_order_id"] is not None, "US_ORDER_ID_UNAVAILABLE")
+        child.cancel(command.execution_id, child._key(command.account_id, command.trade_date,
+                                                     execution["broker_order_id"]))
+        return self._manual_us_output(child, review)
+
+    @serialized
+    def desk_submit(self, order, selection):
+        """One human action over the existing review, selection and claim owner."""
+        target = self._manual_us_context() if order.get("market", "TW") == "US" else self
+        request_id = digest(["desk", selection])
+        rules = StrategyRules(**order["protection"]) if order.get("protection") else None
+        if rules:
+            rules.validate()
+        lineage = {"strategy_id": request_id, "revision": 1} if rules else {}
+        if target.market == "US":
+            instrument = self.session.us_instrument(order["symbol"])
+            value = UsCommand(target.account_id, target.trade_date, request_id, request_id,
+                order["symbol"], order["action"], order["quantity_shares"], order["price"],
+                order.get("settlement_mode", "MUT"), target.environment, instrument["revision"], **lineage)
+        else:
+            value = Command(target.account_id, target.trade_date, request_id, request_id,
+                order["symbol"], order["action"], order["quantity_shares"], order["price"],
+                condition=order["condition"], lot=order["lot"],
+                shares_per_unit=1000 if order["lot"] == "Common" else 1, **lineage)
+        draft = Draft(value, "MCP", "MANUAL")
+        previous = target._manual_us_review(target, request_id)
+        if previous is not None and previous.execution_id is not None:
+            require(draft_payload(previous.draft) == draft_payload(draft), "REVIEW_IDEMPOTENCY_CONFLICT")
+            return target.review_status(previous.draft.review_id)
+        preview = target.prepare_candidate(draft, {"selection": selection, "protection": asdict(rules) if rules else None})
+        return target.confirm_review(preview["review_id"], expected_revision=preview["review_revision"],
+            expected_digest=preview["snapshot"]["digest"], candidate_selection=selection)
+
+    def desk_order(self, market, execution_id):
+        target = self.us_runtime if market == "US" else self
+        require(target is not None, "US_ACCOUNT_UNAVAILABLE")
+        value = target.status(execution_id)
+        with target._journal.connection(readonly=True) as con:
+            command = target._command(con, execution_id)
+        strategy = target.strategy_status(command.strategy_id) if command.strategy_id else None
+        return {"market": market, "execution": value, "command": command_payload(command), "protection": strategy}
+
+    @serialized
+    def desk_cancel(self, market, execution_id):
+        target = self._manual_us_context() if market == "US" else self
+        value = self.desk_order(market, execution_id)
+        order = value["execution"]
+        require(order["broker_order_id"] is not None, "BROKER_ORDER_ID_UNAVAILABLE")
+        target.cancel(execution_id, target._key(target.account_id, order["trade_date"], order["broker_order_id"]))
+        return self.desk_order(market, execution_id)
+
+    @serialized
+    def desk_protection(self, market, execution_id, rules, request_id, expected_revision):
+        target = self._manual_us_context() if market == "US" else self
+        value = self.desk_order(market, execution_id)
+        sid = value["execution"]["strategy_id"]
+        require(sid is not None, "ORDER_HAS_NO_PROTECTION")
+        target.revise_strategy(sid, StrategyRules(**rules),
+            SourceSnapshot(request_id, target._now().isoformat(), {"execution_id": execution_id, "actor": "MCP_USER"}),
+            request_id=request_id, expected_revision=expected_revision)
+        return self.desk_order(market, execution_id)
+
+    def start_managed(self, *, retry_base=5.0, retry_cap=300.0, heartbeat=60.0):
+        """One TW lifecycle worker. Native composition holds its process lease.
+
+        Account discovery may precede Journal opening, as in native prepare();
+        no command is admitted until replay has verified the existing Journal.
+        No persisted trading intent is dispatched by this worker.
+        """
+        require(self._parent is None, "SHARED_CONTEXT_LIFECYCLE_OWNED")
+        require(not self._started and self._lifecycle_worker is None, "RUNTIME_ALREADY_STARTED")
+        require(0 < retry_base <= retry_cap and heartbeat > 0, "INVALID_RECOVERY_POLICY")
+        self._lease.acquire()
+        self._managed = True
+        self._desired, self._actual = "ONLINE", "STARTING"
+        self._lifecycle_stop.clear()
+        self._lifecycle_worker = Thread(target=self._connection_loop,
+            args=(retry_base, retry_cap, heartbeat), name="execution-connection", daemon=True)
+        self._lifecycle_worker.start()
+
+    def _connection_loop(self, retry_base, retry_cap, heartbeat):
+        due, healthy_since = 0.0, None
+        while not self._lifecycle_stop.is_set():
+            now = time.monotonic()
+            recovering = self.session.needs_reconnect()
+            if self._actual == "BLOCKED" or now < due:
+                self._lifecycle_stop.wait(0.1)
+                continue
+            try:
+                with self.operation("recover" if recovering else "heartbeat", blocking=False):
+                    if self._lifecycle_stop.is_set():
+                        break
+                    previous_day = self.trade_date
+                    self.session.refresh_market_dates()
+                    self.trade_date = self.session.trade_date
+                    if self.trade_date != previous_day:
+                        with self._mutex:
+                            self._prices.clear()
+                            self._cash_inventory = None
+                    if recovering:
+                        self._actual = "RECOVERING" if self._started else "CONNECTING"
+                        if self.session.bound:
+                            self.session.close()  # Must finish before a second login.
+                        self.session.trade_date = self.session.current_day()
+                        self.session.start()
+                        self.account_id, self.trade_date = self.session.account_id, self.session.trade_date
+                        if not self._started:
+                            self._open_journal()
+                        else:
+                            with self._mutex:
+                                self._prices.clear()
+                                self._cash_inventory = None
+                            with self._transaction() as con:
+                                self._append(con, "RECONNECT", None, {"resend": False})
+                        self._watch_strategy_prices()
+                    health = self.reconcile()
+                    if health.get("failure_kind") == "TRANSPORT":
+                        raise ConnectionError("BROKER_READ_TRANSPORT_FAILED")
+                    if self._strategy_worker is None:
+                        self._strategy_stop.clear()
+                        self._strategy_worker = Thread(target=self._strategy_loop, name="execution-strategy", daemon=True)
+                        self._strategy_worker.start()
+                        self._wake_strategies()
+                    if self._lifecycle_stop.is_set():
+                        break
+                    if self.session.needs_reconnect():
+                        raise ConnectionError("SESSION_RECOVERY_REQUIRED")
+                    self._actual = "ONLINE"
+                    self._retry_at = None
+                    self._last_connection_error = None
+                    healthy_since = healthy_since or time.monotonic()
+                    if time.monotonic() - healthy_since >= heartbeat:
+                        self._retry_attempt = 0
+                    due = time.monotonic() + heartbeat
+            except ExecutionRejected as exc:
+                if exc.code == "EXECUTOR_BUSY":
+                    self._lifecycle_stop.wait(0.1)
+                    continue
+                self._actual, self._last_connection_error = "BLOCKED", exc.code
+            except Exception as exc:
+                self._last_connection_error = "CONNECTION_TRANSPORT_FAILED" if isinstance(exc, (TimeoutError, ConnectionError)) else "CONNECTION_FAILED_UNCLASSIFIED"
+                if self.session.close_unverified or not isinstance(exc, (TimeoutError, ConnectionError)):
+                    self._actual = "BLOCKED"
+                else:
+                    self._actual = "BACKOFF"
+                    self._retry_attempt += 1
+                    healthy_since = None
+                    delay = min(retry_cap, retry_base * 2 ** min(self._retry_attempt - 1, 16))
+                    delay = min(retry_cap, random.uniform(delay * 0.8, delay * 1.2))
+                    due = time.monotonic() + delay
+                    self._retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+            # Observe disconnect/date rollover promptly, but never retry inside a
+            # callback. A minimum delay also bounds repeated disconnect storms.
+            while not self._lifecycle_stop.wait(0.1) and self._actual == "ONLINE" and time.monotonic() < due:
+                if self.session.needs_reconnect():
+                    self._actual = "RECOVERING"
+                    due = time.monotonic() + retry_base
+                    break
+        self._actual = "STOPPING"
+        try:
+            with self.operation("logout"):
+                self.session.close()
+            self._actual = "OFFLINE"
+        except Exception:
+            self._actual, self._last_connection_error = "BLOCKED", "KGI_SESSION_CLOSE_UNVERIFIED"
+
+    def _record_broker_read(self, status, sources=(), *, failure_kind=None):
+        self._last_broker_read = {"status": status, "observed_at": datetime.now(timezone.utc).isoformat(),
+            "session_generation": self.session.generation, "sources": [asdict(s) for s in sources],
+            "failure_kind": failure_kind}
 
     def start(self):
+        require(self._parent is None, "SHARED_CONTEXT_LIFECYCLE_OWNED")
         require(not self._started, "RUNTIME_ALREADY_STARTED")
         self._lease.acquire()
         try:
-            self._journal = Journal(self.path, self.account_id)
-            self._started = True
-            self.verify()
-            # Acquiring the OS lease proves the previous owner has exited. An
-            # abandoned claim is uncertainty, never permission to dispatch again.
-            with self._transaction() as con:
-                for row in con.execute("SELECT * FROM orders").fetchall():
-                    state = state_from(json.loads(row["state"]))
-                    if state.state in {OrderStatus.PENDING, OrderStatus.CANCEL_PENDING, OrderStatus.RECONCILING}:
-                        state = self._reduce(state, EventKind.TIMEOUT)
-                        self._save(con, row["execution_id"], state)
-                    con.execute("UPDATE orders SET reconcile_required=1 WHERE execution_id=? AND submit_stage!='NOT_SENT'", (row["execution_id"],))
-                self._append(con, "STARTUP", None, {"replay_send": False})
+            self._open_journal()
+            self._desired = "ONLINE"
             self.session.start()
+            self._actual = "ONLINE"
             result = self.reconcile()
             self._watch_strategy_prices()
-            if self.strategy_effects:
+            if self._strategy_worker is None:
                 self._strategy_stop.clear()
                 self._strategy_worker = Thread(target=self._strategy_loop, name="execution-strategy", daemon=True)
                 self._strategy_worker.start()
@@ -85,7 +498,29 @@ class ExecutionRuntime:
             self.close()
             raise
 
+    def _open_journal(self):
+        self._journal = Journal(self.path, self.account_id, scope=
+            {"market": "US", "environment": self.environment} if self.market == "US" else None)
+        self.verify()
+        self._started = True
+        # Acquiring the OS lease proves the previous owner has exited. An
+        # abandoned claim is uncertainty, never permission to dispatch again.
+        with self._transaction() as con:
+            for row in con.execute("SELECT * FROM orders").fetchall():
+                state = state_from(json.loads(row["state"]))
+                if state.state in {OrderStatus.PENDING, OrderStatus.CANCEL_PENDING, OrderStatus.RECONCILING}:
+                    state = self._reduce(state, EventKind.TIMEOUT)
+                    self._save(con, row["execution_id"], state)
+                con.execute("UPDATE orders SET reconcile_required=1 WHERE execution_id=? AND submit_stage!='NOT_SENT'", (row["execution_id"],))
+            self._append(con, "STARTUP", None, {"replay_send": False})
+
     def close(self):
+        require(self._parent is None, "SHARED_CONTEXT_LIFECYCLE_OWNED")
+        self.request_offline()
+        if self._lifecycle_worker is not None:
+            self._lifecycle_worker.join(timeout=5)
+            require(not self._lifecycle_worker.is_alive(), "LIFECYCLE_BUSY_CLOSE_UNVERIFIED")
+            self._lifecycle_worker = None
         self._strategy_stop.set()
         self._strategy_wake.set()
         if self._strategy_worker is not None:
@@ -94,8 +529,13 @@ class ExecutionRuntime:
             self._strategy_worker = None
         # An unconfirmed logout must not release ownership to a second session.
         self.session.close()
+        if self.us_runtime is not None:
+            self.us_runtime._started = False
+            self.us_runtime._desired, self.us_runtime._actual = "OFFLINE", "OFFLINE"
+            self.us_runtime._lease.release()
         self._started = False
         self._lease.release()
+        self._actual = "OFFLINE"
 
     def __enter__(self):
         self.start()
@@ -154,14 +594,14 @@ class ExecutionRuntime:
 
     @staticmethod
     def _command(con, execution_id):
-        return Command(**json.loads(con.execute("SELECT payload FROM intents WHERE execution_id=?", (execution_id,)).fetchone()[0]))
+        return command_from(json.loads(con.execute("SELECT payload FROM intents WHERE execution_id=?", (execution_id,)).fetchone()[0]))
 
     def _status(self, con, execution_id):
         row = self._row(con, execution_id)
         command = self._command(con, execution_id)
         state = state_from(json.loads(row["state"]))
         fills = [dict(f) for f in con.execute("SELECT fill_id,quantity,price,source_time FROM fills WHERE execution_id=? ORDER BY fill_id", (execution_id,))]
-        return {"execution_id": execution_id, "intent_id": command.intent_id,
+        result = {"execution_id": execution_id, "intent_id": command.intent_id,
                 "request_id": command.request_id, "space_id": command.space_id,
                 "strategy_id": command.strategy_id, "revision": command.revision,
                 "broker_order_id": row["broker_id"], "trade_date": row["trade_date"],
@@ -170,6 +610,14 @@ class ExecutionRuntime:
                 "broker_attempts_max": 0 if row["submit_stage"] == "NOT_SENT" else 1,
                 "submit_stage": row["submit_stage"], "cancel_stage": row["cancel_stage"],
                 "reconcile_required": bool(row["reconcile_required"]), "fills": fills}
+        if self.market == "US":
+            aggregate = con.execute("SELECT payload FROM journal WHERE kind='US_ORDER_TOTAL_OBSERVED' AND execution_id=? ORDER BY seq DESC LIMIT 1", (execution_id,)).fetchone()
+            result.update(market="US", environment=self.environment, settlement_mode=command.settlement_mode,
+                          original_order_id=self._us_origin(con, execution_id), fill_history_complete=False,
+                          confirmed_filled_shares=state.cumulative_filled,
+                          filled_shares=state.cumulative_filled if aggregate else None,
+                          fill_status="BROKER_CUMULATIVE" if aggregate else "UNQUALIFIED")
+        return result
 
     def status(self, execution_id):
         require(self._journal is not None, "RUNTIME_NOT_STARTED")
@@ -180,10 +628,13 @@ class ExecutionRuntime:
         """Retired client entry: new exposure requires the canonical confirm path."""
         require(False, "CONFIRMED_REVIEW_REQUIRED")
 
+    @serialized
     def _submit_engine(self, command: Command, *, review_id=None):
-        require(type(command) is Command, "INVALID_COMMAND")
+        require(type(command) is (UsCommand if self.market == "US" else Command), "INVALID_COMMAND")
         command.validate()
         require((command.account_id, command.trade_date) == (self.account_id, self.trade_date), "COMMAND_SESSION_MISMATCH")
+        if self.market == "US":
+            self.session.admit(command)
         execution_id = command.execution_id
         with self._transaction() as con:
             reviews = self._reviews(con)
@@ -197,7 +648,7 @@ class ExecutionRuntime:
             else:
                 review = self._review(reviews, review_id)
                 require(review.state in {"CONFIRMED", "EXECUTION"} and
-                        asdict(review.draft.command) == asdict(command), "CONFIRMED_REVIEW_REQUIRED")
+                        command_payload(review.draft.command) == command_payload(command), "CONFIRMED_REVIEW_REQUIRED")
             claimed = self._claim_command(con, command, {"review_id": review_id} if review_id else {})
             if claimed and review_id is not None:
                 self._review_append(con, "REVIEW_EXECUTION_CLAIMED", review_id, review.revision,
@@ -226,15 +677,15 @@ class ExecutionRuntime:
         existing = con.execute("SELECT * FROM intents WHERE account_id=? AND (request_id=? OR intent_id=?)",
                                (command.account_id, command.request_id, command.intent_id)).fetchall()
         if existing:
-            require(len(existing) == 1 and existing[0]["payload"] == encoded(asdict(command)), "IDEMPOTENCY_CONFLICT")
+            require(len(existing) == 1 and existing[0]["payload"] == encoded(command_payload(command)), "IDEMPOTENCY_CONFLICT")
             return False
         con.execute("INSERT INTO intents VALUES (?,?,?,?,?)", (execution_id, command.account_id,
-                    command.request_id, command.intent_id, encoded(asdict(command))))
+                    command.request_id, command.intent_id, encoded(command_payload(command))))
         state = OrderProgress(execution_id, command.quantity, OrderStatus.PENDING, self._now())
         con.execute("INSERT INTO orders(execution_id,account_id,trade_date,state,submit_stage) VALUES (?,?,?,?,?)",
                     (execution_id, command.account_id, command.trade_date, state_payload(state), "CLAIMED"))
         self._append(con, "SUBMIT_CLAIMED", execution_id,
-                     {"command": asdict(command), "initial_state": json.loads(state_payload(state)), **lineage})
+                     {"command": command_payload(command), "initial_state": json.loads(state_payload(state)), **lineage})
         return True
 
     def _dispatch_claimed(self, command, *, cash_guard=False):
@@ -254,8 +705,10 @@ class ExecutionRuntime:
             return self.status(execution_id)
         self._fault("after_effect")
         broker_id = returned.order_id
+        if self.market == "US":
+            self._record_us_origin(execution_id, returned.original_id)
         if broker_id:
-            self._bind(execution_id, BrokerKey(command.account_id, command.trade_date, broker_id))
+            self._bind(execution_id, self._key(command.account_id, command.trade_date, broker_id))
         if returned.rejected:
             self._rejected_return(execution_id)
         with self._transaction() as con:
@@ -293,9 +746,13 @@ class ExecutionRuntime:
         require(self.session.date_matches(), "SESSION_DATE_EXPIRED")
         require(type(draft) is Draft, "INVALID_DRAFT")
         draft.validate()
+        require(type(draft.command) is (UsCommand if self.market == "US" else Command), "COMMAND_MARKET_MISMATCH")
         require((draft.command.account_id, draft.command.trade_date) ==
                 (self.account_id, self.trade_date), "COMMAND_SESSION_MISMATCH")
+        if self.market == "US":
+            self.session.admit(draft.command)
 
+    @serialized
     def create_review(self, draft: Draft):
         self._validate_draft(draft)
         with self._transaction() as con:
@@ -310,7 +767,7 @@ class ExecutionRuntime:
             command = draft.command
             require(not con.execute("SELECT 1 FROM intents WHERE account_id=? AND (request_id=? OR intent_id=?)",
                     (command.account_id, command.request_id, command.intent_id)).fetchone(), "IDENTITY_ALREADY_EXECUTED")
-            self._review_append(con, "REVIEW_DRAFTED", draft.review_id, 1, {"draft": asdict(draft)})
+            self._review_append(con, "REVIEW_DRAFTED", draft.review_id, 1, {"draft": draft_payload(draft)})
 
     @staticmethod
     def _candidate_binding(con, execution_id):
@@ -319,6 +776,7 @@ class ExecutionRuntime:
         require(len(rows) <= 1, "CANDIDATE_BINDING_CONFLICT")
         return json.loads(rows[0][0]) if rows else None
 
+    @serialized
     def prepare_candidate(self, draft, binding):
         self._validate_draft(draft)
         validate_binding(binding, draft)
@@ -344,6 +802,7 @@ class ExecutionRuntime:
                 self._review_append(con, "REVIEW_PREVIEWED", review_id, review.revision, {"snapshot": value})
         return self.review_status(review_id)
 
+    @serialized
     def revise_review(self, review_id, draft: Draft, *, expected_revision):
         from execution.validation import integer
         integer(expected_revision, positive=True)
@@ -352,7 +811,7 @@ class ExecutionRuntime:
             review = self._review(self._reviews(con), review_id)
             require(self._candidate_binding(con, review.draft.command.execution_id) is None, "CANDIDATE_REVISE_AT_OWNER")
             require(review.revision == expected_revision, "STALE_REVIEW_REVISION")
-            self._review_append(con, "REVIEW_REVISED", review_id, review.revision + 1, {"draft": asdict(draft)})
+            self._review_append(con, "REVIEW_REVISED", review_id, review.revision + 1, {"draft": draft_payload(draft)})
         return self.review_status(review_id)
 
     def reject_review(self, review_id, *, expected_revision, reason="USER_REJECTED"):
@@ -364,6 +823,7 @@ class ExecutionRuntime:
             self._review_append(con, "REVIEW_REJECTED", review_id, review.revision, {"reason": reason})
         return self.review_status(review_id)
 
+    @serialized
     def confirm_review(self, review_id, *, expected_digest, expected_revision, candidate_selection=None):
         expected(expected_revision, expected_digest)
         with self._transaction() as con:
@@ -394,7 +854,7 @@ class ExecutionRuntime:
             (review.draft.command.execution_id,))]
         return {"review_id": review_id, "review_revision": review.revision, "state": review.state,
                 "created_at": review.created_at, "updated_at": review.updated_at,
-                "draft": asdict(review.draft), "snapshot": review.snapshot,
+                "draft": draft_payload(review.draft), "snapshot": review.snapshot,
                 "confirmed_at": review.confirmed_at, "execution_id": review.execution_id,
                 "execution": self.status(review.execution_id) if review.execution_id else None,
                 "audit": audit,
@@ -414,12 +874,14 @@ class ExecutionRuntime:
         with self._journal.connection(readonly=True) as con:
             return [self._review_output(con, key, value) for key, value in self._reviews(con).items()]
 
+    @serialized
     def readback(self):
         """Read the same session and Journal without ingest, reconcile or effects.
 
         GET consumers must never wake the strategy pump or mutate the journal.
         Missing SDK sources remain partial alongside the evidence that exists.
         """
+        require(self.market == "TW", "US_READBACK_PRESENTATION_NOT_IMPLEMENTED")
         from .read_projection import project
         require(self._started, "RUNTIME_NOT_STARTED")
         started = self._now().isoformat()
@@ -435,8 +897,23 @@ class ExecutionRuntime:
             inventory_error = exc.code if isinstance(exc, ExecutionRejected) else "SDK_READ_FAILED"
         received = self._now().isoformat()
         with self._journal.connection(readonly=True) as con:
-            observations = [(observation_from(json.loads(row["payload"])), row["occurred_at"], False)
-                for row in con.execute("SELECT payload,occurred_at FROM journal WHERE kind='BROKER_OBSERVATION' ORDER BY seq")]
+            observations, diagnostics = [], []
+            for index, row in enumerate(con.execute(
+                    "SELECT seq,payload,occurred_at FROM journal WHERE kind='BROKER_OBSERVATION' ORDER BY seq")):
+                try:
+                    observation = observation_from(json.loads(row["payload"]))
+                except (ValueError, TypeError, KeyError, AttributeError, ExecutionRejected):
+                    # Historical unbound callbacks may lack a broker identity.
+                    # Keep their immutable bytes; expose only a diagnostic, never
+                    # invent an order key or let one row hide all valid reports.
+                    diagnostics.append(ReportDiagnostic("Journal.BROKER_OBSERVATION", index,
+                        "INVALID_JOURNAL_OBSERVATION", {"JournalSeq": str(row["seq"])}, None, None))
+                    continue
+                observations.append((observation, row["occurred_at"], False))
+            if diagnostics:
+                batch = replace(batch, diagnostics=(*batch.diagnostics, *diagnostics),
+                    sources=(*batch.sources, SourceRead("Journal.BROKER_OBSERVATION", "PARTIAL",
+                        len(observations), "INVALID_JOURNAL_OBSERVATION")))
             managed = {}
             for row in con.execute("SELECT * FROM orders WHERE broker_id IS NOT NULL"):
                 command = self._command(con, row["execution_id"])
@@ -448,6 +925,10 @@ class ExecutionRuntime:
         result = project(trade_date=self.trade_date, generation=self.session.generation,
             queried_at=started, received_at=received, batch=batch, observations=observations,
             managed=managed, reviews=self.list_reviews(), inventory=inventory, inventory_error=inventory_error)
+        transport_failed = any(s.reason == "SDK_TRANSPORT_FAILED" for s in batch.sources)
+        if transport_failed and self._managed:
+            self.session.disconnected.set()
+        self._record_broker_read(result.quality, batch.sources, failure_kind="TRANSPORT" if transport_failed else None)
         return asdict(result)
 
     @staticmethod
@@ -499,10 +980,16 @@ class ExecutionRuntime:
         identifier(extra["request_id"])
         integer(revision, positive=True)
         strategy = self._strategy(self._strategies(con), sid)
+        prior = strategy.requests.get(extra["request_id"])
+        if kind == "STRATEGY_PRICE_OBSERVED":
+            filled = prior[1].get("filled_quantity") if prior else self._status(con, strategy.entry.execution_id)["filled_shares"]
+            require(filled is not None, "ENTRY_FILL_QUANTITY_UNAVAILABLE")
+            extra = {**extra, "filled_quantity": filled}
         require(strategy.entry.account_id == self.account_id and strategy.entry.trade_date <= self.trade_date,
                 "COMMAND_SESSION_MISMATCH")
         payload = {"strategy_version": STRATEGY_VERSION, "strategy_id": sid,
                    "strategy_revision": revision, **extra}
+        payload = json.loads(encoded(payload))
         prior = strategy.requests.get(extra["request_id"])
         if prior is not None:
             require(prior == (kind, payload), "STRATEGY_IDEMPOTENCY_CONFLICT")
@@ -528,6 +1015,7 @@ class ExecutionRuntime:
                                    {"request_id": request_id, "rules": asdict(rules),
                                     "source_snapshot": source_payload(source)})
         self._watch_strategy_prices()
+        self._evaluate_latest_prices()
         self._wake_strategies()
         return self.strategy_status(strategy_id)
 
@@ -544,6 +1032,7 @@ class ExecutionRuntime:
                 self._fault("before_strategy_target_commit")
         self._fault("after_strategy_target_commit")
         self._watch_strategy_prices()
+        self._evaluate_latest_prices()
         self._wake_strategies()
         return self.strategy_status(strategy_id)
 
@@ -696,7 +1185,7 @@ class ExecutionRuntime:
                                        "AUTOMATIC_PRICE_TRIGGER" if strategy.exit_reason else "NONE",
                     "protection_mode": strategy.rules.protection_mode,
                     "broker_native_protection": "NOT_SUPPORTED", "strategy_error": self.strategy_error,
-                    "strategy_effects": self.strategy_effects,
+                    "strategy_effects": self.strategy_effects or strategy.rules.enabled,
                     "price_source_status": self.price_source_status(strategy.entry.symbol, strategy.entry.lot == "Odd"),
                     "price_input": "NATIVE_SESSION_CALLBACK" if self.native_prices else "EXPLICIT_SOURCE_OBSERVATIONS",
                     "session_date_matches": self.session.date_matches(),
@@ -709,7 +1198,8 @@ class ExecutionRuntime:
                               for k, t, p in self._strategy_records(con) if p["strategy_id"] == strategy_id]}
 
     def _wake_strategies(self, *, query=False):
-        if not self.strategy_effects:
+        if self._parent is not None:
+            self._parent._wake_strategies(query=query)
             return
         with self._mutex:
             self._strategy_query_needed |= query
@@ -728,6 +1218,8 @@ class ExecutionRuntime:
                 self.session.watch_price(symbol, odd)
             except Exception:
                 self._price_error = "NATIVE_PRICE_SOURCE_UNAVAILABLE"
+        if self.us_runtime is not None:
+            self.us_runtime._watch_strategy_prices()
 
     def price_source_status(self, symbol=None, odd_lot=None):
         if not self.native_prices:
@@ -737,15 +1229,37 @@ class ExecutionRuntime:
                  and 0 <= (self._now() - datetime.fromisoformat(p["observed_at"])).total_seconds() <= 5]
         waiting = "WAITING_TRADE_PROGRESS" if values and not any(p.get("trade_progress") for p in values) else "STALE" if values else "WAITING_NATIVE_TRADE"
         return {"status": "FRESH" if fresh else self._price_error or waiting,
-                "native_qualified": bool(fresh), "protection_effects_enabled": self.strategy_effects,
-                "source": "KGI.Quote.set_cb_all", "max_age_seconds": 5}
+                "native_qualified": bool(fresh), "protection_effects_enabled": self.strategy_effects or any(s.rules.enabled for s in self._price_strategies if symbol is None or s.entry.symbol == symbol),
+                "source": "KGI.USQuote.set_cb_all" if self.market == "US" else "KGI.Quote.set_cb_all", "max_age_seconds": 5}
+
+    def _evaluate_latest_prices(self):
+        if not self.native_prices:
+            return
+        with self._mutex, self._transaction() as con:
+            for sid, strategy in self._strategies(con).items():
+                if not (self.strategy_effects or strategy.rules.enabled):
+                    continue
+                evidence = self._prices.get((strategy.entry.symbol, strategy.entry.lot == "Odd"))
+                if not evidence or not evidence.get("trade_progress") or not 0 <= (self._now() - datetime.fromisoformat(evidence["observed_at"])).total_seconds() <= 5:
+                    continue
+                filled = self._status(con, strategy.entry.execution_id)["filled_shares"]
+                if not filled:
+                    continue
+                reason, target = trigger_target(strategy.rules, evidence["price"], filled, strategy.entry.shares_per_unit)
+                if reason is None or strategy.target_position is not None and target >= strategy.target_position:
+                    continue
+                identity = "native-price-" + digest([self.session.generation, sid, strategy.revision, evidence["observed_at"], evidence["price"], filled])
+                self._strategy_request(con, sid, "STRATEGY_PRICE_OBSERVED", strategy.revision,
+                    {"request_id": identity, "symbol": strategy.entry.symbol, "price": evidence["price"],
+                     "source_snapshot": source_payload(SourceSnapshot("KGI_NATIVE_TICK", evidence["observed_at"], evidence))})
+            self._price_strategies = tuple(self._strategies(con).values())
 
     def _native_price(self, raw, generation):
         if generation != self.session.generation:
             return
         try:
             require(self.session.date_matches(), "SESSION_DATE_EXPIRED")
-            evidence = price_observation(raw, self._now())
+            evidence = price_observation(raw, self._now(), market=self.market)
             with self._mutex:
                 key = (evidence["symbol"], evidence["odd_lot"])
                 previous = self._prices.get(key)
@@ -759,18 +1273,22 @@ class ExecutionRuntime:
                 evidence["trade_progress"] = previous is not None
                 self._prices[key] = evidence
                 self._price_error = None
-                if not self.strategy_effects or previous is None:
+                if previous is None:
                     return
                 candidates = [s for s in self._price_strategies
                     if (s.entry.symbol, s.entry.lot == "Odd") == key and s.entry.trade_date <= self.trade_date
-                    and s.target_position is None and price_trigger(s.rules, evidence["price"]) is not None]
+                    and (self.strategy_effects or s.rules.enabled) and price_trigger(s.rules, evidence["price"]) is not None]
                 if not candidates:
                     return
                 with self._transaction() as con:
                     for sid, strategy in self._strategies(con).items():
                         if (strategy.entry.symbol, strategy.entry.lot == "Odd") != key or strategy.entry.trade_date > self.trade_date:
                             continue
-                        if strategy.target_position is not None or price_trigger(strategy.rules, evidence["price"]) is None:
+                        if not (self.strategy_effects or strategy.rules.enabled):
+                            continue
+                        filled = self._status(con, strategy.entry.execution_id)["filled_shares"]
+                        reason, target = trigger_target(strategy.rules, evidence["price"], filled or 0, strategy.entry.shares_per_unit)
+                        if reason is None or not filled or (strategy.target_position is not None and target >= strategy.target_position):
                             continue
                         identity = "native-price-" + digest([generation, sid, strategy.revision,
                             evidence["observed_at"], evidence["price"]])
@@ -800,10 +1318,17 @@ class ExecutionRuntime:
             try:
                 with self._journal.connection(readonly=True) as con:
                     active = bool(self._strategies(con))
+                if self.us_runtime is not None:
+                    with self.us_runtime._journal.connection(readonly=True) as con:
+                        active = active or bool(self.us_runtime._strategies(con))
                 if active:
                     if query:
                         self.query()
+                        if self.us_runtime is not None:
+                            self.us_runtime.query()
                     self._coordinate_strategies()
+                    if self.us_runtime is not None:
+                        self.us_runtime._coordinate_strategies()
                 self.strategy_error = None
             except Exception as exc:
                 self.strategy_error = type(exc).__name__
@@ -813,7 +1338,10 @@ class ExecutionRuntime:
                 if not self._strategy_wake.is_set():
                     self._strategy_idle.set()
 
+    @serialized
     def _coordinate_strategies(self):
+        if self._desired != "ONLINE":
+            return
         commands, cancels = [], []
         if self.session.cash_inventory_required:
             with self._journal.connection(readonly=True) as con:
@@ -824,6 +1352,8 @@ class ExecutionRuntime:
                 self._refresh_cash_inventory()
         with self._transaction() as con:
             for sid, strategy in self._strategies(con).items():
+                if not (self.strategy_effects or strategy.rules.enabled):
+                    continue
                 if strategy.target_position is None or strategy.entry.trade_date > self.trade_date:
                     continue
                 if strategy.exits:
@@ -834,16 +1364,16 @@ class ExecutionRuntime:
                 entry = self._status(con, strategy.entry.execution_id)
                 if strategy.entry.trade_date == self.trade_date and entry["broker_order_id"] and entry["cancel_stage"] is None and entry["state"] not in {s.value for s in TERMINAL}:
                     cancels.append((strategy.entry.execution_id,
-                        BrokerKey(self.account_id, strategy.entry.trade_date, entry["broker_order_id"])))
+                        self._key(self.account_id, strategy.entry.trade_date, entry["broker_order_id"])))
                 quantity = self._strategy_quantities(con, strategy)["available_exit_quantity"]
-                if self.session.cash_inventory_required:
+                if self.session.cash_inventory_required and not strategy.rules.enabled and strategy.entry.action == "Buy" and strategy.entry.condition == "CASH":
                     quantity = min(quantity, self._cash_exit_view(con, strategy.entry.symbol)["executable_quantity"])
                     quantity -= quantity % strategy.entry.shares_per_unit
                 if quantity:
                     command = exit_command(strategy, quantity, self.trade_date)
                     require(self._claim_command(con, command, {"strategy_id": sid}), "STRATEGY_EXIT_ALREADY_CLAIMED")
                     self._strategy_append(con, "STRATEGY_EXIT_CLAIMED", sid, strategy.revision,
-                        {"command": asdict(command), "exit_owner": strategy.exit_owner,
+                        {"command": command_payload(command), "exit_owner": strategy.exit_owner,
                          "target_position": strategy.target_position})
                     self._fault("before_strategy_exit_claim_commit")
                     commands.append(command)
@@ -852,7 +1382,9 @@ class ExecutionRuntime:
         for execution_id, key in cancels:
             self.cancel(execution_id, key)
         for command in commands:
-            self._dispatch_claimed(command, cash_guard=self.session.cash_inventory_required)
+            with self._journal.connection(readonly=True) as con:
+                per_order = self._strategy(self._strategies(con), command.strategy_id).rules.enabled
+            self._dispatch_claimed(command, cash_guard=not per_order and self.session.cash_inventory_required and command.action == "Sell" and command.condition == "CASH")
         if cancels and not commands:
             self.query()
 
@@ -867,7 +1399,7 @@ class ExecutionRuntime:
                 payload = json.loads(row["payload"])
                 if payload["strategy_id"] != sid:
                     continue
-                command = Command(**payload["command"])
+                command = command_from(payload["command"])
                 require(row["execution_id"] == strategy.entry.execution_id, "STRATEGY_JOURNAL_LINEAGE_MISMATCH")
                 claim = con.execute("SELECT seq,payload FROM journal WHERE kind='SUBMIT_CLAIMED' AND execution_id=?",
                                     (command.execution_id,)).fetchone()
@@ -904,7 +1436,7 @@ class ExecutionRuntime:
             if review_id is not None:
                 require(review_id in reviews and reviews[review_id].state == "EXECUTION" and
                         row["execution_id"] == reviews[review_id].execution_id and
-                        claim["command"] == asdict(reviews[review_id].draft.command),
+                        claim["command"] == command_payload(reviews[review_id].draft.command),
                         "JOURNAL_REVIEW_CLAIM_MISMATCH")
         for review_id, review in reviews.items():
             command = review.draft.command
@@ -914,7 +1446,7 @@ class ExecutionRuntime:
             rows = con.execute("SELECT * FROM intents WHERE account_id=? AND (request_id=? OR intent_id=?)",
                                (command.account_id, command.request_id, command.intent_id)).fetchall()
             if review.state == "EXECUTION":
-                require(len(rows) == 1 and rows[0]["payload"] == encoded(asdict(command)),
+                require(len(rows) == 1 and rows[0]["payload"] == encoded(command_payload(command)),
                         "JOURNAL_REVIEW_EXECUTION_MISMATCH")
                 claim = con.execute("SELECT payload FROM journal WHERE kind='SUBMIT_CLAIMED' AND execution_id=?",
                                     (command.execution_id,)).fetchone()
@@ -948,6 +1480,7 @@ class ExecutionRuntime:
 
     def _bind(self, execution_id, key):
         key.validate()
+        require(key == self._key(key.account_id, key.trade_date, key.order_id), "BROKER_MARKET_SCOPE_CONFLICT")
         with self._transaction() as con:
             row = self._row(con, execution_id)
             require((row["account_id"], row["trade_date"]) == (key.account_id, key.trade_date), "BROKER_SCOPE_CONFLICT")
@@ -955,6 +1488,25 @@ class ExecutionRuntime:
             con.execute("UPDATE orders SET broker_id=? WHERE execution_id=?", (key.order_id, execution_id))
             self._append(con, "BROKER_BOUND", execution_id, asdict(key))
         self._drain(key)
+
+    @staticmethod
+    def _us_origin(con, execution_id):
+        rows = con.execute("SELECT payload FROM journal WHERE kind='US_ORIGIN_BOUND' AND execution_id=?",
+                           (execution_id,)).fetchall()
+        values = {json.loads(row[0])["original_id"] for row in rows}
+        require(len(values) <= 1, "US_ORIGIN_ID_CONFLICT")
+        return next(iter(values), None)
+
+    def _record_us_origin(self, execution_id, original_id):
+        if not original_id:
+            return
+        from execution.validation import identifier
+        identifier(original_id)
+        with self._transaction() as con:
+            old = self._us_origin(con, execution_id)
+            require(old in {None, original_id}, "US_ORIGIN_ID_CONFLICT")
+            if old is None:
+                self._append(con, "US_ORIGIN_BOUND", execution_id, {"original_id": original_id})
 
     def _callback(self, raw, generation):
         try:
@@ -972,6 +1524,8 @@ class ExecutionRuntime:
                 self._append(con, "CALLBACK_UNRESOLVED", None, {"error_type": self.callback_error})
 
     def _ingest(self, observation):
+        require(observation.key == self._key(self.account_id, observation.key.trade_date,
+                                             observation.key.order_id), "BROKER_MARKET_SCOPE_CONFLICT")
         with self._transaction() as con:
             con.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?)",
                         (observation.event_id, observation.key.identity, encoded(observation.payload())))
@@ -1004,6 +1558,10 @@ class ExecutionRuntime:
                 return
             row = self._row(con, execution_id)
             command = self._command(con, execution_id)
+            if self.market == "US":
+                require(type(observation) is UsObservation and
+                        observation.original_id == self._us_origin(con, execution_id), "US_ORIGIN_ID_CONFLICT")
+                require(observation.settlement_mode in {None, command.settlement_mode}, "US_SETTLEMENT_CONFLICT")
             state = state_from(json.loads(row["state"]))
             require((observation.symbol, observation.action, observation.condition, observation.lot) ==
                     (command.symbol, command.action, command.condition, command.lot), "BROKER_IDENTITY_CONFLICT")
@@ -1063,28 +1621,41 @@ class ExecutionRuntime:
             self._append(con, "OBSERVATION_APPLIED", execution_id,
                          {"event_id": observation.event_id, "state": state.state.value})
 
+    @serialized
     def query(self):
+        if self.market == "US":
+            self._drain_us_events()
         try:
             batch = self.session.query()
         except Exception as exc:
+            failure = "TRANSPORT" if isinstance(exc, (TimeoutError, ConnectionError)) else "REPORT_OR_UNKNOWN"
+            if failure == "TRANSPORT" and (self._managed or self._parent is not None and self._parent._managed):
+                self.session.disconnected.set()
+            self._record_broker_read("UNAVAILABLE", failure_kind=failure)
             with self._transaction() as con:
                 con.execute("UPDATE orders SET reconcile_required=1 WHERE submit_stage!='NOT_SENT'")
                 self._append(con, "QUERY_UNAVAILABLE", None, {"error_type": type(exc).__name__})
-            return {"status": "UNAVAILABLE", "reconcile_required": True}
+            return {"status": "UNAVAILABLE", "reconcile_required": True, "failure_kind": failure}
         with self._transaction() as con:
             for diagnostic in batch.diagnostics:
                 # Retain quarantine evidence in the existing immutable journal;
                 # it never enters observations, external orders or the reducer.
                 self._append(con, "REPORT_ROW_QUARANTINED", None, asdict(diagnostic))
         for execution_id, returned in self.session.pending_returns().items():
+            if self.market == "US":
+                self._record_us_origin(execution_id, returned.original_id)
             if returned.order_id:
-                self._bind(execution_id, BrokerKey(self.account_id, self.trade_date, returned.order_id))
+                with self._journal.connection(readonly=True) as con:
+                    command = self._command(con, execution_id)
+                self._bind(execution_id, self._key(self.account_id, command.trade_date, returned.order_id))
             if returned.rejected:
                 self._rejected_return(execution_id)
         # Process chronology for status; fill identities dedupe across all sources.
         for observation in sorted(batch.observations, key=lambda o: (o.key.trade_date, o.source_time, o.kind == "DEAL")):
             self._ingest(observation)
         self._reconcile_snapshots(batch)
+        if self.market == "US":
+            self._apply_us_totals(batch.us_order_totals, batch.diagnostics)
         if self.session.cash_inventory_required:
             self._refresh_cash_inventory()
         with self._transaction() as con:
@@ -1092,11 +1663,48 @@ class ExecutionRuntime:
                          {"observations": len(batch.observations), "invalid_trade_count": batch.invalid_trade_count,
                           "invalid_report_count": len(batch.diagnostics),
                           "fill_history_complete": batch.fill_history_complete})
+        self._evaluate_latest_prices()
         self._wake_strategies()
+        self._record_broker_read("PARTIAL" if batch.diagnostics else "AVAILABLE", batch.sources)
         return {"status": "PARTIAL" if batch.diagnostics else "AVAILABLE", "observations": len(batch.observations),
                 "invalid_report_count": len(batch.diagnostics),
                 "diagnostics": [asdict(d) for d in batch.diagnostics],
                 "invalid_trade_count": batch.invalid_trade_count, "fill_history_complete": batch.fill_history_complete}
+
+    def _apply_us_totals(self, totals, diagnostics=()):
+        """Join broker aggregates by both durable IDs; no fabricated fill rows."""
+        with self._transaction() as con:
+            for evidence in totals:
+                row = con.execute("SELECT * FROM orders WHERE account_id=? AND broker_id=?", (evidence["account_id"], evidence["broker_order_id"])).fetchall()
+                for order in row:
+                    eid = order["execution_id"]
+                    command = self._command(con, eid)
+                    if self._us_origin(con, eid) != evidence["original_order_id"]:
+                        continue
+                    if (command.symbol, command.action, command.quantity, decimal(command.price), command.settlement_mode) != (evidence["symbol"], evidence["action"], evidence["quantity"], decimal(evidence["price"]), evidence["settlement_mode"]):
+                        continue
+                    state = state_from(json.loads(order["state"]))
+                    total = evidence["cumulative_filled"]
+                    if total < state.cumulative_filled:
+                        continue
+                    reconcile = any(d.fields.get("OrderNo") == evidence["broker_order_id"] and d.account_matches is not False for d in diagnostics)
+                    old = con.execute("SELECT payload FROM journal WHERE execution_id=? AND kind='US_ORDER_TOTAL_OBSERVED' ORDER BY seq DESC LIMIT 1", (eid,)).fetchone()
+                    if old and json.loads(old[0])["evidence"] == evidence:
+                        con.execute("UPDATE orders SET reconcile_required=? WHERE execution_id=?", (int(reconcile), eid))
+                        continue
+                    self._append(con, "US_ORDER_TOTAL_OBSERVED", eid, {"evidence": evidence, "observed_at": self._now().isoformat()})
+                    if state.state is OrderStatus.UNKNOWN:
+                        state = self._reduce(state, EventKind.RECONCILE)
+                    if total > state.cumulative_filled:
+                        state = self._reduce(state, EventKind.FILLED if total == command.quantity else EventKind.PARTIAL_FILL, total=total)
+                    elif total == 0 and state.state in {OrderStatus.PENDING, OrderStatus.RECONCILING}:
+                        state = self._reduce(state, EventKind.ACCEPTED)
+                    if evidence["cancelled"] and state.state not in {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED}:
+                        if not state.cancel_requested:
+                            state = self._reduce(state, EventKind.CANCEL_REQUESTED)
+                        state = self._reduce(state, EventKind.CANCELLED, total=total)
+                    self._save(con, eid, state)
+                    con.execute("UPDATE orders SET reconcile_required=? WHERE execution_id=?", (int(reconcile), eid))
 
     def _reconcile_snapshots(self, batch):
         """Corroborate current reports, SDK totals and durable fill identities.
@@ -1163,33 +1771,43 @@ class ExecutionRuntime:
                                  {"source_time": snapshot.source_time, "fill_history_complete": False,
                                   "filled_shares": total, "broker_order_id": key.order_id})
 
+    @serialized
     def reconcile(self):
         # Explicit broker read. Constructor/status never acquires broker evidence.
         result = self.query()
+        if self.us_runtime is not None:
+            self.us_runtime.reconcile()
         with self._transaction() as con:
             self._append(con, "RECONCILIATION", None, result)
         return result
 
+    @serialized
     def reconnect(self):
+        require(self._parent is None, "SHARED_CONTEXT_LIFECYCLE_OWNED")
         with self._mutex:
             self._prices.clear()
             self._cash_inventory = None
-        self.session.reconnect()
+        self.session.reconnect(trade_date=self.session.current_day())
+        self.trade_date = self.session.trade_date
         with self._transaction() as con:
             con.execute("UPDATE orders SET reconcile_required=1 WHERE submit_stage!='NOT_SENT'")
             self._append(con, "RECONNECT", None, {"resend": False})
         return self.reconcile()
 
+    @serialized
     def cancel(self, execution_id, key: BrokerKey):
         key.validate()
+        require(key == self._key(key.account_id, key.trade_date, key.order_id), "BROKER_MARKET_SCOPE_CONFLICT")
         with self._transaction() as con:
             row = self._row(con, execution_id)
             require((row["account_id"], row["trade_date"], row["broker_id"]) ==
                     (key.account_id, key.trade_date, key.order_id), "EXACT_CANCEL_IDENTITY_REQUIRED")
-            require(key.account_id == self.account_id and key.trade_date == self.trade_date,
+            require(key.account_id == self.account_id and (self.market == "US" or key.trade_date == self.trade_date),
                     "CANCEL_SESSION_MISMATCH")
             state = state_from(json.loads(row["state"]))
             command = self._command(con, execution_id)
+            original_id = self._us_origin(con, execution_id) if self.market == "US" else None
+            require(self.market != "US" or original_id is not None, "US_ORIGIN_ID_UNAVAILABLE")
             dispatch = row["cancel_stage"] is None and state.state not in TERMINAL
             if dispatch:
                 state = self._reduce(state, EventKind.CANCEL_REQUESTED)
@@ -1199,7 +1817,10 @@ class ExecutionRuntime:
         if dispatch:
             self._fault("after_cancel_claim")
             try:
-                self.session.cancel(key, command)  # no confirmation, no account-wide query, exact ID only
+                if self.market == "US":
+                    self.session.cancel(key, command, original_id=original_id)
+                else:
+                    self.session.cancel(key, command)  # no confirmation, no account-wide query, exact ID only
             except Exception:
                 self._uncertain(execution_id, "CANCEL_UNKNOWN")
             else:
@@ -1238,7 +1859,11 @@ class ExecutionRuntime:
                 claims = [json.loads(r["payload"]) for r in records if r["kind"] == "SUBMIT_CLAIMED"]
                 require(len(claims) == 1, "JOURNAL_CLAIM_MISMATCH")
                 command = self._command(con, execution_id)
-                require(claims[0]["command"] == asdict(command), "JOURNAL_INTENT_MISMATCH")
+                require(type(command) is (UsCommand if self.market == "US" else Command), "JOURNAL_MARKET_MISMATCH")
+                require(self.market != "US" or command.environment == self.environment, "JOURNAL_ENVIRONMENT_MISMATCH")
+                if self.market == "US":
+                    self._us_origin(con, execution_id)
+                require(claims[0]["command"] == command_payload(command), "JOURNAL_INTENT_MISMATCH")
                 state = state_from(claims[0]["initial_state"])
                 require(state == OrderProgress(execution_id, command.quantity, OrderStatus.PENDING, state.admitted_at), "JOURNAL_INITIAL_STATE_MISMATCH")
                 broker_id = None
@@ -1270,7 +1895,12 @@ class ExecutionRuntime:
                 require(state_payload(state) == row["state"], "JOURNAL_PROJECTION_MISMATCH")
                 require((broker_id, submit_stage, cancel_stage) == (row["broker_id"], row["submit_stage"], row["cancel_stage"]), "JOURNAL_COMMAND_MISMATCH")
                 fills = con.execute("SELECT * FROM fills WHERE execution_id=?", (execution_id,)).fetchall()
-                require(sum(f["quantity"] for f in fills) == state.cumulative_filled, "JOURNAL_FILL_MISMATCH")
+                if self.market == "US":
+                    aggregates = [json.loads(r["payload"])["evidence"] for r in records if r["kind"] == "US_ORDER_TOTAL_OBSERVED"]
+                    require(not fills and max((a["cumulative_filled"] for a in aggregates), default=0) == state.cumulative_filled, "JOURNAL_FILL_MISMATCH")
+                    require(all(a["account_id"] == command.account_id and a["broker_order_id"] == broker_id and a["original_order_id"] == self._us_origin(con, execution_id) and a["symbol"] == command.symbol and a["action"] == command.action and a["quantity"] == command.quantity and decimal(a["price"]) == decimal(command.price) and a["settlement_mode"] == command.settlement_mode for a in aggregates), "JOURNAL_FILL_EVIDENCE_MISMATCH")
+                else:
+                    require(sum(f["quantity"] for f in fills) == state.cumulative_filled, "JOURNAL_FILL_MISMATCH")
                 for fill in fills:
                     observations = [observation_from(json.loads(o[0])) for o in con.execute(
                         "SELECT payload FROM observations WHERE broker_key=?", (fill["broker_key"],))]

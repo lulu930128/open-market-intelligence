@@ -1,5 +1,86 @@
 # 原生 KGI headless 操作
 
+2026-11-06 MCP 接線：使用者可在 AI 提名建立待送單，再從 MCP 前端送出；盤後自動須先轉 AI 提名。`desk-submit` 沿原 Native session 一次派送，`desk-cancel` 精確撤單，`desk-protection` 修改該單出場規則。每單停損、多段停利與比例可調；出場依實際成交量、本機行情與限價 ROD 執行，並非券商原生託管。正式啟動預設綁定 TW／US 同一登入以恢復規則，明確 US=false override 與 simulation 保留。完整採用證據見 [MCP 接線進度](../docs/exec-plans/active/mcp-research-execution-20261106/Progress.md)。
+
+## 美股手動正式送單（2026-11-06）
+
+`us-order` 會透過現有 production session 直接送單，自動選取複委託帳戶；不必先跑 `us-probe` 或修改 `.env`。使用者的明確命令沿原 Runtime review／claim 寫入後只送一次，沒有額外審批步驟。以下命令僅由使用者自行執行；更換 request ID 代表新的一筆委託。
+
+```powershell
+Set-Location -LiteralPath 'C:\project\Open Market Intelligence'
+$requestId = 'tsm-manual-20261106-001'
+.\.venv-kgi\Scripts\python.exe -B -m execution_runtime.control us-order --request-id $requestId --symbol TSM --action Buy --quantity 1 --price 1 --settlement TWD
+.\.venv-kgi\Scripts\python.exe -B -m execution_runtime.control us-status --request-id $requestId
+```
+
+以上為 TSM 1 股、USD 1 限價、台幣交割。外幣交割使用 MUT。`us-status` 不加 request ID 只綁定／查詢同一帳戶狀態，不送單；`us-cancel --request-id <原 request ID>` 對該筆執行精確撤單。
+
+回應的 `submission_status=RETURNED` 是 SDK 返回，是否委託成功看 `broker.operations`／`broker.broker_status`／`status_code`，不是成交保證。逾時或 UNKNOWN 保留原 request ID 查詢；相同 request ID 重複呼叫不會重送。成交明細的未驗證部分保留未知，不影響手動委託交給券商受理。完整採用與測試紀錄見 [ManualProduction.md](../docs/exec-plans/active/kgi-us-execution-20261105/ManualProduction.md)。
+
+## 歷史唯讀 checkpoint（2026-11-05，送單限制已由上節取代）
+
+新 `us-probe` 是明確操作，透過既有 Native owner 在同一登入綁定複委託帳戶，讀取單一商品與委託／成交報表的成功狀態及列數。只輸出帳戶 alias 與白名單商品欄位，不輸出帳號、姓名或交易明細。
+
+```powershell
+.\.venv-kgi\Scripts\python.exe -B -m execution_runtime.control us-probe --symbol TSM
+```
+
+此入口不接受價格、數量、方向或 command payload，不呼叫 create_order／cancel_order，不保存草稿或修改 Journal，也不開第二個登入。probe-only binding 不啟用 US operational context，因此不改變原 TW 換日恢復政策；既有正式美股 effect gate 仍封鎖。未載入此版本的 Native 須先經原 Launcher 正常 stop/start 採用，不繞過 session lease。
+
+2026-11-05 23:55（Asia/Taipei）已在 production 完成一次 TSM 唯讀驗證：商品 USD／board lot 1、兩份報表均 AVAILABLE，後續 TW 查詢與同一 session 保持正常。未建立委託。Native status 中 US operational `account_bound=false / US_DISABLED` 與獨立 probe 成功不矛盾：probe 沒有啟用正式 US execution context。完整紀錄見 [美股唯讀驗收](../docs/exec-plans/active/kgi-us-execution-20261105/ReadonlyAcceptance.md)。
+
+## MCP 503 與控制命令逾時
+
+先分別讀 Launcher 的 `ExecutionStatus` 和 Native 的 `control status`。`STOPPED / keep_online=false` 表示交易服務未啟用；Native 的 `FileNotFoundError / EXECUTOR_UNAVAILABLE` 只表示本機 pipe 不可達，不能單靠它判定券商網路原因。舊 startup JSON 的 READY 不代表程序仍存在。已載入 execution component 的 Launcher 可沿既有啟用入口操作；只有 loaded-source 不符時才安排正常採用，不預設重啟全部服務。
+
+送出命令後的 timeout／EOF／無法解析回應維持 `EXECUTOR_RESPONSE_UNKNOWN`；client 退出不取消 Native 正在執行的命令。Backend 對已 claim 的 staged 操作保留 `SUBMISSION_UNKNOWN` 與原身份，不自動重送。只有明確收到 Native rejection code 才當已知拒絕；舊 controller 僅回 `error_type=ExecutionRejected` 而沒有 code 時，同樣按未知結果處理。這些分類是 Source 修正，正式 Backend／MCP 採用須另核對。
+
+Native 發布收據遇到 `ReplaceFileW` 的 32／1175 時，原發布點會有界重試最多 0.5 秒；這是收據 IO 重試，不是交易重送。持續失敗、ACL 拒絕或部分移動仍回報錯誤，不手動刪除 receipt／lease 來繞過。隔離測試已重現 1175 導致 Native 退出，正式歷史故障仍沒有同一例外的證據。
+
+2026-11-05 本輪唯讀 Status 已確認現有 Launcher 載入 execution component，當時為 `STOPPED / keep_online=false`；MCP HTTP 的 loaded build 與磁碟版本不同。因此後續採用先核對各 component 的 source，不直接照下方舊 checkpoint 一律重開 Launcher。實作、測試與後續正式啟用條件見 [本輪驗收](../docs/exec-plans/active/execution-always-online-20261105/PersistentRuntimeAcceptance.md)。
+
+## 常駐部署的新入口（Source／隔離，尚未正式採用）
+
+先由 Reviewer 核對 [部署驗收](../docs/exec-plans/active/execution-always-online-20261105/DeploymentAcceptance.md)，在本機原桌面 tray 正常 Exit，再經原桌面捷徑重開 Launcher，載入新的 execution component。舊 Launcher 不會熱載入；不可用 NORMAL 短命令重建 Launcher／Native 樹。以下是後續 Reviewer 核准的操作入口，本 job 未執行：
+
+```powershell
+.\scripts\omi-execution-control.ps1 -Action Status
+.\scripts\omi-execution-control.ps1 -Action Start -RequestId <新的UUID>
+.\scripts\omi-execution-control.ps1 -Action Status
+.\scripts\omi-execution-control.ps1 -Action Stop -RequestId <新的UUID>
+```
+
+也可用原 tray 的「交易服務（維持連線）」選單。Start 是明確連線意圖，只由持續存在的 Launcher 建立唯一 supervisor；短 client 結束不結束服務。持續意圖保存在原 Launcher per-repo control directory 的 `settings/execution-preference.json`（非秘密、非交易 store）。未明確啟用時預設不登入；啟用後，下次正常 Launcher startup 自動採用一次。Stop 先保存 OFFLINE，重開也不會復活。不要把 STARTING／STOPPING 當完成，不自動重送 Start；用同 owner／startup id 的新 Status 追蹤。
+
+Launcher Status 的 RUNNING 是 fresh heartbeat 與 retained OS lineage，不是券商 ONLINE。仍用原 `execution_runtime.control status` 驗 broker connection、loaded_source、trade_date、ready／busy 等獨立 axes。正常 Launcher Exit 必須先確認 Native/supervisor 退出，會保留 keep_online 供下次正常啟動；明確停用才清除它。換版前先 Stop 並確認 STOPPED／keep_online=false；未知狀態不 force-kill、不刪 lease、不自行改 receipt。
+
+以下舊 `launch --background` 是歷史直接啟動入口，不能用作受短命令 Job 管理環境中的正式常駐部署；本節的 Launcher-owned 入口取代該部署方式。原 foreground/probe、Native 控制與 Journal 語意保留。首次正式採用、登入、OS cold-login 與長時間觀察皆仍待 Reviewer；本輪只用 Fake SDK／臨時 state 與隔離 OS 程序驗證。
+
+## 2026-11-05 Source 交接入口
+
+本版只完成 Source/Fake；下列正式命令**本 job 未執行**。Reviewer 應先核對 [Acceptance](../docs/exec-plans/active/execution-always-online-20261105/Acceptance.md)、task-only patch/hash 與已授權的部署範圍。以下舊 checkpoint 的正式登入結果不代表本版 loaded source 已驗收。
+
+經獨立 review 與後續授權後，在 repo root 用既有設定啟動：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m execution_runtime.launch --connect --background
+.\.venv-kgi\Scripts\python.exe -B -m execution_runtime.control status
+```
+
+不要加入 `--enable-strategy-effects`。背景 launch 是唯一 supervisor；回 READY 需本次 identity 的 receipt。STARTING／RECOVERING 表示尚未就緒，不重複 launch。`loaded_source`、pid、interpreter、root、environment、connection axes 和正式唯讀結果必須分別核對；檔案快照與 source 測試不是 live health。
+
+正常停用，含 Native pipe 不存在的 backoff：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m execution_runtime.launch --stop
+```
+
+這個入口不讀帳密、不登入。只有 exact supervisor/request ACK 才是接受 OFFLINE；STOPPING 不是完成。檢查 `supervisor-status.json` 的同一 startup_id/stop_request_id，須 STOPPED、owner_released=true，並另核對 supervisor／Native process 已退出。無 ACK／owner 不符／SDK hang 維持 UNKNOWN/BLOCKED，不 force-kill、不刪 lease、不另啟第二個 owner。Native 活著時原 `execution_runtime.control stop` 仍可正常停用；durable OPERATOR_STOP 即使接著 child crash 也不會被 supervisor 復活。
+
+Source 回退：先完成上述停用與退出證據，再僅反向套用本輪 task-only patch；不要 reset worktree、刪 DB/Journal、改舊 intent 或覆蓋其他 WIP。本版未改 schema；既有歷史版本對 `SUBMIT_NOT_SENT` 等事件的限制仍適用。若前置 hashes 不符，先人工比較增量，不強行套 patch。
+
+無 Windows service／排程／登入自啟動；supervisor 自身 crash 或 OS reboot 仍需明確重新啟動。本版不保證網路不中斷、SDK call 可取消、回補所有券商歷史或限價成交。詳見本輪驗收中的未驗證項目。
+
 本入口全部位於 OMI，不依賴其他專案。Python 3.12.3 x64／kgisuperpy 2.1.0 native import 已驗證。2026-10-30 已完成正式登入、account selection、唯讀 order/deal query、正常 logout/reconnect，以及獨立背景程序驗收；未送買賣委託、未撤任何真單。官方 simulation probe 回 `KGI_LOGIN_INCOMPLETE`，維持 BLOCKED。最新 PID／Loaded Source 與原始限制見任務 Progress／Continuation-Validation.json。
 
 ## 啟動與設定
@@ -35,7 +116,7 @@ $env:KGI_SUPERPY_SIMULATION = 'false'
 .\.venv-kgi\Scripts\python.exe -B -m execution_runtime.control stop
 ```
 
-背景程序使用 Windows detached process／hidden startup，不依賴研究 Backend／Frontend 或控制程序存活。`STARTING` 的 PID 是 venv redirector，不等於 native PID；以新 control status 的 `pid/interpreter/project_root/loaded_source` 和 Windows process identity 一起驗證。`STOPPING` 不是停止完成，必須再確認該 native PID 退出。沒有 Windows service 安裝、排程、登入自動啟動、自動重登／重試或跨 reboot 保證。
+背景程序使用 Windows detached process／hidden startup，不依賴研究 Backend／Frontend 或控制程序存活。`STARTING` 的 PID 是 venv redirector，不等於 native PID；以新 control status 的 `pid/interpreter/project_root/loaded_source` 和 Windows process identity 一起驗證。`STOPPING` 不是停止完成，必須再確認該 native PID 退出。沒有 Windows service 安裝、排程、登入自動啟動或跨 reboot 保證。11/05 Source 的背景入口新增單一 supervisor 與 managed reconnect；其正式採用仍待本輪交接驗收。
 
 控制通道是固定 OMI-local Windows named pipe，使用有界 bytes JSON，不用 pickle、TCP、MCP 或另一個 manager/store。雙向以 Windows process token 驗證同使用者；server 只接受 `ERROR_PIPE_LOCAL=229` 證明的本機 caller，未知 identity 拒絕。依據為 Microsoft [pipe client PID](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid)、[token query](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation) 與 [ERROR_PIPE_LOCAL](https://github.com/MicrosoftDocs/win32/blob/docs/desktop-src/Debug/system-error-codes--0-499-.md) 文件。這是本機同一 OS principal 的操作入口，不授權遠端／不同使用者。
 
@@ -104,7 +185,7 @@ Native Runtime 的 SL/TP 價格只收同一 KgiSessionOwner session 的 `Quote.s
 
 正常 tick 只更新原 Runtime `_prices` 投影，不讀寫 journal。只有首次符合 SL/TP 時，透過相同 `price_trigger` 判斷，保存來源／received timestamp 及觸發 evidence，交原 Runtime target/reservation/engine。重複／倒序／只有 depth 更新不重複 claim；已觸發 target 的後續 tick 不擴大 immutable journal。可修改已送策略，原 confirmed command 不改寫。實際 deploy 的 price source 尚為 WAITING_NATIVE_TRADE，不能宣稱真實停損／停利保護已生效。
 
-策略修改不改寫已確認 entry snapshot。新增曝險仍須新的 Preview／Confirm；UNKNOWN child claim 不釋放 reservation、不自動 resend。沒有 AI 自動確認。跨台北日界線後 native SDK IO 與 callback admission 拒絕，需結束程序並以新日期重新開啟；不自動滾日或重送。
+策略修改不改寫已確認 entry snapshot。新增曝險仍須新的 Preview／Confirm；UNKNOWN child claim 不釋放 reservation、不自動 resend。沒有 AI 自動確認。跨台北日界線後舊 native binding 的 SDK IO 與 callback admission 仍拒絕；11/05 managed 背景入口由原 owner 正常關閉／重綁新日期，前景入口仍需明確重開。兩者皆不重送舊 intent。
 
 2026-10-30 跨日修正：以新交易日 Session 開啟原 journal 後，前日策略仍訂閱同 Symbol／lot、可修 SL/TP、可明確退出；child exit 使用目前 Session 的交易日。舊 Entry、review digest、成交與原 broker identity 不改寫。昨日 ROD 未證實餘量顯示未知，不當作當日可撤單；exact identity 先驗證，再於任何 claim 前拒絕舊日取消。跨日與重連都不重送既有 child intent。
 

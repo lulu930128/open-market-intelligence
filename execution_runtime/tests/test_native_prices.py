@@ -46,7 +46,7 @@ class NativePriceTests(unittest.TestCase):
         self.assertEqual(price_observation(tick(datetime=20261029100000), NOW)["observed_at"], NOW.isoformat())
         for changes in ({"datetime": "20261029095950"}, {"datetime": "20261029100001"},
                         {"datetime": None}, {"datetime": "202610291000"}, {"simtrade": 1},
-                        {"suspend": 1}, {"delay_time": 1}, {"volume": 0}, {"odd_lot": None}, {"close": "NaN"}):
+                        {"suspend": 1}, {"delay_time": 6}, {"volume": 0}, {"odd_lot": None}, {"close": "NaN"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 price_observation(tick(**changes), NOW)
 

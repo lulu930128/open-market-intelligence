@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta, timezone
 
 from execution.validation import identifier, integer, money, require
-from .contracts import Command, decimal, digest, encoded
+from .contracts import Command, command_from, decimal, digest, encoded
 from .review import stamp
 
 
@@ -21,8 +21,25 @@ CONSENT_POLICY = "MUTABLE_REDUCE_EXIT_V1_PROVISIONAL"
 
 def price_trigger(rules, price):
     value = decimal(price)
-    return ("STOP" if rules.stop_loss is not None and value <= decimal(rules.stop_loss) else
-            "TAKE_PROFIT" if rules.take_profit is not None and value >= decimal(rules.take_profit) else None)
+    direction = rules.direction
+    if rules.stop_loss is not None and direction * (value - decimal(rules.stop_loss)) <= 0:
+        return "STOP"
+    reached = [i for i, target in enumerate(rules.targets)
+               if direction * (value - decimal(target["price"])) >= 0]
+    if reached:
+        return f"TAKE_PROFIT:{max(reached)}"
+    return "TAKE_PROFIT" if not rules.targets and rules.take_profit is not None and direction * (value - decimal(rules.take_profit)) >= 0 else None
+
+
+def trigger_target(rules, price, filled, unit=1):
+    reason = price_trigger(rules, price)
+    if reason is None:
+        return None, None
+    if reason.startswith("TAKE_PROFIT:"):
+        fraction = sum(decimal(t["fraction"]) for t in rules.targets[:int(reason.split(":")[1]) + 1])
+        sold = int(decimal(filled) * fraction // unit) * unit
+        return (reason, filled - sold) if sold else (None, None)
+    return reason, 0
 
 
 @dataclass(frozen=True)
@@ -31,10 +48,24 @@ class StrategyRules:
     take_profit: str | None
     exit_limit_price: str
     protection_mode: str = "LOCAL_SYNTHETIC"
+    direction: int = 1
+    targets: tuple = ()
+    stop_limit_price: str | None = None
+    enabled: bool = False
 
     def validate(self):
         require(self.protection_mode == "LOCAL_SYNTHETIC", "BROKER_NATIVE_PROTECTION_UNSUPPORTED")
-        for value in (self.stop_loss, self.take_profit, self.exit_limit_price):
+        require(type(self.direction) is int and self.direction in {1, -1}, "INVALID_STRATEGY_DIRECTION")
+        require(type(self.enabled) is bool, "INVALID_STRATEGY_ENABLED")
+        require(type(self.targets) in {tuple, list}, "INVALID_STRATEGY_TARGETS")
+        for target in self.targets:
+            require(type(target) is dict and set(target) == {"price", "fraction", "limit_price"}, "INVALID_STRATEGY_TARGET")
+            require(0 < decimal(target["fraction"]) <= 1 and decimal(target["price"]) > 0 and decimal(target["limit_price"]) > 0, "INVALID_STRATEGY_TARGET")
+        if self.targets:
+            require(sum(decimal(t["fraction"]) for t in self.targets) == 1, "INVALID_TARGET_FRACTIONS")
+            prices = [self.direction * decimal(t["price"]) for t in self.targets]
+            require(prices == sorted(set(prices)), "INVALID_TARGET_ORDER")
+        for value in (self.stop_loss, self.take_profit, self.exit_limit_price, self.stop_limit_price):
             if value is None:
                 continue
             require(type(value) is str and len(value) <= 64, "INVALID_STRATEGY_PRICE")
@@ -44,7 +75,7 @@ class StrategyRules:
             require(decimal(native) == price, "PRICE_PRECISION_LOSS")
         require(self.exit_limit_price is not None, "EXIT_LIMIT_REQUIRED")
         if self.stop_loss is not None and self.take_profit is not None:
-            require(decimal(self.stop_loss) < decimal(self.take_profit), "INVALID_PROTECTION_LEVELS")
+            require(self.direction * (decimal(self.take_profit) - decimal(self.stop_loss)) > 0, "INVALID_PROTECTION_LEVELS")
 
 
 @dataclass(frozen=True)
@@ -98,8 +129,17 @@ class Strategy:
 def exit_command(strategy, quantity, trade_date=None):
     """Deterministic child identity; all economic fields stay in the journal."""
     identity = "exit-" + digest([strategy.entry.execution_id, len(strategy.exits) + 1])
+    rules, reason = strategy.rules, strategy.exit_reason or ""
+    price = rules.exit_limit_price
+    if reason == "STOP" and rules.stop_limit_price is not None:
+        price = rules.stop_limit_price
+    elif reason.startswith("TAKE_PROFIT:"):
+        index = int(reason.split(":")[1])
+        if index < len(rules.targets):
+            price = str(rules.targets[index]["limit_price"])
+    mapping = {"condition": "CASH"} if strategy.entry.condition == "CASH_SELLING" else {}
     return replace(strategy.entry, request_id=identity, intent_id=identity,
-                   action="Sell", quantity=quantity, price=strategy.rules.exit_limit_price,
+                   action="Sell" if strategy.entry.action == "Buy" else "Buy", quantity=quantity, price=price, **mapping,
                    revision=strategy.revision, trade_date=trade_date or strategy.entry.trade_date)
 
 
@@ -128,7 +168,7 @@ def replay(records, reviews):
             "STRATEGY_PRICE_OBSERVED": {"request_id", "symbol", "price", "source_snapshot"},
             "STRATEGY_EXIT_CLAIMED": {"command", "exit_owner", "target_position"},
         }[kind]
-        require(set(payload) == base | extras, "INVALID_STRATEGY_RECORD")
+        require(set(payload) - ({"filled_quantity"} if kind == "STRATEGY_PRICE_OBSERVED" else set()) == base | extras, "INVALID_STRATEGY_RECORD")
         if "source_snapshot" in payload:
             validate_source(payload["source_snapshot"], occurred_at)
         if "rules" in payload:
@@ -142,7 +182,7 @@ def replay(records, reviews):
             entry = review.draft.command
             require(entry.strategy_id == sid and entry.revision == revision and
                     review.snapshot["digest"] == payload["review_digest"], "STRATEGY_REVIEW_MISMATCH")
-            require((entry.action, entry.condition) == ("Buy", "CASH"), "STRATEGY_ENTRY_UNSUPPORTED")
+            require(rules.direction == (1 if entry.action == "Buy" else -1), "STRATEGY_DIRECTION_MISMATCH")
             require(payload["consent_policy"] == CONSENT_POLICY, "UNSUPPORTED_STRATEGY_CONSENT")
             require(stamp(review.confirmed_at) <= stamp(occurred_at), "STRATEGY_TIME_REVERSED")
             strategies[sid] = Strategy(entry, review.draft.review_id, payload["review_digest"],
@@ -159,6 +199,7 @@ def replay(records, reviews):
             require(request_id not in strategy.requests, "DUPLICATE_STRATEGY_REQUEST")
             strategy = replace(strategy, requests={**strategy.requests, request_id: (kind, payload)})
         if kind == "STRATEGY_REVISED":
+            require(rules.direction == (1 if strategy.entry.action == "Buy" else -1), "STRATEGY_DIRECTION_MISMATCH")
             strategy = replace(strategy, rules=rules, revision=revision, source_snapshot=payload["source_snapshot"])
         elif kind == "STRATEGY_EXIT_REQUESTED":
             target = payload["target_position"]
@@ -178,14 +219,14 @@ def replay(records, reviews):
             # strictly older ticks are ignored; request identity handles repeats.
             if strategy.last_price_at is None or stamp(observed_at) >= stamp(strategy.last_price_at):
                 price, rules = decimal(payload["price"]), strategy.rules
-                reason = price_trigger(rules, price)
+                reason, target = trigger_target(rules, price, payload.get("filled_quantity", strategy.entry.quantity), strategy.entry.shares_per_unit)
                 if reason:
-                    strategy = _target(strategy, 0, request_id, reason)
+                    strategy = _target(strategy, target, request_id, reason)
                 strategy = replace(strategy, last_price_at=observed_at)
         else:
-            command = Command(**payload["command"])
+            command = command_from(payload["command"])
             command.validate()
-            claim_day = stamp(occurred_at).astimezone(timezone(timedelta(hours=8))).date().isoformat()
+            claim_day = stamp(occurred_at).astimezone(timezone.utc if getattr(command, "market", "TW") == "US" else timezone(timedelta(hours=8))).date().isoformat()
             require(strategy.target_position is not None and payload["exit_owner"] == strategy.exit_owner
                     and payload["target_position"] == strategy.target_position and
                     strategy.entry.trade_date <= command.trade_date == claim_day and
@@ -198,8 +239,9 @@ def replay(records, reviews):
 
 def quantities(strategy, entry, exits, trade_date=None):
     """Projection from canonical orders. No virtual ownership of fungible stock."""
-    entered = entry["filled_shares"]
-    exited = sum(o["filled_shares"] for o in exits)
+    known = entry["filled_shares"] is not None and all(o["filled_shares"] is not None for o in exits)
+    entered = entry["filled_shares"] if entry["filled_shares"] is not None else entry.get("confirmed_filled_shares", 0)
+    exited = sum(o["filled_shares"] if o["filled_shares"] is not None else o.get("confirmed_filled_shares", 0) for o in exits)
     committed = sum(c.quantity for c, o in zip(strategy.exits, exits) if o["submit_stage"] != "NOT_SENT")
     require(0 <= exited <= committed <= entered, "STRATEGY_QUANTITY_CONFLICT")
     effective, reserved = entered - exited, committed - exited
@@ -215,7 +257,7 @@ def quantities(strategy, entry, exits, trade_date=None):
         # reports neither proves its final balance nor erases historical fills.
         remaining = None
     target = strategy.target_position
-    available = max(0, effective - reserved - target) if target is not None else 0
+    available = max(0, effective - reserved - target) if target is not None and known else 0
     unresolved = entry["reconcile_required"] or any(o["reconcile_required"] for o in exits)
     if target is None:
         lifecycle = ("RECONCILING" if entry["state"] in {"UNKNOWN", "RECONCILING"} else
@@ -227,7 +269,7 @@ def quantities(strategy, entry, exits, trade_date=None):
     else:
         lifecycle = "RECONCILING" if strategy.exits or entry["cancel_stage"] else "EXITING"
     blocked = [o["execution_id"] for o in exits if o["state"] in
-               {"UNKNOWN", "REJECTED", "CANCELLED", "RECONCILING"} and o["filled_shares"] < o["quantity"]
+               {"UNKNOWN", "REJECTED", "CANCELLED", "RECONCILING"} and (o["filled_shares"] is None or o["filled_shares"] < o["quantity"])
                and o["submit_stage"] != "NOT_SENT"]
     return {"state": lifecycle, "entry_filled": entered, "exit_filled": exited,
             "entry_remaining": remaining, "effective_position": effective,
@@ -235,7 +277,7 @@ def quantities(strategy, entry, exits, trade_date=None):
             "available_exit_quantity": available, "target_position": target,
             "entry_session": "PRIOR_SESSION" if prior_session else "CURRENT_SESSION",
             "entry_cancel_eligible": not prior_session,
-            "position_basis": "STRATEGY_FILL_LINEAGE_NOT_ACCOUNT_INVENTORY",
+            "position_basis": "BROKER_CUMULATIVE" if entry.get("fill_status") == "BROKER_CUMULATIVE" else "UNQUALIFIED" if not known else "STRATEGY_FILL_LINEAGE_NOT_ACCOUNT_INVENTORY",
             "protection_guaranteed": False, "exit_order_type": "LOCAL_LIMIT_ROD",
             "exit_fill_guaranteed": False,
             "trigger_state": "TRIGGERED" if target is not None else "NOT_TRIGGERED",

@@ -72,8 +72,9 @@ class Command:
         require(self.condition in {"CASH", "MARGIN", "CASH_SELLING", "SHORT_SELLING"},
                 "UNSUPPORTED_CONDITION")
         require(self.condition == "CASH" or self.lot == "Common", "UNSUPPORTED_CREDIT_LOT")
-        require(self.condition != "MARGIN" or self.action == "Buy", "UNQUALIFIED_MARGIN_SIDE")
-        require(self.condition not in {"CASH_SELLING", "SHORT_SELLING"} or self.action == "Sell",
+        require(self.condition != "MARGIN" or self.action == "Buy" or self.strategy_id is not None, "UNQUALIFIED_MARGIN_SIDE")
+        require(self.condition != "CASH_SELLING" or self.action == "Sell", "UNQUALIFIED_SHORT_SIDE")
+        require(self.condition != "SHORT_SELLING" or self.action == "Sell" or self.strategy_id is not None,
                 "UNQUALIFIED_SHORT_SIDE")
         require(type(self.price) is str and decimal(self.price) > 0, "INVALID_LIMIT_PRICE")
 
@@ -121,7 +122,37 @@ class Observation:
 
 
 def observation_from(payload: dict) -> Observation:
-    return Observation(**{**payload, "key": BrokerKey(**payload["key"])})
+    from .us_contracts import UsObservation
+    kind = UsObservation if payload["key"].get("market") == "US" else Observation
+    return kind(**{**payload, "key": broker_key_from(payload["key"])})
+
+
+def command_from(payload: dict):
+    """Old TW bytes retain their original codec and identity."""
+    from .us_contracts import UsCommand
+    require(type(payload) is dict, "INVALID_COMMAND")
+    try:
+        result = UsCommand(**payload) if "schema_version" in payload else Command(**payload)
+    except TypeError:
+        raise ValueError("INVALID_COMMAND_FIELDS") from None
+    result.validate()
+    return result
+
+
+def command_payload(command):
+    """Keep legacy US command bytes stable when no protection was attached."""
+    result = asdict(command)
+    if result.get("market") == "US" and result.get("strategy_id") is None:
+        result.pop("strategy_id", None)
+        result.pop("revision", None)
+    return result
+
+
+def broker_key_from(payload: dict):
+    from .us_contracts import UsBrokerKey
+    result = UsBrokerKey(**payload) if "market" in payload else BrokerKey(**payload)
+    result.validate()
+    return result
 
 
 @dataclass(frozen=True)
@@ -160,6 +191,7 @@ class QueryBatch:
     fill_history_complete: bool = False
     diagnostics: tuple[ReportDiagnostic, ...] = ()
     sources: tuple[SourceRead, ...] = ()
+    us_order_totals: tuple[dict, ...] = ()
 
 
 def parse_stamp(day_value: str, value: object) -> str:

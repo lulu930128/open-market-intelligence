@@ -61,7 +61,7 @@ def emit(output, value):
     output.flush()
 
 
-def native_run(output, *, strategy_effects=False, probe=False, persistent=False):
+def native_run(output, *, strategy_effects=False, probe=False, persistent=False, startup_id=None):
     # A fixed OMI execution lease is acquired BEFORE login/account discovery.
     # A second invocation cannot evade ownership with another journal or mode.
     lease = OwnerLease(STATE / "native-session")
@@ -70,8 +70,16 @@ def native_run(output, *, strategy_effects=False, probe=False, persistent=False)
     try:
         settings = NativeSettings.from_environment()
         factory = NativeSessionFactory(settings, owner_lease=lease)
-        binding = factory.prepare()
         journal = STATE / ("simulation.sqlite" if settings.simulation else "production.sqlite")
+        if persistent:
+            from .service import record_startup, serve_runtime
+            runtime = ExecutionRuntime(journal, account_id=None, trade_date=factory.current_day(),
+                session_factory=factory, strategy_effects=strategy_effects, native_prices=True)
+            runtime.start_managed()
+            serve_runtime(runtime, ExecutionApplication(runtime), settings.simulation, STATE,
+                startup=(lambda value: record_startup(STATE, startup_id, value)) if startup_id else None)
+            return
+        binding = factory.prepare()
         runtime = ExecutionRuntime(journal, account_id=binding.account_id, trade_date=binding.trade_date,
                                    session_factory=factory, strategy_effects=strategy_effects, native_prices=True)
         startup = runtime.start()
@@ -86,9 +94,6 @@ def native_run(output, *, strategy_effects=False, probe=False, persistent=False)
             emit(output, {"event": "READONLY_PROBE", "query_status": result["status"],
                           "callback_registered": True, "fill_history_complete": False,
                           "order_effects": "NOT_SENT", "account_selected": True})
-        elif persistent:
-            from .service import serve_runtime
-            serve_runtime(runtime, app, settings.simulation, STATE)
         else:
             serve(app, sys.stdin, output, selected_account=binding.account_id)
     finally:
@@ -99,8 +104,11 @@ def native_run(output, *, strategy_effects=False, probe=False, persistent=False)
             factory.close_unclaimed()
         lease.release()
         if persistent:
-            from .service import record_state
+            from .service import record_startup, record_state
             record_state(STATE, {"status": "STOPPED", "pid": os.getpid(), "owner_released": True})
+            if startup_id:
+                record_startup(STATE, startup_id, {"status": "STOPPED", "pid": os.getpid(),
+                    "owner_released": True, "reason": runtime.stop_reason if runtime else None})
 
 
 def main(argv=None):
@@ -114,6 +122,7 @@ def main(argv=None):
     mode.add_argument("--persistent", action="store_true", help="Same-user Windows pipe; independent of controller lifetime")
     native.add_argument("--enable-strategy-effects", action="store_true",
                         help="Explicitly resume existing CASH long strategy effects, including cancel/exit")
+    native.add_argument("--startup-id", help="Internal launch receipt identity; no credentials")
     args = parser.parse_args(argv)
     if args.route is None:
         parser.print_help()
@@ -122,6 +131,9 @@ def main(argv=None):
         parser.error("native requires --connect; no login attempted")
     if args.route == "native" and args.probe and args.enable_strategy_effects:
         parser.error("probe forbids strategy effects")
+    if args.route == "native" and args.startup_id:
+        if not args.persistent or len(args.startup_id) != 32 or any(c not in "0123456789abcdef" for c in args.startup_id):
+            parser.error("invalid startup receipt identity")
     # Enforce the OMI-local interpreter, never fall back to another project/SDK.
     expected = ROOT / ".venv-kgi" / "Scripts" / "python.exe"
     if Path(sys.executable).resolve() != expected.resolve():
@@ -144,11 +156,17 @@ def main(argv=None):
                               "bits": struct.calcsize("P") * 8, "broker_session": "NOT_STARTED", "live_order": "NOT_SENT"})
             else:
                 native_run(output, strategy_effects=args.enable_strategy_effects,
-                           probe=args.probe, persistent=args.persistent)
+                           probe=args.probe, persistent=args.persistent, startup_id=args.startup_id)
         except KeyboardInterrupt:
             emit(output, {"status": "STOPPED", "reason": "INTERRUPTED_CHECK_STATUS_BEFORE_RETRY"})
             return 130
         except BaseException as exc:
+            if args.route == "native" and args.startup_id:
+                from .service import record_startup
+                record_startup(STATE, args.startup_id, {"status": "BLOCKED", "pid": os.getpid(),
+                    "code": exc.code if isinstance(exc, ExecutionRejected) else
+                        "EXECUTION_OWNER_ALREADY_ACTIVE" if isinstance(exc, RuntimeError) and
+                        str(exc) == "EXECUTION_OWNER_ALREADY_ACTIVE" else "NATIVE_OPERATION_FAILED"})
             # Never print SDK exception strings/tracebacks, credentials or accounts.
             emit(output, {"status": "BLOCKED", "stage": args.route, "error_type": type(exc).__name__,
                           "code": exc.code if isinstance(exc, ExecutionRejected) else "NATIVE_OPERATION_FAILED",

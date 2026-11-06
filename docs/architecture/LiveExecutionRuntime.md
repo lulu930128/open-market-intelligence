@@ -1,4 +1,75 @@
+# 每單人工執行接線（2026-11-06 current source）
+
+台股 Desk readback 對歷史 `BROKER_OBSERVATION` 採逐列解析；無法建立合法 broker identity 的資料保留原 Journal bytes，透過既有 `unparsed_reports` 回傳 `INVALID_JOURNAL_OBSERVATION` 與 Journal sequence，該來源標示 PARTIAL。它不產生委託／成交 identity，不改寫 ledger，也不隱藏其他有效紀錄；SDK 斷線仍在各來源顯示 UNAVAILABLE，歷史證據不冒充即時券商讀回。
+
+`desk-submit` 在原 Runtime 一次操作內完成持久化選定版本、preview、confirm 與 submit；MCP 使用者點按是此筆明確交易意圖，不另加 gate。Broker IO、SDK session、單據與 fills 仍由原 owner 管理。TW／US 共用操作面，US 使用既有子 context 與相同 SDK lane。
+
+正式 Native 啟動預設於同一登入綁定 TW／US，以恢復已保存的美股每單規則；保留明確 `KGI_SUPERPY_US_ENABLED=false` override，simulation 不綁定美股。US 帳戶或介面不可用時沿既有 binding reason 回報，不妨礙 TW 原連線。
+
+`StrategyRules.enabled` 是使用者選定的每單出場規則；預設 false 保持既有策略不自動啟用。Research stage 明確攜帶 enabled=true 與各 TP price/fraction/limit、stop trigger/limit。使用者可在原 execution 修改規則，不重送進場；已派送子單不回溯改寫。每筆委託依自身成交與預留退出數量協調，整股／小股數不提前把 TP2 比例交給 TP1。
+
+明確採用的每單規則按該單實際成交數派送，券商判定可賣／信用資格，不新增帳戶估算庫存門檻；舊 global 策略的現有 capacity path 保留。TW SHORT_SELLING 回補為 Buy/SHORT_SELLING；現先賣回補為 Buy/CASH（SDK 禁止 Buy/CASH_SELLING）。US Sell 仍是現股賣出，不能宣稱裸放空已支援。
+
+US `US_ORDER_TOTAL_OBSERVED` 保存券商累計量與本機讀取時刻，精確聯結 durable original ID、order ID、帳號與原價量。它不是逐筆 fill，也沒有虛構時間戳或 fill ID；`fill_history_complete=false` 保留。US quote 的無時區原始字串採明示 LOCAL_CALLBACK_RECEIPT，不假設紐約時區；callback latency 與交易量進展分開驗證。斷線重接由原 owner 恢復訂閱，讀取／重播不重送 entry。
+
+MCP 使用者可精確撤單與修改每單出場規則。未提供把 SDK US cancel-and-replace 偽裝成原子改價的 API。出場仍是 LOCAL_SYNTHETIC / LIMIT ROD，需本機 runtime 與行情在線，並非券商託管或成交保證。
+
+以下保留先前階段證據；其中舊的 CASH-only／TW-only／尚未接 MCP 描述不代表上述 current source 的能力。實際 Loaded／Live 驗收另見 active exec plan Progress。
+
 # Dedicated Execution Runtime（原生 headless 接線）
+
+## 美股手動正式送單
+
+`control us-order` 依使用者指定的商品、方向、股數、USD 限價、TWD/MUT 交割及 request ID，在現有 Native owner 上送出正式委託。它自動綁定同一登入的複委託帳戶，不要求先跑 probe 或設定 US enable flag。Native factory 維持帳戶選擇與重連 pin；所有 SDK IO 仍在 KgiSessionOwner 的共用 lane。`us-status` 查詢連線或指定 request；`us-cancel` 以該 request 保存的原始序號及委託書號精確撤單。
+
+先前固定拒絕 Native US 的 `US_LIVE_EXECUTION_UNQUALIFIED` 已移除。明確的手動命令在 Runtime 內沿既有 Draft／Preview／Confirm／durable claim 完成單次派送，不增加外部審批步驟；同 request 重複呼叫只回傳原結果。相同 request 改參數回報衝突；逾時、None、claim 後中斷及重啟都不自動重送。資金、可賣量、受理時間及價格限制由券商裁決，不把缺少本機資料當作券商已核准。
+
+正式 US command 的 `trade_date` 是 UTC 本機送單日，僅作 Journal／intent scope；公開輸出標明 `date_basis=CLIENT_SUBMISSION_UTC`、`broker_business_date=null`，不將本機日期偽裝成券商營業日。既有 OFFLINE fixtures 與 TW v1 payload 不變。原 schema-v1 Journal 實作仍以獨立 US 檔案及 market/environment metadata 保存紀錄。台北／UTC 換日更新各市場的本機日期，不 logout 共用 session、不改寫歷史委託。
+
+SDK 原始序號及委託書號延遲回報時，查單會從同一回傳 Trade 物件補齊；重啟後僅以已保存的原始序號復原，不能靠同商品、價格或數量猜配。`submission_status=RETURNED` 表示 SDK 已返回；`broker` 個別顯示券商狀態、操作與錯誤碼。缺少可信成交 ID／回報時區的資料仍保留未對帳，`filled_shares=null`；這些資料限制不再阻擋手動送單。自動策略未啟用，美股 UI/MCP 的完整操作介面另屬後續工作。
+
+實作、隔離測試與正式 source 採用狀態見 [手動正式送單紀錄](../exec-plans/active/kgi-us-execution-20261105/ManualProduction.md)。前一次 2026-11-05 23:55 的 TSM 唯讀查詢證據保留於 [ReadonlyAcceptance.md](../exec-plans/active/kgi-us-execution-20261105/ReadonlyAcceptance.md)，不代表真實送單曾經驗收。
+
+## 正式採用 checkpoint（2026-11-05 21:49，Asia/Taipei）
+
+在使用者明確採用授權下，既有 Launcher 啟用 production Native、Backend 正常 restart、MCP 載入相符 build。21:39:11–21:49:52 的完整採樣維持同一 Native PID／creation、startup identity 與 session generation，首尾唯讀報表成功，沒有再出現 503；`keep_online=true`、strategy effects 關閉。這是該版本在該時窗的正式證據，非即時健康承諾；報表仍 PARTIAL，實際交易時段／台北跨日／真實送撤單尚未驗收。版本、收據、操作與剩餘界線見 [正式採用驗收](../exec-plans/active/execution-always-online-20261105/PersistentRuntimeLiveAcceptance.md)。
+
+## Windows 收據發布（2026-11-05，Source／隔離）
+
+Launcher 正常重開的真 Windows 子程序測試重現 Native 在發布 READY 收據時因 `ReplaceFileW / WinError 1175` 退出；這會讓原本已連線的 runtime 消失。本輪只修正原 `service.replace_receipt`：sharing violation（32）與原／新檔名皆保留的 1175 最多重試 0.5 秒；權限拒絕、1176／1177 等部分移動錯誤立即回報，持續衝突仍失敗。沒有刪除舊 receipt、忽略 ACL、另建 owner 或重送交易命令。
+
+此錯誤來自本輪 synthetic fixture 的例外證據，尚不能認定為過去正式程序消失的唯一原因。[Windows ReplaceFileW 文件](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew) 說明 1175 保留兩個原檔名，與部分移動錯誤的復原條件不同。原子發布與 owner identity 檢查維持；完整修正及採用界線見 [本輪驗收](../exec-plans/active/execution-always-online-20261105/PersistentRuntimeAcceptance.md)。
+
+## Controller 失聯語意（2026-11-05，Source）
+
+短命令 controller 在送出 Native command 後逾時，不能證明 SDK 未執行。`control.py` 將等待回應逾時分類為 `TimeoutError`；本機失敗回固定 `EXECUTOR_RESPONSE_UNKNOWN`，缺少 pipe 回 `EXECUTOR_UNAVAILABLE`，不輸出例外自由文字。Backend 只有收到附具體 Native code 的 `ExecutionRejected` 才當成已知拒絕；舊 controller 的無 code `ExecutionRejected` 也保守視為結果未知。
+
+已 claim 的 staged 操作沿用 `SUBMISSION_UNKNOWN`／`CHECK_STATUS_DO_NOT_RESEND`，不因 client 退出、逾時或 Native 後來完成而自動重送、退回 STAGED 或建立替代 intent。readiness 階段的 exact-pin `NOT_ATTEMPTED` 規則不變。這是既有 controller／Backend 的局部分類修正，不新增 session owner、交易 store 或 lifecycle API；正式 loaded-source 採用與常駐驗收另記。
+
+## Launcher 部署增量（2026-11-05，Source／隔離）
+
+常駐部署的正式 owner 改為既有 mutex-owning OMI desktop Launcher：其 `Omi.RuntimeControl.Controller` 內 execution component 只建立／持有固定 `execution_runtime.launch --connect --supervise`，不重啟 supervisor、不管理 SDK。原 launch supervisor 繼續獨占 Native crash 恢復，`ExecutionRuntime/KgiSessionOwner/Journal` 不變。
+
+既有同使用者 authenticated local pipe 提供固定 ExecutionStart／ExecutionStop／ExecutionStatus；短 client `scripts/omi-execution-control.ps1` 不啟動 Launcher 或程序樹，不取得遠端 HTTP/MCP authority。Start 冪等，保留原 SDK config bootstrap，策略 effects 關閉。Launcher 保留 spawn handle，另核對 `.venv` supervisor 及 `.venv-kgi` Native redirector 的 parent／birth／固定 interpreter image；READY 檔案、舊 PID 或過期 heartbeat 均不能宣稱服務在線。Launcher 的 RUNNING 只表示本代程序鏈，券商 connection 必須另讀原 Native status。
+
+一次明確啟用保存 `runtime-control/<repo-hash>/settings/execution-preference.json` 的非秘密 keep_online 設定；它不是 UUID operation receipt／交易 store。下次正常 Launcher 啟動只採用一次。人工 Stop 先保存 false，再對原 startup id 提出 OFFLINE；正常 Launcher Exit 則暫停本代、保留下一次啟動意圖，且須原 supervisor 退出、所觀察 Native/shim handle 退出及兩個 OS lease 釋放。無法確認就不宣稱停止，不 force-kill。Launcher 意外消失由 supervisor 保留的 PID/creation handle 偵測並沿原流程停止，沒有第二 watchdog。
+
+一般 Backend／Frontend Stop/Restart 和 MCP 生命週期不擁有 execution。Launcher 整體換版必須先人工 Stop，確認 STOPPED／keep_online=false；同 owner 的 PrepareUpdate fence 拒絕其後 Start，updater 不把 execution 納入 hard-cutoff tree。舊 owner 首次換版只能在原 Native/supervisor leases 都空閒且沒有新 preference 時交接。
+
+正式舊 Launcher 不會熱載入新 component。首次採用須由 Reviewer 核對後經本機原桌面 Exit／重開載入，不能從 NORMAL 短命令建立 successor。本輪未操作正式 Launcher/Backend/Native、未登入或送撤單；隔離真程序與剩餘限制見 [部署驗收](../exec-plans/active/execution-always-online-20261105/DeploymentAcceptance.md)。OS 開機／正式長時連線仍待 Reviewer 驗收。Supervisor 自身 crash／SDK hang 不自動建立替代 owner，維持 UNKNOWN／人工核對。
+
+## 常駐恢復 Source checkpoint（2026-11-05）
+
+本節是新增 Source/Fake 能力；正式 Native／Backend／MCP 未部署，不能用歷史登入驗收替本版背書。完整分層證據與 task-only patch 見 [本輪驗收](../exec-plans/active/execution-always-online-20261105/Acceptance.md)。
+
+- `launch --connect --background` 保留一個同 checkout OS lease 保護的 supervisor。只在已觀察 child 非預期退出、取得該 child 的有效啟動 receipt、再次證明 Native lease 已釋放時恢復。stop／fatal／未知 owner 不重啟；不新增 Windows service、排程或交易 store。
+- `launch --stop` 可在 child 的 pipe 尚未出現或 crash backoff 期間保存 exact supervisor 的 OFFLINE 意圖；只有該 owner 的 exact request ACK 才算接受，STOPPED 另需 child exit 與 lease 證據。無 ACK 是 UNKNOWN。
+- `ExecutionRuntime` 是唯一 session 恢復迴圈；`KgiSessionOwner` 仍序列化所有 SDK IO。disconnect callback 只標記事件；TW 跨日關閉舊 session／重綁新日期，沿同 Journal replay/reconcile，歷史 intent 不改、不重送 UNKNOWN／部分成交。每 60 秒有界 health read；空報表／無行情不是斷線。
+- transport failure 與 report/schema failure 分開。退避為 5–300 秒並帶 jitter；已取得 handle 且 cleanup 成功的 transient 可恢復。SDK constructor 未回傳 handle 的失敗是 `KGI_LOGIN_OUTCOME_UNKNOWN`，不假定無 session。fatal/config/auth/close unknown 留人工介入。
+- status 純讀 connection 投影，含 desired/actual/binding/date/busy/last broker read。pipe 保留 status/stop 容量；正常命令會等待同一 SDK lane，不讓 heartbeat 競態產生額外 staged rejection。GET readback 保留原 session 即時唯讀查詢及來源品質，不改為無刷新快照。
+- Backend 前置狀態檢查已結束且 exact Candidate id/revision/digest 仍未 claim 時，才在實際 ASGI `error.detail.submission_attempt` 回 `NOT_ATTEMPTED`；latch 後沿用原 UNKNOWN／不重送。見 [InterfaceContract](../exec-plans/active/execution-always-online-20261105/InterfaceContract.md)。
+
+本 checkpoint 的正式市場為 TW／Asia/Taipei；新增 US Source slice 的限制見本頁上方，尚未正式啟用美股下單。Supervisor 自己的 crash／OS reboot 不自動恢復，SDK 不可中止時只呈現 busy/unknown，沒有 force-kill 或第二個 watchdog。
 
 ## Current native owner boundary（2026-10-30）
 
@@ -12,7 +83,7 @@
 - 唯一環境切換為官方 `KGI_SUPERPY_SIMULATION` bool，無 fake native 模式。固定 simulation／production journal 分開保存於 OMI `data/execution-runtime/`；無任意 journal／root CLI override，不碰 OMI production DB。原 M1／M2A manifests 與 synthetic contract 不變。
 - Native 入口預設不啟動 strategy effect pump。明確 `--enable-strategy-effects` 才允許已同意的 CASH long 策略恢復；規則仍可修改。已有策略才透過同 session 的 Quote `subscribe_all/set_cb_all` 訂閱對應 lot；14 位台北事件時間、5 秒 freshness、formal trade 與成交量前進為 price admission。正常 tick 只更新 Runtime 價格投影，只有首次 SL/TP 觸發才保存 evidence/target；同一 pure `price_trigger` 服務 replay 與 admission。不接受 caller 任意 price 代替 native event，不新增市場 cache owner 或 AI 自動確認。
 - 安裝版 2.1.0 `set_Account` 只公開 `Account.ExecReport`，adapter 保留實際來源名稱；有 `Order.ExecReport` 時用原介面。Account report／full trades／ExecReport 始終經同一 session owner。history completeness 仍不能由 SDK cache 推定。
-- Native binding 以台北日期限制使用；跨日後拒絕新 draft/confirm、SDK IO 與 callback admission，不自動切日或重送。
+- Native binding 以台北日期限制使用；本節原 10/30 checkpoint 需人工換日，11/05 managed Source 已在原 owner 加入上述自動換日。舊日 command 仍受日期檢查，不重送。
 
 Source／隔離 tests／Native Import 分開驗證。2026-10-30 正式 Session、account selection、readonly query、logout/reconnect、detached process 與 controlled stop 已有實機 evidence；callback registration 已驗證，Order/Deal 真事件仍未觀察。官方 simulation 為 `BLOCKED / KGI_LOGIN_INCOMPLETE`。沒有實際買賣／撤單，沒有指定新實單參數，Live Order 仍 NOT_SENT；native SL/TP source 尚未收到合格事件，不宣稱保護生效。固定 lease 不是跨 checkout／跨機帳戶鎖；SDK native file logs、call hang、新 session history completeness 仍是限制。
 

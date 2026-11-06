@@ -8,7 +8,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 
 from execution.validation import identifier, instant, integer, money, require
-from .contracts import Command, decimal, digest
+from .contracts import Command, command_from, command_payload, decimal, digest
+from .us_contracts import UsCommand
 
 
 REVIEW_VERSION = 1  # versioned records inside the existing schema-v1 journal
@@ -24,10 +25,13 @@ class Draft:
 
     @property
     def review_id(self):
+        if type(self.command) is UsCommand:
+            return "review-" + digest([2, self.command.environment, "US",
+                                       self.command.account_id, self.command.intent_id])
         return "review-" + digest([self.command.account_id, self.command.intent_id])
 
     def validate(self):
-        require(type(self.command) is Command, "INVALID_COMMAND")
+        require(type(self.command) in {Command, UsCommand}, "INVALID_COMMAND")
         identifier(self.owner_id)
         command = self.command
         for name in ("account_id", "trade_date", "request_id", "intent_id", "symbol",
@@ -37,6 +41,7 @@ class Draft:
         allowed = {"USER_SPACE": {"MANUAL", "MOBILE", "LOCAL_STRATEGY"},
                    "AGENT_SPACE": {"AGENT_PROPOSAL"}}
         require(self.source in allowed.get(command.space_id, set()), "INVALID_DRAFT_SOURCE")
+        require(type(command) is not UsCommand or self.source == "MANUAL", "US_MANUAL_ONLY")
         command.validate()
         require((command.strategy_id is None) == (command.revision is None),
                 "STRATEGY_LINEAGE_INCOMPLETE")
@@ -58,11 +63,15 @@ def draft_from(value):
     require(type(value) is dict and set(value) == {"command", "owner_id", "source"}, "INVALID_DRAFT")
     require(type(value["command"]) is dict, "INVALID_COMMAND")
     try:
-        result = Draft(Command(**value["command"]), value["owner_id"], value["source"])
+        result = Draft(command_from(value["command"]), value["owner_id"], value["source"])
     except TypeError:
         raise ValueError("INVALID_COMMAND_FIELDS") from None
     result.validate()
     return result
+
+
+def draft_payload(draft):
+    return {"command": command_payload(draft.command), "owner_id": draft.owner_id, "source": draft.source}
 
 
 def stamp(value):
@@ -88,10 +97,14 @@ def snapshot(draft, revision, previewed_at):
     command = draft.command
     body = {"review_version": REVIEW_VERSION, "review_id": draft.review_id,
             "review_revision": revision, "previewed_at": previewed_at,
-            "draft": asdict(draft),
+            "draft": draft_payload(draft),
             "order_semantics": {"order_kind": "LIMIT", "time_in_force": "ROD",
                                 "quantity_unit": "shares",
                                 "broker_quantity": command.quantity // command.shares_per_unit}}
+    if type(command) is UsCommand:
+        body["order_semantics"].update(market="US", trade_currency=command.trade_currency,
+            settlement_mode=command.settlement_mode, session_policy=command.session_policy,
+            instrument_revision=command.instrument_revision)
     return {**body, "digest": digest(body)}
 
 
@@ -148,7 +161,7 @@ def replay(records):
             def lineage(d):
                 c = d.command
                 return (c.account_id, c.trade_date, c.request_id, c.intent_id, c.space_id,
-                        c.strategy_id, d.owner_id, d.source)
+                        c.strategy_id, d.owner_id, d.source, type(c), getattr(c, "environment", None))
             require(review.state in {"DRAFT", "PREVIEW"} and revision == review.revision + 1
                     and draft.review_id == review_id and lineage(draft) == lineage(old),
                     "INVALID_REVIEW_REVISION")

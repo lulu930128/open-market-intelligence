@@ -33,7 +33,8 @@ def sdk_fixture(session):
                   ("set_event", "create_order", "cancel_order", "get_trades")})
     api = NS(Order=order, Account=NS(OrderReport=session.account_report, ExecReport=session.ExecReport),
              show_account=Mock(return_value=[{"account_flag": "證券", "account": ACCOUNT}]),
-             set_Account=Mock(), logout=Mock(side_effect=session.logout))
+             set_Account=Mock(), logout=Mock(side_effect=session.logout),
+             set_disconnect_cb=session.set_disconnect_cb)
     sdk = NS(**vars(SDK), login=Mock(return_value=api))
     return sdk, api
 
@@ -61,7 +62,12 @@ class NativeTests(unittest.TestCase):
             settings = NativeSettings.from_environment({"KGI_SUPERPY_SIMULATION": mode,
                 "KGI_SUPERPY_PERSON_ID": "sanitized-person", "KGI_SUPERPY_PASSWORD": "sanitized-password"})
             self.assertIs(settings.simulation, expected)
+            self.assertIs(settings.us_enabled, not expected)
             self.assertNotIn("sanitized", repr(settings))
+        disabled = NativeSettings.from_environment({"KGI_SUPERPY_SIMULATION": "false",
+            "KGI_SUPERPY_PERSON_ID": "sanitized-person", "KGI_SUPERPY_PASSWORD": "sanitized-password",
+            "KGI_SUPERPY_US_ENABLED": "false"})
+        self.assertFalse(disabled.us_enabled)
         for env in ({}, {"KGI_SUPERPY_SIMULATION": "tru"}, {"KGI_SUPERPY_SIMULATION": "false"}):
             with self.assertRaises(ValueError):
                 NativeSettings.from_environment(env)
@@ -143,6 +149,23 @@ class NativeTests(unittest.TestCase):
             factory()
         self.assertEqual(self.sdk.login.call_count, 1)
 
+    def test_constructor_transport_unknown_does_not_retry_but_cleaned_up_transient_can(self):
+        factory = self.factory()
+        self.sdk.login.side_effect = TimeoutError("synthetic constructor result unknown")
+        with self.assertRaisesRegex(ValueError, "KGI_LOGIN_OUTCOME_UNKNOWN"):
+            factory.prepare()
+        with self.assertRaisesRegex(ValueError, "KGI_FACTORY_FAILED_NO_RETRY"):
+            factory()
+        self.assertEqual(self.sdk.login.call_count, 1)
+        self.sdk.login.side_effect = None
+        self.api.show_account.side_effect = [ConnectionError("synthetic"), [{"account_flag": "證券", "account": ACCOUNT}]]
+        factory = self.factory()
+        with self.assertRaises(ConnectionError):
+            factory.prepare()
+        self.api.logout.assert_called_once()
+        self.assertEqual(factory.prepare().account_id, ACCOUNT)
+        factory.close_unclaimed()
+
     def test_failed_account_interface_does_not_become_connected(self):
         self.api.Account.ExecReport = None
         with self.assertRaisesRegex(ValueError, "KGI_ORDER_INTERFACE_UNAVAILABLE"):
@@ -222,7 +245,7 @@ class NativeTests(unittest.TestCase):
             updated = app.revise_strategy("strategy-1", StrategyRules("470", "560", "470"), source(),
                                           request_id="revision-2", expected_revision=1)
             self.assertEqual(updated["strategy_revision"], 2)
-            self.assertIsNone(runtime._strategy_worker)
+            self.assertIsNotNone(runtime._strategy_worker)
             with self.assertRaisesRegex(ValueError, "STRATEGY_EFFECTS_DISABLED"):
                 app.exit_strategy("strategy-1", source(), request_id="exit-1", expected_revision=2)
             self.assertEqual(len(self.session.broker.attempts), 1)

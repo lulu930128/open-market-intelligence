@@ -47,6 +47,17 @@ class CommandParser(argparse.ArgumentParser):
 def parser():
     result = CommandParser(description="ExecutionApplication commands", add_help=False)
     routes = result.add_subparsers(dest="route", required=True)
+    desk = routes.add_parser("desk-submit")
+    desk.add_argument("--order-json", required=True)
+    desk.add_argument("--selection-json", required=True)
+    for name in ("desk-order", "desk-cancel", "desk-protection"):
+        desk = routes.add_parser(name)
+        desk.add_argument("--market", choices=("TW", "US"), required=True)
+        desk.add_argument("--execution-id", required=True)
+        if name == "desk-protection":
+            desk.add_argument("--rules-json", required=True)
+            desk.add_argument("--request-id", required=True)
+            desk.add_argument("--expected-revision", type=int, required=True)
     routes.add_parser("draft").add_argument("--draft-json", required=True)
     candidate = routes.add_parser("candidate-prepare")
     candidate.add_argument("--draft-json", required=True)
@@ -91,6 +102,12 @@ def parser():
 
 def run(application, argv, *, selected_account=None):
     args = parser().parse_args(argv)
+    if args.route == "desk-submit":
+        return application.desk_submit(json_value(args.order_json), json_value(args.selection_json))
+    if args.route in {"desk-order", "desk-cancel"}:
+        return getattr(application, args.route.replace("-", "_"))(args.market, args.execution_id)
+    if args.route == "desk-protection":
+        return application.desk_protection(args.market, args.execution_id, json_value(args.rules_json), args.request_id, args.expected_revision)
     if args.route == "draft":
         return application.draft(_draft(args.draft_json, selected_account))
     if args.route == "candidate-prepare":

@@ -79,6 +79,7 @@ class FakeSession:
         self.Order = self
         self.Account = NS(OrderReport=self.account_report)
         self.event = lambda event: None
+        self.disconnect_callback = lambda: None
         self.query_count = 0
         self.full_reads = []
         self.closed = False
@@ -99,6 +100,9 @@ class FakeSession:
 
     def set_event(self, callback):
         self.event = callback
+
+    def set_disconnect_cb(self, callback):
+        self.disconnect_callback = callback
 
     def create_order(self, **args):
         if self.before_create:
