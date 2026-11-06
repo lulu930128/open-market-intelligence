@@ -8,6 +8,7 @@ import {
   projectUSIntradayIndicatorPoint,
   usDailySnapshotRevision,
   projectUSVisibleDailyChartPoints,
+  projectUSVisibleChartIndicatorPoints,
 } from "../src/components/stock-detail/usStockDetailCanonicalProjection";
 import { usTruthResponse } from "./fixtures/usMarketTruth";
 import { projectUSMarketTapeSnapshot } from "../src/components/market-dashboard/tape/usMarketTapeCanonicalProjection";
@@ -16,6 +17,7 @@ import type {
   IntradayTrendResponse,
   USMarketIndexItemRead,
   USOhlcChartRead,
+  StockIndicatorPoint,
 } from "../src/types/market";
 
 test("provisional Daily is display-only and the actual Tape reader ignores it", async () => {
@@ -42,6 +44,39 @@ test("provisional Daily is display-only and the actual Tape reader ignores it", 
   const gap = { ...fullWindow, points: [...fullWindow.points.slice(0, 19), { close: null }] };
   const incomplete = await runInNewContext(script, { fetchJson: async () => gap });
   expect(incomplete.ma20).toBeNull();
+});
+
+for (const timeframe of ["daily", "weekly", "monthly"] as const) {
+  test(`${timeframe} forming projection replaces its period without stale indicators or history mutation`, () => {
+    const period = timeframe === "daily" ? "2026-11-05" : timeframe === "weekly" ? "2026-11-02" : "2026-11-01";
+    const chart = {
+      timeframe, bars: 2, points: [{ time: "2026-10-01", close: 100 }, { time: period, close: 120 }],
+      intraday_overlay: {
+        display_timeframe: timeframe, display_point: { time: period, close: 201 },
+        point: { time: "2026-11-05", close: 201 },
+      },
+    } as USOhlcChartRead;
+    const indicators = [{ time: period, close: 120 }, { time: "2026-10-01", close: 100 }] as StockIndicatorPoint[];
+    expect(projectUSVisibleDailyChartPoints(chart).map((point) => point.close)).toEqual([100, 201]);
+    expect(projectUSVisibleChartIndicatorPoints(chart, indicators).map((point) => point.time)).toEqual(["2026-10-01"]);
+    expect(chart.points[1].close).toBe(120);
+    expect(indicators).toHaveLength(2);
+    chart.intraday_overlay!.display_point!.close = 202;
+    expect(projectUSVisibleDailyChartPoints(chart).map((point) => point.close)).toEqual([100, 202]);
+    chart.points = [
+      { time: "2026-09-01", open: 89, high: 91, low: 88, close: 90, volume: 100 },
+      { time: "2026-10-01", open: 99, high: 101, low: 98, close: 100, volume: 100 },
+    ];
+    expect(projectUSVisibleDailyChartPoints(chart).map((point) => point.close)).toEqual([100, 202]);
+    chart.intraday_overlay = null;
+    expect(projectUSVisibleDailyChartPoints(chart)).toBe(chart.points);
+    expect(projectUSVisibleChartIndicatorPoints(chart, indicators)).toBe(indicators);
+  });
+}
+
+test("weekly chart never treats a legacy daily overlay as a weekly point", () => {
+  const chart = { timeframe: "weekly", points: [], intraday_overlay: { point: { time: "2026-11-05", close: 200 } } } as unknown as USOhlcChartRead;
+  expect(projectUSVisibleDailyChartPoints(chart)).toEqual([]);
 });
 
 test("supplemental partial failure preserves successful fields and a later retry can succeed", async () => {

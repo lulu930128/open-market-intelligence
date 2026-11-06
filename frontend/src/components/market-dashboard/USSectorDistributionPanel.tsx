@@ -22,7 +22,7 @@ export default function USSectorDistributionPanel() {
       setFailed(false);
       try {
         const result = await fetchJson<USSectorDistribution>("/api/us-market/sectors", undefined, { signal: controller.signal });
-        if (result.schema_version !== "us.market.sector_distribution.v1" || result.data_mode !== "eod_market_snapshot") {
+        if (!["us.market.sector_distribution.v1", "us.market.sector_distribution.v2"].includes(result.schema_version) || result.data_mode !== "eod_market_snapshot") {
           throw new Error("Unsupported US EOD distribution contract");
         }
         if (!controller.signal.aborted) setData(result);
@@ -73,10 +73,10 @@ export default function USSectorDistributionPanel() {
               [t("usDistribution.classified"), data.classification_coverage.mapped_count],
               [t("usDistribution.evaluated"), data.coverage.evaluated_count],
               [t("usDistribution.notCovered"), data.coverage.not_covered_count],
-              [t("usDistribution.comparable"), data.counts.comparable],
-              [t("usDistribution.unknown"), data.counts.unknown],
-              [t("usDistribution.stale"), data.counts.stale],
-              [t("usDistribution.noTrade"), data.counts.no_trade],
+              [t("usDistribution.comparable"), data.counts?.comparable],
+              [t("usDistribution.unknown"), data.counts?.unknown],
+              [t("usDistribution.stale"), data.counts?.stale],
+              [t("usDistribution.noTrade"), data.counts?.no_trade],
             ].map(([label, value]) => <div key={label} className="border-l border-omi-border-subtle pl-2"><dt className="text-omi-text-muted">{label}</dt><dd className="font-mono text-sm">{value ?? "\u2014"}</dd></div>)}
           </dl>
           <p className="mt-2 text-omi-text-muted">

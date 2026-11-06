@@ -20,12 +20,12 @@ export type USDistributionGroup = {
 };
 
 export type USSectorDistribution = {
-  schema_version: "us.market.sector_distribution.v1";
+  schema_version: "us.market.sector_distribution.v1" | "us.market.sector_distribution.v2";
   status: "partial" | "unavailable"; market: "US";
   as_of: string | null; expected_trade_date: string; reference_trade_date: string;
   evaluated_at: string; data_mode: "eod_market_snapshot"; sample_only: boolean;
   freshness_status: "current" | "stale" | "missing";
-  counts: USDistributionCounts;
+  counts: USDistributionCounts | null;
   coverage: { universe_count: number | null; evaluated_count: number; not_covered_count: number | null;
     over_budget_count: number; query_symbol_limit: number | null; truncated: boolean;
     inventory_current_count: number; inventory_stale_count: number; inventory_missing_count: number;

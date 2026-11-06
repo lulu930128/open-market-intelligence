@@ -3,6 +3,7 @@
 import JobStatusCenter from "@/components/JobStatusCenter";
 import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
+import SidebarTools from "@/components/SidebarTools";
 import { marketLabel, marketSummary, useT, type TranslationFunction } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
@@ -2271,6 +2272,7 @@ export default function SidebarWatchlistExplorer({
             </a>
           ))}
         </div>
+        <SidebarTools />
       </div>
 
       {selectedMarket === "tw" ? (

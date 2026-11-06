@@ -1,7 +1,118 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer, type ServerResponse } from "node:http";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 
 import { expect, test } from "@playwright/test";
+
+// Real HTTP headers and partial bodies, using the actual API module. No backend
+// or provider participates; every socket is owned and closed by this fixture.
+async function withStreamingApi(run: (host: {
+  api: typeof import("../src/lib/api");
+  headers: () => number;
+  held: ServerResponse[];
+}) => Promise<void>) {
+  const held: ServerResponse[] = [];
+  const server = createServer((request, response) => {
+    if (request.url?.includes("/empty")) { response.writeHead(204).end(); return; }
+    if (request.url?.includes("/invalid")) { response.end("{invalid"); return; }
+    if (request.url?.includes("/http")) {
+      response.writeHead(503, { "x-request-id": "fixture-request" });
+      response.end(JSON.stringify({ error: { message: "unavailable", code: "fixture" } }));
+      return;
+    }
+    if (request.url?.includes("/ok")) { response.end('{"ok":true}'); return; }
+    response.writeHead(request.url?.includes("/error-body") ? 503 : 200, { "Content-Type": "application/json" });
+    response.flushHeaders();
+    response.write('{"ok":');
+    held.push(response);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing fixture port");
+  let headers = 0;
+  const exports = {};
+  runInNewContext(ts.transpileModule(source("src/lib/api.ts"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText, {
+    exports, process: { env: {} }, window: { location: { origin: `http://127.0.0.1:${address.port}` } },
+    URL, Headers, AbortController, Error, SyntaxError, TypeError, setTimeout, clearTimeout,
+    fetch: async (...args: Parameters<typeof fetch>) => { const response = await fetch(...args); headers++; return response; },
+  });
+  try {
+    await run({ api: exports as typeof import("../src/lib/api"), headers: () => headers, held });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+async function boundedOutcome(promise: Promise<unknown>, waitMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ value }), (error: unknown) => ({ error })),
+      new Promise<{ pending: true }>((resolve) => { timer = setTimeout(() => resolve({ pending: true }), waitMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+test.describe("API body lifecycle", () => {
+  test("default GET deadline covers already returned headers and never-ending body", async () => {
+    test.setTimeout(27_000);
+    await withStreamingApi(async ({ api, headers }) => {
+      const started = Date.now();
+      const outcome = boundedOutcome(api.fetchJson("/api/stalled"), 20_750);
+      await expect.poll(headers).toBe(1); // fetch() has resolved, body remains open.
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(await outcome).toMatchObject({ error: { kind: "timeout", path: "/api/stalled" } });
+      expect(Date.now() - started).toBeLessThan(20_750);
+      expect(await api.fetchJson("/api/ok")).toEqual({ ok: true });
+    });
+  });
+
+  for (const method of ["GET-error-body", "POST", "DELETE-error-body"]) {
+    test(`${method} body uses the same request deadline`, async () => {
+      await withStreamingApi(async ({ api, headers }) => {
+        const options = { timeoutMs: 200 };
+        const request = method === "POST" ? api.requestJson("/api/stalled", { method: "POST" }, undefined, options)
+          : method === "DELETE-error-body" ? api.deleteRequest("/api/error-body", undefined, options)
+            : api.fetchJson("/api/error-body", undefined, options);
+        const outcome = boundedOutcome(request, 1_000);
+        await expect.poll(headers).toBe(1);
+        expect(await outcome).toMatchObject({ error: { kind: "timeout" } });
+      });
+    });
+  }
+
+  for (const timeoutMs of [0, 20_000]) {
+    test(`external abort after headers remains AbortError with timeoutMs=${timeoutMs}`, async () => {
+      await withStreamingApi(async ({ api, headers }) => {
+        const controller = new AbortController();
+        const outcome = boundedOutcome(api.requestJson("/api/stalled", { method: "POST", signal: controller.signal },
+          undefined, { timeoutMs }), 1_000);
+        await expect.poll(headers).toBe(1);
+        controller.abort();
+        expect(await outcome).toMatchObject({ error: { name: "AbortError" } });
+      });
+    });
+  }
+
+  test("body disconnect is network; malformed JSON and HTTP detail retain their own kinds", async () => {
+    await withStreamingApi(async ({ api, headers, held }) => {
+      const outcome = boundedOutcome(api.fetchJson("/api/stalled"), 1_000);
+      await expect.poll(headers).toBe(1);
+      held[0].destroy();
+      expect(await outcome).toMatchObject({ error: { kind: "network" } });
+      expect(await boundedOutcome(api.fetchJson("/api/invalid"), 1_000)).toMatchObject({ error: { kind: "invalid_response", status: 200 } });
+      expect(await boundedOutcome(api.fetchJson("/api/http"), 1_000)).toMatchObject({ error: { kind: "http", status: 503, code: "fixture", requestId: "fixture-request" } });
+      expect(await api.requestJson("/api/empty", { method: "POST" })).toBeNull();
+      expect(await api.deleteRequest("/api/empty")).toBeUndefined();
+      expect(await api.requestJson("/api/ok", { method: "POST", body: "{}" }, undefined, { timeoutMs: 0 })).toEqual({ ok: true });
+    });
+  });
+});
 
 function source(path: string) {
   return readFileSync(join(process.cwd(), path), "utf8");

@@ -3,6 +3,7 @@
 import JobStatusCenter from "@/components/JobStatusCenter";
 import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
+import SidebarTools from "@/components/SidebarTools";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
@@ -660,6 +661,7 @@ export default function KRMarketSidebar({
             </a>
           ))}
         </div>
+        <SidebarTools />
       </div>
 
       <div className="flex items-center justify-between border-b border-omi-border-subtle px-4 py-3">

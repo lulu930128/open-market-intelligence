@@ -1,4 +1,5 @@
 export const enUS = {
+  workspaceTools: { label: "Workspace tools", research: "Stock research" },
   usDistribution: {
     "title": "US sectors & industries · EOD",
     "loading": "Reading…",
@@ -191,6 +192,11 @@ export const enUS = {
       limitUnknown: "Unconfirmed",
       breadthProvenance: "Date {date} · Source {source} · Receipt {receipt}",
       publishedBreadth: "Exchange-published stock totals",
+      publishedTpexBreadth: "TPEx stocks and share conversion rights totals",
+      breadthOfficialPending: "Official closing breadth pending confirmation",
+      breadthMisSnapshot: "MIS registered-stock snapshot (separate scope)",
+      breadthOfficialStatus: "Official closing aggregate (receipt confirmed)",
+      breadthDirections: "Up {advance} / down {decline} / unchanged {unchanged} / unknown {unknown} · scope {total}",
       breadthDetails: "Data details",
       breadthGaps: "Received unclassified {unclassified} · Not received {missing}",
       breadthLimitUnknowns: "Unknown limit up {up} · Unknown limit down {down}",
@@ -2914,11 +2920,16 @@ export const enUS = {
     },
   },
   usStockDetail: {
+    timeAxisTimezone: "US ET",
     requestState: {
       retainedSnapshot: "Showing the previous snapshot; this read failed",
       revalidating: "Revalidating the previous snapshot",
       revalidate: "Revalidate",
-      provisionalDaily: "Provisional daily candle ? not finalized",
+      provisionalDaily: "Provisional daily candle · not finalized",
+      provisionalWeekly: "Forming weekly candle · not finalized",
+      provisionalMonthly: "Forming monthly candle · not finalized",
+      provisionalHistoryIncomplete: "Daily history for this period is incomplete",
+      provisionalIndicators: "Indicators use finalized data",
     },
     session: {
       volume: "Volume (shares)",

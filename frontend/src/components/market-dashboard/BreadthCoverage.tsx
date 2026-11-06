@@ -47,6 +47,10 @@ export function BreadthCoverage({ breadth }: { breadth: MarketBreadth }) {
   const limits = breadth.limits;
   return (
     <div className="w-full min-w-0 space-y-1 break-words text-xs text-omi-text-muted" data-testid="tw-breadth-coverage">
+      <div>{t("dashboard.marketIndex.breadthDirections", {
+        advance: breadth.advance_count, decline: breadth.decline_count, unchanged: breadth.unchanged_count,
+        unknown: breadth.unknown_count ?? "—", total: breadth.total_count,
+      })}</div>
       {breadth.classified_coverage_ratio !== undefined ? (
         <div>{t("dashboard.marketIndex.breadthCoverageDual", {
           received: breadth.received_count ?? "—", total: breadth.total_count,
@@ -76,6 +80,7 @@ export function BreadthCoverage({ breadth }: { breadth: MarketBreadth }) {
         source: breadth.source ?? "—", receipt: breadth.raw_result_id ?? "—",
         date: breadth.trade_date ?? "—",
       })}</div>
+      {breadth.official ? <div>{t("dashboard.marketIndex.breadthOfficialStatus")}</div> : null}
       <p>{t("dashboard.marketIndex.breadthExplanation")}</p>
     </div>
   );
@@ -93,6 +98,13 @@ export function OfficialBreadthComparison({ lanes }: { lanes: MarketIndexSnapsho
   const t = useT();
   if (!lanes || lanes.status === "not_applicable") return null;
   const daily = lanes.official_daily;
+  if (lanes.selected_lane === "official_daily") return <div className="w-full min-w-0 text-xs text-omi-text-muted">
+    {lanes.status === "pending" ? <div>{t("dashboard.marketIndex.breadthOfficialPending")}</div> : null}
+    {lanes.current_registered ? <details>
+      <summary className="cursor-pointer">{t("dashboard.marketIndex.breadthMisSnapshot")} · <CompactBreadthCoverage breadth={lanes.current_registered} /></summary>
+      <BreadthCoverage breadth={lanes.current_registered} />
+    </details> : null}
+  </div>;
   return <div className="w-full min-w-0 text-xs text-omi-text-muted">
     {!daily || daily.status === "missing" ? t("dashboard.marketIndex.breadthOfficialMissing") :
       t(daily.published_limits ? "dashboard.marketIndex.breadthPublishedComparison" : "dashboard.marketIndex.breadthOfficialComparison", {

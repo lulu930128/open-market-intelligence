@@ -1137,6 +1137,8 @@ export type MarketBreadth = {
   price_semantics?: string | null;
   decision_usable?: boolean;
   is_provisional?: boolean;
+  official?: boolean;
+  finalization?: string;
   scope?: "full_market" | "registered_universe" | "local_dataset" | string | null;
   label?: string | null;
   trade_date: string | null;
@@ -1259,6 +1261,10 @@ export type MarketIndexSnapshot = {
   latest_completed_auctions?: MarketBreadth["latest_completed_auctions"];
   breadth_lanes?: {
     status: string;
+    selected_lane?: string;
+    reason?: string;
+    trade_date?: string;
+    current_registered?: MarketBreadth | null;
     official_daily?: Partial<MarketBreadth> | null;
   } | null;
   breadth_status: MarketBreadthStatus;
@@ -4198,6 +4204,9 @@ export type USOhlcChartRead = {
     contract_version: "omi.us.provisional_daily.v1";
     trade_date: string;
     point: USOhlcPointRead;
+    display_timeframe?: "daily" | "weekly" | "monthly";
+    display_point?: USOhlcPointRead | null;
+    display_missing_trade_dates?: string[];
     finalization: "provisional";
     authority: "derived";
     release_status: "pending_release" | "unavailable";

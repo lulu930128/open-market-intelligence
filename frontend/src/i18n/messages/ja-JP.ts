@@ -2,6 +2,7 @@ import { zhTW } from "./zh-TW";
 
 export const jaJP = {
   ...zhTW,
+  workspaceTools: { label: "ワークスペースツール", research: "株式リサーチ" },
   usDistribution: {
     "title": "米国セクター・業種分布 · EOD",
     "loading": "読込中…",
@@ -202,6 +203,11 @@ export const jaJP = {
       limitUnknown: "未確認",
       breadthProvenance: "データ日 {date} · 出典 {source} · 原本 {receipt}",
       publishedBreadth: "取引所公表の銘柄集計",
+      publishedTpexBreadth: "TPEx 株式・株式転換権利証書の集計",
+      breadthOfficialPending: "公式引け後騰落集計は確認待ち",
+      breadthMisSnapshot: "MIS 登録銘柄スナップショット（別集計範囲）",
+      breadthOfficialStatus: "公式引け後集計（取得記録を確認済み）",
+      breadthDirections: "値上がり {advance}／値下がり {decline}／変わらず {unchanged}／不明 {unknown} · 範囲 {total}",
       breadthDetails: "データ詳細",
       breadthGaps: "受信済み未分類 {unclassified} · 未受信 {missing}",
       breadthLimitUnknowns: "ストップ高不明 {up} · ストップ安不明 {down}",
@@ -2213,11 +2219,16 @@ export const jaJP = {
   },
   usStockDetail: {
     ...zhTW.usStockDetail,
+    timeAxisTimezone: "米東部 ET",
     requestState: {
       retainedSnapshot: "前回のスナップショットを表示中。今回の取得は失敗しました",
       revalidating: "前回のスナップショットを再検証中",
       revalidate: "再検証",
       provisionalDaily: "暫定日足・未確定",
+      provisionalWeekly: "形成中の週足・未確定",
+      provisionalMonthly: "形成中の月足・未確定",
+      provisionalHistoryIncomplete: "当期の日足履歴が不完全",
+      provisionalIndicators: "指標は確定済みデータに基づく",
     },
     session: {
       volume: "出来高（株）",

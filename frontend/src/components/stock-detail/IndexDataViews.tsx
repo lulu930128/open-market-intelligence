@@ -71,6 +71,9 @@ function taiwanBreadthScopeLabel(
   if (breadth.scope === "twse_published_stock_aggregate") {
     return t("dashboard.marketIndex.publishedBreadth");
   }
+  if (breadth.scope === "tpex_published_stock_and_share_conversion_rights") {
+    return t("dashboard.marketIndex.publishedTpexBreadth");
+  }
   if (breadth.scope === "full_market") {
     return t(
       breadth.market === "TPEX" || index?.index_id === "TPEX"
@@ -499,7 +502,8 @@ export function IndexDetailDataPanel({
           {index?.breadth_status?.status === "failed"
             ? t("dashboard.marketIndex.breadthFailed")
             : index?.breadth_status?.status === "pending"
-              ? t("dashboard.marketIndex.breadthPending")
+              ? t(index.breadth_lanes?.reason === "OFFICIAL_AGGREGATE_PENDING"
+                ? "dashboard.marketIndex.breadthOfficialPending" : "dashboard.marketIndex.breadthPending")
             : index?.breadth_status?.status === "partial"
               ? t("dashboard.marketIndex.breadthPartial")
               : breadth?.source

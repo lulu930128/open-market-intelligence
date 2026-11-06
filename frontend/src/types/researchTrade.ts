@@ -1,4 +1,5 @@
 export type Direction = "long" | "short" | "both";
+export type ResearchMarket = "TW" | "US";
 export type Money = string | number;
 export type ResearchStrategy = {
   version: string; direction: 1 | -1; mode: "aggressive" | "confirmed";
@@ -14,6 +15,7 @@ export type SetupEvaluation = {
   missing_costs?: string[]; reason_codes?: string[]; limitations?: string[];
 };
 export type ResearchProposal = {
+  market: ResearchMarket;
   creation_id: string; revision_id: string; revision: number; supersedes: string | null;
   symbol: string; strategy: ResearchStrategy; costs: { version: string; [key: string]: unknown };
   recorded_at: string; effective_at: string; change_reason: string; evidence_hash: string;
@@ -23,11 +25,24 @@ export type ResearchProposal = {
       data_revision: string; snapshot_json: string }[] };
 };
 export type ProposalRead = {
+  workflow_origin?: "USER_NOMINATION" | "AI_NOMINATION" | "OMI_SCREEN";
+  currency?: "TWD" | "USD"; promotion_supported?: boolean;
   status: string; proposal: ResearchProposal; setup_evaluation: SetupEvaluation | null;
   valid_from_date: string | null; valid_until_date: string | null;
   eligibility: Record<string, unknown> | null;
 };
 export type ProposalList = { as_of: string; items: ProposalRead[]; limit: number; offset: number; has_more: boolean };
+export type ProposalSummary = {
+  creation_id: string; revision_id: string; revision: number; market: ResearchMarket; symbol: string;
+  stock_name: string | null; direction: "long" | "short"; status: "proposed" | "scheduled";
+  workflow_origin: "USER_NOMINATION" | "AI_NOMINATION" | "OMI_SCREEN" | null;
+  as_of_trade_date: string; cutoff: string; recorded_at: string; effective_at: string;
+  assessment_status: string | null; reason_codes: string[]; evidence_hash: string;
+};
+export type ProposalSummaryList = {
+  projection: "research.proposal_list.summary.v1"; evidence_included: false; execution_ready: false;
+  as_of: string; items: ProposalSummary[]; limit: number; offset: number; has_more: boolean;
+};
 export type RevisionList = { creation_id: string; as_of: string; revisions: ProposalRead[] };
 export type ProposalPromotion = {
   creation_id: string; revision_id: string; status: "PROMOTED" | "DATA_BLOCKED";
@@ -51,9 +66,12 @@ export type ResearchMonitor = {
   observation_id: string; limitations: string[]; execution_ready: false;
 };
 export type NominationSnapshot = {
+  identity?: { market: ResearchMarket; symbol: string; venue: string };
+  price_map?: { payload?: { stock_id?: string; stock_name?: string | null } };
   request?: { nomination_origin?: string; horizon_sessions?: number };
   assessment?: { status?: string; reason_codes?: string[] };
   selected_zones?: { lower_bound: number; upper_bound: number; zone_id: string }[];
-  discovery?: { sample_only?: boolean; research_sample_only?: boolean;
+  discovery?: { scope?: string; membership_count?: number; sample_only?: boolean; research_sample_only?: boolean;
     coverage?: { quality_status?: string } };
 };
+export type ProposalDeletion = { creation_id: string; revision_id: string; deleted_at: string; status: "deleted" };

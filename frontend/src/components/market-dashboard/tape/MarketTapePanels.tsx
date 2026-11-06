@@ -1,6 +1,6 @@
 "use client";
 
-import { BreadthInfo, HistoricalAuctionBreadth } from "@/components/market-dashboard/BreadthCoverage";
+import { BreadthInfo, HistoricalAuctionBreadth, OfficialBreadthComparison } from "@/components/market-dashboard/BreadthCoverage";
 
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import {
@@ -88,6 +88,12 @@ function taiwanBreadthLabel(t: TranslationFunction, index: MarketIndexSnapshot) 
   }
   if ((breadth.scope === "registered_universe" || breadth.scope === "full_market_registered_stock_universe")) {
     return t("dashboard.marketIndex.registeredBreadth");
+  }
+  if (breadth.scope === "twse_published_stock_aggregate") {
+    return t("dashboard.marketIndex.publishedBreadth");
+  }
+  if (breadth.scope === "tpex_published_stock_and_share_conversion_rights") {
+    return t("dashboard.marketIndex.publishedTpexBreadth");
   }
   if (breadth.scope === "full_market") {
     return t(
@@ -209,7 +215,8 @@ export function TaiwanMarketTape({
                       {breadthStatus === "failed"
                         ? t("dashboard.marketIndex.breadthFailed")
                         : breadthStatus === "pending"
-                          ? t("dashboard.marketIndex.breadthPending")
+                          ? t(index.breadth_lanes?.reason === "OFFICIAL_AGGREGATE_PENDING"
+                            ? "dashboard.marketIndex.breadthOfficialPending" : "dashboard.marketIndex.breadthPending")
                         : advanceRatio === null
                           ? "-"
                         : t("dashboard.marketIndex.advancePct", {
@@ -244,6 +251,7 @@ export function TaiwanMarketTape({
                     ) : null}
                   </div>
                 ) : null}
+                <OfficialBreadthComparison lanes={index.breadth_lanes} />
                 {!breadth ? <HistoricalAuctionBreadth auctions={index.latest_completed_auctions} /> : null}
               </div>
             );

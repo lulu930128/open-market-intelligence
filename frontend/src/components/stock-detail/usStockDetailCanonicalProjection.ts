@@ -6,11 +6,25 @@ import type {
 } from "@/types/market";
 import type { USMarketTruthRead } from "@/types/usMarketTruth";
 
-/** Display-only series. Never mutate the finalized points consumed by research/tape. */
+function displayOverlayPoint(chart: USOhlcChartRead) {
+  const overlay = chart.intraday_overlay;
+  if (!overlay || (overlay.display_timeframe ?? "daily") !== chart.timeframe) return null;
+  return overlay.display_point ?? (chart.timeframe === "daily" ? overlay.point : null);
+}
+
+/** Backend owns period aggregation. Replace its period key without mutating research/tape. */
 export function projectUSVisibleDailyChartPoints(chart: USOhlcChartRead) {
-  return chart.timeframe === "daily" && chart.intraday_overlay
-    ? [...chart.points, chart.intraday_overlay.point]
-    : chart.points;
+  const overlay = displayOverlayPoint(chart);
+  if (!overlay) return chart.points;
+  const points = [...chart.points.filter((point) => point.time !== overlay.time), overlay]
+    .sort((a, b) => a.time.localeCompare(b.time));
+  return chart.bars > 0 ? points.slice(-chart.bars) : points;
+}
+
+/** A finalized indicator must not be paired with a replaced, forming period. */
+export function projectUSVisibleChartIndicatorPoints(chart: USOhlcChartRead, series: StockIndicatorPoint[]) {
+  const overlay = displayOverlayPoint(chart);
+  return overlay ? series.filter((point) => point.time !== overlay.time) : series;
 }
 
 export type USCurrentSessionHeadline = {

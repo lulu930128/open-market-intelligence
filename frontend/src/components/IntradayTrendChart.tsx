@@ -33,6 +33,7 @@ type Props = {
   source: string;
   indicators?: IntradayIndicatorSettings;
   session?: IntradaySessionConfig;
+  timeAxisLabel?: string;
   revealKey?: string;
   refreshIntervalMs?: number;
   refreshMode?: "data" | "cache_poll";
@@ -770,6 +771,7 @@ export default function IntradayTrendChart({
   source,
   indicators = defaultIntradayIndicators,
   session = taiwanIntradaySession,
+  timeAxisLabel,
   revealKey,
   refreshIntervalMs,
   refreshMode = "data",
@@ -1324,6 +1326,17 @@ export default function IntradayTrendChart({
             </g>
           );
         })}
+
+        {timeAxisLabel ? (
+          <text
+            x={chartAreaRight + 8}
+            y={labelY}
+            className="fill-omi-text-muted text-[10px]"
+            data-testid="intraday-time-axis-label"
+          >
+            {timeAxisLabel}
+          </text>
+        ) : null}
 
         {previousCloseY !== null ? (
           <g>

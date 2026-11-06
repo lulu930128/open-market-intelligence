@@ -98,13 +98,14 @@ export function buildApiUrl(path: string, params?: ApiParams) {
   return url.toString();
 }
 
-async function fetchWithOptionalTimeout(
+async function fetchWithOptionalTimeout<T>(
   path: string,
   params: ApiParams | undefined,
   init: RequestInit,
   options: ApiRequestOptions | undefined,
-  defaultTimeoutMs: number
-) {
+  defaultTimeoutMs: number,
+  consumeResponse: (response: Response) => Promise<T>
+): Promise<T> {
   const timeoutMs = options?.timeoutMs ?? defaultTimeoutMs;
   const externalSignal = options?.signal ?? init.signal ?? null;
   const requestHeaders = withRequestContext(init.headers);
@@ -114,24 +115,12 @@ async function fetchWithOptionalTimeout(
     headers: requestHeaders,
   };
 
-  if (timeoutMs <= 0 && !externalSignal) {
-    try {
-      return await fetch(buildApiUrl(path, params), requestInit);
-    } catch (error) {
-      throw new ApiError({
-        kind: "network",
-        message: error instanceof Error ? error.message : `API network error: ${path}`,
-        path,
-        requestId,
-      });
-    }
-  }
-
   const controller = new AbortController();
   let timedOut = false;
   const timeoutId =
     timeoutMs > 0
       ? setTimeout(() => {
+          if (controller.signal.aborted) return;
           timedOut = true;
           controller.abort();
         }, timeoutMs)
@@ -147,10 +136,13 @@ async function fetchWithOptionalTimeout(
   }
 
   try {
-    return await fetch(buildApiUrl(path, params), {
+    const response = await fetch(buildApiUrl(path, params), {
       ...requestInit,
       signal: controller.signal,
     });
+    // Headers do not complete a request. Keep the deadline and external abort
+    // listener alive through both success JSON and HTTP error-body consumption.
+    return await consumeResponse(response);
   } catch (error) {
     if (timedOut) {
       throw new ApiError({
@@ -163,6 +155,7 @@ async function fetchWithOptionalTimeout(
     if (externalSignal?.aborted) {
       throw error;
     }
+    if (error instanceof ApiError) throw error;
     throw new ApiError({
       kind: "network",
       message: error instanceof Error ? error.message : `API network error: ${path}`,
@@ -232,7 +225,9 @@ export async function createHttpApiError(response: Response, path: string) {
 async function readJsonResponse<T>(response: Response, path: string): Promise<T> {
   try {
     return (await response.json()) as T;
-  } catch {
+  } catch (error) {
+    // A truncated/disconnected body or abort is a transport failure, not JSON.
+    if (!(error instanceof SyntaxError)) throw error;
     throw new ApiError({
       kind: "invalid_response",
       message: `API returned invalid JSON: ${path}`,
@@ -248,7 +243,7 @@ export async function fetchJson<T>(
   params?: ApiParams,
   options?: ApiRequestOptions
 ): Promise<T> {
-  const response = await fetchWithOptionalTimeout(
+  return fetchWithOptionalTimeout(
     path,
     params,
     {
@@ -258,14 +253,12 @@ export async function fetchJson<T>(
       cache: "no-store",
     },
     options,
-    DEFAULT_GET_TIMEOUT_MS
+    DEFAULT_GET_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) throw await createHttpApiError(response, path);
+      return readJsonResponse<T>(response, path);
+    }
   );
-
-  if (!response.ok) {
-    throw await createHttpApiError(response, path);
-  }
-
-  return readJsonResponse<T>(response, path);
 }
 
 export async function requestJson<T>(
@@ -274,7 +267,7 @@ export async function requestJson<T>(
   params?: ApiParams,
   apiOptions?: ApiRequestOptions
 ): Promise<T> {
-  const response = await fetchWithOptionalTimeout(
+  return fetchWithOptionalTimeout(
     path,
     params,
     {
@@ -287,18 +280,13 @@ export async function requestJson<T>(
       cache: "no-store",
     },
     apiOptions,
-    DEFAULT_MUTATION_TIMEOUT_MS
+    DEFAULT_MUTATION_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) throw await createHttpApiError(response, path);
+      if (response.status === 204) return null as T;
+      return readJsonResponse<T>(response, path);
+    }
   );
-
-  if (!response.ok) {
-    throw await createHttpApiError(response, path);
-  }
-
-  if (response.status === 204) {
-    return null as T;
-  }
-
-  return readJsonResponse<T>(response, path);
 }
 
 export async function deleteRequest(
@@ -306,7 +294,7 @@ export async function deleteRequest(
   params?: ApiParams,
   options?: ApiRequestOptions
 ): Promise<void> {
-  const response = await fetchWithOptionalTimeout(
+  return fetchWithOptionalTimeout(
     path,
     params,
     {
@@ -317,10 +305,9 @@ export async function deleteRequest(
       cache: "no-store",
     },
     options,
-    DEFAULT_GET_TIMEOUT_MS
+    DEFAULT_GET_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) throw await createHttpApiError(response, path);
+    }
   );
-
-  if (!response.ok) {
-    throw await createHttpApiError(response, path);
-  }
 }

@@ -1,4 +1,5 @@
 export const zhTW = {
+  workspaceTools: { label: "工作台工具", research: "股票研究候選" },
   usDistribution: {
     "title": "美股板塊與產業分布 · EOD",
     "loading": "讀取中…",
@@ -189,6 +190,11 @@ export const zhTW = {
       limitUnknown: "尚未確認",
       breadthProvenance: "資料日 {date} · 來源 {source} · 原始記錄 {receipt}",
       publishedBreadth: "交易所股票合計",
+      publishedTpexBreadth: "櫃買股票及換股權利證書合計",
+      breadthOfficialPending: "官方盤後廣度待確認",
+      breadthMisSnapshot: "MIS 註冊股票快照（獨立範圍）",
+      breadthOfficialStatus: "官方盤後彙總（收據已確認）",
+      breadthDirections: "上漲 {advance}／下跌 {decline}／平盤 {unchanged}／未知 {unknown} · 範圍 {total}",
       breadthDetails: "資料詳情",
       breadthGaps: "已接收未分類 {unclassified} · 未收到 {missing}",
       breadthLimitUnknowns: "漲停未知 {up} · 跌停未知 {down}",
@@ -3180,11 +3186,16 @@ export const zhTW = {
     },
   },
   usStockDetail: {
+    timeAxisTimezone: "美東 ET",
     requestState: {
       retainedSnapshot: "保留上次快照，本次讀取失敗",
       revalidating: "正在重新驗證上次快照",
       revalidate: "重新驗證",
       provisionalDaily: "盤中暫定日 K · 尚未定稿",
+      provisionalWeekly: "形成中週 K · 尚未定稿",
+      provisionalMonthly: "形成中月 K · 尚未定稿",
+      provisionalHistoryIncomplete: "本期歷史日線不完整",
+      provisionalIndicators: "技術指標依已定稿資料",
     },
     session: {
       volume: "總量（股）",

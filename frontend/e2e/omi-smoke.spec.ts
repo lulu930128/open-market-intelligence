@@ -59,6 +59,391 @@ async function mockG4Detail(page: Page, responder?: MockOmiApiOptions["apiRespon
   });
 }
 
+test.describe("US intraday response lifecycle", () => {
+  function snapshot(symbol: string, interval: string, revision: string, count: number, scope = "regular") {
+    return { ...usIntradayResponse(symbol, scope), effective_interval: interval, market_phase: "regular",
+      snapshot_revision: revision, response_mode: "full", point_count: count,
+      points: Array.from({ length: count }, (_, i) => ({ time: `2026-06-15T10:${String(i * 15).padStart(2, "0")}:00-04:00`,
+        price: 200 + i, open: 200 + i, high: 201 + i, low: 199 + i, close: 200 + i, volume: 1000 })) };
+  }
+
+  async function openPanel(page: Page, focus = false) {
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await expect(panel.getByRole("img")).toBeVisible();
+    if (focus) {
+      await panel.getByRole("button", { name: "放大", exact: true }).click();
+      await expect(page.getByTestId("lightweight-kline-chart")).toBeVisible();
+    }
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    return panel;
+  }
+
+  async function visibility(page: Page, value: "hidden" | "visible") {
+    await page.evaluate((state) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, value);
+    await page.clock.runFor(1);
+  }
+
+  // Browser-level streaming fixture: the second real mocked HTTP response has
+  // returned headers; its replacement body stays open until its signal aborts.
+  // The contract test separately proves the same case on native HTTP sockets.
+  async function stallSecondBody(page: Page) {
+    await page.addInitScript(() => {
+      const nativeFetch = window.fetch;
+      let count = 0;
+      window.fetch = async (...args) => {
+        const response = await nativeFetch(...args);
+        if (!String(args[0]).includes("/us-market/intraday/") || ++count !== 2) return response;
+        document.documentElement.dataset.heldBody = "open";
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"points":'));
+            const abort = () => {
+              document.documentElement.dataset.heldBody = "aborted";
+              controller.error(new DOMException("Fixture body aborted", "AbortError"));
+            };
+            if (args[1]?.signal?.aborted) abort();
+            else args[1]?.signal?.addEventListener("abort", abort, { once: true });
+          },
+        }), { status: response.status, headers: response.headers });
+      };
+    });
+  }
+
+  for (const recovery of ["timeout", "visibility"] as const) {
+    test(`Today ${recovery} ends body loading, retains candles and resumes one owner`, async ({ page }) => {
+      await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+      await stallSecondBody(page);
+      const requests: string[] = [];
+      await mockG4Detail(page, ({ path, url }) => {
+        if (!path.endsWith("/intraday/AAPL")) return null;
+        requests.push(url.search);
+        return { body: snapshot("AAPL", "1m", `revision-${requests.length}`, requests.length < 3 ? 3 : 4) };
+      });
+      const panel = await openPanel(page);
+      await panel.getByRole("button", { name: "今日", exact: true }).press("Enter");
+      await page.clock.runFor(1);
+      const chart = page.getByTestId("intraday-trend-chart");
+      const revalidating = page.getByText("正在重新驗證上次快照", { exact: false });
+      await expect(chart).toHaveAttribute("data-rendered-point-count", "3");
+      await page.clock.fastForward(5_000);
+      await expect(page.locator("html")).toHaveAttribute("data-held-body", "open");
+      await expect(revalidating).toBeVisible();
+      await page.evaluate(() => { for (let i = 0; i < 10; i++) window.dispatchEvent(new Event("focus")); });
+      expect(requests).toHaveLength(2);
+      if (recovery === "timeout") {
+        await page.clock.fastForward(19_999);
+        await expect(revalidating).toBeVisible();
+        await page.clock.runFor(1);
+        await expect(page.getByTestId("us-today-request-error")).toBeVisible();
+        await expect(revalidating).toHaveCount(0);
+        await expect(chart).toHaveAttribute("data-rendered-point-count", "3");
+        await page.clock.fastForward(29_999);
+        expect(requests).toHaveLength(2);
+        await page.clock.runFor(1);
+      } else {
+        await visibility(page, "hidden");
+        await expect(revalidating).toHaveCount(0);
+        await expect(chart).toHaveAttribute("data-rendered-point-count", "3");
+        await expect(page.locator("html")).toHaveAttribute("data-held-body", "aborted");
+        await page.clock.fastForward(120_000);
+        expect(requests).toHaveLength(2);
+        await visibility(page, "visible");
+      }
+      await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+      await expect(page.getByTestId("us-today-request-error")).toHaveCount(0);
+      expect(requests).toHaveLength(3);
+      expect(new URLSearchParams(requests[2]).get("since_revision")).toBe("revision-1");
+      await page.clock.fastForward(4_999);
+      expect(requests).toHaveLength(3);
+      await page.clock.runFor(1);
+      await expect.poll(() => requests.length).toBe(4);
+    });
+  }
+
+  test("Today rapid interval, scope and symbol changes discard held responses", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+    const requests: string[] = [], failed: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    page.on("requestfailed", (request) => { if (request.url().includes("/intraday/")) failed.push(request.url()); });
+    await mockG4Detail(page, async ({ path, url }) => {
+      if (!path.includes("/us-market/intraday/")) return null;
+      const symbol = path.split("/").at(-1)!;
+      const interval = url.searchParams.get("interval")!;
+      const scope = url.searchParams.get("session_scope")!;
+      requests.push(`${symbol}:${scope}:${interval}`);
+      if (symbol === "AAPL" && interval === "5m") await held;
+      return { body: snapshot(symbol, interval, `${symbol}-${scope}-${interval}`, symbol === "AMD" ? 4 : 3, scope) };
+    });
+    const panel = await openPanel(page);
+    await panel.getByRole("button", { name: "今日", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+    const chart = page.getByTestId("intraday-trend-chart");
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "3");
+    await chart.getByRole("button", { name: "5m", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+    await expect.poll(() => requests.includes("AAPL:regular:5m")).toBe(true);
+    await panel.getByRole("button", { name: "全部", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+    await expect.poll(() => requests.includes("AAPL:all:5m")).toBe(true);
+    await page.locator('[data-ranking-symbol="AMD"]').press("Enter");
+    await page.clock.runFor(1);
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+    await expect.poll(() => failed.filter((url) => url.includes("/AAPL")).length).toBe(2);
+    release();
+    await page.clock.fastForward(60_000);
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+    expect(requests.filter((key) => key.startsWith("AAPL:"))).toHaveLength(3);
+    await expect(page.getByTestId("us-today-request-error")).toHaveCount(0);
+  });
+
+  test("professional recovery retains candles, cancels body on hide and supersedes intervals", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+    await stallSecondBody(page);
+    const requests: string[] = [], failed: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    page.on("requestfailed", (request) => { if (request.url().includes("/intraday/")) failed.push(request.url()); });
+    await mockG4Detail(page, async ({ path, url }) => {
+      if (!path.endsWith("/intraday/AAPL")) return null;
+      const interval = url.searchParams.get("interval")!;
+      requests.push(interval);
+      const n = requests.length;
+      if (interval === "5m") await held;
+      if (n === 3) return { status: 503, body: { detail: "bounded outage" } };
+      return { body: snapshot("AAPL", interval, `revision-${n}`, n < 4 || interval === "5m" ? 3 : 4) };
+    });
+    await openPanel(page, true);
+    const professional = page.getByTestId("professional-chart-panel");
+    await professional.getByRole("button", { name: "1分", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+    const chart = page.getByTestId("lightweight-kline-chart");
+    await expect(chart).toHaveAttribute("data-chart-point-count", "3");
+    await page.clock.fastForward(5_000);
+    await expect(page.locator("html")).toHaveAttribute("data-held-body", "open");
+    await page.evaluate(() => { for (let i = 0; i < 10; i++) window.dispatchEvent(new Event("focus")); });
+    expect(requests).toHaveLength(2);
+    await visibility(page, "hidden");
+    await expect(page.locator("html")).toHaveAttribute("data-held-body", "aborted");
+    await expect(chart).toHaveAttribute("data-chart-point-count", "3");
+    await page.clock.fastForward(120_000);
+    expect(requests).toHaveLength(2);
+    await visibility(page, "visible");
+    await expect(page.getByTestId("us-professional-request-error")).toBeVisible();
+    await expect(chart).toHaveAttribute("data-chart-point-count", "3");
+    await page.clock.fastForward(30_000);
+    await expect(chart).toHaveAttribute("data-chart-point-count", "4");
+    await expect(page.getByTestId("us-professional-request-error")).toHaveCount(0);
+    await professional.getByRole("button", { name: "5分", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+    await expect.poll(() => requests.at(-1)).toBe("5m");
+    await professional.getByRole("button", { name: "15分", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+    await expect(chart).toHaveAttribute("data-chart-point-count", "4");
+    await expect.poll(() => failed.some((url) => url.includes("interval=5m"))).toBe(true);
+    release();
+    await page.clock.fastForward(60_000);
+    expect(requests.filter((interval) => interval === "5m")).toHaveLength(1);
+    await expect(chart).toHaveAttribute("data-chart-point-count", "4");
+    await expect(page.getByTestId("us-professional-request-error")).toHaveCount(0);
+  });
+
+  for (const interval of ["1m", "5m", "15m"]) {
+    test(`professional ${interval} polls revisions, retains unchanged and pauses on historical views`, async ({ page }) => {
+      await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+      const requests: string[] = [];
+      await mockG4Detail(page, ({ path, url }) => {
+        if (!path.endsWith("/intraday/AAPL")) return null;
+        requests.push(url.search);
+        expect(url.searchParams.get("interval")).toBe(interval);
+        expect(url.searchParams.get("session_scope")).toBe("regular");
+        const n = requests.length;
+        const body = snapshot("AAPL", interval, n === 1 ? "first" : "latest", n === 1 ? 3 : 4);
+        return { body: n === 3 ? { ...body, response_mode: "unchanged", points: [], market_phase: "closed" } : body };
+      });
+      await openPanel(page, true);
+      const professional = page.getByTestId("professional-chart-panel");
+      await professional.getByRole("button", { name: `${interval.slice(0, -1)}分`, exact: true }).press("Enter");
+      await page.clock.runFor(1);
+      const chart = page.getByTestId("lightweight-kline-chart");
+      await expect(chart).toHaveAttribute("data-chart-point-count", "3");
+      await page.clock.fastForward(4_999);
+      expect(requests).toHaveLength(1);
+      await page.clock.runFor(1);
+      await expect(chart).toHaveAttribute("data-chart-point-count", "4");
+      expect(new URLSearchParams(requests[1]).get("since_revision")).toBe("first");
+      await page.clock.fastForward(5_000);
+      await expect.poll(() => requests.length).toBe(3);
+      expect(new URLSearchParams(requests[2]).get("since_revision")).toBe("latest");
+      await expect(chart).toHaveAttribute("data-chart-point-count", "4");
+      await page.clock.fastForward(59_999);
+      expect(requests).toHaveLength(3);
+      await page.clock.runFor(1);
+      await expect.poll(() => requests.length).toBe(4);
+      for (const label of ["日K", "週K", "月K"]) {
+        await professional.getByRole("button", { name: label, exact: true }).press("Enter");
+        await page.clock.fastForward(60_000);
+        expect(requests).toHaveLength(4);
+      }
+    });
+  }
+});
+
+test.describe("R16 Today polling recovery", () => {
+  // Pause after the historical chart is ready. Deadlines use browser time and
+  // request counts; the held case explicitly witnesses loading -> error.
+  async function openToday(page: Page) {
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("us-stock-kline-panel");
+    await expect(panel.getByRole("img")).toBeVisible();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    await panel.getByRole("button", { name: "今日", exact: true }).press("Enter");
+    await page.clock.runFor(1);
+  }
+
+  function today(symbol: string, revision: string, count = 3) {
+    const response = usIntradayResponse(symbol, "regular");
+    return { ...response, effective_interval: "1m", market_phase: "closed", snapshot_revision: revision,
+      source: `r16.${symbol}.${revision}`, response_mode: "full", point_count: count,
+      points: Array.from({ length: count }, (_, i) => ({ time: `2026-06-15T10:0${i}:00-04:00`, price: 200 + i, volume: 1000 })) };
+  }
+
+  function record(url: URL) {
+    expect(url.searchParams.get("session_scope")).toBe("regular");
+    expect(url.searchParams.get("interval")).toBe("1m");
+    return { path: url.pathname, scope: url.searchParams.get("session_scope"), interval: url.searchParams.get("interval"),
+      since_revision: url.searchParams.get("since_revision") };
+  }
+
+  async function nextAt(page: Page, requests: unknown[], delay: number) {
+    const count = requests.length;
+    await page.clock.fastForward(delay - 1);
+    expect(requests).toHaveLength(count);
+    await page.clock.runFor(1);
+    await expect.poll(() => requests.length).toBe(count + 1);
+  }
+
+  test("R16 recovers after six failures without external events and resets cadence", async ({ page }, info) => {
+    await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+    const requests: ReturnType<typeof record>[] = [];
+    await mockG4Detail(page, ({ method, path, url }) => {
+      if (method !== "GET" || !path.endsWith("/us-market/intraday/AAPL")) return null;
+      requests.push(record(url));
+      const n = requests.length;
+      if (n <= 6 || n === 9) return { status: 503, body: { detail: "R16 bounded outage" } };
+      if (n === 8 || n === 11) return { body: { ...today("AAPL", n === 8 ? "recovered" : "active"), response_mode: "unchanged", points: [] } };
+      return { body: { ...today("AAPL", n === 7 ? "recovered" : "active", n === 7 ? 3 : 4), market_phase: n === 7 ? "closed" : "regular" } };
+    });
+    await openToday(page);
+    const error = page.getByTestId("us-today-request-error");
+    await expect(error).toBeVisible();
+    for (let failure = 2; failure <= 6; failure++) {
+      await nextAt(page, requests, 30_000);
+      await expect(error).toBeVisible();
+    }
+    await nextAt(page, requests, 60_000);
+    const chart = page.getByTestId("intraday-trend-chart");
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "3");
+    await expect(error).toHaveCount(0);
+    await nextAt(page, requests, 60_000); // Closed cadence, unchanged uses retained points.
+    expect(requests[7].since_revision).toBe("recovered");
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "3");
+    await nextAt(page, requests, 60_000);
+    await expect(error).toBeVisible();
+    await nextAt(page, requests, 30_000); // Success reset the earlier six failures.
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+    await expect(error).toHaveCount(0);
+    await nextAt(page, requests, 5_000); // Backend regular phase keeps existing cadence.
+    expect(requests[10].since_revision).toBe("active");
+    await info.attach("r16-recovery", { contentType: "application/json", body: JSON.stringify(requests) });
+  });
+
+  test("R16 caps continued failures and focus cannot overlap a held request", async ({ page }, info) => {
+    await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+    const requests: ReturnType<typeof record>[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let active = 0, maximum = 0;
+    await mockG4Detail(page, async ({ method, path, url }) => {
+      if (method !== "GET" || !path.endsWith("/us-market/intraday/AAPL")) return null;
+      requests.push(record(url));
+      maximum = Math.max(maximum, ++active);
+      if (requests.length === 12) await held;
+      active--;
+      return { status: 503, body: { detail: "R16 continued outage" } };
+    });
+    await openToday(page);
+    const error = page.getByTestId("us-today-request-error");
+    await expect(error).toBeVisible();
+    const delays = [30, 30, 30, 30, 30, 60, 120, 240, 300, 300];
+    for (const seconds of delays) {
+      await nextAt(page, requests, seconds * 1000);
+      await expect(error).toBeVisible();
+    }
+    await nextAt(page, requests, 300_000);
+    expect(active).toBe(1); // The actual intraday responder is holding this request.
+    await expect(error).toHaveCount(0); // Loading committed; a prior error cannot satisfy the post-release witness.
+    await page.evaluate(() => { for (let i = 0; i < 10; i++) window.dispatchEvent(new Event("focus")); });
+    await page.clock.runFor(1000); // Below the existing 20s HTTP timeout.
+    expect(requests).toHaveLength(12);
+    expect(active).toBe(1);
+    release();
+    await expect(error).toBeVisible();
+    await nextAt(page, requests, 300_000);
+    await expect(error).toBeVisible();
+    expect(maximum).toBe(1);
+    await info.attach("r16-backoff", { contentType: "application/json", body: JSON.stringify({ delays, requests, maximum }) });
+  });
+
+  test("R16 cancels a held old symbol and never republishes or reschedules it", async ({ page }, info) => {
+    await page.clock.install({ time: new Date("2026-06-15T14:00:00Z") });
+    const requests: ReturnType<typeof record>[] = [], failed: string[] = [];
+    let release!: () => void, oldEntered = false, oldReleased = false;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    page.on("requestfailed", (request) => { if (request.url().includes("/us-market/intraday/")) failed.push(request.url()); });
+    await mockG4Detail(page, async ({ method, path, url }) => {
+      if (method !== "GET" || !/\/us-market\/intraday\/(AAPL|AMD)$/.test(path)) return null;
+      requests.push(record(url));
+      if (path.endsWith("/AAPL")) { oldEntered = true; await held; oldReleased = true; return { body: today("AAPL", "obsolete", 6) }; }
+      return { body: today("AMD", "current", 4) };
+    });
+    await openToday(page);
+    await expect.poll(() => oldEntered).toBe(true);
+    await page.locator('[data-ranking-symbol="AMD"]').press("Enter");
+    await page.clock.runFor(1);
+    const chart = page.getByTestId("intraday-trend-chart");
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+    await expect(page.getByTestId("us-stock-kline-panel").locator("h2")).toContainText("AMD");
+    await expect.poll(() => failed.some((url) => url.includes("/intraday/AAPL"))).toBe(true);
+    release();
+    await expect.poll(() => oldReleased).toBe(true);
+    await page.clock.fastForward(60_001); // Beyond the old request timeout and its possible timer.
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+    await expect(page.getByTestId("us-stock-kline-panel").locator("h2")).toContainText("AMD");
+    expect(requests.filter((r) => r.path.endsWith("/AAPL"))).toHaveLength(1);
+    await expect(page.getByTestId("us-today-request-error")).toHaveCount(0);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const beforeHidden = requests.length;
+    await page.clock.fastForward(300_000);
+    expect(requests).toHaveLength(beforeHidden);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.clock.runFor(1);
+    await expect.poll(() => requests.length).toBe(beforeHidden + 1);
+    await expect(chart).toHaveAttribute("data-rendered-point-count", "4");
+    await info.attach("r16-symbol-cleanup", { contentType: "application/json", body: JSON.stringify({ requests, failed, oldEntered, oldReleased }) });
+  });
+});
+
 test.describe("G4 source browser", () => {
   for (const slowSymbol of ["AAPL", "SSO"]) {
   test(`G4 slow daily read ${slowSymbol} commits under changing intraday revisions`, async ({ page }, info) => {
@@ -5268,6 +5653,80 @@ test.describe("OMI dashboard smoke", () => {
     await expect(error).toHaveCount(0);
     expect(reads).toBe(2);
   });
+
+  for (const [timeframe, tab, label, period] of [
+    ["daily", "日K", "盤中暫定日 K", "2026-11-05"],
+    ["weekly", "週K", "形成中週 K", "2026-11-02"],
+    ["monthly", "月K", "形成中月 K", "2026-11-01"],
+  ]) {
+    test(`US forming ${timeframe} follows intraday revision in standard and focus charts`, async ({ page }) => {
+      let revision = 0;
+      let finalized = false;
+      let reads = 0;
+      await mockOmiApi(page, {
+        usWatchlistTree: seededUsWatchlistTree(), usWatchlistItems: seededUsWatchlistItems(),
+        apiResponder: ({ path, url }) => {
+          if (path.endsWith("/us-market/truth/AAPL")) {
+            const truth = usTruthResponse("AAPL");
+            return { body: { ...truth, market_phase: "regular", component_revisions: {
+              ...truth.component_revisions, intraday_revision: String(revision).repeat(64),
+              daily_revision: (finalized ? "f" : "a").repeat(64),
+            } } };
+          }
+          if (!path.endsWith("/us-market/ohlc/AAPL")) return null;
+          const requested = url.searchParams.get("timeframe") ?? "daily";
+          if (requested !== timeframe) return { body: { ...usOhlcResponse("AAPL"), timeframe: requested } };
+          reads += 1;
+          const point = { time: period, open: 200, high: 204, low: 199, close: 201 + revision, volume: 1000 };
+          return { body: { ...usOhlcResponse("AAPL"), timeframe, point_count: 1,
+            points: [{ ...point, time: timeframe === "daily" && !finalized ? "2026-11-04" : period, close: finalized ? 203 : 200 }],
+            intraday_overlay: finalized ? null : {
+              contract_version: "omi.us.provisional_daily.v1", trade_date: "2026-11-05",
+              point: { ...point, time: "2026-11-05" }, display_timeframe: timeframe, display_point: point,
+              display_missing_trade_dates: [], finalization: "provisional", authority: "derived",
+              release_status: "pending_release", freshness: "delayed", decision_usable: false,
+              coverage: { point_count: 60 + revision, expected_point_count: 390, missing_slot_count: 330 - revision, coverage_status: "partial" },
+            },
+          } };
+        },
+      });
+      await page.goto("/?market=us&group_id=17&symbol=AAPL", { waitUntil: "domcontentloaded" });
+      const panel = page.getByTestId("us-stock-kline-panel");
+      await panel.getByRole("button", { name: tab, exact: true }).click();
+      const marker = page.getByTestId("us-provisional-daily");
+      await expect(marker).toContainText(label);
+      await expect(marker).toContainText("60/390 · partial · delayed");
+      await expect(panel.getByText("201", { exact: true })).toBeVisible();
+      const before = reads;
+      revision = 1;
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(marker).toContainText("61/390");
+      await expect(panel.getByText("202", { exact: true })).toBeVisible();
+      expect(reads).toBeGreaterThan(before);
+      if (timeframe === "weekly") {
+        await panel.screenshot({ path: ".tmp/us-forming-weekly.png" });
+        await page.setViewportSize({ width: 390, height: 844 });
+        await expect(marker).toBeVisible();
+        await panel.screenshot({ path: ".tmp/us-forming-weekly-mobile.png" });
+        await page.setViewportSize({ width: 1440, height: 1000 });
+      }
+      await panel.getByRole("button", { name: "放大", exact: true }).click();
+      const focusMarker = page.getByTestId("us-provisional-daily-focus");
+      await expect(focusMarker).toContainText(label);
+      await expect(page.getByTestId("lightweight-kline-chart")).toBeVisible();
+      revision = 2;
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(focusMarker).toContainText("62/390");
+      await expect(page.getByTestId("lightweight-kline-chart")).toHaveAttribute("data-chart-point-count", timeframe === "daily" ? "2" : "1");
+      if (timeframe === "weekly") {
+        await page.screenshot({ path: ".tmp/us-forming-weekly-focus.png", fullPage: true });
+      }
+      finalized = true;
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(focusMarker).toHaveCount(0);
+      await expect(page.getByTestId("lightweight-kline-chart")).toBeVisible();
+    });
+  }
 
   test("US convergence provisional daily marker disappears on finalized revision", async ({ page }) => {
     let finalized = false;
