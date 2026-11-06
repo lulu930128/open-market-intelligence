@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import USStockMaster, USWatchlistItem
 from app.us_market import watchlist_metrics, watchlist_store
-from app.us_market.errors import USMarketConfigurationError
+from app.us_market.errors import USMarketConfigurationError, USMarketDataFetchError, USStockNotFoundError
+from app.us_market.daily_market_state import resolve_us_instrument_identity
+from app.us_market.daily_rollout import build_us_daily_operation_rollout_state
 from app.us_market.sources import normalize_us_symbol
 
 
@@ -353,6 +355,7 @@ def refresh_us_watchlist_daily_prices(
     adjusted: bool = False,
     sleep_seconds: float = 12.0,
     progress_callback: ProgressCallback | None = None,
+    explicit_operation: bool = False,
 ) -> dict:
     symbols = list_us_watchlist_symbols(
         db=db,
@@ -389,11 +392,21 @@ def refresh_us_watchlist_daily_prices(
 
     for index, symbol in enumerate(symbols, start=1):
         try:
+            operation_args = {}
+            if explicit_operation:
+                # Only the trusted interactive Job owner enables this seam.
+                # The watchlist snapshot stays finite; each resolved target
+                # gets an exact local scope, never a runtime settings override.
+                canonical_symbol = resolve_us_instrument_identity(db, symbol).instrument.symbol
+                operation_args["rollout_state"] = build_us_daily_operation_rollout_state(
+                    symbols=(canonical_symbol,), max_symbols=1,
+                )
             result = dependencies.refresh_daily_prices(
                 db=db,
                 symbol=symbol,
                 outputsize=outputsize,
                 adjusted=adjusted,
+                **operation_args,
             )
             fetched_count += result["fetched_count"]
             eligible_count += int(result.get("eligible_count", result["fetched_count"]))
@@ -402,9 +415,15 @@ def refresh_us_watchlist_daily_prices(
                 partial_symbol_count += 1
             inserted_count += result["inserted_count"]
             updated_count += result["updated_count"]
-        except USMarketConfigurationError:
-            raise
-        except Exception as exc:
+        except USMarketConfigurationError as exc:
+            if not str(exc).startswith("US_DAILY_ACQUISITION_ROLLOUT_DISABLED:"):
+                raise
+            db.rollback()
+            errors.append({"symbol": symbol, "message": str(exc)})
+        except (ValueError, LookupError, USStockNotFoundError, USMarketDataFetchError) as exc:
+            # Clear this target's pending transaction, without undoing earlier
+            # committed targets. A rollback failure must propagate unchanged.
+            db.rollback()
             errors.append(
                 {
                     "symbol": symbol,

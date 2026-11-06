@@ -11,7 +11,7 @@ from typing import Iterable
 
 from sqlalchemy.orm import Session
 
-from app.market.trading_calendar import TAIWAN_TZ
+from app.research.market_policy import market_timezone
 from app.research.trade_journal import proposal_at
 from app.research.trade_proposal import PaperBar, ProposalVersion, content_hash, utc_text
 from app.watchlists.radar_outcome_v2_service import (
@@ -195,12 +195,14 @@ def calculate_paper_outcomes(
     selected_horizon = horizon_sessions
     if selected_horizon is not None and (type(selected_horizon) is not int or not 7 <= selected_horizon <= 20):
         raise ValueError("Outcome horizon must be 7 to 20 trading sessions.")
-    anchor = version.effective_at.astimezone(TAIWAN_TZ).date()
+    anchor = version.effective_at.astimezone(market_timezone(version.market)).date()
     expected = version.planned_trade_dates
     selected: dict = {}
     for bar in bars:
         if bar.symbol != version.symbol:
             raise ValueError("Outcome bar symbol does not match proposal.")
+        if bar.market != version.market:
+            raise ValueError("Outcome bar market does not match proposal.")
         if bar.trade_date not in expected or max(bar.source_available_at, bar.received_at) > outcome_as_of:
             continue
         if not bar.final:

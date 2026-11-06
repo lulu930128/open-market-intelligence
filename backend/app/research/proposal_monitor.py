@@ -24,6 +24,9 @@ def read_proposal_monitor(db: Session, creation_id: str) -> dict:
     now = utc_now()
     read = read_at(db, creation_id, now)
     version, strategy = read.proposal, read.proposal.strategy
+    if version.market == "US":
+        from app.us_market.watchlist_research import read_monitor
+        return read_monitor(db, version, now)
     horizon, qualified, reference = 15, {"eligible": True, "ineligible": False}.get(strategy.paper_eligibility, "unknown"), None
     for item in version.evidence.items:
         if item.source_ref == "research.stock_nomination.v1":

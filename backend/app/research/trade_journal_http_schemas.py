@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, Field
+from app.research.market_policy import ResearchMarket
 
 from app.research.trade_proposal import (
     FrozenInput, PaperBar, PaperCosts, PaperStrategy, ProposalEvidence, ProposalVersion, ResearchHorizon,
@@ -11,6 +12,7 @@ from app.research.trade_proposal import (
 
 
 class ProposalCreate(FrozenInput):
+    market: ResearchMarket = "TW"
     symbol: str = Field(min_length=1, max_length=20)
     evidence: ProposalEvidence
     strategy: PaperStrategy
@@ -18,6 +20,7 @@ class ProposalCreate(FrozenInput):
     effective_at: AwareDatetime | None = None
     change_reason: str = Field(min_length=1)
     horizon_sessions: ResearchHorizon | None = None
+    workflow_origin: Literal["USER_NOMINATION", "AI_NOMINATION", "OMI_SCREEN"] | None = None
 
 
 class ProposalRevise(FrozenInput):
@@ -33,7 +36,32 @@ class ProposalPromote(FrozenInput):
     owner_id: str = Field(min_length=1, max_length=128)
 
 
+class ProposalDelete(FrozenInput):
+    expected_revision_id: str = Field(min_length=1, max_length=36)
+
+
+class ProposalMove(FrozenInput):
+    expected_revision_id: str = Field(min_length=1, max_length=36)
+    origin: Literal["AI_NOMINATION", "OMI_SCREEN"]
+
+
+class ProposalStage(FrozenInput):
+    expected_revision_id: str = Field(min_length=1, max_length=36)
+    client_intent_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:.-]+$")
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProposalDeleteRead(FrozenInput):
+    creation_id: str
+    revision_id: str
+    deleted_at: AwareDatetime
+    status: Literal["deleted"] = "deleted"
+
+
 class ProposalRead(FrozenInput):
+    workflow_origin: Literal["USER_NOMINATION", "AI_NOMINATION", "OMI_SCREEN"] | None = None
+    currency: Literal["TWD", "USD"] = "TWD"
+    promotion_supported: bool = True
     status: Literal["proposed", "scheduled"]
     proposal: ProposalVersion
     setup_evaluation: dict[str, Any] | None = None
@@ -51,6 +79,36 @@ class RevisionListRead(FrozenInput):
 class ProposalListRead(FrozenInput):
     as_of: AwareDatetime
     items: tuple[ProposalRead, ...]
+    limit: int
+    offset: int
+    has_more: bool
+
+
+class ProposalSummaryRead(FrozenInput):
+    creation_id: str
+    revision_id: str
+    revision: int
+    market: ResearchMarket
+    symbol: str
+    stock_name: str | None
+    direction: Literal["long", "short"]
+    status: Literal["proposed", "scheduled"]
+    workflow_origin: Literal["USER_NOMINATION", "AI_NOMINATION", "OMI_SCREEN"] | None
+    as_of_trade_date: str
+    cutoff: AwareDatetime
+    recorded_at: AwareDatetime
+    effective_at: AwareDatetime
+    assessment_status: str | None
+    reason_codes: tuple[str, ...]
+    evidence_hash: str
+
+
+class ProposalSummaryListRead(FrozenInput):
+    projection: Literal["research.proposal_list.summary.v1"] = "research.proposal_list.summary.v1"
+    evidence_included: Literal[False] = False
+    execution_ready: Literal[False] = False
+    as_of: AwareDatetime
+    items: tuple[ProposalSummaryRead, ...]
     limit: int
     offset: int
     has_more: bool

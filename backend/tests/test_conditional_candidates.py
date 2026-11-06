@@ -198,6 +198,17 @@ def test_research_revision_promote_existing_candidate_owner(setup, monkeypatch):
     assert "COMPLETED_DAILY_CONFIRMATION_NOT_REPRESENTABLE" in blocked["reason_codes"]
     assert len(writes) == 3  # Original owner invoked; repeat returns existing head without a new append.
     with factory() as db:
+        adopted_before = store.latest(db, store.candidates)
+    deleted = client.request("DELETE", f"{PREFIX}/{proposal.creation_id}",
+        body={"expected_revision_id": confirmed.revision_id})
+    assert deleted.status_code == 200
+    assert client.post(url, {**body, "expected_revision_id": confirmed.revision_id}).status_code == 410
+    with factory() as db:
+        marker = journal.list_versions(db, creation_id=proposal.creation_id, as_of=NOW)[-1]
+    with factory() as db, pytest.raises(ValueError, match="STALE_RESEARCH_REVISION"):
+        candidate_owner(db).create(spec, owner_id="fixture-user", research_revision=marker)
+    with factory() as db:
+        assert store.latest(db, store.candidates) == adopted_before
         assert len(store.history(db, store.candidates, candidate["id"])) == 2
         assert len(store.latest(db, store.candidates)) == 2
         assert store.latest(db, store.pending) == []

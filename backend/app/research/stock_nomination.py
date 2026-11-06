@@ -35,6 +35,7 @@ STRATEGY_VERSION = "tw.nomination.zone_rebound.v1"
 
 
 class StockNomination(FrozenInput):
+    market: Literal["TW", "US"] = Field(default="TW", exclude_if=lambda value: value == "TW")
     stock_ids: tuple[str, ...] = Field(min_length=1, max_length=5)
     direction: Literal["long", "short", "both"] = "both"
     horizon_sessions: Literal[10, 15] = 10
@@ -75,6 +76,11 @@ def _levels(item, direction):
 def create_nominations(db: Session, request: StockNomination, *, automatic: bool = False,
                        discovery_context: dict | None = None,
                        screen_request: SwingScreenRequest | None = None) -> dict:
+    if request.market == "US":
+        from app.us_market.watchlist_research import create_nominations as create_us_nominations
+        if "quantity" not in request.model_fields_set:
+            request = request.model_copy(update={"quantity": 1})
+        return create_us_nominations(db, request, automatic=automatic, discovery_context=discovery_context)
     now = utc_now()
     if request.requested_at > now:
         raise JournalHttpError(422, "FUTURE_KNOWLEDGE_TIME", "Knowledge time cannot be in the future.")
@@ -107,6 +113,9 @@ def create_nominations(db: Session, request: StockNomination, *, automatic: bool
                     ])))
                     versions = trade_journal.list_versions(db, creation_id=creation_id, as_of=now)
                     if versions:
+                        if versions[-1].deleted_at is not None:
+                            row.update(status="DELETED", reason_codes=["PROPOSAL_DELETED"], deduplicated=True)
+                            continue
                         read = _proposal_read(versions[-1], now).model_dump(mode="json")
                         row.update(status="WAITING_PRICE" if (read["eligibility"] or {}).get("research_eligible") is True
                                    else "WAITING_RESEARCH", proposal=read, deduplicated=True)

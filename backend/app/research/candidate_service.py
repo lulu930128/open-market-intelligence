@@ -6,7 +6,7 @@ import json
 from sqlalchemy.orm import Session
 
 from . import candidate_store as store
-from .candidate_control import ControlRejected, ControlUnavailable, command, request_control
+from .candidate_control import ControlRejected, ControlUnavailable, SubmissionNotAttempted, command, request_control
 from .candidate_evidence import read_market_evidence, order_qualification
 from .conditional_candidate import ManualStageOrder, TAIPEI, Truth, digest, evaluate, lifecycle, validate_raw
 
@@ -52,6 +52,8 @@ class CandidateService:
             identity = digest(["manual_stage", "MCP", raw["client_intent_id"]])
         with write(self.db):
             record = None
+            if manual_stage and raw.get("research_proposal"):
+                self._research_order_current(raw)
             if manual_stage:
                 try:
                     record = store.get(self.db, store.candidates, identity)
@@ -63,7 +65,8 @@ class CandidateService:
                 from . import trade_journal
                 from .trade_proposal import content_hash
                 versions = trade_journal.list_versions(self.db, creation_id=research_revision.creation_id, as_of=self.clock())
-                require(versions and versions[-1] == research_revision, "STALE_RESEARCH_REVISION")
+                require(versions and versions[-1] == research_revision and research_revision.deleted_at is None,
+                        "STALE_RESEARCH_REVISION")
                 identity = digest({"research_revision": research_revision.revision_id,
                                    "proposal_digest": content_hash(research_revision.model_dump(mode="json"))})
                 try:
@@ -120,13 +123,22 @@ class CandidateService:
                 return record  # Includes in-flight/UNKNOWN. Never another control call.
             require(record["revision"] == expected_revision and record["digest"] == expected_digest, "STALE_STAGE_SELECTION")
             require(record["state"] == "ACTIVE", "STAGE_NOT_SENDABLE")
-        status = self.control({"operation": "status"})
+            self._research_order_current(record["raw"])
+        try:
+            status = self.control({"operation": "status"})
+        except ControlUnavailable as exc:
+            self._stage_not_attempted(identity, pin, exc)
         ready = (isinstance(status, dict) and status.get("broker_session") == "CONNECTED" and
-            status.get("session_date_matches") is not False and
+            status.get("session_date_matches") is True and
+            ("connection" not in status or isinstance(status["connection"], dict) and status["connection"].get("ready") is True) and
             status.get("trade_date") == self.clock().astimezone(TAIPEI).date().isoformat())
+        if record["raw"].get("market") == "US":
+            ready = isinstance(status, dict) and status.get("broker_session") == "CONNECTED"
         if not ready:
-            raise ControlUnavailable("EXECUTOR_NOT_READY")
+            self._stage_not_attempted(identity, pin, ControlUnavailable("EXECUTOR_NOT_READY"))
         order = record["raw"]
+        if order.get("market") == "US" or order.get("protection") is not None:
+            return self._send_research_stage(identity, record, pin)
         token = digest(["manual_stage", identity, pin])
         draft = {"owner_id": "MCP", "source": "MANUAL", "command": {
             "account_id": "SELECTED", "trade_date": status["trade_date"], "request_id": token, "intent_id": token,
@@ -183,6 +195,53 @@ class CandidateService:
                  "CANCELLED": "SUBMISSION_CANCELLED"}.get(receipt["execution"].get("state"), "SUBMISSION_UNKNOWN")
         return self._stage_progress(identity, pin, state=state, phase="RESULT", receipt=receipt)
 
+    def _research_order_current(self, order):
+        link = order.get("research_proposal")
+        if not link:
+            return
+        from . import trade_journal
+        versions = trade_journal.list_versions(self.db, creation_id=link["creation_id"], as_of=self.clock())
+        require(bool(versions) and versions[-1].deleted_at is None, "PROPOSAL_DELETED")
+        require(trade_journal.workflow_origin(versions[-1]) == "AI_NOMINATION", "AI_NOMINATION_REQUIRED")
+
+    def _send_research_stage(self, identity, record, pin):
+        selection = {"candidate_id": identity, "candidate_revision": pin["revision"],
+            "pending_id": identity, "pending_revision": pin["revision"], "pending_digest": pin["digest"]}
+        with write(self.db):
+            current = store.get(self.db, store.candidates, identity)
+            require(current["revision"] == pin["revision"] and current["digest"] == pin["digest"]
+                    and current["state"] == "ACTIVE", "STALE_STAGE_SELECTION")
+            self._research_order_current(current["raw"])
+            submission = {"pin": pin, "phase": "CONFIRM", "native_intent_id": digest(["desk", selection])}
+            store.append(self.db, store.candidates, identity, identity, current["revision"] + 1,
+                {**store.body(current), "event": "MANUAL_SUBMIT_CLAIMED", "manual_stage": {
+                    **current["manual_stage"], "state": "SUBMITTING", "submission": submission}}, self.clock())
+        try:
+            receipt = command(self.control, ["desk-submit", "--order-json", json.dumps(record["raw"], allow_nan=False),
+                "--selection-json", json.dumps(selection)])
+            execution = receipt.get("execution") or {}
+            require(receipt.get("state") == "EXECUTION" and bool(execution.get("execution_id")), "NATIVE_STAGE_RESPONSE_MISMATCH")
+        except ControlRejected as exc:
+            self._stage_progress(identity, pin, state="SUBMISSION_REJECTED", phase="CONFIRM", error=str(exc))
+            raise
+        except Exception:
+            self._stage_progress(identity, pin, state="SUBMISSION_UNKNOWN", phase="CONFIRM", error="EXECUTOR_RESPONSE_UNKNOWN")
+            raise ControlUnavailable("EXECUTOR_RESPONSE_UNKNOWN") from None
+        state = {"ACCEPTED": "SUBMITTED", "PARTIALLY_FILLED": "SUBMITTED", "FILLED": "SUBMITTED",
+            "PENDING": "SUBMISSION_PENDING", "REJECTED": "SUBMISSION_REJECTED", "CANCELLED": "SUBMISSION_CANCELLED"}.get(execution.get("state"), "SUBMISSION_UNKNOWN")
+        return self._stage_progress(identity, pin, state=state, phase="RESULT", receipt=receipt,
+            native={"review_id": receipt["review_id"], "execution_id": execution["execution_id"], "market": record["raw"].get("market", "TW")})
+
+    def _stage_not_attempted(self, identity, pin, cause):
+        # Pin again AFTER status terminates, under the existing writer boundary.
+        # No append: a transient readiness failure must not rewrite the stage.
+        with write(self.db):
+            current = store.get(self.db, store.candidates, identity)
+            require(current["revision"] == pin["revision"] and current["digest"] == pin["digest"] and
+                    current["state"] == "ACTIVE" and current["manual_stage"]["state"] == "STAGED" and
+                    current["manual_stage"]["submission"] is None, "STALE_STAGE_SELECTION")
+        raise SubmissionNotAttempted(cause, identity, pin) from None
+
     def history(self, identity):
         return store.history(self.db, store.candidates, identity)
 
@@ -217,10 +276,13 @@ class CandidateService:
                     self._pending_append(current, invalidated_native=remaining,
                         native_invalidation="PENDING_EXECUTOR" if remaining else "REJECTED")
 
-    def change(self, identity, *, expected_revision, operation, raw=None):
+    def change(self, identity, *, expected_revision, operation, raw=None, research_id=None):
         require(operation in {"revise", "pause", "resume", "cancel"}, "INVALID_CANDIDATE_OPERATION")
         with write(self.db):
             old = store.get(self.db, store.candidates, identity)
+            if research_id is not None:
+                require(old.get("kind") == "manual_stage" and old["raw"].get("research_proposal", {}).get("creation_id") == research_id, "RESEARCH_STAGE_MISMATCH")
+                self._research_order_current(old["raw"])
             require(old["revision"] == expected_revision, "STALE_CANDIDATE_REVISION")
             require(old["state"] != "CANCELLED", "CANDIDATE_CANCELLED")
             if old.get("kind") == "manual_stage":
@@ -229,6 +291,7 @@ class CandidateService:
                 if operation == "revise":
                     order = ManualStageOrder.model_validate(raw).canonical()
                     require(order["client_intent_id"] == old["manual_stage"]["client_intent_id"], "STAGE_IDENTITY_IMMUTABLE")
+                    require(order.get("research_proposal") == old["raw"].get("research_proposal"), "RESEARCH_PROVENANCE_IMMUTABLE")
                     value["raw"] = order
                 else:
                     value["state"] = {"pause": "PAUSED", "resume": "ACTIVE", "cancel": "CANCELLED"}[operation]

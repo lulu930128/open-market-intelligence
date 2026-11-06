@@ -137,17 +137,50 @@ class Truth(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ExitTarget(Model):
+    price: Decimal = Field(gt=0, allow_inf_nan=False)
+    fraction: Decimal = Field(gt=0, le=1, allow_inf_nan=False)
+    limit_price: Decimal = Field(gt=0, allow_inf_nan=False)
+
+
+class OrderProtection(Model):
+    enabled: bool = True
+    stop_loss: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    take_profit: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    exit_limit_price: Decimal = Field(gt=0, allow_inf_nan=False)
+    direction: Literal[1, -1] = 1
+    targets: tuple[ExitTarget, ...] = ()
+    stop_limit_price: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    protection_mode: Literal["LOCAL_SYNTHETIC"] = "LOCAL_SYNTHETIC"
+
+    @model_validator(mode="after")
+    def target_fractions(self):
+        if self.targets and sum(t.fraction for t in self.targets) != Decimal(1):
+            raise ValueError("TARGET_FRACTIONS_MUST_SUM_TO_ONE")
+        return self
+
+
 class ManualStageOrder(Model):
     client_intent_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:.-]+$")
-    symbol: str = Field(pattern=r"^[0-9A-Za-z]{2,12}$")
+    symbol: str = Field(pattern=r"^[0-9A-Za-z][0-9A-Za-z._/-]{0,19}$")
+    market: Literal["TW", "US"] = Field(default="TW", exclude_if=lambda v: v == "TW")
+    settlement_mode: Literal["TWD", "MUT"] = Field(default="MUT", exclude_if=lambda v: v == "MUT")
+    protection: OrderProtection | None = Field(default=None, exclude_if=lambda v: v is None)
+    research_proposal: dict | None = Field(default=None, exclude_if=lambda v: v is None)
     action: Literal["Buy", "Sell"]
     condition: Literal["CASH", "CASH_SELLING", "MARGIN", "SHORT_SELLING"]
-    lot: Literal["Odd", "Common"]
+    lot: Literal["Odd", "Common", "Shares"]
     quantity_shares: int = Field(gt=0, le=1_000_000_000, strict=True)
     price: Decimal = Field(gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def order_shape(self):
+        if self.market == "US":
+            if self.lot != "Shares" or self.condition != "CASH":
+                raise ValueError("US_ORDER_REQUIRES_SHARES_AND_CASH")
+            return self
+        if self.lot == "Shares":
+            raise ValueError("TW_ORDER_REQUIRES_ODD_OR_COMMON")
         if self.lot == "Common" and self.quantity_shares % 1000:
             raise ValueError("QUANTITY_UNIT_MISMATCH")
         if self.condition != "CASH" and self.lot != "Common":

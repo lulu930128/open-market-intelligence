@@ -4,6 +4,7 @@ No SDK import, local order store, account discovery, login, or submit primitive.
 """
 from .candidate_control import ControlRejected, command, request_control
 from .candidate_service import CandidateService
+import json
 
 
 class ManualDeskService:
@@ -45,3 +46,14 @@ class ManualDeskService:
     def cancel(self, identity, *, trade_date, broker_order_id):
         return command(self.control, ["cancel", "--execution-id", identity, "--account-id", "SELECTED",
             "--trade-date", trade_date, "--broker-order-id", broker_order_id])
+
+    def order(self, identity, *, market):
+        return command(self.control, ["desk-order", "--market", market, "--execution-id", identity])
+
+    def cancel_order(self, identity, *, market):
+        return command(self.control, ["desk-cancel", "--market", market, "--execution-id", identity])
+
+    def protection(self, identity, *, market, rules, request_id, expected_revision):
+        return command(self.control, ["desk-protection", "--market", market, "--execution-id", identity,
+            "--rules-json", json.dumps(rules, allow_nan=False), "--request-id", request_id,
+            "--expected-revision", str(expected_revision)])

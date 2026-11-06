@@ -1,6 +1,22 @@
 schema_version = 1
 
 [[rules]]
+id = "us_watchlist_research_uses_canonical_read_owners"
+kind = "python_forbidden_import"
+description = "US watchlist research cannot acquire providers, choose execution, schedule work or implement consumer-owned data policy."
+roots = ["backend/app/us_market/watchlist_research.py", "backend/app/us_market/research_math.py", "backend/app/us_market/research_schedule.py"]
+extensions = [".py"]
+forbidden_prefixes = ["requests", "httpx", "urllib", "app.us_market.providers", "app.jobs", "app.routers", "app.ai", "app.market.tw_swing_screening", "app.market.tw_trade_setup", "app.research.candidate_service"]
+
+[[rules]]
+id = "us_watchlist_research_no_acquisition"
+kind = "python_forbidden_call"
+description = "US research reads canonical cache and appends only via the Journal; it cannot refresh or repair market data."
+roots = ["backend/app/us_market/watchlist_research.py", "backend/app/us_market/research_math.py", "backend/app/us_market/research_schedule.py"]
+extensions = [".py"]
+forbidden_call_names = ["refresh", "ensure_history_coverage", "fetch", "enqueue_job", "create_all", "create_candidate"]
+
+[[rules]]
 id = "us_eod_distribution_read_boundary"
 kind = "python_forbidden_import"
 description = "US EOD snapshot builder composes batched canonical reads; GET reads its existing checkpoint; no provider, scheduler or consumer ownership."

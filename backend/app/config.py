@@ -226,6 +226,7 @@ class Settings(BaseSettings):
     enable_taiwan_session_close_scheduler: bool = True
     enable_taiwan_price_map_snapshot_scheduler: bool = False
     enable_taiwan_swing_research_scheduler: bool = True
+    enable_us_watchlist_research_scheduler: bool = True
     taiwan_swing_research_batch_size: Annotated[Literal[50, 100], BeforeValidator(
         lambda value: int(value) if isinstance(value, str) else value)] = 50
     taiwan_swing_research_interval_minutes: Annotated[Literal[5, 10], BeforeValidator(

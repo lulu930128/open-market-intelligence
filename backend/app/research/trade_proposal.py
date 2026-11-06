@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from app.research.market_policy import ResearchMarket, market_timezone, session_close
 
 
 ResearchHorizon = Annotated[int, Field(ge=7, le=20, strict=True)]
@@ -45,6 +46,7 @@ class EvidenceItem(FrozenInput):
 
 
 class ProposalEvidence(FrozenInput):
+    market: ResearchMarket = Field(default="TW", exclude_if=lambda value: value == "TW")
     as_of_trade_date: date
     cutoff: AwareDatetime
     price_basis: str = Field(min_length=1)
@@ -52,8 +54,7 @@ class ProposalEvidence(FrozenInput):
 
     @model_validator(mode="after")
     def known_at_cutoff(self):
-        from app.market.trading_calendar import TAIWAN_TZ
-        if self.as_of_trade_date > self.cutoff.astimezone(TAIWAN_TZ).date():
+        if self.as_of_trade_date > self.cutoff.astimezone(market_timezone(self.market)).date():
             raise ValueError("Evidence trade date is after the cutoff.")
         if any(max(item.source_available_at, item.received_at) > self.cutoff for item in self.items):
             raise ValueError("Evidence was unavailable at the frozen cutoff.")
@@ -112,7 +113,7 @@ class ProposalVersion(FrozenInput):
     revision: int = Field(ge=1)
     supersedes: str | None
     symbol: str = Field(min_length=1)
-    market: Literal["TW"] = "TW"
+    market: ResearchMarket = "TW"
     evidence: ProposalEvidence
     evidence_hash: str
     strategy: PaperStrategy
@@ -128,13 +129,23 @@ class ProposalVersion(FrozenInput):
     calendar_verified: bool
     # Excluding an absent additive field preserves legacy payload/evidence hashes.
     outcome_horizon_sessions: ResearchHorizon | None = Field(default=None, exclude_if=lambda value: value is None)
+    # A terminal visibility event retains the original strategy and calendar.
+    # Old payloads omit this field so their immutable hashes remain valid.
+    deleted_at: AwareDatetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    workflow_origin: Literal["USER_NOMINATION", "AI_NOMINATION", "OMI_SCREEN"] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def valid_window(self):
-        from app.market.trading_calendar import TAIWAN_TZ
+        if self.deleted_at is not None and (
+            self.deleted_at != self.recorded_at or self.revision < 2 or self.supersedes is None
+        ):
+            raise ValueError("Deletion must be a timestamped successor of an existing proposal.")
+        if self.market != self.evidence.market:
+            raise ValueError("Proposal market disagrees with frozen evidence.")
         if list(self.planned_trade_dates) != sorted(set(self.planned_trade_dates)):
             raise ValueError("Planned sessions must be unique and ordered.")
-        if self.planned_trade_dates[0] <= self.effective_at.astimezone(TAIWAN_TZ).date():
+        if self.planned_trade_dates[0] <= self.effective_at.astimezone(market_timezone(self.market)).date():
             raise ValueError("Planned outcome sessions must follow strategy effectiveness.")
         if self.outcome_horizon_sessions is not None and len(self.planned_trade_dates) < self.outcome_horizon_sessions:
             raise ValueError("The selected outcome horizon exceeds the frozen calendar.")
@@ -145,6 +156,7 @@ class ProposalVersion(FrozenInput):
 
 
 class PaperBar(FrozenInput):
+    market: ResearchMarket = Field(default="TW", exclude_if=lambda value: value == "TW")
     symbol: str = Field(min_length=1)
     trade_date: date
     open_price: float = Field(gt=0)
@@ -165,9 +177,7 @@ class PaperBar(FrozenInput):
             raise ValueError("Inconsistent OHLC high.")
         if self.low_price > min(self.open_price, self.high_price, self.close_price):
             raise ValueError("Inconsistent OHLC low.")
-        # A daily bar cannot be available before its Taiwan session closes.
-        from app.market.trading_calendar import TAIWAN_TZ, TAIWAN_SESSION_CLOSE_TIME
-        close_at = datetime.combine(self.trade_date, TAIWAN_SESSION_CLOSE_TIME, TAIWAN_TZ)
+        close_at = session_close(self.market, self.trade_date)
         if self.source_available_at < close_at or self.received_at < close_at:
             raise ValueError("Daily OHLC receipt precedes session close.")
         return self

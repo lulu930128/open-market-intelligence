@@ -1,6 +1,6 @@
 """HTTP application service; the F05 journal remains the only write owner.
 
-Only create/revise own transactions. Evaluation (GET or POST) is a pure read
+Only create/revise/delete own transactions. Evaluation (GET or POST) is a pure read
 and computation; its returned replay request carries the immutable bar snapshot.
 No separate evaluation store, engine, provider acquisition or execution receipt.
 """
@@ -31,6 +31,8 @@ from app.research.paper_outcome import calculate_paper_outcomes
 from app.research.trade_journal_http_schemas import (
     HorizonAssessment, PaperEvaluationRead, PaperEvaluationRequest, ProposalCreate,
     ProposalListRead, ProposalPromote, ProposalRead, ProposalRevise, RevisionListRead,
+    ProposalDelete, ProposalDeleteRead,
+    ProposalSummaryRead, ProposalSummaryListRead,
 )
 from app.research.trade_proposal import PaperBar, ProposalVersion, content_hash, utc_text
 
@@ -50,41 +52,60 @@ def _known_time(value: datetime, now: datetime) -> datetime:
 
 
 def _proposal_read(version: ProposalVersion, as_of: datetime) -> ProposalRead:
+    if version.deleted_at is not None:
+        raise JournalHttpError(410, "PROPOSAL_DELETED", "The research proposal was deleted.")
     horizon = None
     eligibility = None
+    if version.market == "US":
+        from app.us_market.watchlist_research import proposal_eligibility
+        horizon = version.outcome_horizon_sessions or 10
+        eligibility = proposal_eligibility(version)
     for item in version.evidence.items:
-        if item.source_ref == "research.stock_nomination.v1":
+        if version.market == "TW" and item.source_ref == "research.stock_nomination.v1":
             snapshot = json.loads(item.snapshot_json)
-            horizon = snapshot["request"]["horizon_sessions"]
             # Re-evaluate revisions against the frozen F04 evidence. GET never
             # acquires newer data or silently replaces the original assessment.
             try:
+                if not isinstance(snapshot, dict) or not isinstance(snapshot.get("request"), dict):
+                    raise ValueError("NOMINATION_SNAPSHOT_INVALID")
+                candidate_horizon = snapshot["request"].get("horizon_sessions")
+                if type(candidate_horizon) is not int or not 1 <= candidate_horizon <= len(version.planned_trade_dates):
+                    raise ValueError("NOMINATION_HORIZON_INVALID")
+                horizon = candidate_horizon
                 request = EligibilityRequest.model_validate({**snapshot["eligibility"]["request"],
                     "quantity": version.strategy.shares, "entry_trade_date": version.planned_trade_dates[0]})
                 eligibility = evaluate_tw_trade_eligibility(request,
                     EligibilityEvidence.model_validate(snapshot["eligibility"]["evidence"])).model_dump(mode="json")
             except ValueError as exc:
                 eligibility = {"status": "DATA_BLOCKED", "reason_codes": [str(exc)]}
+            except (KeyError, TypeError):
+                eligibility = {"status": "DATA_BLOCKED", "reason_codes": ["NOMINATION_ELIGIBILITY_INVALID"]}
     try:
         math = evaluate_strategy(version.symbol, version.evidence.as_of_trade_date,
-                                 version.strategy, version.costs, version.outcome_horizon_sessions or horizon or 10)
+                                 version.strategy, version.costs, version.outcome_horizon_sessions or horizon or 10,
+                                 market=version.market)
     except ValueError as exc:
         # Existing Journal inputs can exceed F03's two-target/tick scope. The
         # stored record remains readable; no historical strategy is rewritten.
         math = {"status": "DATA_BLOCKED", "reason_codes": [str(exc)]}
     return ProposalRead(status="scheduled" if version.effective_at > as_of else "proposed", proposal=version,
+                        workflow_origin=trade_journal.workflow_origin(version),
+                        currency="USD" if version.market == "US" else "TWD", promotion_supported=version.market == "TW",
                         setup_evaluation=math,
                         valid_from_date=version.planned_trade_dates[0].isoformat() if horizon else None,
                         valid_until_date=version.planned_trade_dates[horizon - 1].isoformat() if horizon else None,
                         eligibility=eligibility)
 
 
-def evaluate_strategy(symbol, basis_date, strategy, costs, horizon=10) -> dict:
+def evaluate_strategy(symbol, basis_date, strategy, costs, horizon=10, *, market="TW") -> dict:
     """Use F03 for both generated and revised Journal strategies.
 
     Paper's absolute slippage cannot be represented by one F03 exit bps for
     different targets. Nonzero/unknown slippage stays unknown in this projection.
     """
+    if market == "US":
+        from app.us_market.research_math import evaluate_us_strategy
+        return evaluate_us_strategy(strategy, costs, horizon)
     slippage = 0 if costs.slippage_per_share == 0 else None
     borrow = (Decimal(str(costs.short_borrow_per_share_session)) * strategy.shares * horizon
               if costs.short_borrow_per_share_session is not None else None)
@@ -113,18 +134,26 @@ def promote(db: Session, creation_id: str, request: ProposalPromote) -> dict:
     if not versions:
         raise JournalHttpError(404, "PROPOSAL_NOT_FOUND", "No proposal is known at this time.")
     version = versions[-1]
+    if version.deleted_at is not None:
+        raise JournalHttpError(410, "PROPOSAL_DELETED", "The research proposal was deleted.")
     if version.revision_id != request.expected_revision_id:
         raise JournalHttpError(409, "REVISION_CONFLICT", "The expected revision is no longer the journal head.")
     result = {"creation_id": creation_id, "revision_id": version.revision_id,
               "status": "DATA_BLOCKED", "reason_codes": [], "warnings": [],
               "candidate": None, "preview": None, "execution_ready": False}
     reasons = result["reason_codes"]
+    if version.market != "TW":
+        reasons.append("US_RESEARCH_PROMOTION_UNSUPPORTED")
+        return result
     strategy = version.strategy
     snapshot = next((json.loads(item.snapshot_json) for item in version.evidence.items
                      if item.source_ref == "research.stock_nomination.v1"), {})
-    origin = snapshot.get("request", {}).get("nomination_origin")
-    horizon = version.outcome_horizon_sessions or snapshot.get("request", {}).get("horizon_sessions")
-    if origin not in {"USER_NOMINATION", "AI_NOMINATION", "OMI_SCREEN"}:
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    nomination_request = snapshot.get("request")
+    nomination_request = nomination_request if isinstance(nomination_request, dict) else {}
+    origin = nomination_request.get("nomination_origin")
+    horizon = version.outcome_horizon_sessions or nomination_request.get("horizon_sessions")
+    if not isinstance(origin, str) or origin not in {"USER_NOMINATION", "AI_NOMINATION", "OMI_SCREEN"}:
         reasons.append("RESEARCH_ORIGIN_MISSING")
     if version.effective_at > now:
         reasons.append("PROPOSAL_NOT_EFFECTIVE")
@@ -203,7 +232,29 @@ def create(db: Session, request: ProposalCreate) -> ProposalRead:
     return _proposal_read(version, now)
 
 
-def revise(db: Session, creation_id: str, request: ProposalRevise) -> ProposalRead:
+def require_ai_scope(version):
+    if trade_journal.workflow_origin(version) not in {"AI_NOMINATION", "OMI_SCREEN"}:
+        raise JournalHttpError(403, "RESEARCH_OUTSIDE_AI_SCOPE", "AI can manage AI nominations and post-close research only.")
+
+
+def move(db, creation_id, request, *, ai_scope=False):
+    now = utc_now()
+    try:
+        with db.begin():
+            version = trade_journal.move_proposal(db, creation_id=creation_id,
+                expected_revision_id=request.expected_revision_id, origin=request.origin, now=now, ai_scope=ai_scope)
+    except PermissionError as exc:
+        raise JournalHttpError(403, "RESEARCH_OUTSIDE_AI_SCOPE", str(exc)) from exc
+    except trade_journal.ProposalDeletedError as exc:
+        raise JournalHttpError(410, "PROPOSAL_DELETED", str(exc)) from exc
+    except LookupError as exc:
+        raise JournalHttpError(404, "PROPOSAL_NOT_FOUND", str(exc)) from exc
+    except (ValueError, IntegrityError) as exc:
+        raise JournalHttpError(409, "REVISION_CONFLICT", "The proposal changed; reload before moving.") from exc
+    return _proposal_read(version, now)
+
+
+def revise(db: Session, creation_id: str, request: ProposalRevise, *, ai_scope=False) -> ProposalRead:
     now = utc_now()
     try:
         with db.begin():
@@ -211,18 +262,30 @@ def revise(db: Session, creation_id: str, request: ProposalRevise) -> ProposalRe
             versions = trade_journal.list_versions(db, creation_id=creation_id, as_of=now)
             if not versions:
                 raise JournalHttpError(404, "PROPOSAL_NOT_FOUND", "No proposal is known at this time.")
+            if ai_scope:
+                require_ai_scope(versions[-1])
+            if versions[-1].deleted_at is not None:
+                raise JournalHttpError(410, "PROPOSAL_DELETED", "The research proposal was deleted.")
             if versions[-1].revision_id != request.expected_revision_id:
                 raise JournalHttpError(409, "REVISION_CONFLICT", "The expected revision is no longer the journal head.")
-            if any(item.source_ref == "research.stock_nomination.v1" for item in versions[-1].evidence.items):
-                if request.strategy.direction == -1 and request.strategy.entry_price >= 200:
-                    raise ValueError("SHORT_PRICE_CAP")
-                evaluate_strategy(versions[-1].symbol, versions[-1].evidence.as_of_trade_date,
-                                  request.strategy, request.costs)
-            version = trade_journal.revise_proposal(
-                db, creation_id=creation_id, expected_revision_id=request.expected_revision_id,
-                strategy=request.strategy, costs=request.costs,
-                effective_at=request.effective_at or now, change_reason=request.change_reason, now=now,
-            )
+            previous = versions[-1]
+            if request.strategy.direction != previous.strategy.direction:
+                # A reversed thesis is a successor research idea, with its own
+                # initial risk baseline; historical performance keeps its lineage.
+                version = trade_journal.create_proposal(db, market=previous.market, symbol=previous.symbol,
+                    evidence=previous.evidence, strategy=request.strategy, costs=request.costs,
+                    effective_at=request.effective_at or now, now=now,
+                    workflow_origin=trade_journal.workflow_origin(previous),
+                    horizon_sessions=previous.outcome_horizon_sessions,
+                    change_reason=f"Replaces {previous.creation_id}: {request.change_reason}")
+                trade_journal.delete_proposal(db, creation_id=creation_id,
+                    expected_revision_id=request.expected_revision_id, now=now)
+            else:
+                version = trade_journal.revise_proposal(
+                    db, creation_id=creation_id, expected_revision_id=request.expected_revision_id,
+                    strategy=request.strategy, costs=request.costs,
+                    effective_at=request.effective_at or now, change_reason=request.change_reason, now=now,
+                )
     except IntegrityError as exc:
         raise JournalHttpError(409, "REVISION_CONFLICT", "Another revision was appended concurrently.") from exc
     except ValueError as exc:
@@ -230,11 +293,24 @@ def revise(db: Session, creation_id: str, request: ProposalRevise) -> ProposalRe
     return _proposal_read(version, now)
 
 
-def read_at(db: Session, creation_id: str, decision_at: datetime | None = None) -> ProposalRead:
+def read_at(db: Session, creation_id: str, decision_at: datetime | None = None, *, ai_scope=False) -> ProposalRead:
     now = utc_now()
     at = _known_time(decision_at or now, now)
     try:
-        return _proposal_read(trade_journal.proposal_at(db, creation_id=creation_id, decision_at=at), at)
+        if ai_scope and decision_at is None:
+            versions = trade_journal.list_versions(db, creation_id=creation_id, as_of=at)
+            if not versions:
+                raise LookupError("Unknown proposal.")
+            version = versions[-1]
+            if version.deleted_at is not None:
+                raise trade_journal.ProposalDeletedError("The research proposal was deleted.")
+        else:
+            version = trade_journal.proposal_at(db, creation_id=creation_id, decision_at=at)
+        if ai_scope:
+            require_ai_scope(version)
+        return _proposal_read(version, at)
+    except trade_journal.ProposalDeletedError as exc:
+        raise JournalHttpError(410, "PROPOSAL_DELETED", str(exc)) from exc
     except LookupError as exc:
         raise JournalHttpError(404, "PROPOSAL_NOT_FOUND", str(exc)) from exc
 
@@ -249,11 +325,64 @@ def read_revisions(db: Session, creation_id: str, as_of: datetime | None = None)
                             revisions=tuple(_proposal_read(version, at) for version in versions))
 
 
-def read_list(db: Session, limit: int = 20, offset: int = 0) -> ProposalListRead:
+def _proposal_summary(version: ProposalVersion, as_of: datetime) -> ProposalSummaryRead:
+    # Project the frozen journal only. Never relabel this as a complete ProposalVersion
+    # or replace its evidence/hash with a truncated snapshot.
+    snapshot = next((json.loads(item.snapshot_json) for item in version.evidence.items
+        if item.source_ref in {"research.stock_nomination.v1", "research.us_watchlist_nomination.v1"}), {})
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    price_map = snapshot.get("price_map")
+    identity = price_map.get("payload") if isinstance(price_map, dict) else None
+    identity = identity if isinstance(identity, dict) else {}
+    name = identity.get("stock_name") if identity.get("stock_id") == version.symbol else None
+    assessment = snapshot.get("assessment")
+    assessment = assessment if isinstance(assessment, dict) else {}
+    assessment_status = assessment.get("status")
+    reasons = assessment.get("reason_codes")
+    reasons = tuple(reasons) if isinstance(reasons, list) and all(isinstance(code, str) for code in reasons) else ()
+    return ProposalSummaryRead(
+        creation_id=version.creation_id, revision_id=version.revision_id, revision=version.revision,
+        market=version.market, symbol=version.symbol,
+        stock_name=name.strip() if isinstance(name, str) and name.strip() else None,
+        direction="long" if version.strategy.direction == 1 else "short",
+        status="scheduled" if version.effective_at > as_of else "proposed",
+        workflow_origin=trade_journal.workflow_origin(version),
+        as_of_trade_date=version.evidence.as_of_trade_date.isoformat(), cutoff=version.evidence.cutoff,
+        recorded_at=version.recorded_at, effective_at=version.effective_at,
+        assessment_status=assessment_status if isinstance(assessment_status, str) else None, reason_codes=reasons,
+        evidence_hash=version.evidence_hash,
+    )
+
+
+def read_list(db: Session, limit: int = 20, offset: int = 0, *, market=None, origin=None, direction=None, ai_scope=False,
+              view: str = "full") -> ProposalListRead | ProposalSummaryListRead:
     now = utc_now()
-    versions = trade_journal.list_proposal_heads(db, as_of=now, limit=limit + 1, offset=offset)
+    versions = trade_journal.list_proposal_heads(db, as_of=now, limit=limit + 1, offset=offset,
+                                               market=market, origin=origin, direction=direction, ai_scope=ai_scope)
+    if view == "summary":
+        return ProposalSummaryListRead(as_of=now, items=tuple(_proposal_summary(v, now) for v in versions[:limit]),
+                                       limit=limit, offset=offset, has_more=len(versions) > limit)
     return ProposalListRead(as_of=now, items=tuple(_proposal_read(v, now) for v in versions[:limit]),
                             limit=limit, offset=offset, has_more=len(versions) > limit)
+
+
+def delete(db: Session, creation_id: str, request: ProposalDelete, *, ai_scope=False) -> ProposalDeleteRead:
+    now = utc_now()
+    try:
+        with db.begin():
+            if ai_scope:
+                versions = trade_journal.list_versions(db, creation_id=creation_id, as_of=now)
+                if not versions:
+                    raise LookupError("Unknown proposal.")
+                require_ai_scope(versions[-1])
+            version = trade_journal.delete_proposal(db, creation_id=creation_id,
+                expected_revision_id=request.expected_revision_id, now=now)
+    except LookupError as exc:
+        raise JournalHttpError(404, "PROPOSAL_NOT_FOUND", str(exc)) from exc
+    except (ValueError, IntegrityError) as exc:
+        raise JournalHttpError(409, "REVISION_CONFLICT", "The proposal changed; reload before deleting.") from exc
+    return ProposalDeleteRead(creation_id=version.creation_id, revision_id=version.revision_id,
+                              deleted_at=version.deleted_at)
 
 
 def _canonical_bars(db: Session, version: ProposalVersion, as_of: datetime) -> tuple[tuple[PaperBar, ...], tuple[str, ...]]:
@@ -263,6 +392,9 @@ def _canonical_bars(db: Session, version: ProposalVersion, as_of: datetime) -> t
     release owner; actual receipt uses only lineage received/fetched timestamps.
     Unknown corporate-action coverage remains unknown (G1 owns that evidence).
     """
+    if version.market == "US":
+        from app.us_market.watchlist_research import read_outcome_bars
+        return read_outcome_bars(db, version, as_of)
     dates = version.planned_trade_dates
     if as_of < taiwan_daily_price_release_at(dates[0]):
         return (), ("canonical_window_not_yet_released",)
@@ -334,7 +466,8 @@ def evaluate(db: Session, creation_id: str, request: PaperEvaluationRequest) -> 
     if request.horizon_sessions is not None:
         try:
             setup_evaluation = evaluate_strategy(version.symbol, version.evidence.as_of_trade_date,
-                                                 version.strategy, version.costs, request.horizon_sessions)
+                                                 version.strategy, version.costs, request.horizon_sessions,
+                                                 market=version.market)
         except ValueError as exc:
             setup_evaluation = {"status": "DATA_BLOCKED", "reason_codes": [str(exc)]}
     assessments = []

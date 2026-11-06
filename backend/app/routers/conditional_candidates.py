@@ -1,6 +1,7 @@
 """Candidate commands and fixed MCP desk routes over the existing Native owner."""
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,7 +12,7 @@ from app.db.session import get_db
 from app.research.candidate_service import CandidateService
 from app.research.candidate_control import ControlRejected, ControlUnavailable
 from app.research.manual_desk_service import ManualDeskService
-from app.research.conditional_candidate import ManualStageOrder
+from app.research.conditional_candidate import ManualStageOrder, OrderProtection
 
 
 router = APIRouter()
@@ -52,13 +53,23 @@ class DeskCancel(Input):
     broker_order_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:.-]+$")
 
 
+class DeskMarket(Input):
+    market: Literal["TW", "US"]
+
+
+class DeskProtection(DeskMarket):
+    rules: OrderProtection
+    request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:.-]+$")
+    expected_revision: int = Field(gt=0, strict=True)
+
+
 def desk_call(method, *args, db=None, **kwargs):
     try:
         return getattr(ManualDeskService(db), method)(*args, **kwargs)
     except ControlRejected as exc:
-        raise HTTPException(409, detail={"code": str(exc), "retry_policy": "CHECK_STATUS_DO_NOT_RESEND"}) from exc
+        raise HTTPException(409, detail=exc.detail()) from exc
     except ControlUnavailable as exc:
-        raise HTTPException(503, detail={"code": str(exc), "retry_policy": "CHECK_STATUS_DO_NOT_RESEND"}) from exc
+        raise HTTPException(503, detail=exc.detail()) from exc
     except LookupError as exc:
         raise HTTPException(404, detail={"code": str(exc)}) from exc
     except ValueError as exc:
@@ -137,6 +148,21 @@ def desk_inventory():
 @router.get("/desk/status")
 def desk_status():
     return desk_call("status")
+
+
+@router.get("/desk/executions/{identity}")
+def desk_order(identity: str, market: Literal["TW", "US"]):
+    return desk_call("order", identity, market=market)
+
+
+@router.post("/desk/executions/{identity}/cancel-order")
+def desk_cancel_order(identity: str, request: DeskMarket):
+    return desk_call("cancel_order", identity, market=request.market)
+
+
+@router.post("/desk/executions/{identity}/protection")
+def desk_protection(identity: str, request: DeskProtection):
+    return desk_call("protection", identity, **request.model_dump(mode="json"))
 
 
 @router.post("/desk/reviews/{identity}/confirm")
