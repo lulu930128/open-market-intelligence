@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+## [4.11.0] - 2026-11-06
+
+### Changed
+
+- 台股資料：整合試撮與收盤證據、指數開盤修訂、官方廣度獨立觀測時窗、普通股／ETF 日線收集，以及有界盤後補查；保留來源、交易日期、缺值與各自統計範圍。
+- 美股資料：改善盤中 observation／materialization、日線及 sector coverage，保留來源差異與未完成資料；FINRA 股數採六位小數並保留來源代號的大小寫語意。
+- AI 與技術分析：統一指數指標與圖表 owner，保留讀取失敗及 negative acquisition 證據；減少重複歷史讀取、資料庫更新與未輸出資料的深複製。
+- 研究流程：整合台美股研究候選的版本、刪除、分頁、摘要與完整證據讀取，加入美股觀察名單的 cache-only 分批研究流程。
+- 獨立 execution runtime：更新本機部署／連線 owner、回執與隔離機制、美股獨立契約及手動研究交接；保留明確操作、帳戶資格與 broker acceptance 邊界。
+- 背景工作與啟動控制：父工作沿既有 JobService 等待原子工作完成，補強 owned lifecycle、execution 元件部署與停止診斷；未知結果及需要對帳的狀態持續保留。
+- 前端：對齊研究候選、台美股資料展示、coverage／freshness 與三語文案，沿用 Backend 的 canonical 判斷。
+
+### Fixed
+
+- 官方指數收盤價合格但總量缺漏時，可呈現 factual partial；總量仍為 null，完整資料補查及研究資格不因此放行。
+- 官方 published breadth 的完成判定不再要求不同統計範圍變成 full-market ready，避免合格資料被持續誤判為未完成。
+- 對齊 VERSION、Frontend package／lockfile root 與三語 README badges 為 4.11.0；排除測試產生的 SQLite sidecar 與 owner 檔。
+
+### Notes
+
+- 此版本提交與 Runtime／Live provider／Product acceptance 分開；升號不會自動部署、執行 migration、啟用券商連線或下單。
+- 技術分析長尾、全市場資料缺口、graceful stop／forced-stop 業務對帳、尚未觀測的交易時窗與既有 EOD 測試落差仍保留，未宣稱全數完成。
+- 各市場的 partial、missing、UNKNOWN、BLOCKED 與來源限制不因版本發布而解除；本機資料庫、觀察回執與私人 runtime state 不納入公開提交。
+
 ## [4.10.0] - 2026-10-26
 
 ### Changed
