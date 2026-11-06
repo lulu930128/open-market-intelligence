@@ -21,8 +21,9 @@ current_job_stop: ContextVar[JobStopToken | None] = ContextVar("job_stop", defau
 class JobPaused(BaseException):
     """Expected owner unwind, deliberately outside broad provider Exception handlers."""
 
-    def __init__(self, checkpoint: dict[str, Any]):
+    def __init__(self, checkpoint: dict[str, Any], *, reason: str = "restart_paused"):
         self.checkpoint = checkpoint
+        self.reason = reason
 
 
 def checkpoint_after_transaction(db, checkpoint: dict[str, Any]) -> None:
@@ -41,7 +42,7 @@ def checkpoint_after_transaction(db, checkpoint: dict[str, Any]) -> None:
         raise JobPaused(checkpoint)
 
 
-def period_checkpoint_arguments(db, owner: str) -> dict:
+def period_checkpoint_arguments(db, owner: str, *, yield_after_period: bool = False) -> dict:
     """Injection at audited Job entrypoints only; domain owns every transaction."""
     from app.jobs.resumption import PERIOD_TASK_OWNERS, period_binding
 
@@ -57,6 +58,10 @@ def period_checkpoint_arguments(db, owner: str) -> dict:
         evidence = {**evidence, "job_id": token.job_id,
                     "binding": period_binding(token.task_identity, token.task_args)}
         checkpoint_after_transaction(db, evidence)
+        # Use the same durable cursor and completion callback as restart resume.
+        # Requeue at the executor tail only after this scope's Session closes.
+        if yield_after_period and evidence["current"] < evidence["total"]:
+            raise JobPaused(evidence, reason="work_slice")
 
     return {"checkpoint": checkpoint, "resume_state": resume_state}
 

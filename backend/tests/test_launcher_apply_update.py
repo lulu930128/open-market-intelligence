@@ -125,6 +125,78 @@ $script:UpdateOperation | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath 'OU
         }[mode]
 
 
+@pytest.mark.parametrize("mode", ["success", "readiness-failed", "source-drift"])
+def test_update_startup_schema_pin_is_scoped_to_operation(tmp_path, mode):
+    scenario = r'''
+Add-Type -Path @((Join-Path (Split-Path $ast.Extent.File) 'OmiRuntimeControl.cs'),(Join-Path (Split-Path $ast.Extent.File) 'OmiOwnedShutdown.cs')) -ReferencedAssemblies @('System.Web.Extensions','System.Core','System.Windows.Forms')
+$definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-OmiUpdateStartup'},$false)
+. ([scriptblock]::Create($definition.Extent.Text))
+$controlAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $ast.Extent.File) 'omi-runtime-control.ps1'),[ref]$null,[ref]$null)
+$guard=$controlAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-OmiManualBackendStartOwner'},$false)
+. ([scriptblock]::Create($guard.Extent.Text))
+$script:RuntimeController=[object]::new();$script:LastSchemaOperation=$null
+$script:LoadedLifecycleSourceId='fixture-lifecycle'
+$script:BackendHost='127.0.0.1';$script:BackendPort=8400
+$script:BackendReload=$false;$script:IsPackagedRelease=$false
+$script:SchemaDigest='schema-before';$script:AppRelease='app-before'
+$script:FrontendSawPin=$false;$script:MidOperationRejected=$false;$script:Factory=0
+function Initialize-ServiceEnvironment {}
+function Publish-OmiRuntimeControlStatus {}
+function Assert-OmiRuntimeControllerOwner {}
+function Get-OmiLifecycleSourceId {return 'fixture-lifecycle'}
+function Get-OmiSchemaSourceRelease {return $script:SchemaDigest}
+function Get-OmiBackendApplicationRelease {return $script:AppRelease}
+function Start-Backend {
+    $script:Factory++
+    $script:BackendStartSchemaPin=$script:SchemaDigest
+    $script:OwnedBackendSession=[pscustomobject]@{Alive=$true;Terminal=$false;ReleaseId='app-before';
+        SelectedHost='127.0.0.1';SelectedPort=8400;ChildPid=123;ChildCreated='fixture-birth'}
+    $script:OwnedBackendSession | Add-Member ScriptMethod WaitForStartReadinessAsync {
+        param($budget)
+        $task=[Threading.Tasks.TaskCompletionSource[bool]]::new()
+        $task.SetResult('MODE' -ne 'readiness-failed');return $task.Task
+    }
+}
+function Assert-OmiSchemaCompatibility {
+    param($ExpectedRelease)
+    if ($ExpectedRelease -cne $script:AppRelease) {throw 'TARGET_RELEASE_LOST'}
+    $script:BackendStartSchemaPin=$script:SchemaDigest
+    $script:RestartCompatibilityObservation=@{SchemaRevision='fixture-head';SchemaHead='fixture-head'}
+}
+function Get-OmiOwnedBackendIdentity {
+    if ('MODE' -eq 'source-drift') {
+        $script:SchemaDigest='schema-during-operation'
+        try {Assert-OmiManualBackendStartOwner;throw 'MID_OPERATION_DRIFT_ACCEPTED'}
+        catch {
+            if ($_.Exception.Message -ne 'RESTART_SOURCE_CHANGED') {throw}
+            $script:MidOperationRejected=$true;throw
+        }
+    }
+    return @{pid=123;created_at='fixture-birth'}
+}
+function Start-Frontend {
+    $script:FrontendSawPin=($script:BackendStartSchemaPin -ceq 'schema-before')
+}
+Invoke-OmiUpdateStartup -RequestId ([Guid]::NewGuid().ToString('D'))
+if ($script:BackendStartSchemaPin) {throw 'UPDATE_OPERATION_PIN_LEAKED'}
+if ($script:Factory -ne 1) {throw 'UNREQUESTED_REPLAY'}
+if ('MODE' -eq 'success') {
+    if ($script:UpdateOperation.status -ne 'succeeded' -or -not $script:FrontendSawPin) {throw 'PIN_CLEARED_BEFORE_OPERATION_END'}
+} else {
+    if ($script:UpdateOperation.status -ne 'failed') {throw 'FAILURE_SWALLOWED'}
+    if ('MODE' -eq 'source-drift' -and (-not $script:MidOperationRejected -or
+        $script:UpdateOperation.failure_code -ne 'RESTART_SOURCE_CHANGED')) {throw 'IN_OPERATION_GUARD_LOST'}
+}
+# A later source edit is admitted to fresh compatibility validation, without
+# starting a service or changing/clearing any live process state.
+$script:SchemaDigest='schema-next-operation';$script:AppRelease='app-next-operation'
+Assert-OmiManualBackendStartOwner
+$script:Calls.Add('fresh-owner-admission')
+'''.replace("MODE", mode)
+    result = _run_isolated_launcher(tmp_path, scenario)
+    assert result["calls"] == ["fresh-owner-admission"]
+
+
 def test_existing_worker_upgrades_0093_to_dynamic_source_head_without_backup(tmp_path):
     database = tmp_path / "maintenance.db"
     with sqlite3.connect(database) as db:

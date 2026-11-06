@@ -266,9 +266,10 @@ def test_parent_resume_skips_admitted_child_and_does_not_claim_completion(databa
     wait_idle()
     result = snapshot(database, job_id)
     assert admitted == ["2330", "1101"]
-    assert result["status"] == "error" and result["result"]["postcondition_met"] is False
-    assert result["result"]["admitted_count"] == 2 and result["result"]["children_completed_count"] == 0
-    assert len(result["result"][LEDGER_KEY]["results"]) == 2
+    assert result["status"] == "paused" and result["result"]["reason"] == "children_pending"
+    state = saved_state(database, job_id)
+    assert state["totals"]["admitted"] == 2
+    assert len(state["results"]) == 2
 
 
 @pytest.mark.parametrize("mutation", ["calls", "completed", "inflight"])

@@ -1,7 +1,10 @@
 from concurrent.futures import Future
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
+from os import getpid
 from threading import Event, Thread, RLock
+from time import monotonic
+from uuid import uuid4
 import json
 import logging
 from typing import Any
@@ -88,6 +91,7 @@ from app.market.tw_index_daily_platform import (
     refresh_tpex_completed_derived_daily_bar,
 )
 from app.market.indices import (
+    current_market_summary_phase,
     TAIWAN_INDEX_RECONCILIATION_END_TIME,
     TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
     get_market_index_summary,
@@ -102,11 +106,9 @@ from app.market.official_index_platform import (
     read_taiwan_official_index,
     refresh_taiwan_official_index,
 )
-from app.market.providers.twse_mis_current_breadth import (
-    get_cached_current_breadth_stock_rows,
-)
 from app.market.source_health import build_taiwan_source_health
 from app.market_data.eod_coverage import (
+    eod_reconcile_bounds,
     expected_eod_trade_date,
     should_enqueue_eod_reconcile,
 )
@@ -1402,36 +1404,74 @@ def _add_taiwan_daily_metric_repair_jobs(scheduler: Any) -> bool:
     return True
 
 
+def _begin_taiwan_summary_timing(db, lane, started_at, started):
+    trace = {"run_id": uuid4().hex, "pid": getpid(), "lane": lane,
+             "started_at": started_at.isoformat(), "status": "error",
+             "phases": {}, "counts": {}, "_started": started}
+    db.info["tw_summary_phase_timing"] = trace
+    logger.debug("Taiwan summary invocation started run_id=%s pid=%s lane=%s started_at=%s",
+                 trace["run_id"], trace["pid"], lane, trace["started_at"])
+    return trace
+
+
+def _log_taiwan_summary_timing(db, trace):
+    trace["wall_ms"] = round((monotonic() - trace.pop("_started")) * 1000, 3)
+    trace["finished_at"] = datetime.now(_timezone()).isoformat()
+    trace.pop("phase", None)
+    db.info.pop("tw_summary_phase_timing", None)
+    # Index cadence is 5s. Keep ordinary rounds at DEBUG; slow/error rounds
+    # emit one bounded record, never one record per candidate or SQL statement.
+    log = logger.warning if trace["status"] == "error" or trace["wall_ms"] >= 5000 else logger.debug
+    log("Taiwan summary invocation timing=%s", json.dumps(trace, separators=(",", ":")))
+
+
 def collect_taiwan_market_index_summary() -> None:
     now = datetime.now(_timezone())
     if not is_taiwan_index_live_refresh_window(now):
         return
+    started = monotonic()
     db = SessionLocal()
+    timing = _begin_taiwan_summary_timing(db, "index", now, started)
     try:
-        payload = refresh_current_market_index_snapshots(db=db)
+        with current_market_summary_phase(db, "current_refresh"):
+            payload = refresh_current_market_index_snapshots(db=db)
         trade_date = taiwan_presentation_session(now)["trade_date"]
         materialized_count = 0
         for index_id in ("TAIEX", "TPEX"):
-            batch = materialize_index_minute_candidates(
-                db,
-                index_id=index_id,
-                trade_date=trade_date,
-                as_of=now,
-            )
+            with current_market_summary_phase(db, f"candidate_build_{index_id}"):
+                batch = materialize_index_minute_candidates(
+                    db,
+                    index_id=index_id,
+                    trade_date=trade_date,
+                    as_of=now,
+                )
+            timing["counts"][index_id] = {
+                "candidates": len(batch.candidates),
+                "distinct_bar_keys": len({(c.observation.lineage.provider,
+                    c.observation.instrument.symbol, c.observation.interval, c.observation.start_at)
+                    for c in batch.candidates}),
+            }
             if not batch.candidates:
                 continue
-            summary = TaiwanBarMaterializationTransaction(
-                db
-            ).persist_materialized_bars(batch.candidates)
+            with current_market_summary_phase(db, f"candidate_persist_{index_id}"):
+                summary = TaiwanBarMaterializationTransaction(
+                    db
+                ).persist_materialized_bars(batch.candidates)
+            timing["counts"][index_id].update(written=summary.observations_written,
+                unchanged=summary.observations_unchanged)
             materialized_count += (
                 summary.observations_written + summary.observations_unchanged
             )
-        persistence = persist_taiwan_market_minute_state(
-            db,
-            payload=payload,
-            finalized=False,
-            now=now,
-        )
+        with current_market_summary_phase(db, "minute_state_persist"):
+            persistence = persist_taiwan_market_minute_state(
+                db,
+                payload=payload,
+                finalized=False,
+                now=now,
+            )
+        timing["counts"]["minute_rows"] = persistence.get("inserted_count", 0) + persistence.get("updated_count", 0)
+        timing["counts"]["indices"] = len(payload.get("indices") or [])
+        timing["status"] = "success"
         logger.debug(
             "Taiwan market index summary cache refreshed as_of=%s indices=%s "
             "minute_rows=%s base_1m_candidates=%s.",
@@ -1444,35 +1484,48 @@ def collect_taiwan_market_index_summary() -> None:
         db.rollback()
         logger.exception("Taiwan market index summary cache refresh failed.")
     finally:
-        db.close()
+        try:
+            with current_market_summary_phase(db, "session_close"):
+                db.close()
+        finally:
+            _log_taiwan_summary_timing(db, timing)
 
 
 def collect_taiwan_market_breadth_summary() -> None:
     now = datetime.now(_timezone())
     if not is_taiwan_index_live_refresh_window(now):
         return
+    started = monotonic()
     db = SessionLocal()
+    timing = _begin_taiwan_summary_timing(db, "breadth", now, started)
     try:
-        payload = refresh_current_market_breadth_snapshots(db=db)
-        persistence = persist_taiwan_market_minute_state(
-            db,
-            payload=payload,
-            finalized=False,
-            now=now,
-            commit=False,
-        )
-        stock_state_persistence = persist_taiwan_intraday_stock_states(
-            db,
-            rows=attach_current_market_lineage_to_stock_rows(
-                get_cached_current_breadth_stock_rows(),
-                summary=payload,
-            ),
-            now=now,
-            commit=False,
-        )
+        with current_market_summary_phase(db, "current_refresh"):
+            payload = refresh_current_market_breadth_snapshots(db=db)
+        with current_market_summary_phase(db, "minute_state_persist"):
+            persistence = persist_taiwan_market_minute_state(
+                db,
+                payload=payload,
+                finalized=False,
+                now=now,
+                commit=False,
+            )
+        with current_market_summary_phase(db, "stock_state_persist"):
+            stock_state_persistence = persist_taiwan_intraday_stock_states(
+                db,
+                rows=attach_current_market_lineage_to_stock_rows(
+                    summary=payload,
+                    db=db,
+                ),
+                now=now,
+                commit=False,
+            )
         # These two derived views describe the same acquisition. A stock-state
         # failure must not publish only the market-minute half of this update.
-        db.commit()
+        with current_market_summary_phase(db, "derived_state_commit"):
+            db.commit()
+        timing["counts"].update(minute_rows=persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
+            stock_state_rows=stock_state_persistence.get("inserted_count", 0) + stock_state_persistence.get("updated_count", 0))
+        timing["status"] = "success"
         logger.debug(
             "Taiwan market breadth cache refreshed as_of=%s minute_rows=%s "
             "stock_state_rows=%s.",
@@ -1486,7 +1539,11 @@ def collect_taiwan_market_breadth_summary() -> None:
         db.rollback()
         logger.exception("Taiwan market breadth cache refresh failed.")
     finally:
-        db.close()
+        try:
+            with current_market_summary_phase(db, "session_close"):
+                db.close()
+        finally:
+            _log_taiwan_summary_timing(db, timing)
 
 
 def refresh_taiwan_market_index_directories() -> None:
@@ -1541,7 +1598,9 @@ def _reconcile_taiwan_official_index_rows(
         if (
             selected is not None
             and selected.trade_date == expected_index_date
-            and current.resolved.health.facts_usable
+            # A qualified close with missing totals is factual but still needs
+            # reconciliation; only a complete dataset can skip acquisition.
+            and current.resolved.health.status.value in {"selected", "fallback"}
         ):
             results.append(
                 {
@@ -2027,12 +2086,20 @@ def _add_taiwan_corporate_event_history_refresh_job(scheduler: Any) -> bool:
     hour, minute = _parse_hour_minute(
         settings.scheduler_tw_corporate_event_history_refresh_time
     )
+    from apscheduler.triggers.combining import OrTrigger
+    from apscheduler.triggers.cron import CronTrigger
+    from app.market.taiwan_rules import TAIWAN_DAILY_REGULAR_RESEARCH_TIME, TAIWAN_DAILY_PRICE_RELEASE_TIME
+    # Same owner/job, with bounded opportunities five minutes after each daily
+    # release gate. force=False rechecks only lagged provider history windows.
+    clocks = {(hour, minute)}
+    for release in (TAIWAN_DAILY_REGULAR_RESEARCH_TIME, TAIWAN_DAILY_PRICE_RELEASE_TIME):
+        opportunity = datetime.combine(date.min, release) + timedelta(minutes=5)
+        clocks.add((opportunity.hour, opportunity.minute))
+    trigger = OrTrigger([CronTrigger(day_of_week=settings.scheduler_tw_corporate_event_history_refresh_day_of_week,
+        hour=h, minute=m, timezone=_timezone()) for h, m in sorted(clocks)])
     scheduler.add_job(
         refresh_taiwan_corporate_event_history,
-        trigger="cron",
-        day_of_week=settings.scheduler_tw_corporate_event_history_refresh_day_of_week,
-        hour=hour,
-        minute=minute,
+        trigger=trigger,
         id="taiwan_corporate_event_history_refresh",
         replace_existing=True,
         coalesce=True,
@@ -2513,11 +2580,27 @@ def _add_market_chip_daily_refresh_jobs(scheduler: Any) -> bool:
     return True
 
 
-def enqueue_market_eod_coverage_reconcile(*, markets: tuple[str, ...] | None = None) -> None:
+def enqueue_market_eod_coverage_reconcile(
+    *, markets: tuple[str, ...] | None = None, retry_scheduler: Any | None = None,
+) -> None:
     from app.market.daily_ohlcv_platform import qualify_taiwan_eod_universe
     from app.us_market.daily_rollout import (
         us_daily_full_market_acquisition_enabled,
     )
+
+    def schedule_tw_retry(retry_at: datetime) -> None:
+        # Keep the original Cron and its window; adjust only this job's next
+        # wakeup when backoff expires between two scheduled opportunities.
+        local_retry = retry_at.astimezone(ZoneInfo("Asia/Taipei"))
+        if local_retry.weekday() >= 5 or not (
+            (local_retry.hour == 14 and local_retry.minute >= 35)
+            or (local_retry.hour == 15 and local_retry.minute >= 20)
+            or 16 <= local_retry.hour <= 23
+        ):
+            return
+        job = retry_scheduler.get_job("taiwan_eod_coverage_reconcile")
+        if job is not None and job.next_run_time is not None and retry_at < job.next_run_time:
+            retry_scheduler.modify_job(job.id, next_run_time=retry_at)
 
     configured_markets = dict.fromkeys(
         item.upper() for item in _split_csv(settings.scheduler_eod_coverage_markets)
@@ -2545,6 +2628,7 @@ def enqueue_market_eod_coverage_reconcile(*, markets: tuple[str, ...] | None = N
             expected_trade_date = expected_eod_trade_date(
                 market,
                 us_port=us_port,
+                include_early_regular=market == "TW",
             )
             if not should_enqueue_eod_reconcile(
                 db,
@@ -2552,6 +2636,8 @@ def enqueue_market_eod_coverage_reconcile(*, markets: tuple[str, ...] | None = N
                 expected_trade_date=expected_trade_date,
                 us_port=us_port,
                 taiwan_daily_qualifier=qualify_taiwan_eod_universe,
+                **({"retry_at_callback": schedule_tw_retry}
+                   if market == "TW" and retry_scheduler is not None else {}),
             ):
                 continue
             job, created = enqueue_eod_coverage_reconcile(
@@ -2562,7 +2648,7 @@ def enqueue_market_eod_coverage_reconcile(*, markets: tuple[str, ...] | None = N
                 max_symbols=(
                     settings.scheduler_eod_coverage_us_max_symbols_per_run
                     if market == "US"
-                    else 2
+                    else eod_reconcile_bounds("TW").max_calls
                 ),
                 max_runtime_seconds=(
                     settings.scheduler_eod_coverage_us_max_runtime_seconds
@@ -2610,13 +2696,14 @@ def _add_market_eod_coverage_reconcile_job(scheduler: Any) -> bool:
         from apscheduler.triggers.cron import CronTrigger
 
         trigger = OrTrigger([
+            CronTrigger(day_of_week="mon-fri", hour=14, minute="35,50", timezone="Asia/Taipei"),
             CronTrigger(day_of_week="mon-fri", hour=15, minute="20,35,50", timezone="Asia/Taipei"),
             CronTrigger(day_of_week="mon-fri", hour="16-23", minute="5,20,35,50", timezone="Asia/Taipei"),
         ])
         scheduler.add_job(
             enqueue_market_eod_coverage_reconcile,
             trigger=trigger,
-            kwargs={"markets": ("TW",)},
+            kwargs={"markets": ("TW",), "retry_scheduler": scheduler},
             id="taiwan_eod_coverage_reconcile",
             replace_existing=True,
             coalesce=True,
@@ -2675,7 +2762,6 @@ def enqueue_us_priority_ohlc_reconcile(*, now: datetime | None = None) -> None:
             and previous_result.get("continuation_required") is True
             and isinstance(previous_result.get("continuation_remaining_count"), int)
             and previous_result["continuation_remaining_count"] > 0
-            and previous_result.get("error_count") == 0
         )
         if latest_completed is not None and isinstance(latest_completed.ended_at, datetime):
             # SQLite returns naive UTC. Restart uses the durable JobRun receipt,
@@ -3190,6 +3276,20 @@ def _add_taiwan_swing_research_job(scheduler: Any) -> bool:
     return True
 
 
+def _add_us_watchlist_research_job(scheduler: Any) -> bool:
+    if not settings.enable_us_watchlist_research_scheduler:
+        return False
+    from apscheduler.triggers.cron import CronTrigger
+    from app.jobs.us_watchlist_research import run_scheduled_scan
+    from app.us_market.research_schedule import CRON_MINUTES
+    from app.us_market.trading_calendar import US_MARKET_TIMEZONE
+    # Calendar-owned post-close gate also covers early closes and overnight resume.
+    scheduler.add_job(run_scheduled_scan,
+        trigger=CronTrigger(minute=CRON_MINUTES, timezone=US_MARKET_TIMEZONE),
+        id="us_watchlist_research", replace_existing=True, coalesce=True, max_instances=1)
+    return True
+
+
 def start_scheduler() -> Any | None:
     require_intraday_publisher_admission()
     if (
@@ -3209,6 +3309,7 @@ def start_scheduler() -> Any | None:
         and not settings.enable_taiwan_session_close_scheduler
         and not settings.enable_taiwan_price_map_snapshot_scheduler
         and not settings.enable_taiwan_swing_research_scheduler
+        and not settings.enable_us_watchlist_research_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
@@ -3364,6 +3465,7 @@ def start_scheduler() -> Any | None:
     )
     add_taiwan_price_map_snapshot_jobs(scheduler)
     _add_taiwan_swing_research_job(scheduler)
+    _add_us_watchlist_research_job(scheduler)
     taiwan_session_close_scheduler_enabled = add_taiwan_session_close_jobs(
         scheduler
     )

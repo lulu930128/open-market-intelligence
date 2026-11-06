@@ -48,7 +48,9 @@ def _inside_closeout_window(local_now: datetime) -> bool:
 
 
 def _mis_depth_acquisition(local_now: datetime) -> TwseMisRealtimeAcquisitionAdapter:
-    return TwseMisRealtimeAcquisitionAdapter(clock=lambda: local_now)
+    # local_now is the scheduler's policy cutoff, not a transport receipt.
+    # The adapter samples this clock again after the response completes.
+    return TwseMisRealtimeAcquisitionAdapter(clock=lambda: datetime.now(TAIWAN_TZ))
 
 
 def collect_taiwan_session_closes(
@@ -266,19 +268,20 @@ def collect_taiwan_session_closes(
 def add_taiwan_session_close_jobs(scheduler: Any) -> bool:
     if not settings.enable_taiwan_session_close_scheduler:
         return False
-    for minute in TAIWAN_SESSION_CLOSE_RETRY_MINUTES:
-        scheduler.add_job(
-            collect_taiwan_session_closes,
-            trigger="cron",
-            day_of_week="mon-fri",
-            hour=13,
-            minute=minute,
-            second=TAIWAN_SESSION_CLOSE_TRIGGER_SECOND,
-            id=f"taiwan_session_closeout_13{minute:02d}",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
+    # One cron job owns all retry slots, so max_instances applies across them.
+    # Five independent IDs would allow five overlapping 32-symbol collectors.
+    scheduler.add_job(
+        collect_taiwan_session_closes,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=13,
+        minute=",".join(str(minute) for minute in TAIWAN_SESSION_CLOSE_RETRY_MINUTES),
+        second=TAIWAN_SESSION_CLOSE_TRIGGER_SECOND,
+        id="taiwan_session_closeout",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
     return True
 
 

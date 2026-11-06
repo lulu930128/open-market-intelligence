@@ -1,5 +1,11 @@
 # OMI runtime control v1 — source contract
 
+## Execution 元件的本機部署邊界（Source／隔離）
+
+既有 Controller 內新增 Launcher-owned execution component，沿同使用者 local pipe 接受固定 ExecutionStart／ExecutionStop／ExecutionStatus，並有 updater 使用的 ExecutionPrepareUpdate fence。它不走遠端 Backend token、不開 HTTP/MCP lifecycle route；Backend receipt queue、writer/schema admission 和交易 Journal 各自保留原 owner。唯一非秘密偏好位於 Controller `settings/execution-preference.json`，不進根目錄 UUID receipt 的 Recover／capacity／credential 掃描。初始化偏好失敗且本 owner 從未 spawn 時，兩個 execution OS lease 皆空閒仍可正常退出研究 Launcher；已 spawn／owner 不明不降級成安全退出。
+
+操作語意、redirector lineage、退出／更新與正式首次桌面採用見 [LiveExecutionRuntime](LiveExecutionRuntime.md) 及 [部署驗收](../exec-plans/active/execution-always-online-20261105/DeploymentAcceptance.md)。這是 Source／隔離能力，正式 owner 尚未載入。
+
 ## 手動終止 schema worker 與退出後觀察
 
 `scripts/omi-schema-worker-exit.ps1` 是一次性 operator 工具，不是另一個 manager，
@@ -1192,6 +1198,14 @@ Bootstrap parent 保存原 target plan、admitted child ids 與剩餘 symbols；
 progress 不代表 children coverage。每個 child 的 deadline、CAS claim、quota、retry 與
 terminal postcondition 仍由 `taiwan_intraday_demand` 擁有。Admission 與 parent checkpoint
 之間若 persistence outcome 不明，保留 inflight ledger 並阻擋自動重放。
+
+完整 admission 後，尚未 terminal 的 child 以 `owner_children_pending` safe point 保存
+在同一 paused obligation。JobService 在 executor fence 外以唯讀、最多原 10 個 child ID
+檢查依賴；pending 不提交 Future，child completion callback 或正式 startup recovery
+才喚醒同一 parent。成功只在所有原 child success 時成立；missing／error／未知 terminal
+喚醒失敗彙整。等待不持有 worker 或 DB transaction、不新增 timer／queue、不重派 child，
+也不回寫既有 terminal parent 歷史。已完整 admission 的 frozen target 不因跨日或 universe
+變更重建；未完成 admission 仍遵守原 context guard。
 
 其餘已開始的 worker，包括 TW EOD venue bulk、index repair、其他未接線 bootstrap、
 Dispatch 與 intraday-demand，尚無本契約驗證的中途 safe point；執行中顯示

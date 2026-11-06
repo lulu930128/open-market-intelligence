@@ -1,9 +1,10 @@
 from datetime import date
+from time import monotonic
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import utc_now
+from app.db.models import JobRun, utc_now
 from app.jobs.cooperative import period_checkpoint_arguments, radar_outcome_checkpoint_arguments
 from app.jobs.service import JobExecutionError, ProgressCallback, run_tracked_job
 from app.jp_market import service as jp_market_service
@@ -281,10 +282,28 @@ def run_taiwan_broker_branch_market_refresh_job(
     max_stocks: int,
     max_runtime_seconds: int,
 ) -> None:
-    from app.jobs.cooperative import checkpoint_after_transaction
+    from app.jobs.cooperative import JobPaused, checkpoint_after_transaction, current_job_stop
 
     def worker(db: Session, progress: ProgressCallback):
-        progress(0, 1, "Preparing Taiwan all-market broker-branch collection.")
+        token = current_job_stop.get()
+        saved = token.resume_checkpoint if token else None
+        slice_started = monotonic()
+        slice_stocks = 0
+
+        def checkpoint(evidence):
+            nonlocal slice_stocks
+            # A restart retries a rolled-back stock as before; ordinary slices
+            # retain attempted failures so a failing prefix cannot loop forever.
+            restart = evidence.pop("restart_checkpoint", evidence)
+            checkpoint_after_transaction(db, restart if token and token.requested.is_set() else evidence)
+            if token and evidence["safe_point"] == "stock_transaction_complete":
+                slice_stocks += 1
+                if (evidence["current"] < evidence["total"]
+                        and (slice_stocks >= 8 or monotonic() - slice_started >= 60)):
+                    raise JobPaused(evidence, reason="work_slice")
+
+        if saved is None:
+            progress(0, 1, "Preparing Taiwan all-market broker-branch collection.")
         return refresh_taiwan_broker_branch_market(
             db,
             trade_date=trade_date,
@@ -293,7 +312,8 @@ def run_taiwan_broker_branch_market_refresh_job(
             max_runtime_seconds=max_runtime_seconds,
             progress=progress,
             job_run_id=job_id,
-            checkpoint=lambda evidence: checkpoint_after_transaction(db, evidence),
+            checkpoint=checkpoint,
+            resume_checkpoint=saved,
         )
 
     run_tracked_job(job_id, worker)
@@ -606,7 +626,9 @@ def run_watchlist_radar_auto_snapshot_job(
     save_snapshots: bool,
 ) -> None:
     def worker(db: Session, progress: ProgressCallback):
-        progress(0, 1, "Running watchlist radar snapshot automation.")
+        checkpoint_args = period_checkpoint_arguments(db, "radar_snapshot_scope", yield_after_period=True)
+        if checkpoint_args.get("resume_state") is None:
+            progress(0, 1, "Running watchlist radar snapshot automation.")
         return run_watchlist_radar_automation(
             db=db,
             group_ids=group_ids,
@@ -621,7 +643,7 @@ def run_watchlist_radar_auto_snapshot_job(
             evaluate_lookback_days=evaluate_lookback_days,
             save_snapshots=save_snapshots,
             progress_callback=progress,
-            **period_checkpoint_arguments(db, "radar_snapshot_scope"),
+            **checkpoint_args,
         )
 
     run_tracked_job(job_id, worker)
@@ -673,6 +695,7 @@ def run_us_watchlist_daily_refresh_job(
 ) -> None:
     def worker(db: Session, progress: ProgressCallback):
         progress(0, 1, "Refreshing US watchlist daily prices.")
+        job = db.get(JobRun, job_id)
         return us_market_service.refresh_us_watchlist_daily_prices(
             db=db,
             group_id=group_id,
@@ -682,6 +705,9 @@ def run_us_watchlist_daily_refresh_job(
             adjusted=adjusted,
             sleep_seconds=sleep_seconds,
             progress_callback=progress,
+            # The POST owner fixes this durable type; scheduler jobs use a
+            # different type. No request flag or rollout mode grants scope.
+            explicit_operation=(job is not None and job.job_type == "us_market.watchlist_daily_refresh"),
         )
 
     run_tracked_job(job_id, worker)

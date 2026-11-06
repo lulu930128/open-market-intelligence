@@ -50,10 +50,18 @@ def run_taiwan_intraday_bar_bootstrap_job(
     def worker(db: Session, progress: job_service.ProgressCallback):
         continuation_args = owner_continuation_arguments(db, "tw_bootstrap_children")
         progress(0, max_symbols, "Running bounded Taiwan Base-1m bootstrap.")
-        plan = resolve_taiwan_tier_a_target_plan(db, operation_profile="production_intraday",
-            max_symbols=max_symbols, configured_symbols=symbols or None)
-        requested_at = datetime.now(TAIWAN_TZ)
-        target_date = taiwan_presentation_session(requested_at)["trade_date"].isoformat()
+        saved = continuation_args.get("resume_state")
+        if saved and len(saved["results"]) == len(saved["items"]):
+            # Admission is complete. The validated original ledger owns the
+            # dependency set even after a session/universe changes on restart.
+            plan = saved["context"]["target_plan"]
+            requested_at = datetime.fromisoformat(saved["context"]["requested_at"])
+            target_date = saved["identity"]["date"]
+        else:
+            plan = resolve_taiwan_tier_a_target_plan(db, operation_profile="production_intraday",
+                max_symbols=max_symbols, configured_symbols=symbols or None)
+            requested_at = datetime.now(TAIWAN_TZ)
+            target_date = taiwan_presentation_session(requested_at)["trade_date"].isoformat()
         items = list(plan.get("symbols") or [])
         work = OwnerWork("tw_bootstrap_children",
             dict(contract="tw.bootstrap.parent.v1", date=target_date, release=target_date,
@@ -101,6 +109,14 @@ def run_taiwan_intraday_bar_bootstrap_job(
             "Taiwan Base-1m child admission finished; coverage follows child outcomes.",
         )
         if not payload["postcondition_met"]:
+            if (not payload["remaining_symbols"] and results
+                    and all(item["job_id"] is not None and item["status"] in
+                            {"queued", "running", "paused", "success"} for item in results)):
+                # End the progress refresh's read transaction before yielding.
+                # JobService wakes this same parent from child completion;
+                # no worker sleeps, polls, or admits the children again.
+                db.rollback()
+                work.notify("wait_children")
             raise job_service.JobExecutionError(
                 "Taiwan Base-1m bootstrap did not satisfy its postcondition.",
                 result=payload,

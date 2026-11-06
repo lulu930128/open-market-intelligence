@@ -13,7 +13,232 @@ using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace Omi.RuntimeControl {
+    // A component of the mutex-owning Launcher, not another service/watchdog.
+    // Owns only the launch supervisor. Python remains the sole Native supervisor.
+    internal sealed class ExecutionComponent {
+        readonly object gate = new object();
+        readonly string repo, state, python, arguments, preference;
+        readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = 65536 };
+        readonly Process owner = Process.GetCurrentProcess();
+        Process process;
+        Process supervisor, nativeShim, native;
+        string startup, stopRequest, desired = "OFFLINE";
+        bool keepOnline, closing, attempted, spawnUnknown;
+
+        internal ExecutionComponent(string root, string stateRoot, string interpreter, string fixedArguments, string setting) {
+            repo = root; state = stateRoot; python = interpreter; arguments = fixedArguments; preference = setting;
+            // Missing is opt-out; malformed/unreadable is UNKNOWN, never enabled.
+            if (File.Exists(preference)) {
+                var value = Read(preference);
+                if (Text(value, "schema") != "omi.launcher.execution-preference.v1" ||
+                    !value.ContainsKey("keep_online") || !(value["keep_online"] is bool))
+                    throw new IOException("EXECUTION_PREFERENCE_INVALID");
+                keepOnline = (bool)value["keep_online"];
+            }
+        }
+        static string Text(Dictionary<string,object> value, string key) {
+            return value.ContainsKey(key) ? Convert.ToString(value[key], System.Globalization.CultureInfo.InvariantCulture) : null;
+        }
+        Dictionary<string,object> Read(string path) {
+            using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                if (file.Length > 65536) throw new IOException("EXECUTION_RECEIPT_INVALID");
+                using (var reader = new StreamReader(file, Encoding.UTF8)) return json.Deserialize<Dictionary<string,object>>(reader.ReadToEnd());
+            }
+        }
+        void Write(string path, object value) {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            using (var file = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
+                var bytes = Encoding.UTF8.GetBytes(json.Serialize(value)); file.Write(bytes, 0, bytes.Length); file.Flush(true);
+            }
+            if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
+        }
+        void Preference(bool enabled) {
+            Write(preference, new Dictionary<string,object> {{"schema", "omi.launcher.execution-preference.v1"}, {"keep_online", enabled}});
+            keepOnline = enabled;
+        }
+        internal static bool LeasesFree(string state) {
+            foreach (var name in new[] {"launch-supervisor.owner", "native-session.owner"}) {
+                var path = Path.Combine(state, name);
+                if (!File.Exists(path)) continue;
+                using (var file = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)) {
+                    file.Lock(0, 1); file.Unlock(0, 1);
+                }
+            }
+            return true;
+        }
+        bool LeasesFree() { return LeasesFree(state); }
+        Dictionary<string,object> BoundReceipt() {
+            var value = Read(Path.Combine(state, "startup-" + startup + ".json"));
+            if (Text(value, "startup_id") != startup || Text(value, "owner_pid") != owner.Id.ToString() ||
+                Text(value, "owner_created") != owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString())
+                throw new IOException("EXECUTION_RECEIPT_IDENTITY_MISMATCH");
+            return value;
+        }
+        Process Retain(Process retained, int pid, Process parent, string interpreter) {
+            if (retained != null && retained.Id == pid && !retained.HasExited) return retained;
+            if (retained != null && !retained.HasExited) throw new IOException("EXECUTION_GENERATION_STILL_ACTIVE");
+            var candidate = Process.GetProcessById(pid);
+            try {
+                var handle = candidate.Handle;
+                var baseImage = interpreter;
+                var cfg = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(interpreter)), "pyvenv.cfg");
+                if (File.Exists(cfg)) foreach (var line in File.ReadAllLines(cfg))
+                    if (line.StartsWith("executable = ", StringComparison.Ordinal)) baseImage = line.Substring(13).Trim();
+                if (parent.HasExited || candidate.HasExited || candidate.StartTime.ToUniversalTime() < parent.StartTime.ToUniversalTime() ||
+                    (pid != parent.Id && ProcessEvidence.ParentId(pid) != parent.Id) ||
+                    (!String.Equals(candidate.MainModule.FileName, interpreter, StringComparison.OrdinalIgnoreCase) &&
+                     !String.Equals(candidate.MainModule.FileName, baseImage, StringComparison.OrdinalIgnoreCase)))
+                    throw new IOException("EXECUTION_PROCESS_LINEAGE_MISMATCH");
+                if (retained != null) retained.Dispose();
+                return candidate;
+            } catch { candidate.Dispose(); throw; }
+        }
+        internal Dictionary<string,object> Status() {
+            lock (gate) {
+                var result = new Dictionary<string,object> {
+                    {"schema", "omi.launcher.execution.v1"}, {"desired", desired}, {"keep_online", keepOnline},
+                    {"startup_id", startup}, {"stop_request_id", stopRequest}, {"state", "UNKNOWN"},
+                    {"reason", "EXECUTION_OWNER_UNVERIFIED"}, {"supervisor_pid", null},
+                    {"broker_connection", "CHECK_NATIVE_STATUS"}, {"strategy_effects", false},
+                    {"launcher_pid", owner.Id}, {"observed_at", DateTime.UtcNow.ToString("o")}
+                };
+                try {
+                    if (spawnUnknown) return result;
+                    if (process == null) {
+                        if (LeasesFree()) { result["state"] = "STOPPED"; result["reason"] = "NO_OWNED_SUPERVISOR"; }
+                        return result;
+                    }
+                    var value = BoundReceipt();
+                    result["supervisor_pid"] = value.ContainsKey("supervisor_pid") ? value["supervisor_pid"] : null;
+                    result["spawn_pid"] = process.Id;
+                    if (process.HasExited) {
+                        if (Text(value, "status") == "STOPPED" && Text(value, "owner_released") == "True" && LeasesFree() &&
+                            (supervisor == null || supervisor.HasExited) && (native == null || native.HasExited) &&
+                            (nativeShim == null || nativeShim.HasExited)) {
+                            result["state"] = "STOPPED"; result["reason"] = "OWNED_EXIT_AND_LEASES_RELEASED";
+                        } else result["reason"] = "SUPERVISOR_EXIT_UNCONFIRMED";
+                        return result;
+                    }
+                    DateTime observed;
+                    if (!DateTime.TryParse(Text(value, "observed_at"), null, System.Globalization.DateTimeStyles.RoundtripKind, out observed) ||
+                        observed.ToUniversalTime() > DateTime.UtcNow.AddSeconds(1) ||
+                        (DateTime.UtcNow - observed.ToUniversalTime()).TotalSeconds > 5) {
+                        result["reason"] = "EXECUTION_RECEIPT_STALE"; return result;
+                    }
+                    var status = Text(value, "status");
+                    supervisor = Retain(supervisor, Int32.Parse(Text(value, "supervisor_pid")), process, python);
+                    if (status == "READY") {
+                        var nativePython = Path.Combine(repo, ".venv-kgi", "Scripts", "python.exe");
+                        nativeShim = Retain(nativeShim, Int32.Parse(Text(value, "child_launcher_pid")), supervisor, nativePython);
+                        native = Retain(native, Int32.Parse(Text(value, "pid")), nativeShim, nativePython);
+                        result["native_pid"] = native.Id;
+                    }
+                    result["lineage_attested"] = true;
+                    result["state"] = desired == "OFFLINE" ? "STOPPING" :
+                        status == "READY" ? "RUNNING" : status == "RECOVERING" ? "RECOVERING" :
+                        status == "BLOCKED" ? "BLOCKED" : "STARTING";
+                    result["reason"] = "SUPERVISOR_OBSERVED";
+                    // This is process/startup evidence, not current broker ONLINE.
+                    result["startup_status"] = status;
+                    result["stop_acknowledged"] = stopRequest != null && Text(value, "stop_request_id") == stopRequest;
+                } catch (FileNotFoundException) {
+                    if (process != null && !process.HasExited) result["state"] = desired == "ONLINE" ? "STARTING" : "STOPPING";
+                    result["reason"] = "EXECUTION_RECEIPT_NOT_YET_AVAILABLE";
+                }
+                catch { result["reason"] = "EXECUTION_OBSERVATION_UNAVAILABLE"; }
+                return result;
+            }
+        }
+        internal Dictionary<string,object> Start(bool explicitIntent) {
+            lock (gate) {
+                if (closing) throw new IOException("EXECUTION_OWNER_CLOSING");
+                if (!explicitIntent && !keepOnline) return Status();
+                if (process != null && !process.HasExited) {
+                    // STOP wins; a later explicit Start must observe STOPPED first.
+                    if (desired != "ONLINE") throw new IOException("EXECUTION_STOP_IN_PROGRESS");
+                    return Status();
+                }
+                var prior = Status();
+                if ((string)prior["state"] != "STOPPED") throw new IOException("EXECUTION_OWNER_UNVERIFIED");
+                if (!explicitIntent && attempted) return prior; // one startup adoption, no watchdog
+                if (!File.Exists(python)) throw new IOException("EXECUTION_INTERPRETER_MISSING");
+                // Persist before spawn; a lost reply is never an automatic second login.
+                if (explicitIntent) Preference(true);
+                if (process != null) { process.Dispose(); process = null; }
+                desired = "ONLINE"; startup = Guid.NewGuid().ToString("N"); stopRequest = null; attempted = true;
+                var info = new ProcessStartInfo(python, arguments + " --startup-id " + startup +
+                    " --owner-pid " + owner.Id + " --owner-created " + owner.StartTime.ToUniversalTime().ToFileTimeUtc()) {
+                    WorkingDirectory = repo, UseShellExecute = false, CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardInput = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                // Bootstrap alone loads existing OMI config. No credentials in IPC/argv/logs.
+                try {
+                    process = Process.Start(info); var handle = process.Handle;
+                    process.StandardInput.Close();
+                    process.OutputDataReceived += delegate { }; process.ErrorDataReceived += delegate { };
+                    process.BeginOutputReadLine(); process.BeginErrorReadLine();
+                } catch { spawnUnknown = true; throw new IOException("EXECUTION_START_UNCONFIRMED"); }
+                return Status();
+            }
+        }
+        internal Dictionary<string,object> Stop(bool explicitIntent) {
+            lock (gate) {
+                // Manual Stop is durable even while connecting/recovering. Exit only
+                // suspends this owner; next normal Launcher adopts the preference.
+                if (explicitIntent) Preference(false);
+                desired = "OFFLINE";
+                if (startup != null && (process == null || !process.HasExited)) {
+                    if (stopRequest == null) stopRequest = Guid.NewGuid().ToString("N");
+                    Write(Path.Combine(state, "supervisor-stop-" + startup + ".json"),
+                        new Dictionary<string,object> {{"startup_id", startup}, {"request_id", stopRequest}, {"desired", "OFFLINE"}});
+                }
+                return Status();
+            }
+        }
+        internal bool PrepareExit(int milliseconds) {
+            lock (gate) { closing = true; Stop(false); }
+            var watch = Stopwatch.StartNew();
+            do {
+                if ((string)Status()["state"] == "STOPPED") return true;
+                Thread.Sleep(50);
+            } while (watch.ElapsedMilliseconds < milliseconds);
+            lock (gate) { closing = false; }
+            return false; // no kill, no disposal-as-stop
+        }
+        internal Dictionary<string,object> PrepareUpdate() {
+            lock (gate) {
+                var value = Status();
+                bool ready = (string)value["state"] == "STOPPED" && !keepOnline;
+                if (ready) closing = true; // No concurrent Start after updater admission.
+                value["update_prepared"] = ready;
+                return value;
+            }
+        }
+    }
     public static class ProcessEvidence {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct Entry {
+            public uint size, usage, pid; public UIntPtr heap; public uint module, threads, parent;
+            public int priority; public uint flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string image;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snapshot, ref Entry entry);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snapshot, ref Entry entry);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        public static int ParentId(int pid) {
+            var snapshot = CreateToolhelp32Snapshot(2, 0);
+            if (snapshot == new IntPtr(-1)) throw new IOException("PROCESS_LINEAGE_UNAVAILABLE");
+            try {
+                var entry = new Entry(); entry.size = (uint)Marshal.SizeOf(entry);
+                if (Process32FirstW(snapshot, ref entry)) do {
+                    if (entry.pid == pid) return checked((int)entry.parent);
+                } while (Process32NextW(snapshot, ref entry));
+                throw new IOException("PROCESS_LINEAGE_UNAVAILABLE");
+            } finally { CloseHandle(snapshot); }
+        }
         [DllImport("shell32.dll", SetLastError = true)]
         static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int count);
         [DllImport("kernel32.dll")]
@@ -195,6 +420,45 @@ namespace Omi.RuntimeControl {
         readonly string tokenHash;
         readonly string pipeName;
         readonly Queue<string> pending = new Queue<string>();
+        ExecutionComponent execution;
+        string executionState;
+        readonly HashSet<string> executionStarts = new HashSet<string>();
+        public void EnableExecution(string repo) {
+            lock (gate) {
+                if (execution != null) throw new IOException("EXECUTION_ALREADY_CONFIGURED");
+                executionState = Path.Combine(repo, "data", "execution-runtime");
+                execution = new ExecutionComponent(repo, executionState,
+                    Path.Combine(repo, ".venv", "Scripts", "python.exe"),
+                    "-B -m execution_runtime.launch --connect --supervise", Path.Combine(directory, "settings", "execution-preference.json"));
+                execution.Start(false);
+            }
+        }
+        public string LocalExecution(string action) {
+            lock (gate) {
+                if (execution == null) {
+                    if (action == "ExecutionPrepareUpdate" && PrepareExecutionExit(0))
+                        return "{\"schema\":\"omi.launcher.execution.v1\",\"state\":\"STOPPED\",\"update_prepared\":true}";
+                    throw new IOException("EXECUTION_OWNER_UNAVAILABLE");
+                }
+                return json.Serialize(action == "ExecutionStart" ? execution.Start(true) :
+                    action == "ExecutionStop" ? execution.Stop(true) :
+                    action == "ExecutionPrepareUpdate" ? execution.PrepareUpdate() :
+                    action == "ExecutionStatus" ? execution.Status() : throwInvalidExecution());
+            }
+        }
+        static Dictionary<string,object> throwInvalidExecution() { throw new ArgumentException("INVALID_EXECUTION_ACTION"); }
+        public bool PrepareExecutionExit(int milliseconds) {
+            lock (gate) {
+                // Constructor failure precedes every spawn. Never lock a research
+                // owner in merely because a non-secret preference was malformed.
+                try { return execution != null ? execution.PrepareExit(milliseconds) :
+                    executionState == null || ExecutionComponent.LeasesFree(executionState); }
+                catch { return false; }
+            }
+        }
+        public static bool ExecutionLeasesFree(string repo) {
+            return ExecutionComponent.LeasesFree(Path.Combine(repo, "data", "execution-runtime"));
+        }
         readonly ManualResetEvent listening = new ManualResetEvent(false);
         readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = Limit, RecursionLimit = 16 };
         readonly SecurityIdentifier sid = WindowsIdentity.GetCurrent().User;
@@ -541,6 +805,39 @@ namespace Omi.RuntimeControl {
                     if (offline && !request.ContainsKey("confirmation")) throw new ArgumentException();
                     if (request["action"] == "Status") return snapshot != null && (DateTime.UtcNow - published).TotalSeconds < 15
                         ? snapshot : "{\"schema\":\"omi.runtime-control.v1\",\"owner_id\":null,\"reason\":\"OWNER_NOT_ATTESTED\"}";
+                    if (request["action"] == "ExecutionStatus" || request["action"] == "ExecutionStart" || request["action"] == "ExecutionStop" || request["action"] == "ExecutionPrepareUpdate") {
+                        if (!ValidIdentity(pipeClient) || request["expected_owner_id"] != OwnerId)
+                            return "{\"schema\":\"omi.launcher.execution.v1\",\"state\":\"UNKNOWN\",\"reason\":\"OWNER_MISMATCH\"}";
+                        // Same-user local pipe authority only. Remote Backend/MCP
+                        // token does not confer execution lifecycle authority.
+                        var executionId = Id(request["request_id"]);
+                        string reply;
+                        try {
+                            var action = request["action"];
+                            // Lost Start replies cannot revive a later manual Stop.
+                            // Owner replacement also invalidates expected_owner_id.
+                            if (action == "ExecutionStart" && executionStarts.Contains(executionId)) action = "ExecutionStatus";
+                            else if (action == "ExecutionStart") {
+                                if (executionStarts.Count >= Capacity) throw new IOException("EXECUTION_REQUEST_CAPACITY");
+                                executionStarts.Add(executionId);
+                            }
+                            reply = LocalExecution(action);
+                        } catch (Exception error) {
+                            var code = OperationDiagnostics.Safe(error.Message,
+                                "EXECUTION_OWNER_UNAVAILABLE|EXECUTION_OWNER_CLOSING|EXECUTION_STOP_IN_PROGRESS|EXECUTION_OWNER_UNVERIFIED|EXECUTION_INTERPRETER_MISSING|EXECUTION_START_UNCONFIRMED|EXECUTION_REQUEST_CAPACITY",
+                                "EXECUTION_OPERATION_UNCONFIRMED");
+                            var unknown = code == "EXECUTION_START_UNCONFIRMED" || code == "EXECUTION_OPERATION_UNCONFIRMED";
+                            reply = json.Serialize(new Dictionary<string,object> {
+                                {"schema", "omi.launcher.execution.v1"}, {"state", unknown ? "UNKNOWN" : "BLOCKED"},
+                                {"reason", code}, {"operation_outcome", unknown ? "UNCONFIRMED" : "NOT_STARTED"}
+                            });
+                        }
+                        var result = json.Deserialize<Dictionary<string,object>>(reply);
+                        result["owner_id"] = OwnerId; result["request_id"] = executionId;
+                        result["action"] = request["action"];
+                        if (!result.ContainsKey("operation_outcome")) result["operation_outcome"] = "OBSERVED";
+                        return json.Serialize(result);
+                    }
                     string id = Id(request["request_id"]);
                     if (request["action"] == "ReadOperation") {
                         var operation = Read(id);

@@ -18,13 +18,82 @@ from r1d_test_support import isolated_job_lifecycle, offline_asyncio  # noqa: F4
 from test_owned_restart_preflight import restart_runtime  # noqa: F401
 
 
+def test_radar_77_scopes_yields_same_job_to_queued_eod(database, monkeypatch):
+    from app.db.models import WatchlistGroup
+    from app.jobs import eod_coverage
+    from app.watchlists import radar_automation as radar
+
+    with Session(database) as db:
+        groups = [WatchlistGroup(group_name=f"slice-{i}", is_active=True) for i in range(77)]
+        db.add_all(groups)
+        db.commit()
+        ids = [g.id for g in groups]
+    first_scope, release = Event(), Event()
+    visited, eod_observations = [], []
+
+    def bundle(**kwargs):
+        visited.append(kwargs["group_id"])
+        if len(visited) == 1:
+            first_scope.set()
+            assert release.wait(5)
+        return {}, []
+
+    monkeypatch.setattr(radar.radar_service, "get_watchlist_group_radar_bundle", bundle)
+    monkeypatch.setattr(radar.radar_outcome_service, "watchlist_radar_snapshot_date", lambda _: DAY)
+    monkeypatch.setattr(radar.radar_active_v2_service, "build_radar_v2_active_projection_from_db", lambda **kw: {})
+    def persist(**kw):
+        kw["db"].commit()
+        return {"evaluation_created_count": 1, "evaluation_ids": [], "rule_version": "fixture", "snapshot_date": DAY.isoformat()}
+    monkeypatch.setattr(radar.radar_active_v2_service, "persist_radar_v2_active", persist)
+    monkeypatch.setattr(radar.radar_shadow_v2_service, "evaluate_pending_radar_v2_outcomes",
+        lambda **kw: {"evaluated_count": 0, "error_count": 0, "errors": []})
+    monkeypatch.setattr(radar, "get_watchlist_radar_daily_coverage",
+        lambda **kw: {"complete": True, "reconciliation_complete": True})
+    radar_id, eod_id = make_job(database), make_job(database)
+    progress_values = []
+    update_progress = service.update_progress
+    def record_progress(**kwargs):
+        if kwargs["job_id"] == radar_id:
+            progress_values.append(kwargs["current"])
+        return update_progress(**kwargs)
+    monkeypatch.setattr(service, "update_progress", record_progress)
+    def reconcile(db, **kw):
+        saved = json.loads(service.get_job(db, radar_id).result_json or "{}")
+        eod_observations.append((len(visited), saved, time.monotonic() - submitted))
+        return {"status": "partial", "market": "TW", "postcondition_met": False,
+                "reason": "expected_date_not_observed", "stale_count": 1}
+    monkeypatch.setattr(eod_coverage, "reconcile_eod_coverage", reconcile)
+    try:
+        service.submit_job_task(backfill_tasks.run_watchlist_radar_auto_snapshot_job,
+            radar_id, ids, "action", True, True, 30, 100, False, 30, DAY, 10, True)
+        assert first_scope.wait(5)
+        submitted = time.monotonic()
+        service.submit_job_task(eod_coverage.run_eod_coverage_reconcile_job,
+            eod_id, "TW", True, DAY, 1, 60, 0.0, 1, 900)
+    finally:
+        release.set()
+        wait_idle(timeout=45)
+    assert eod_observations[0][0] == 1
+    assert eod_observations[0][2] < 5  # Fixture admission only, not full Radar or live SLO.
+    cursor = eod_observations[0][1][resumption.RESUME_KEY]["checkpoint"]["state"]
+    assert cursor["completed"] == 1 and len(cursor["items"]) == 77
+    assert visited == ids  # No repeated or omitted scopes through 76 continuations.
+    assert progress_values == sorted(progress_values)  # Resumption must not reset the displayed cursor.
+    result = snapshot(database, radar_id)
+    assert result["status"] == "success" and result["result"]["saved_count"] == 77
+    assert snapshot(database, eod_id)["result"]["reason"] == "expected_date_not_observed"
+    assert snapshot(database, eod_id)["status"] == "error"  # Fair admission does not invent current EOD.
+    with Session(database) as db:
+        assert db.query(JobRun).count() == 2
+
+
 DAY = date(2026, 10, 16)
 TASK = backfill_tasks.run_taiwan_broker_branch_market_refresh_job
 ARGS = (DAY, 0.0, 2500, 7200)
 
 
-def wait_idle():
-    deadline = time.monotonic() + 5
+def wait_idle(timeout=5):
+    deadline = time.monotonic() + timeout
     while service._pending_tasks or service._active_enqueues:
         assert time.monotonic() < deadline, service.observe_job_quiescence()
         time.sleep(.005)

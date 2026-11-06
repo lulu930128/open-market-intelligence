@@ -2403,6 +2403,7 @@ function Invoke-OmiUpdateStartup {
         $script:UpdateOperation.error_type=[Omi.RuntimeControl.OperationDiagnostics]::ErrorType($_.Exception.GetType().Name)
         $script:UpdateOperation.next_action='Read_update_receipt_and_Status_then_correct_failed_phase'
     } finally {
+        $script:BackendStartSchemaPin = $null
         $schema=$script:LastSchemaOperation
         if ($null -ne $schema -and $schema.request_id -ceq $RequestId) {
             $script:UpdateOperation.migration_outcome=$schema.migration_outcome
@@ -3117,6 +3118,9 @@ function Exit-Launcher {
         # The single-flight guards above keep an active schema task in this
         # owner. A terminal UNKNOWN result is retained history, not an exit veto;
         # full update observes all original worker exits and reacquires DB locks.
+        if ($null -ne $script:RuntimeController -and -not $script:RuntimeController.PrepareExecutionExit(10000)) {
+            throw 'EXECUTION_STOP_UNCONFIRMED'
+        }
         Stop-Services -Deadline $deadline
         $script:LauncherExitReady = $true
         [System.Windows.Forms.Application]::Exit()
@@ -3259,6 +3263,20 @@ $exitItem.add_Click({
     Exit-Launcher -Reason "tray-menu"
 })
 
+$executionItem = New-Object System.Windows.Forms.MenuItem
+$executionItem.Text = '交易服務（維持連線）'
+foreach ($entry in @(@('啟用並維持連線', 'ExecutionStart'), @('停用並記住離線', 'ExecutionStop'), @('檢查交易服務狀態', 'ExecutionStatus'))) {
+    $item = New-Object System.Windows.Forms.MenuItem
+    $item.Text = $entry[0]
+    $item.Tag = $entry[1]
+    $item.add_Click({
+        param($sender, $eventArgs)
+        try { Show-Message ($script:RuntimeController.LocalExecution([string]$sender.Tag)) }
+        catch { Show-Message '交易服務操作未確認，請檢查交易服務狀態；不要重複啟動。' }
+    })
+    [void]$executionItem.MenuItems.Add($item)
+}
+
 [void]$script:Menu.MenuItems.Add($script:TitleItem)
 [void]$script:Menu.MenuItems.Add($script:StatusItem)
 [void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
@@ -3274,6 +3292,7 @@ $exitItem.add_Click({
 [void]$script:Menu.MenuItems.Add($restartBackendItem)
 [void]$script:Menu.MenuItems.Add($safeStopBackendItem)
 [void]$script:Menu.MenuItems.Add($stopItem)
+[void]$script:Menu.MenuItems.Add($executionItem)
 [void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
 [void]$script:Menu.MenuItems.Add($exitItem)
 
@@ -3457,6 +3476,7 @@ $script:ActivationTimer.add_Tick({
 . (Join-Path $PSScriptRoot 'omi-runtime-control.ps1')
 . (Join-Path $PSScriptRoot 'apply-omi-update.ps1')
 Initialize-OmiRuntimeControl
+Initialize-OmiExecutionComponent
 if ($UpdateRequestId) {Invoke-OmiUpdateStartup -RequestId $UpdateRequestId}
 else {Start-Services}
 $script:Timer.Start()

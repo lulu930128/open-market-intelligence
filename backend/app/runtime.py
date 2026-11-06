@@ -197,6 +197,7 @@ class RuntimeCoordinator:
         self._restart_rearmed = False
         deadline = time.monotonic() + timeout_seconds
         stage = "HTTP_QUIESCENCE"
+        flush_owner = None
         scheduler_lease = None
         last_scheduler_false_remaining_ms = None
         last_job_false_remaining_ms = None
@@ -264,7 +265,9 @@ class RuntimeCoordinator:
             await until(lambda: all(gate.idle(lease) for gate, lease in self._restart_gates))
             stage = "COLLECTOR_FINAL_FLUSH"
             if fugle is not None:
+                flush_owner = "fugle"
                 await flush(fugle.flush_for_restart(fugle_lease))
+            flush_owner = "crypto"
             await flush(persistence.flush_once())
             persisted = persistence.status()
             if persisted["pending_count"] or persisted["flush_in_flight"] or persisted["last_error"]:
@@ -321,7 +324,16 @@ class RuntimeCoordinator:
             return {"state": "WRITERS_PREPARED", "authority": "SQLITE_IMMEDIATE_TRANSACTION",
                     "terminal_drain_started": False}
         except BaseException as exc:
-            if stage == "SCHEDULER_QUIESCENCE":
+            if stage == "COLLECTOR_FINAL_FLUSH":
+                # Bounded owner/type diagnostics; provider payloads and exception
+                # messages may contain private data and are not restart authority.
+                logger.warning(
+                    "OMI_RESTART_COLLECTOR_FINAL_FLUSH owner=%s failure_type=%s "
+                    "deadline_remaining_ms=%s",
+                    flush_owner, type(exc).__name__,
+                    round((deadline - time.monotonic()) * 1000),
+                )
+            elif stage == "SCHEDULER_QUIESCENCE":
                 # Observe before rearm clears the pause lease. Never infer the
                 # blocker from missed-run notices, and never discard active jobs.
                 logger.warning("OMI_RESTART_SCHEDULER_QUIESCENCE failure_type=%s "

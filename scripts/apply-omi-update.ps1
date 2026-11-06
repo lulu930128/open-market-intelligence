@@ -186,6 +186,28 @@ function Read-OmiUpdateOwnerStatus {
     return ([Omi.RuntimeControl.Controller]::ReadOwnerStatus($PipeName,$Process) | ConvertFrom-Json)
 }
 
+function Assert-OmiExecutionUpdateOffline {
+    param([string]$Repo, $Identity)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $suffix=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Repo.ToLowerInvariant())))).Replace('-','').ToLowerInvariant().Substring(0,24) }
+    finally { $sha.Dispose() }
+    $pipe = "omi-runtime-$suffix"
+    $status = Read-OmiUpdateOwnerStatus $pipe $Identity.Process
+    if (-not $status.owner_id) { throw 'UPDATE_EXECUTION_OWNER_UNVERIFIED' }
+    $message = @{action='ExecutionPrepareUpdate';request_id=[Guid]::NewGuid().ToString('D');expected_owner_id=$status.owner_id;token=''} | ConvertTo-Json -Compress
+    $result = [Omi.RuntimeControl.Controller]::RequestOwner($pipe, $Identity.Process, $message) | ConvertFrom-Json
+    if ($result.schema -ceq 'omi.launcher.execution.v1') {
+        if ($result.state -cne 'STOPPED' -or $result.update_prepared -cne $true) { throw 'UPDATE_EXECUTION_STOP_REQUIRED' }
+        return
+    }
+    # First adoption from a legacy Launcher has no execution component. It
+    # cannot spawn execution; still require both canonical OS leases to be free.
+    $setting = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Open Market Intelligence\runtime-control\$suffix\settings\execution-preference.json"
+    if ((Test-Path -LiteralPath $setting) -or -not [Omi.RuntimeControl.Controller]::ExecutionLeasesFree($Repo)) {
+        throw 'UPDATE_EXECUTION_OWNER_UNVERIFIED'
+    }
+}
+
 function Get-OmiUpdateRecovery {
     param([string]$Repo, $Identity, [string]$RequestId)
     if ($RequestId) {$RequestId=[Guid]::ParseExact($RequestId,'D').ToString('D')}
@@ -439,7 +461,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         $expectedApplication=[Omi.OwnedShutdown.ProductionSession]::ApplicationRelease($repo)
         $result = Invoke-OmiApplyUpdate -LogRoot (Join-Path $appData 'logs\launcher') `
             -RecoveryRequestId $RecoveryRequestId `
-            -TimeoutSeconds 180 -CaptureOwner { Get-OmiUpdateOwner -Repo $repo } -VerifySuccessor {
+            -TimeoutSeconds 180 -CaptureOwner {
+                $captured = Get-OmiUpdateOwner -Repo $repo
+                try { Assert-OmiExecutionUpdateOffline -Repo $repo -Identity $captured; return $captured }
+                catch { foreach ($node in $captured.Nodes) { $node.Process.Dispose() }; throw }
+            } -VerifySuccessor {
                 param($old,$requestId,$progress)
                 Wait-OmiUpdateSuccessor -Repo $repo -OldIdentity $old -ExpectedLifecycle $expectedLifecycle -ExpectedApplication $expectedApplication -RequestId $requestId -OnProgress $progress
             } -Launch {

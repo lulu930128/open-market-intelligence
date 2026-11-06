@@ -2,7 +2,7 @@
 import json
 
 from app.db.models import JobRun
-from app.jobs.cooperative import current_job_stop, checkpoint_after_transaction
+from app.jobs.cooperative import JobPaused, current_job_stop, checkpoint_after_transaction
 from app.jobs.resumption import OWNER_TASKS, period_binding
 from app.utils.owner_checkpoint import OwnerOutcomeUnknown, validate_owner_state
 
@@ -37,11 +37,15 @@ def owner_continuation_arguments(db, owner):
             except Exception as exc:
                 raise OwnerOutcomeUnknown("JOB_OWNER_ROLLBACK_UNKNOWN") from exc
             return
-        if phase == "checkpoint":
-            evidence = dict(safe_point="owner_transaction_complete", owner=owner, state=state,
+        if phase in {"checkpoint", "wait_children"}:
+            if phase == "wait_children" and owner != "tw_bootstrap_children":
+                raise ValueError("JOB_OWNER_CHILD_WAIT_UNSUPPORTED")
+            evidence = dict(safe_point="owner_children_pending" if phase == "wait_children" else "owner_transaction_complete", owner=owner, state=state,
                 current=len(state["results"]), total=len(state["items"]), job_id=token.job_id,
                 binding=period_binding(token.task_identity, token.task_args))
             checkpoint_after_transaction(db, evidence)
+            if phase == "wait_children":
+                raise JobPaused(evidence, reason="children_pending")
             return
         try:
             job = db.get(JobRun, token.job_id)

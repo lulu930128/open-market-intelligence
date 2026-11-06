@@ -84,6 +84,14 @@ function Initialize-OmiRuntimeControl {
     }
 }
 
+function Initialize-OmiExecutionComponent {
+    # Called only by the mutex-owning desktop entry, after control initialization.
+    # Keep credential initialization and its diagnostics independent of execution.
+    if ($null -eq $script:RuntimeController) { return }
+    try { $script:RuntimeController.EnableExecution($script:RepoRoot) }
+    catch { Write-LauncherLog 'Execution owner adoption unavailable; inspect ExecutionStatus. No automatic retry.' 'WARN' }
+}
+
 function Get-OmiLifecycleSourceId {
     $sha = [Security.Cryptography.SHA256]::Create()
     $buffer = [IO.MemoryStream]::new()

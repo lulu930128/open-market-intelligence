@@ -18,7 +18,7 @@ from app.config import settings
 from app.db.models import JobRun, utc_now
 from app.db.session import SessionLocal
 from app.jobs.cooperative import JobPaused, JobStopToken, current_job_stop
-from app.jobs.resumption import RESUME_KEY, describe, validate
+from app.jobs.resumption import QUEUED_TASKS, RESUME_KEY, describe, validate
 from app.utils.backfill_checkpoint import BackfillContextChanged
 
 
@@ -736,7 +736,7 @@ class JobQuiescenceUnknown(RuntimeError):
     pass
 
 
-def _persist_job_pause(job_id, task, task_args, lane, checkpoint):
+def _persist_job_pause(job_id, task, task_args, lane, checkpoint, *, reason="restart_paused"):
     """Future stays live through durable disposition AND Session close."""
     try:
         descriptor = describe(task, task_args, lane)
@@ -754,14 +754,19 @@ def _persist_job_pause(job_id, task, task_args, lane, checkpoint):
                               checkpoint=checkpoint)
             validate(descriptor)
             job.status = "paused"
-            job.message = "Restart paused; durable continuation pending."
+            job.message = ("Work slice complete; durable continuation pending."
+                           if reason == "work_slice" else
+                           "Waiting for admitted child outcomes; durable continuation pending."
+                           if reason == "children_pending" else
+                           "Waiting for default executor capacity; durable continuation pending."
+                           if reason == "default_capacity" else "Restart paused; durable continuation pending.")
             job.error_message = None
             job.ended_at = None
             job.updated_at = utc_now()
             if "current" in checkpoint:
                 job.progress_current = checkpoint["current"]
                 job.progress_total = max(checkpoint["total"], 1)
-            result = {"status": "partial", "reason": "restart_paused", RESUME_KEY: descriptor}
+            result = {"status": "partial", "reason": reason, RESUME_KEY: descriptor}
             job.result_json = _to_json(result)
             job.result_summary_json = _to_result_summary_json(result)
             db.commit()
@@ -793,17 +798,73 @@ def _restore_paused_job(job_id, task, task_args, lane):
     return descriptor["checkpoint"]
 
 
+def _is_tw_eod(identity, args):
+    return (identity == ("app.jobs.eod_coverage", "run_eod_coverage_reconcile_job")
+            and bool(args) and args[0] == "TW")
+
+
+def _tw_eod_waiting():
+    # Called under the executor fence. Inspect the existing submitted Futures,
+    # not just paused obligations; FIFO order alone cannot provide priority.
+    return any(pending.lane == "default" and pending.started_at is None
+               and _is_tw_eod(pending.stop.task_identity, pending.stop.task_args)
+               for pending in _pending_tasks.values())
+
+
+def _owner_children_ready(descriptor):
+    """Read bounded dependency outcomes outside the executor fence.
+
+    Only the validated bootstrap checkpoint can wait for existing JobRuns.
+    Child owners retain all admission, deadline, quota and completion authority.
+    A failed/missing child wakes the parent to persist its own failed outcome.
+    """
+    validate(descriptor)
+    checkpoint = descriptor["checkpoint"]
+    child_ids = [entry["outcome"]["job_id"] for entry in checkpoint["state"]["results"]]
+    with SessionLocal() as db:
+        statuses = dict(db.query(JobRun.id, JobRun.status).filter(JobRun.id.in_(child_ids)).all())
+    pending = {"queued", "running", "paused"}
+    return (len(statuses) != len(child_ids)
+            or any(status not in pending | {"success"} for status in statuses.values())
+            or all(status == "success" for status in statuses.values()))
+
+
 def _resume_ready_tasks():
-    """Reserve under the fence; validate/import/submit outside it. Never DB IO."""
+    """Check dependencies outside the fence; reserve then validate/submit.
+
+    Pending dependencies stay registered during their read. A concurrent child
+    completion can therefore wake the parent without a lost-wakeup reservation.
+    No waiting Future, polling timer or second dispatch owner is introduced.
+    """
     global _active_enqueues
     with _executor_lock:
-        candidates = list(_paused_tasks)
+        # Existing durable obligations are the backlog. Admit TW EOD before
+        # historical repairs instead of filling the executor's FIFO on rearm.
+        candidates = sorted(_paused_tasks, key=lambda job_id: (
+            not (_paused_tasks[job_id]["module"] == "app.jobs.eod_coverage"
+                 and _paused_tasks[job_id]["name"] == "run_eod_coverage_reconcile_job"
+                 and _paused_tasks[job_id]["args"]["value"][0] == "TW"),
+        ))
     for job_id in candidates:
+        with _executor_lock:
+            candidate = _paused_tasks.get(job_id)
+            if _admission_closed or _admission_pause is not None:
+                return
+        if candidate is None:
+            continue
+        if (candidate["checkpoint"]["safe_point"] == "owner_children_pending"
+                and not _owner_children_ready(candidate)):
+            continue
         with _executor_lock:
             if _admission_closed or _admission_pause is not None:
                 return
-            if (job_id not in _paused_tasks or job_id in _resuming_jobs
+            if (_paused_tasks.get(job_id) is not candidate or job_id in _resuming_jobs
                     or any(t.job_id == job_id for t in _pending_tasks.values())):
+                continue
+            candidate = _paused_tasks[job_id]
+            if (candidate["lane"] == "default" and _tw_eod_waiting()
+                    and not _is_tw_eod((candidate["module"], candidate["name"]),
+                                       candidate["args"]["value"])):
                 continue
             descriptor = _paused_tasks.pop(job_id)
             _resuming_jobs.add(job_id)
@@ -814,6 +875,8 @@ def _resume_ready_tasks():
         except BaseException as exc:
             with _executor_lock:
                 _paused_tasks[job_id] = descriptor
+            if isinstance(exc, JobExecutionCapacityFull) and str(exc) == "TW_HISTORICAL_REPAIR_DEFERRED":
+                continue  # No Future or IO; try other obligations, then callback rearm.
             if isinstance(exc, JobAdmissionClosed) or str(exc) == "MARKET_MATERIALIZATION_QUEUE_FULL":
                 return  # Still durable; next rearm/completion can dispatch it.
             raise
@@ -868,6 +931,14 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
     # Submit and register under the same fence. Immediate callbacks may re-enter.
     with _executor_lock:
         require_job_admission()
+        if (execution_lane == "default"
+                and getattr(task, "__module__", None) == "app.jobs.taiwan_historical_input_repair"
+                and getattr(task, "__name__", None) == "run_taiwan_historical_input_repair_job"
+                and any(pending.lane == "default" for pending in _pending_tasks.values())):
+            # A stock/month step is bounded, but hundreds of independent Futures
+            # still starve EOD. Keep unstarted repairs in the SAME durable pause
+            # owner; never cancel/recreate a JobRun or enlarge executor capacity.
+            raise JobExecutionCapacityFull("TW_HISTORICAL_REPAIR_DEFERRED")
         slots = None
         if execution_lane != "default":
             slots = _materialization_slots.get(execution_lane)
@@ -895,7 +966,11 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
             def run_task():
                 with _executor_lock:
                     pause_before_start = _admission_closed or _admission_pause is not None
-                    if not pause_before_start:
+                    defer_to_eod = (not pause_before_start and execution_lane == "default"
+                                    and tracked.stop.task_identity in QUEUED_TASKS
+                                    and not _is_tw_eod(tracked.stop.task_identity, task_args)
+                                    and _tw_eod_waiting())
+                    if not pause_before_start and not defer_to_eod:
                         tracked.started_at = time.monotonic()
                 context = current_job_stop.set(tracked.stop)
                 try:
@@ -910,6 +985,13 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
                         _persist_job_pause(job_id, task, task_args, execution_lane,
                                            {"safe_point": "not_started"})
                         return
+                    if defer_to_eod:
+                        # A FIFO Future already owns this dispatch. Preserve its
+                        # same-id durable obligation without starting any IO;
+                        # completion rearms it after the waiting EOD has begun.
+                        _persist_job_pause(job_id, task, task_args, execution_lane,
+                                           {"safe_point": "not_started"}, reason="default_capacity")
+                        return
                     if _resuming:
                         try:
                             tracked.stop.resume_checkpoint = _restore_paused_job(
@@ -918,7 +1000,8 @@ def submit_job_task(task: JobTask, job_id: int, *task_args: Any,
                             raise JobQuiescenceUnknown("JOB_RESUME_CLAIM_UNKNOWN") from exc
                     return task(job_id, *task_args)
                 except JobPaused as paused:
-                    _persist_job_pause(job_id, task, task_args, execution_lane, paused.checkpoint)
+                    _persist_job_pause(job_id, task, task_args, execution_lane, paused.checkpoint,
+                                       reason=paused.reason)
                 except BackfillContextChanged as exc:
                     # Preserve the durable obligation but block automatic retry
                     # in this process. A changed universe is not completion.
@@ -1044,6 +1127,13 @@ def _enqueue_job(
 
     try:
         submit_job_task(task, job.id, *task_args)
+    except JobExecutionCapacityFull as exc:
+        if str(exc) != "TW_HISTORICAL_REPAIR_DEFERRED":
+            raise
+        _persist_job_pause(job.id, task, task_args, "default", {"safe_point": "not_started"},
+                           reason="default_capacity")
+        db.refresh(job)
+        _resume_ready_tasks()  # Retain a completion racing pause persistence.
     except JobAdmissionClosed:
         # The enqueue was admitted before PREPARE, but committed after its fence.
         # It has never executed provider IO and needs a durable continuation.
@@ -1094,6 +1184,12 @@ def continue_job(db: Session, *, job_id: int, task: JobTask) -> bool:
             return False
         try:
             submit_job_task(task, job_id)
+        except JobExecutionCapacityFull as exc:
+            if str(exc) != "TW_HISTORICAL_REPAIR_DEFERRED":
+                raise
+            _persist_job_pause(job_id, task, (), "default", {"safe_point": "not_started"},
+                               reason="default_capacity")
+            _resume_ready_tasks()
         except JobAdmissionClosed:
             _persist_job_pause(job_id, task, (), "default", {"safe_point": "not_started"})
         except Exception as exc:

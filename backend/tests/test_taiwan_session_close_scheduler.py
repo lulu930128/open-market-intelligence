@@ -181,13 +181,59 @@ def test_session_closeout_registers_exact_bounded_retry_slots() -> None:
     scheduler = _FakeScheduler()
 
     assert add_taiwan_session_close_jobs(scheduler) is True
-    assert len(scheduler.jobs) == len(TAIWAN_SESSION_CLOSE_RETRY_MINUTES)
-    assert [job["minute"] for job in scheduler.jobs] == list(
-        TAIWAN_SESSION_CLOSE_RETRY_MINUTES
-    )
+    assert len(scheduler.jobs) == 1
+    from apscheduler.triggers.cron import CronTrigger
+    trigger = CronTrigger(**{k:v for k,v in scheduler.jobs[0].items()
+        if k in {"day_of_week", "hour", "minute", "second"}}, timezone=TAIWAN_TZ)
+    clock = datetime(2026, 8, 28, 13, 29, tzinfo=TAIWAN_TZ)
+    observed = []
+    previous = None
+    for _ in TAIWAN_SESSION_CLOSE_RETRY_MINUTES:
+        previous = trigger.get_next_fire_time(previous, previous or clock)
+        observed.append(previous.minute)
+    assert observed == list(TAIWAN_SESSION_CLOSE_RETRY_MINUTES)
     assert {job["second"] for job in scheduler.jobs} == {
         TAIWAN_SESSION_CLOSE_TRIGGER_SECOND
     }
     assert all(job["hour"] == 13 for job in scheduler.jobs)
     assert all(job["coalesce"] is True for job in scheduler.jobs)
     assert all(job["max_instances"] == 1 for job in scheduler.jobs)
+
+
+def test_closeout_depth_receipt_uses_completed_transport_clock(monkeypatch):
+    from datetime import timedelta, timezone
+    from app.jobs import taiwan_session_close_scheduler as owner
+    from app.db.models import RawFetchResult, TaiwanStockDepthSnapshot
+    from app.market.providers.twse_mis_realtime_acquisition import TwseMisRealtimeAcquisitionAdapter, TwseMisProviderSnapshot
+    from app.market.taiwan_realtime_platform import acquire_taiwan_depth
+    from app.market.tw_realtime_capabilities import MIS_ORDER_BOOK_DESCRIPTOR
+    from app.market_data.contracts import MarketSession
+    from app.market_data.policies import RealtimePolicy
+    from test_twse_mis_realtime_acquisition import _db, _payload
+    started = datetime(2026, 8, 26, 13, 30, 1, tzinfo=TAIWAN_TZ)
+    completed = started + timedelta(seconds=7)
+    tick = [started]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tick[0].astimezone(tz) if tz else tick[0].replace(tzinfo=None)
+    def delayed_response(*args):
+        tick[0] = completed
+        return TwseMisProviderSnapshot(raw_text=_payload(event_time="13:30:00"),
+            status="available", status_code=200)
+    monkeypatch.setattr(owner, "datetime", Clock)
+    monkeypatch.setattr(owner, "TwseMisRealtimeAcquisitionAdapter",
+        lambda **kwargs: TwseMisRealtimeAcquisitionAdapter(delayed_response, **kwargs))
+    db, engine = _db()
+    try:
+        acquire_taiwan_depth(db, stock_id="2330", requested_at=started,
+            policy=RealtimePolicy.PREFER_LIVE, session=MarketSession.CLOSE_RESOLUTION,
+            descriptors=(MIS_ORDER_BOOK_DESCRIPTOR,), acquisition=owner._mis_depth_acquisition(started))
+        raw = db.query(RawFetchResult).one()
+        depth = db.query(TaiwanStockDepthSnapshot).one()
+        expected = completed.astimezone(timezone.utc).replace(tzinfo=None)
+        assert raw.fetched_at == depth.fetched_at == depth.received_at == expected
+        assert depth.event_at == datetime(2026, 8, 26, 13, 30)
+    finally:
+        db.close()
+        engine.dispose()

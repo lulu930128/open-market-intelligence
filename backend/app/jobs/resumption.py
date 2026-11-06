@@ -158,7 +158,7 @@ def validate(descriptor):
     identity = (descriptor["module"], descriptor["name"])
     if not all(type(value) is str for value in identity):
         raise ValueError("JOB_RESUME_TASK_UNSUPPORTED")
-    if checkpoint["safe_point"] == "owner_transaction_complete":
+    if checkpoint["safe_point"] in {"owner_transaction_complete", "owner_children_pending"}:
         if (identity not in OWNER_TASKS
                 or set(checkpoint) != {"safe_point", "owner", "state", "current", "total", "job_id", "binding"}
                 or checkpoint["owner"] != OWNER_TASKS[identity]
@@ -171,6 +171,15 @@ def validate(descriptor):
                 or checkpoint["current"] != len(checkpoint["state"]["results"])
                 or checkpoint["total"] != len(checkpoint["state"]["items"])):
             raise ValueError("JOB_RESUME_CHECKPOINT_INVALID")
+        if checkpoint["safe_point"] == "owner_children_pending":
+            state = checkpoint["state"]
+            child_ids = [entry["outcome"].get("job_id") for entry in state["results"]]
+            if (checkpoint["owner"] != "tw_bootstrap_children"
+                    or not child_ids or len(child_ids) > 10 or len(child_ids) != len(state["items"])
+                    or any(type(child_id) is not int or child_id <= 0
+                           or child_id == checkpoint["job_id"] for child_id in child_ids)
+                    or len(set(child_ids)) != len(child_ids)):
+                raise ValueError("JOB_RESUME_CHILD_DEPENDENCIES_INVALID")
     elif checkpoint["safe_point"] == "period_transaction_complete":
         if (identity not in PERIOD_TASK_OWNERS
                 or set(checkpoint) != {"safe_point", "owner", "state", "current", "total", "job_id", "binding"}
